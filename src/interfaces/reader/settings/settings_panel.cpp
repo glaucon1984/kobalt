@@ -1160,16 +1160,16 @@ void SettingsPanel::showAdvancedTextChoices(AdvancedText feature, int current, s
     QStringList values;
     switch (feature) {
     case AdvancedText::WordSpacing:
-        key = "settings.word_spacing"; prefix = "rrWordSpacing"; values = {"narrow", "normal", "wide"}; break;
+        key = "settings.word_spacing"; prefix = "rrWordSpacing"; values = QStringList{"narrow", "normal", "wide"}; break;
     case AdvancedText::Tracking:
-        key = "settings.justification_tracking"; prefix = "rrTracking"; values = {"off", "subtle", "more"}; break;
+        key = "settings.justification_tracking"; prefix = "rrTracking"; values = QStringList{"off", "subtle", "more"}; break;
     case AdvancedText::Pagination:
-        key = "settings.widows_orphans"; prefix = "rrWidowsOrphans"; values = {"publisher", "avoid", "allow"}; break;
+        key = "settings.widows_orphans"; prefix = "rrWidowsOrphans"; values = QStringList{"publisher", "avoid", "allow"}; break;
     case AdvancedText::VerticalSpacing:
         // Centering is the recommended adjustment, so it comes before Expand.
-        key = "settings.vertical_spacing"; prefix = "rrVerticalSpacing"; values = {"off", "center", "expand"}; break;
+        key = "settings.vertical_spacing"; prefix = "rrVerticalSpacing"; values = QStringList{"off", "center", "expand"}; break;
     case AdvancedText::VerticalSpacingScope:
-        key = "settings.vertical_spacing_scope"; prefix = "rrVerticalSpacingScope"; values = {"all", "protection"}; break;
+        key = "settings.vertical_spacing_scope"; prefix = "rrVerticalSpacingScope"; values = QStringList{"all", "protection"}; break;
     }
     const auto text = [key](const QString &suffix) { return strings::get((key + suffix).toUtf8().constData()); };
     fontDialog->setObjectName(prefix + "Popup");

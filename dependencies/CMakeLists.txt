@@ -199,7 +199,7 @@ if(APPLE)
     file(MAKE_DIRECTORY "${prefix}/lib/pkgconfig")
     file(CONFIGURE OUTPUT "${prefix}/lib/pkgconfig/libpng.pc" CONTENT
         "Name: libpng\nDescription: libpng from the installed Qt SDK\nVersion: ${png_version}\nLibs: ${png} -lz\nCflags: -I${png_include}\n" @ONLY)
-elseif(ANDROID)
+elseif(ANDROID OR KOBALT_POCKETBOOK)
     kobalt_source(libpng)
     kobalt_library(libpng ARCHIVE libpng16.a OPTIONS -DPNG_SHARED=OFF -DPNG_STATIC=ON
         -DPNG_TESTS=OFF -DPNG_TOOLS=OFF)
