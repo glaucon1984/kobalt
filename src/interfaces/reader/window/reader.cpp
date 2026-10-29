@@ -198,13 +198,42 @@ sleep::Snapshot Reader::captureSleepScreen() {
         pixels > 4 * 1024 * 1024 || !readyForPresentation() || appearanceEdit.panelOpen() || model->temporaryTypography())
         return {};
     const bool useCover = mode == sleep::Mode::Cover && !sleepCover.isNull();
-    auto frame = useCover ? sleepCoverBackground(sleepCover, page->size()) : page->snapshot(true);
+    auto frame = useCover ? cachedSleepCoverBackground(page->size()) : page->snapshot(true);
     if (frame.isNull())
         return {};
     const int percent = pageProgressPercent(model->page(), model->pages());
     return {std::move(frame), kobalt::shownOrientation(QGuiApplication::primaryScreen()),
             strings::get("sleep.percent_read").arg(percent), sleepTimeLeft(book->estimates().bookMilliseconds),
             darkTheme, mode, !useCover, percent, sleep::tile(preferences)};
+}
+
+// The sleep image for the current page and battery state, composed the way sleepReader() does
+// it, without entering the sleep sequence. Null while the page cannot serve as a sleep screen
+// (stock sleep screen chosen, a panel open, the engine still laying out).
+// The cover fitted to the page, kept between compositions: a host that keeps a cached sleep
+// screen current composes after every page turn, and the scaling was most of the cost.
+QImage Reader::cachedSleepCoverBackground(QSize size) {
+    static qint64 coverKey = -1;
+    static QSize coverSize;
+    static QImage background;
+    if (background.isNull() || coverKey != sleepCover.cacheKey() || coverSize != size) {
+        background = sleepCoverBackground(sleepCover, size);
+        coverKey = sleepCover.cacheKey();
+        coverSize = size;
+    }
+    return background; // the composition paints on its own copy (implicit sharing)
+}
+
+QImage Reader::composeSleepImage() {
+    auto snapshot = captureSleepScreen();
+    if (snapshot.image.isNull())
+        return {};
+    const auto battery = services.battery();
+    const auto status = battery.fullyCharged ? SleepStatus::Charged
+                        : battery.charging   ? SleepStatus::Charging
+                                             : SleepStatus::Sleeping;
+    return sleepScreenImage(std::move(snapshot.image), snapshot.progress, snapshot.remaining, darkTheme,
+                            battery.percent, status, snapshot.dimPage, snapshot.tile, snapshot.percent);
 }
 
 void Reader::sleepReader() {

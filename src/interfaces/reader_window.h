@@ -1,4 +1,5 @@
 #pragma once
+#include <QImage>
 #include <QWidget>
 #include "reading/sleep_screen.h"
 #include "reader_timing.h"
@@ -40,6 +41,11 @@ public:
     virtual void cancelWake() = 0;
     virtual void sleepViewReady() = 0;
     virtual void wakeReader() = 0;
+    // The sleep image the reader would present now, or a null image when none applies. For
+    // hosts whose sleep screen is a cached file that must be kept current while reading.
+    virtual QImage composeSleepImage() {
+        return {};
+    }
     virtual void progressTick() = 0;
     virtual void refreshHostPresentation() = 0;
     // Logical forward/backward input, independent of touch swipe direction.

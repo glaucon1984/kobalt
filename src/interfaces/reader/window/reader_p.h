@@ -83,6 +83,8 @@ public:
     void cancelWake() override;
     void sleepViewReady() override;
     void wakeReader() override;
+    QImage composeSleepImage() override;
+    QImage cachedSleepCoverBackground(QSize size);
     void progressTick() override;
     void refreshHostPresentation() override;
     void pageButton(int direction) override;
