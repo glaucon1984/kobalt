@@ -40,6 +40,13 @@ protected:
     }
 };
 }
+// Slider step in percent from the host's warmth resolution: ten stops where the light has ten
+// levels (Kobo), one percent where it has a hundred (PocketBook).
+static int warmthPercentStep(const LightControls &light) {
+    const int range = qMax(1, light.warmthMaximum() - light.warmthMinimum());
+    return qBound(1, qRound(100.0 * qMax(1, light.warmthStep()) / range), 10);
+}
+
 LightPanel::LightPanel(LightControls &light, QWidget *parent) : ui::Panel(parent, Qt::BottomEdge), light(light) {
     setObjectName("rrLightPanel");
     auto *outer = new QVBoxLayout(this);
@@ -79,8 +86,11 @@ LightPanel::LightPanel(LightControls &light, QWidget *parent) : ui::Panel(parent
                       "rrBrightnessLess", "rrBrightnessMore", 0, 100, 1, {}, {}, "%");
     brightnessSlider->setMarkers({0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100});
     warmthSlider = ui::sliderRow(this, rows, "rrWarmth", "rrWarmthValue", strings::get("light_panel.warmth"),
-                                 "rrWarmthLess", "rrWarmthMore", 0, 100, 10, {}, {}, "%");
-    warmthSlider->setMarkers({0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100}, ui::SettingSlider::MarkerMode::Stops);
+                                 "rrWarmthLess", "rrWarmthMore", 0, 100, warmthPercentStep(light), {}, {}, "%");
+    if (warmthPercentStep(light) >= 10)
+        warmthSlider->setMarkers({0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100}, ui::SettingSlider::MarkerMode::Stops);
+    else
+        warmthSlider->setMarkers({0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100});
     brightnessValue = findChild<QLabel *>("rrBrightnessValue");
     warmthValue = findChild<QLabel *>("rrWarmthValue");
     warmthRow = warmthSlider->parentWidget();
@@ -207,7 +217,8 @@ void LightPanel::refreshValues() {
     if (warmth) {
         if (!warmthSlider->interacting()) {
             const int minimum = light.warmthMinimum(), range = light.warmthMaximum() - minimum;
-            const int percent = range > 0 ? qRound(10.0 * (light.warmth() - minimum) / range) * 10 : 0;
+            const int step = warmthPercentStep(light);
+            const int percent = range > 0 ? qRound(100.0 * (light.warmth() - minimum) / range / step) * step : 0;
             warmthSlider->setValue(qBound(0, percent, 100));
         }
         // setValue does not emit when the current value is unchanged.

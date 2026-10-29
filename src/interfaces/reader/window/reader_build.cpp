@@ -152,7 +152,7 @@ Reader::Reader(std::unique_ptr<kobalt::ReadingBook> openedBook, kobalt::ReaderOr
     dictionary = services.dictionary();
     if (services.downloadableDictionaries)
         dictionary = std::make_unique<kobalt::DictionaryManager>(book->paths().directory + "/dictionaries",
-                                                                 std::move(dictionary));
+                                                                 std::move(dictionary), this);
     if (!book->dictionaryChoice().isEmpty()) {
         QString error;
         dictionary->select(book->identity(), book->dictionaryChoice(), &error);
@@ -1442,8 +1442,11 @@ void Reader::connectLightGestures() {
             }
             const double percent =
                 100.0 * (warmthInitial - minimum) / range + kobalt::ui::BrightnessGesture::change(moved);
-            const int snapped = qBound(0, qRound(percent / 10.) * 10, 100);
             const int step = qMax(1, light->warmthStep());
+            // Snap to the host's warmth resolution in percent (10 on a ten-level light, 1 on a
+            // hundred-level one), not to a fixed 10 %.
+            const int stepPercent = qBound(1, qRound(100.0 * step / range), 10);
+            const int snapped = qBound(0, qRound(percent / stepPercent) * stepPercent, 100);
             const int level =
                 qBound(minimum, minimum + qRound(snapped * range / (100.0 * step)) * step, minimum + range);
             const int value = light->setWarmth(snapped == 100 ? minimum + range : level);
