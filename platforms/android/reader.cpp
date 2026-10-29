@@ -1,6 +1,12 @@
 #include "reading/appearance_settings.h"
 #include "support/strings.h"
 #include "reader.h"
+#ifdef KOBALT_POCKETBOOK
+#include "orientation_sensor.h"
+#include "explorer_progress.h"
+#include "epub_cfi.h"
+#include "reading/reading_progress.h"
+#endif
 #include "interfaces/reader_interface.h"
 #include "interfaces/opening_message.h"
 #include "reading/reading_book.h"
@@ -15,6 +21,7 @@
 #include <QTimer>
 #include <QUrl>
 #include <utility>
+class QOrientationSensor;
 #ifdef Q_OS_ANDROID
 #include <QCoreApplication>
 #include <QJniObject>
@@ -23,10 +30,30 @@
 
 namespace kobalt::android {
 namespace {
+// The PocketBook target (platforms/pocketbook) reuses this controller with the hooks below: the
+// inkview orientation sensor and the firmware library's row as the book's native progress. The
+// Android build keeps Qt's own sensor handling and the local checkpoint.
+#ifdef KOBALT_POCKETBOOK
+QOrientationSensor *platformOrientationSensor(QObject *parent) {
+    return pocketbook::createOrientationSensor(parent);
+}
+std::unique_ptr<ReadingBridge> platformLibraryBridge(const QString &identity, const QString &path,
+                                                     const storage::Paths &paths) {
+    return pocketbook::makeLibraryBridge(identity, path, paths);
+}
+#else
+QOrientationSensor *platformOrientationSensor(QObject *) {
+    return nullptr;
+}
+std::unique_ptr<ReadingBridge> platformLibraryBridge(const QString &, const QString &, const storage::Paths &) {
+    return nullptr;
+}
+#endif
+
 QString recentText(QString text) {
     // Keep metadata and the optional cover below the 256 KiB record limit.
     text.truncate(4096);
-    if (!text.isEmpty() && text.back().isHighSurrogate())
+    if (!text.isEmpty() && QChar(text.back()).isHighSurrogate())
         text.chop(1);
     return text;
 }
@@ -36,7 +63,7 @@ ReaderController::ReaderController(storage::Paths paths, EngineFontInputs fonts,
                                    std::function<ReaderHostServices()> services,
                                    std::function<void(Qt::ScreenOrientation)> rotate, QObject *parent)
     : QObject(parent), paths(std::move(paths)), fonts(std::move(fonts)), placeholder(std::move(placeholder)),
-      services(std::move(services)), orientation(nullptr, std::move(rotate)) {
+      services(std::move(services)), orientation(platformOrientationSensor(this), std::move(rotate)) {
     storage::prepareProfile(this->paths);
 }
 ReaderController::~ReaderController() {
@@ -131,6 +158,23 @@ void ReaderController::begin(const QString &path, QSize pixels) {
     }
     if (saved.value("book").toString() != identity)
         saved = {};
+#ifdef KOBALT_POCKETBOOK
+    // PocketBook: the firmware library's row for the book plays Nickel's part (as in Kobo's
+    // reader coordinator): open at PBReader's position when it is newer than the one this reader
+    // last saw, else at the local checkpoint, and keep both as the reader's baselines.
+    const auto diskBaseline = pocketbook::readLibraryProgress(identity, path);
+    const auto savedBaseline = ReadingProgress::fromJson(saved.value("nickel_progress").toObject());
+    const bool useNative = preferNativeProgress(diskBaseline, savedBaseline);
+    const auto baseline = diskBaseline.valid ? diskBaseline : savedBaseline;
+    if (useNative) {
+        saved.remove("position");
+        qInfo("kobalt-pb: opening at the library's (PBReader) position");
+    }
+    const QString nativeLocation = useNative ? diskBaseline.location : QString();
+#else
+    const ReadingProgress baseline, diskBaseline;
+    const QString nativeLocation;
+#endif
     const auto settings = appearance::readerPreferences(storage::readPreferences(paths.preferences()).object, saved);
     saved["dark_mode"] = settings.value("dark_mode").toBool(false);
     saved["bold_reading"] = settings.value("bold_reading").toString("off");
@@ -139,7 +183,11 @@ void ReaderController::begin(const QString &path, QSize pixels) {
     const auto viewport = readerInterface().readingViewport(pixels, settings);
     opening = std::make_unique<ReaderSession>(fonts, placeholder);
     QPointer<ReaderController> guard(this);
-    OpenRequest request{identity, path, viewport, saved, {}, paths.layoutCache(), lease, source->resources(lease)};
+    OpenRequest request{identity, path, viewport, saved, nativeLocation, paths.layoutCache(), lease,
+                        source->resources(lease)};
+#ifdef KOBALT_POCKETBOOK
+    request.positions = pocketbook::positionCodec();
+#endif
 #ifdef Q_OS_ANDROID
     const QJniObject context = QNativeInterface::QAndroidApplication::context();
     request.syncFilename = context.callObjectMethod(
@@ -151,7 +199,7 @@ void ReaderController::begin(const QString &path, QSize pixels) {
     request.appearanceDefaults = appearance::bookDefaults(settings);
     opening->open(
         std::move(request),
-        [guard, identity, statePath, pixels](const OpeningResult &result) {
+        [guard, identity, statePath, pixels, baseline, diskBaseline](const OpeningResult &result) {
             if (!guard || guard->phase != Phase::Opening)
                 return;
             if (!result.ready()) {
@@ -171,7 +219,8 @@ void ReaderController::begin(const QString &path, QSize pixels) {
                                  256 * 1024);
             const auto hash = guard->opening->sourceHash();
             auto book = std::make_unique<ReadingBook>(std::move(guard->opening), statePath, guard->paths, identity,
-                                                      hash, nullptr, ReadingProgress{}, ReadingProgress{}, guard->currentSourceKey);
+                                                      hash, platformLibraryBridge(identity, guard->current, guard->paths),
+                                                      baseline, diskBaseline, guard->currentSourceKey);
             auto services = guard->services();
             if (services.backButtonLabel.isEmpty())
                 services.backButtonLabel = strings::get("library.exit_to_library");

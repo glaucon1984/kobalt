@@ -26,6 +26,9 @@ class ColumnView;
 namespace nickel {
 class NickelPositionCodec;
 }
+namespace pocketbook {
+class PocketBookPositionCodec;
+}
 // Bundled defaults for generic families.
 inline constexpr auto publisherSansFontFace = "NV Legible Next";
 // Bundled face for the generic monospace family.
@@ -286,6 +289,7 @@ private:
     void markKoboLinkDecorations();
     EngineFontInputs fonts_;
     friend class nickel::NickelPositionCodec;
+    friend class pocketbook::PocketBookPositionCodec;
     std::shared_ptr<ReaderSource> source_;
     QJsonObject openingTimes_;
     std::unique_ptr<ColumnView> engine_;
