@@ -99,6 +99,35 @@ The launcher pins the released image by digest. Set `KOBALT_ANDROID_IMAGE` only 
 
 The APK is `build/android-HOST/android-build/build/outputs/apk/debug/android-build-debug.apk`. It uses `com.nicoverbruggen.kobalt.debug`, the public debug key under `platforms/android/app/` and a version ending in `-debug`. Android 9 or later and ARM64 are required. Release signing uses the explicit mode described below. BOOX selects Qt's SurfaceView container before creating windows so firmware refresh metadata can reach the submitted buffers. Other Android devices keep Qt's default container. Library, book-opening and reader canvases share the BOOX frame transport. Returning to the Library retains a captured reader frame until its final system-bar insets are ready, then requests GC cleanup. The Android window follows the activity's laid-out bounds at startup and after rotation. Only the Library canvas draws rules below Android's status bar and above its navigation controls; the fullscreen reader has neither rule.
 
+## PocketBook
+
+The PocketBook target (`platforms/pocketbook/`, on the fork's `pocketbook` branch) links Kobalt's reader (`src/` without the standalone Library), the Android `ReaderController` with its `KOBALT_POCKETBOOK` hooks, the `pbink` Qt platform plugin for the firmware's inkview display layer (`platforms/pocketbook/pbink/`) and a small host (`platforms/pocketbook/host/`) into one static executable. It runs as a firmware "application": a launcher script in `applications/` and `system/bin/`, the binary and runtime assets under `applications/kobalt/`. Install steps and device behaviour are in [Kobalt on PocketBook](pocketbook.md); the development log with every device finding is [PocketBook port notes](pocketbook-notes.md).
+
+The toolchain pairs Debian bookworm's `arm-linux-gnueabi` GCC 12 with the PocketBook SDK sysroot (glibc 2.23), the way kobuild pairs a newer compiler with Kobo's sysroot: `platforms/pocketbook/tools/pocketbook-gcc12.toolchain.cmake`. Qt 5.15 is built static for that sysroot on Kobalt's own FreeType, HarfBuzz, libpng and libjpeg plus OpenSSL 3, with Qt Sensors. That SDK production (the `pbqt-build` Docker image, Qt, OpenSSL, the libstdc++ compatibility shims and the mkspec) lives in `platforms/pocketbook/tools/sdk/` and is separate from the application build; it takes hours and is done once per build host. There is no published image to pull yet; the notes record how the existing one was made.
+
+The build host is a Linux machine with Docker (here a VM reachable as `docker` over SSH) with `~/build/pbqt` mounted at `/work` in the container:
+
+| Path under `/work` | Contents |
+| --- | --- |
+| `sdk/SDK-B288/` | PocketBook SDK (sysroot with inkview) |
+| `qt-pb12/`, `openssl-pb/` | static Qt 5.15 and OpenSSL for the sysroot (`tools/sdk/`) |
+| `gcc12-overlay/`, `gcc12-compat/` | libstdc++ configuration overlay and glibc symbol shim (`tools/sdk/`) |
+| `cacert.pem` | Mozilla's CA bundle, packaged for TLS |
+| `kobalt-deps/` | Kobalt's third-party libraries, prebuilt once (`tools/rebuild-deps.sh`) |
+| `kobalt/` | this repository, synced by the launcher |
+| `kobalt-pb-build/` | the CMake build directory |
+
+```sh
+docker build -t pbqt-build platforms/pocketbook/tools/sdk          # once, on the build host
+bash platforms/pocketbook/tools/remote-rebuild-deps.sh docker        # after dependencies/ changed
+bash platforms/pocketbook/tools/remote-build-kobalt.sh docker        # build and package
+sh platforms/pocketbook/tools/install-kobalt.sh /l                   # onto the mounted device
+```
+
+The launcher syncs the working tree (tracked and untracked files, nothing ignored) to `/work/kobalt`, runs `tools/build-kobalt-pb.sh` in the container and copies `build/pocketbook/kobalt-pb.tar.gz` back. It passes the source commit for the About screen. The package holds the launcher `kobalt.app` and `kobalt/` with the stripped binary, `assets/` and `cacert.pem`. Dependencies are rebuilt only when `dependencies/manifest.json` or `dependencies/patches/` changed upstream (`tools/rebuild-deps.sh` builds Kobalt's `kobalt-dependencies` target through `tools/kobalt-check/` and refreshes `kobalt-deps/`; if the install prefix's headers differ, Qt needs `tools/sdk/build-qt-gcc12.sh` again).
+
+Changes to shared source for this target are ordinary commits on the branch, kept small: libpng 1.6 for PocketBook in `dependencies/`, the warmth slider and gesture step following the host's range, the dictionary manager parented to the reader, `composeSleepImage()` with a cached cover for hosts that keep a sleep-screen file current, the position codec's friend access in the engine model, `QStringList{...}` for Qt 5.15 in the settings panel, and the guarded hooks in `platforms/android/reader.cpp`.
+
 ## Dependencies and validation
 
 CREngine and its text/image libraries use the versions and patches recorded in this worktree. Android also builds OpenSSL and downloads the pinned BOOX compatibility JAR. These application dependencies are separate from Qt SDK production. Build directories are separated by compiler, SDK, source manifest and recipe identity. This initial setup invalidates the dependency set when its recipes, patches or source pins change; application-only changes reuse it.
