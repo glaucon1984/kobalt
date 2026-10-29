@@ -134,7 +134,7 @@ void requestLockImageReload(const char *reason, std::function<void()> done) {
     // `sync`: taskmgr reads the file through the page cache, and a lock press that arrives while
     // it reloads is dropped by the firmware, so the reload must be as short as possible.
     const QString command = QStringLiteral(
-        "p=$(ps | grep '[t]askmgr\.app' | grep -v visualizer | awk '{print $1}' | head -n 1); "
+        "p=$(ps | grep '[t]askmgr\\.app' | grep -v visualizer | awk '{print $1}' | head -n 1); "
         "[ -n \"$p\" ] && exec /ebrmain/bin/iv2sh SendEventTo \"$p\" 154 0");
     auto *process = new QProcess(QCoreApplication::instance());
     auto *clock = new QElapsedTimer;
