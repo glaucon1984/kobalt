@@ -22,8 +22,9 @@ page covers installing and using it. [Building](building.md#pocketbook) covers t
 - Automatic rotation from the gravity sensor, including starting in landscape or upside down.
 - Frontlight brightness and warmth in 1 % steps, from the light panel or the edge swipe.
 - The sleep screen shows the current page or the cover with progress and battery, in the
-  orientation the device is held in. The power-off screen shows the same image when the
-  PocketBook's Power-off logo setting (Settings → Personalize → Logos) is the book cover.
+  orientation the device is held in. The power-off and boot screens show the same image when
+  the PocketBook's Power-off logo and Boot logo settings (Settings → Personalize → Logos) are
+  the book cover.
 - Reading progress shared with the built-in reader: the home screen shows Kobalt's progress
   and the built-in reader opens where Kobalt left off, and vice versa.
 - KOsync progress sync (Settings → Sync), with Wi-Fi brought up automatically when needed.
@@ -71,7 +72,8 @@ Delete `applications/kobalt/`, `applications/kobalt.app`, `system/bin/kobalt.app
 from their `.before-kobalt` copies (or remove the `kobalt` entries from them). The sleep screen
 image is `system/resources/Line/taskmgr_lock_background.bmp`; the original is next to it as
 `taskmgr_lock_background.bmp.orig`. The power-off image is `system/logo/bookcover` (with a
-`bookcover.orig` copy of what was there before). The library database keeps the progress Kobalt wrote, as it
+`bookcover.orig` copy of what was there before). The boot logo lives in the device's flash and
+is replaced by picking another in Settings → Personalize → Logos → Boot logo. The library database keeps the progress Kobalt wrote, as it
 would for the built-in reader; a copy from before Kobalt's first write is
 `system/explorer-3/explorer-3.db.before-kobalt`.
 
@@ -89,7 +91,10 @@ would for the built-in reader; a copy from before Kobalt's first write is
   above.
 - **Standby**: the sleep screen is updated a moment after each page turn while the device is
   awake; the lock screen the firmware shows is therefore the page you were reading. The same
-  image is copied to the firmware's power-off cover file at every standby.
+  image is copied to the firmware's power-off cover file at every standby, and stored as the
+  boot logo (through the firmware's own tool, which takes a few seconds in the background) after
+  the book opens and at each standby. A power-off straight from a page, without a standby first,
+  shows the image of the last standby or open at the next boot.
 - **Logs**: `applications/kobalt/kobalt.log` on the device. Attach it when reporting a problem.
 
 ## What had to change for PocketBook
@@ -127,8 +132,8 @@ Sleep and standby:
   PocketBook firmware shows a fixed image it loads when the app starts, so Kobalt writes its
   sleep image into that file after every page turn and asks the firmware to reload it, timed so
   a lock pressed right after a page turn does not catch the device half asleep. The same image
-  goes to the firmware's power-off cover file, so the power-off screen is not left showing
-  another app's picture of another book.
+  goes to the firmware's power-off cover file and, through the firmware's own tool, to the boot
+  logo, so neither screen is left showing another app's picture of another book.
 - **The device falling asleep mid-task.** A PocketBook goes into light sleep a few seconds after
   the last touch, even while the app is working; books stalled on the loading screen because of
   it. Kobalt keeps the device awake while opening a book, downloading or syncing.

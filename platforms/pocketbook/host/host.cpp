@@ -204,8 +204,9 @@ void Host::taskBackground() {
         syncPoll.start();
     }
     // A power-off usually follows a standby (long press on the lock screen): make sure the
-    // power-off image is the sleep screen's bitmap, not an older copy.
+    // power-off image is the sleep screen's bitmap, not an older copy, and the boot logo with it.
     writePowerOffImage();
+    updateBootLogo("standby");
     // EVT_BACKGROUND precedes every standby and every USB export. The firmware's PC Link export
     // was seen to drop what the apps had written since the last sync(2) (a standby's suspend
     // syncs, fdatasync alone did not survive), so flush everything now; ~0.1-0.3 s.
@@ -313,6 +314,10 @@ void Host::refreshSleepScreen(const char *reason) {
     const bool queued = writeLockImagesAsync(image, [self, why](bool ok) {
         if (!self || quitting)
             return;
+        if (ok && !self->bootLogoForBook) {
+            self->bootLogoForBook = true;
+            self->updateBootLogo("open");
+        }
         if (!ok || self->asleep) {
             if (ok)
                 markLockReloadPending();
@@ -345,7 +350,23 @@ void Host::usbEvent(int type) {
 }
 
 void Host::updateKeepAwake() {
-    keepAwake(openingBusy || downloadBusy || syncBusy || sleepRefreshHolds > 0);
+    keepAwake(openingBusy || downloadBusy || syncBusy || bootLogoBusy || sleepRefreshHolds > 0);
+}
+
+void Host::updateBootLogo(const char *reason) {
+    if (quitting || bootLogoWriteInFlight())
+        return;
+    QPointer<Host> self(this);
+    const bool started = writeBootLogo(reason, [self] {
+        if (!self)
+            return;
+        self->bootLogoBusy = false;
+        self->updateKeepAwake();
+    });
+    if (started) {
+        bootLogoBusy = true;
+        updateKeepAwake();
+    }
 }
 
 bool Host::connectNetwork(bool interactive) {

@@ -21,6 +21,13 @@ bool writeLockImages(const QImage &image);
 // Copies the lock bitmap on disk to the power-off file now (blocking, tens of ms; waits for a
 // lock image write in progress). False when the power-off file is already that bitmap.
 bool writePowerOffImage();
+// Stores the power-off file as the boot logo through the firmware's own tool (iv2sh
+// WriteStartupLogo, which writes the bootloader's flash partition; the firmware does the same
+// for its reader when its Boot logo setting is the book cover). Slow, so it runs as a background
+// process: the caller keeps the device awake until `done` runs on the GUI thread. Returns false,
+// without calling `done`, when a write is running or the file has not changed since the last.
+bool writeBootLogo(const char *reason, std::function<void()> done = {});
+bool bootLogoWriteInFlight();
 // The same on a worker thread (a write takes 0.2-0.4 s on the device). Returns false, without
 // calling `done`, for an image identical to the last one written at the same panel rotation; otherwise `done(ok)` runs on
 // the GUI thread afterwards.

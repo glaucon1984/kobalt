@@ -48,8 +48,12 @@ public:
     // sleepRefreshHolds: awake from a page turn until its lock image is on disk and reloaded
     // (the device light-sleeps within seconds of the last input and a suspended CPU runs no Qt
     // timers). Counted: the page-turn chain and the wake reload hold it independently.
-    bool openingBusy = false, downloadBusy = false, syncBusy = false;
+    bool openingBusy = false, downloadBusy = false, syncBusy = false, bootLogoBusy = false;
     int sleepRefreshHolds = 0;
+    // Boot logo from the power-off file: once after the book's first lock image, then at each
+    // standby whose power-off file changed. Awake until the firmware's tool has returned.
+    bool bootLogoForBook = false;
+    void updateBootLogo(const char *reason);
     void holdAwakeForRefresh();
     void releaseAwakeForRefresh();
 

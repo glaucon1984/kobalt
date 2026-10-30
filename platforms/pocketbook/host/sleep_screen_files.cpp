@@ -12,6 +12,7 @@
 #include <QScreen>
 #include <QVector>
 #include <QCoreApplication>
+#include <atomic>
 #include <mutex>
 #include <thread>
 
@@ -31,6 +32,9 @@ const char *powerOffCover = "/mnt/ext1/system/logo/bookcover";
 QElapsedTimer lastPowerOffCopy; // under writeMutex
 bool powerOffStale = false; // lock bitmap written since the last copy; under writeMutex
 const int powerOffCopyIntervalMs = 30000;
+std::atomic<bool> bootLogoStale{false}; // power-off file written since the last boot logo write
+bool bootLogoInFlight = false; // GUI thread only
+const int bootLogoTimeoutMs = 60000;
 
 QVector<QRgb> greyTable() {
     QVector<QRgb> table(256);
@@ -92,6 +96,7 @@ bool copyLockToPowerOffLocked() {
     if (ok) {
         lastPowerOffCopy.start();
         powerOffStale = false;
+        bootLogoStale = true;
     }
     return ok;
 }
@@ -161,6 +166,48 @@ bool writeLockImagesAsync(const QImage &image, std::function<void(bool)> done) {
         QMetaObject::invokeMethod(QCoreApplication::instance(), [ok, done] { done(ok); }, Qt::QueuedConnection);
     }).detach();
     return true;
+}
+
+bool writeBootLogo(const char *reason, std::function<void()> done) {
+    // The bootloader shows a logo kept in a flash partition; `iv2sh WriteStartupLogo <bmp>`
+    // stores one there (KOReader's Cover image plugin does the same; the firmware itself does it
+    // for its own reader when Settings > Personalize > Logos > Boot logo is the book cover, which
+    // is also what makes the setting show a book cover at all). The source is the power-off
+    // file, so boot and power-off screens agree. Slow (seconds): a background process, with the
+    // device kept awake by the caller; skipped while one runs or when the file has not changed.
+    if (bootLogoInFlight || !bootLogoStale || !QFile::exists(powerOffCover))
+        return false;
+    bootLogoInFlight = true;
+    bootLogoStale = false;
+    auto *process = new QProcess(QCoreApplication::instance());
+    auto *clock = new QElapsedTimer;
+    clock->start();
+    const QString why = QString::fromLatin1(reason);
+    QObject::connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), process,
+                     [process, clock, why, done](int code, QProcess::ExitStatus) {
+                         qInfo("kobalt-pb: boot logo write (%s) done in %lld ms, exit %d", qPrintable(why),
+                               static_cast<long long>(clock->elapsed()), code);
+                         if (code != 0)
+                             bootLogoStale = true; // try again at the next occasion
+                         delete clock;
+                         process->deleteLater();
+                         bootLogoInFlight = false;
+                         if (done)
+                             done();
+                     });
+    QTimer::singleShot(bootLogoTimeoutMs, process, [process] {
+        if (process->state() != QProcess::NotRunning) {
+            qWarning("kobalt-pb: boot logo write still running after %d ms, killing it", bootLogoTimeoutMs);
+            process->kill();
+        }
+    });
+    process->start(QStringLiteral("/ebrmain/bin/iv2sh"), {QStringLiteral("WriteStartupLogo"), QString::fromLatin1(powerOffCover)});
+    qInfo("kobalt-pb: boot logo write started (%s)", reason);
+    return true;
+}
+
+bool bootLogoWriteInFlight() {
+    return bootLogoInFlight;
 }
 
 void markLockReloadPending() {
