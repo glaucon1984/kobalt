@@ -187,8 +187,9 @@ void Host::open(const QString &path) {
     bookPath = file.absoluteFilePath();
     // Resumed after a power-off (the firmware reopens the book at boot, or the user does): the
     // page the boot logo shows, instead of the opening view, until the live page replaces it,
-    // so the boot reads as one continuous page. The capture is in the panel's orientation and
-    // so is the host at start (pbink pins portrait, rotation 0), so it is painted as it is.
+    // so the boot reads as one continuous page. The capture comes back as logical content and
+    // the screen is already turned the way the device is held (the constructor read the gravity
+    // sensor), so a page captured upside down and resumed upright reads right, and vice versa.
     // A book that was closed on purpose has no capture any more (markCurrentBook) and gets
     // Kobalt's opening view as usual; a different book never matches the capture's path.
     const QImage saved = savedBootLogo(bookPath);

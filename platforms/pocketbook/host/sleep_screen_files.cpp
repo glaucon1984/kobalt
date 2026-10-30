@@ -224,14 +224,18 @@ bool writeBootLogo(const QImage &panelImage, const QString &bookPath, const char
         return false;
     bootLogoInFlight = true;
     const QString why = QString::fromLatin1(reason);
-    std::thread([panelImage, bookPath, why, done = std::move(done)] {
+    // The capture is the panel as turned for the holder at the time; the firmware draws the boot
+    // logo as it is, so that is the right file. The turn is kept beside it, so that the page can
+    // be shown again in whatever orientation the device is held at the next start.
+    const int rotation = panelRotation();
+    std::thread([panelImage, bookPath, rotation, why, done = std::move(done)] {
         QElapsedTimer clock;
         clock.start();
         const bool ok = writeBmp24(panelImage, bootLogoPath());
         if (ok) {
             QSaveFile book(bootLogoBookPath());
             if (book.open(QIODevice::WriteOnly)) {
-                book.write(bookPath.toUtf8());
+                book.write(bookPath.toUtf8() + '\n' + QByteArray::number(rotation) + '\n');
                 book.commit();
             }
         }
@@ -253,9 +257,15 @@ bool writeBootLogo(const QImage &panelImage, const QString &bookPath, const char
 
 QImage savedBootLogo(const QString &bookPath) {
     QFile book(bootLogoBookPath());
-    if (!book.open(QIODevice::ReadOnly) || QString::fromUtf8(book.readAll()) != bookPath)
+    if (!book.open(QIODevice::ReadOnly))
         return {};
-    return QImage(bootLogoPath());
+    const QList<QByteArray> lines = book.readAll().split('\n');
+    if (lines.isEmpty() || QString::fromUtf8(lines[0]) != bookPath)
+        return {};
+    const int rotation = lines.size() > 1 ? lines[1].toInt() : 0;
+    // Back to the page as logical content; the screen's current rotation turns it for the holder.
+    const QImage panel(bootLogoPath());
+    return rotation ? panel.transformed(QTransform().rotate(-rotation)) : panel;
 }
 
 void markCurrentBook(const QString &bookPath, const QString &title) {
