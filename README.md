@@ -93,7 +93,7 @@ You can also connect your device via USB and remove the uninstallation file (`.a
 
 ### Install on PocketBook
 
-Download `kobalt-pb.tar.gz` from the [PocketBook releases](https://github.com/glaucon1984/kobalt/releases) and connect the device over USB (PC Link). On Windows, download `install-kobalt.ps1` from the same release and run `powershell -ExecutionPolicy Bypass -File install-kobalt.ps1 L: kobalt-pb.tar.gz` (your drive letter in place of `L:`); on macOS, Linux or Git Bash, run `platforms/pocketbook/tools/install-kobalt.sh <mount> <package>` from a checkout of this repository. The steps, what the installer changes and how to undo it are in [Kobalt on PocketBook](doc/pocketbook.md#install).
+Download [kobalt-pb.tar.gz](https://github.com/glaucon1984/kobalt/releases/latest/download/kobalt-pb.tar.gz) from the [PocketBook releases](https://github.com/glaucon1984/kobalt/releases) and connect the device over USB (PC Link). On Windows, download [install-kobalt.ps1](https://github.com/glaucon1984/kobalt/releases/latest/download/install-kobalt.ps1) into the same folder and run `powershell -ExecutionPolicy Bypass -File install-kobalt.ps1 L: kobalt-pb.tar.gz` there (your drive letter in place of `L:`). On macOS, Linux or Git Bash, get the repository (the [ZIP of the pocketbook branch](https://github.com/glaucon1984/kobalt/archive/refs/heads/pocketbook.zip) or a clone) and run `platforms/pocketbook/tools/install-kobalt.sh <mount> <package>` from it. The steps, what the installer changes and how to undo it are in [Kobalt on PocketBook](doc/pocketbook.md#install).
 
 ## Issues and contributions
 

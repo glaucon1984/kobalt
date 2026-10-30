@@ -38,14 +38,21 @@ had little testing, and the port has only been run on one device model.
 
 ## Install
 
-1. Download `kobalt-pb.tar.gz` from the latest [PocketBook release](https://github.com/glaucon1984/kobalt/releases)
-   (or build it, see [Building](building.md#pocketbook)).
+1. Download the package, [kobalt-pb.tar.gz](https://github.com/glaucon1984/kobalt/releases/latest/download/kobalt-pb.tar.gz),
+   from the latest [PocketBook release](https://github.com/glaucon1984/kobalt/releases) (or
+   build it, see [Building](building.md#pocketbook)), and the installer for your system:
+   - Windows: [install-kobalt.ps1](https://github.com/glaucon1984/kobalt/releases/latest/download/install-kobalt.ps1),
+     from the same release, into the same folder as the package.
+   - macOS, Linux, or Git Bash on Windows: [install-kobalt.sh](https://github.com/glaucon1984/kobalt/blob/pocketbook/platforms/pocketbook/tools/install-kobalt.sh)
+     needs the files around it, so get the whole repository: the
+     [ZIP of the pocketbook branch](https://github.com/glaucon1984/kobalt/archive/refs/heads/pocketbook.zip),
+     unpacked anywhere, or `git clone -b pocketbook https://github.com/glaucon1984/kobalt`.
 2. Connect the PocketBook over USB and choose **PC Link**, so its storage mounts as a drive.
 3. Run the installer with the device's drive and the package.
 
-   **Windows (PowerShell, nothing else needed).** Download `install-kobalt.ps1` from the same
-   release next to the package, open PowerShell in that folder (the Downloads folder: right-click
-   it, *Open in Terminal*) and run, with your device's drive letter in place of `L:`:
+   **Windows (PowerShell, nothing else needed).** Open PowerShell in the folder with the two
+   files (in Explorer, right-click the folder, *Open in Terminal*) and run, with your device's
+   drive letter in place of `L:`:
 
    ```powershell
    powershell -ExecutionPolicy Bypass -File .\install-kobalt.ps1 L: .\kobalt-pb.tar.gz
@@ -56,7 +63,7 @@ had little testing, and the port has only been run on one device model.
    Windows since 2018. From a checkout the script is `platforms\pocketbook\tools\install-kobalt.ps1`
    and the package defaults to `build\pocketbook\kobalt-pb.tar.gz`.
 
-   **macOS, Linux, or Git Bash on Windows.** From a checkout of this repository:
+   **macOS, Linux, or Git Bash on Windows.** From the unpacked ZIP or the clone:
 
    ```sh
    sh platforms/pocketbook/tools/install-kobalt.sh /l ~/Downloads/kobalt-pb.tar.gz
