@@ -123,8 +123,12 @@ add_custom_target(package
     COMMAND "${CMAKE_STRIP}" -o "${package}/kobalt/kobalt-pb" "$<TARGET_FILE:kobalt-pb>"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${KOBALT_ASSETS}" "${package}/kobalt/assets"
     COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_CURRENT_SOURCE_DIR}/device/kobalt.app" "${package}/kobalt.app"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${package}/icons"
+    COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_CURRENT_SOURCE_DIR}/device/desktop_app_kobalt.bmp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/device/desktop_app_kobalt_f.bmp" "${package}/icons"
+    COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_CURRENT_SOURCE_DIR}/tools/install-kobalt.ps1" "${package}/install-kobalt.ps1"
     # CA bundle for TLS (Mozilla's, fetched by the build host); the launcher points OpenSSL at it.
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${PB_CACERT}" "${package}/kobalt/cacert.pem"
-    COMMAND "${CMAKE_COMMAND}" -E chdir "${package}" "${CMAKE_COMMAND}" -E tar czf "${CMAKE_CURRENT_BINARY_DIR}/kobalt-pb.tar.gz" -- kobalt kobalt.app
+    COMMAND "${CMAKE_COMMAND}" -E chdir "${package}" "${CMAKE_COMMAND}" -E tar czf "${CMAKE_CURRENT_BINARY_DIR}/kobalt-pb.tar.gz" -- kobalt kobalt.app icons install-kobalt.ps1
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
     DEPENDS kobalt-pb ${KOBALT_ASSET_INPUTS} VERBATIM)
