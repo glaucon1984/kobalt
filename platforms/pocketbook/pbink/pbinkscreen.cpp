@@ -166,15 +166,26 @@ QRegion PbInkScreen::doRedraw()
     static const int burstWipes = qEnvironmentVariableIsSet("PBINK_ANIM_BURST")
                                       ? qEnvironmentVariableIntValue("PBINK_ANIM_BURST") : 4;
     const qint64 sinceLast = mLastUpdate.isValid() ? mLastUpdate.elapsed() : 1000000;
-    if (sinceLast < 700)
-        ++mQuickTurns;
-    else
-        mQuickTurns = 0;
-    const bool quickSuccession = mQuickTurns >= burstWipes;
-    if (sinceLast < minFrameMs) {
-        usleep(useconds_t(minFrameMs - sinceLast) * 1000);
-        if (mDebug)
-            qCDebug(lcPbInk, "paced the next frame by %lld ms", static_cast<long long>(minFrameMs - sinceLast));
+    // Only a frame that covers a good part of the screen (a page, a full-width panel) is paced
+    // and counted as a turn. A small region (the light pop-up while a finger slides along the
+    // edge, a button) is a quick update the controller absorbs; pacing it made this thread sleep
+    // up to minFrameMs per frame while the touch events kept arriving, so the pop-up trailed
+    // further behind the finger the longer the drag went on.
+    const QRect bounds = touched.boundingRect();
+    const bool large = qint64(bounds.width()) * bounds.height() * 4 >=
+                       qint64(mScreenImage.width()) * mScreenImage.height();
+    bool quickSuccession = false;
+    if (large) {
+        if (sinceLast < 700)
+            ++mQuickTurns;
+        else
+            mQuickTurns = 0;
+        quickSuccession = mQuickTurns >= burstWipes;
+        if (sinceLast < minFrameMs) {
+            usleep(useconds_t(minFrameMs - sinceLast) * 1000);
+            if (mDebug)
+                qCDebug(lcPbInk, "paced the next frame by %lld ms", static_cast<long long>(minFrameMs - sinceLast));
+        }
     }
     if (sweep && kind != FullRefresh && !quickSuccession) {
         // Strip wipe as in swipeanimation.koplugin's e-ink engine: the whole new frame goes into

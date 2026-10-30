@@ -333,7 +333,7 @@ pinned to portrait at start/show/foreground, logical rotation with touch mapping
 reporting; first frame after EVT_FOREGROUND; a Qt Sensors backend on EVT_ORIENTATION;
 keep-awake (`iv_sleepmode(0)`) while opening a book or downloading; strip-wipe page animation
 instead of the Kobo hwtcon sweep; startup `WaitForUpdateComplete`; a frame that follows the
-previous update by less than 350 ms (450 until 2026-10-29) is held back until then (`PBINK_MIN_FRAME_MS`;
+previous update by less than 350 ms (450 until 2026-10-29) is held back until then (`PBINK_MIN_FRAME_MS`; since 2026-10-30 only when it covers at least a quarter of the screen, the light pop-up's frames used to be paced too and trailed the finger;
 `WaitForUpdateComplete()` returns at once on this firmware, 0 ms in every log line) and from the
 fifth frame in a row within 0.7 s of the previous one the wipe is dropped (`PBINK_ANIM_BURST`,
 default 4 since 2026-10-29, 3 before: at 450 ms pacing the controller absorbed three wipes before its queue fell behind), since the controller was still executing the previous
