@@ -19,7 +19,9 @@ page covers installing and using it. [Building](building.md#pocketbook) covers t
   bookmarks, annotations and their export, dictionaries, search, table of contents.
 - The physical page-turn buttons, which also swap sides when the device is held upside down;
   holding one keeps turning pages. A short press of the power button opens Kobalt's menu.
-- Automatic rotation from the gravity sensor, including starting in landscape or upside down.
+- Automatic rotation from the gravity sensor, including starting in landscape or upside down,
+  within Kobalt's rotation setting (portrait only, landscape only, or both), also for the
+  loading screen and the resumed page before the book is open.
 - Frontlight brightness and warmth in 1 % steps, from the light panel or the edge swipe.
 - The sleep screen shows the current page or the cover with progress and battery, in the
   orientation the device is held in. The power-off screen shows the same image, and the boot

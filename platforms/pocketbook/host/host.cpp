@@ -5,6 +5,8 @@
 #include "interfaces/reader/views/reading_page.h"
 #include "dictionaries/manager.h"
 #include "sleep_screen_files.h"
+#include "storage/reader_storage.h"
+#include <QJsonObject>
 #include <qpa/qplatformnativeinterface.h>
 #include <inkview.h>
 #include <unistd.h>
@@ -35,16 +37,17 @@ QElapsedTimer Host::rotationClock;
 
 Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
     : controller(
-          std::move(paths), std::move(fonts), std::move(placeholder), [] { return readerServices(); },
-          &Host::rotateScreen) {
+          paths, std::move(fonts), std::move(placeholder), [] { return readerServices(); }, &Host::rotateScreen) {
     setObjectName("pocketbookHost");
+    preferencesPath = paths.preferences();
     // Kobalt's font setup creates a hidden window before this one, so the platform plugin does not
     // force this window to the screen size on its own: take the whole panel explicitly.
     setGeometry(QGuiApplication::primaryScreen()->geometry());
     connect(QGuiApplication::primaryScreen(), &QScreen::geometryChanged, this, &Host::followScreen);
     // Until a book is open, Kobalt's orientation logic is not running: show the message and the
-    // opening screen the way the device is held, from the gravity sensor, and follow flips.
-    rotateScreen(fromInkviewOrientation(GetGSensorOrientation()));
+    // opening screen the way the device is held, from the gravity sensor, within what Kobalt's
+    // rotation setting allows, and follow flips.
+    rotateScreen(startOrientation(GetGSensorOrientation()));
     auto *native = QGuiApplication::platformNativeInterface();
     if (auto fn = native ? native->platformFunction("pbinkNotifier") : nullptr)
         if (auto *notifier = reinterpret_cast<QObject *(*)()>(fn)()) {
@@ -456,6 +459,21 @@ Qt::ScreenOrientation Host::fromInkviewOrientation(int value) {
     }
 }
 
+Qt::ScreenOrientation Host::startOrientation(int inkviewOrientation) const {
+    const Qt::ScreenOrientation held = fromInkviewOrientation(inkviewOrientation);
+    const QJsonObject settings = storage::readPreferences(preferencesPath).object;
+    if (settings.value("auto_rotate").toBool(false))
+        return held;
+    const int saved = settings.value("orientation").toInt(Qt::PortraitOrientation);
+    const Qt::ScreenOrientation axis =
+        saved == Qt::LandscapeOrientation || saved == Qt::InvertedLandscapeOrientation ? Qt::LandscapeOrientation
+                                                                                        : Qt::PortraitOrientation;
+    const bool onAxis = axis == Qt::PortraitOrientation
+                            ? (held == Qt::PortraitOrientation || held == Qt::InvertedPortraitOrientation)
+                            : (held == Qt::LandscapeOrientation || held == Qt::InvertedLandscapeOrientation);
+    return onAxis ? held : axis;
+}
+
 void Host::deviceTurned(int inkviewOrientation) {
     if (controller.window())
         return;
@@ -465,7 +483,7 @@ void Host::deviceTurned(int inkviewOrientation) {
         turnTimer.setSingleShot(true);
         connect(&turnTimer, &QTimer::timeout, this, [this] {
             if (!controller.window() && pendingTurn >= 0)
-                rotateScreen(fromInkviewOrientation(pendingTurn));
+                rotateScreen(startOrientation(pendingTurn));
         }, Qt::UniqueConnection);
     }
     turnTimer.start(250);

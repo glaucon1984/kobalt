@@ -29,6 +29,12 @@ public:
     static void rotateScreen(Qt::ScreenOrientation orientation);
     // inkview gravity code (0 portrait, 3 upside down, 2 clockwise, 1 counter-clockwise) to Qt.
     static Qt::ScreenOrientation fromInkviewOrientation(int value);
+    // The orientation to show for a gravity reading before the book is open, under Kobalt's own
+    // rotation setting (reader-settings.json): "both" follows the reading; a locked axis keeps
+    // the reading only when it lies on that axis (upright or upside down within it, as
+    // ReaderOrientation::permits does with a sensor), else the axis's upright orientation.
+    Qt::ScreenOrientation startOrientation(int inkviewOrientation) const;
+    QString preferencesPath;
     // Started by rotateScreen(); the first page paint with the reader ready gets a full flash.
     static QElapsedTimer rotationClock;
     // Started when a KOsync dialog hides; the page paint that restores the page gets a full flash.
