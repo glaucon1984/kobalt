@@ -60,6 +60,8 @@ public:
     bool bootLogoForBook = false;
     void updateBootLogo(const QImage &panel, const char *reason);
     static QImage capturePanel();
+    // Seconds since the device booted (/proc/uptime), -1 when unknown.
+    static double uptimeSeconds();
     void holdAwakeForRefresh();
     void releaseAwakeForRefresh();
 

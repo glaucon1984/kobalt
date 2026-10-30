@@ -119,9 +119,11 @@ would for the built-in reader; a copy from before Kobalt's first write is
   awake; the lock screen the firmware shows is therefore the page you were reading. The same
   image is copied to the firmware's power-off cover file at every standby. A capture of the page
   is stored as the boot logo (through the firmware's own tool, which takes a few seconds in the
-  background) after the book opens and at each standby, and Kobalt shows that capture while the
-  book loads again, so a boot goes from the page to the same page. A power-off straight from a
-  page, without a standby first, shows the capture of the last standby or open at the next boot.
+  background) after the book opens and at each standby. When the firmware reopens the book
+  right after a boot, Kobalt shows that capture while the book loads, so the boot goes from the
+  page to the same page; a book opened by hand shows the usual loading screen. A power-off
+  straight from a page, without a standby first, shows the capture of the last standby or open
+  at the next boot.
 - **Reopening at boot**: Kobalt registers the open book with the firmware the way KOReader
   does, so the firmware's "Open last book at startup" (on by default) launches Kobalt with it
   after a power-off. Closing the book in Kobalt clears that, and the device boots to its home

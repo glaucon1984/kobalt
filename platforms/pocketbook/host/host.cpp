@@ -11,6 +11,7 @@
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDialog>
+#include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QScreen>
@@ -184,20 +185,34 @@ void Host::open(const QString &path) {
         return;
     }
     bookPath = file.absoluteFilePath();
-    // Reopened after a boot (or opened again): the page the boot logo shows, instead of the
-    // opening view, until the live page replaces it. The capture is in the panel's orientation
-    // and so is the host at start (pbink pins portrait, rotation 0), so it is painted as it is.
-    const QImage saved = savedBootLogo(bookPath);
+    // Reopened by the firmware right after a boot: the page the boot logo shows, instead of the
+    // opening view, until the live page replaces it, so the boot reads as one continuous page.
+    // The capture is in the panel's orientation and so is the host at start (pbink pins
+    // portrait, rotation 0), so it is painted as it is. A book opened by hand gets Kobalt's
+    // opening view as usual; "right after a boot" is read from the system uptime, since the
+    // firmware launches the app the same way in both cases.
+    const double uptime = uptimeSeconds();
+    const bool bootLaunch = uptime >= 0 && uptime < 180;
+    const QImage saved = bootLaunch ? savedBootLogo(bookPath) : QImage();
     if (!saved.isNull() && saved.size() == size()) {
         bootPage->setPixmap(QPixmap::fromImage(saved));
         setCurrentWidget(bootPage);
-        qInfo("kobalt-pb: showing the boot logo's page while the book loads");
+        qInfo("kobalt-pb: showing the boot logo's page while the book loads (uptime %.0f s)", uptime);
     } else {
         setCurrentWidget(openingPage);
     }
     openingBusy = true;
     updateKeepAwake();
     controller.open(bookPath, size());
+}
+
+double Host::uptimeSeconds() {
+    QFile file(QStringLiteral("/proc/uptime"));
+    if (!file.open(QIODevice::ReadOnly))
+        return -1;
+    bool ok = false;
+    const double seconds = QString::fromLatin1(file.readLine()).section(' ', 0, 0).toDouble(&ok);
+    return ok ? seconds : -1;
 }
 
 QImage Host::capturePanel() {
