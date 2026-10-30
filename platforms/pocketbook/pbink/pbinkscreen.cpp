@@ -154,16 +154,17 @@ QRegion PbInkScreen::doRedraw()
     // The controller executes partial updates asynchronously, a strip wipe queues ten of them,
     // and a page turned before they are done used to be blitted under them: strips of two pages
     // on the panel. WaitForUpdateComplete() returns at once on this firmware, so the pacing is
-    // by time: a frame follows the previous update by at least PBINK_MIN_FRAME_MS (450 ms, about
-    // one partial update), and from the PBINK_ANIM_BURST-th frame within 700 ms of the previous one
-    // onwards the wipe is dropped.
+    // by time: a frame follows the previous update by at least PBINK_MIN_FRAME_MS (350 ms, a
+    // little under one partial update), and from the PBINK_ANIM_BURST-th frame within 700 ms of
+    // the previous one onwards the wipe is dropped.
     static const int minFrameMs = qEnvironmentVariableIsSet("PBINK_MIN_FRAME_MS")
-                                      ? qEnvironmentVariableIntValue("PBINK_MIN_FRAME_MS") : 450;
-    // The controller absorbs a few wipes in a row before its queue falls behind (the fourth quick
-    // turn tore, the first three did not), so a burst keeps the wipe for its first
-    // PBINK_ANIM_BURST turns (default 3) and drops it from then on until the turns slow down.
+                                      ? qEnvironmentVariableIntValue("PBINK_MIN_FRAME_MS") : 350;
+    // The controller absorbs a few wipes in a row before its queue falls behind, so a burst keeps
+    // the wipe for its first PBINK_ANIM_BURST turns (default 4) and drops it from then on until
+    // the turns slow down. First measured at 450 ms pacing: three quick wipes were fine and the
+    // fourth tore; the defaults were then tightened to 350 ms and four turns (2026-10-29).
     static const int burstWipes = qEnvironmentVariableIsSet("PBINK_ANIM_BURST")
-                                      ? qEnvironmentVariableIntValue("PBINK_ANIM_BURST") : 3;
+                                      ? qEnvironmentVariableIntValue("PBINK_ANIM_BURST") : 4;
     const qint64 sinceLast = mLastUpdate.isValid() ? mLastUpdate.elapsed() : 1000000;
     if (sinceLast < 700)
         ++mQuickTurns;

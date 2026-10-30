@@ -34,6 +34,8 @@ public:
     // Started when a KOsync dialog hides; the page paint that restores the page gets a full flash.
     QElapsedTimer dialogClock;
     void flashAfterTurn();
+    // Last page turn from a physical button; paces the turns of a held button.
+    QElapsedTimer heldTurnClock;
     // No device light sleep while the engine opens a book (the firmware would suspend mid-load).
     static void keepAwake(bool keep);
     void updateKeepAwake();

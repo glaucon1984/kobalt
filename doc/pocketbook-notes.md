@@ -333,10 +333,10 @@ pinned to portrait at start/show/foreground, logical rotation with touch mapping
 reporting; first frame after EVT_FOREGROUND; a Qt Sensors backend on EVT_ORIENTATION;
 keep-awake (`iv_sleepmode(0)`) while opening a book or downloading; strip-wipe page animation
 instead of the Kobo hwtcon sweep; startup `WaitForUpdateComplete`; a frame that follows the
-previous update by less than 450 ms is held back until then (`PBINK_MIN_FRAME_MS`;
+previous update by less than 350 ms (450 until 2026-10-29) is held back until then (`PBINK_MIN_FRAME_MS`;
 `WaitForUpdateComplete()` returns at once on this firmware, 0 ms in every log line) and from the
-fourth frame in a row within 0.7 s of the previous one the wipe is dropped (`PBINK_ANIM_BURST`,
-default 3: the controller absorbs three wipes before its queue falls behind), since the controller was still executing the previous
+fifth frame in a row within 0.7 s of the previous one the wipe is dropped (`PBINK_ANIM_BURST`,
+default 4 since 2026-10-29, 3 before: at 450 ms pacing the controller absorbed three wipes before its queue fell behind), since the controller was still executing the previous
 wipe's strips when the next page was blitted under them (tearing when turning quickly). The
 sleep-image composition after a turn cost 140-165 ms on the GUI thread, mostly scaling the cover:
 Kobalt patch 7 caches the scaled cover, and a turn within a second of the previous one postpones

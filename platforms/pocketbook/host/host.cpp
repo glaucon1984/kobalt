@@ -203,6 +203,9 @@ void Host::taskBackground() {
         syncClock.start();
         syncPoll.start();
     }
+    // A power-off usually follows a standby (long press on the lock screen): make sure the
+    // power-off image is the sleep screen's bitmap, not an older copy.
+    writePowerOffImage();
     // EVT_BACKGROUND precedes every standby and every USB export. The firmware's PC Link export
     // was seen to drop what the apps had written since the last sync(2) (a standby's suspend
     // syncs, fdatasync alone did not survive), so flush everything now; ~0.1-0.3 s.
@@ -528,8 +531,20 @@ bool Host::eventFilter(QObject *object, QEvent *event) {
             !qobject_cast<QLineEdit *>(QApplication::focusWidget())) {
             const int direction = readerServices().pageButtonDirection(key);
             if (direction) {
-                if (event->type() == QEvent::KeyPress && !key->isAutoRepeat())
-                    reader->pageButton(direction);
+                if (event->type() == QEvent::KeyPress) {
+                    // A held button keeps turning, as in the firmware's reader and KOReader:
+                    // inkview repeats the key while it is down (EVT_KEYREPEAT, Qt auto-repeat
+                    // here). One turn per repeat, once the previous page is on screen and no
+                    // sooner than the plugin's frame pacing, so turns do not pile up.
+                    if (!key->isAutoRepeat()) {
+                        reader->pageButton(direction);
+                        heldTurnClock.start();
+                    } else if (reader->readyForPresentation() && heldTurnClock.isValid() &&
+                               heldTurnClock.elapsed() >= 350) {
+                        reader->pageButton(direction);
+                        heldTurnClock.start();
+                    }
+                }
                 return true;
             }
         }

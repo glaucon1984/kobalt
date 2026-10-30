@@ -12,7 +12,15 @@ namespace kobalt::pocketbook {
 // device's physical orientation, so the image is turned into the panel's own orientation (the
 // pbink plugin's current rotation) and written to the portrait file only. 8-bit greyscale BMP at
 // panel size. Returns false when nothing was written.
+// The same bitmap also goes to system/logo/bookcover, the image the firmware shows at power-off
+// when its Power-off logo setting is the book cover (read at shutdown; the KOReader cover
+// plugins write the same file). It is copied from the lock file after the first write of a
+// book and then at most every 30 s, and always at standby, so a power-off from the lock screen
+// shows the page or cover the sleep screen showed.
 bool writeLockImages(const QImage &image);
+// Copies the lock bitmap on disk to the power-off file now (blocking, tens of ms; waits for a
+// lock image write in progress). False when the power-off file is already that bitmap.
+bool writePowerOffImage();
 // The same on a worker thread (a write takes 0.2-0.4 s on the device). Returns false, without
 // calling `done`, for an image identical to the last one written at the same panel rotation; otherwise `done(ok)` runs on
 // the GUI thread afterwards.

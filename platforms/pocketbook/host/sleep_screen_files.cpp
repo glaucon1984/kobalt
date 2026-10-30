@@ -25,6 +25,12 @@ QImage lastWritten; // GUI thread only
 int lastRotation = -1; // panel rotation lastWritten was turned by
 const char *lineDir = "/mnt/ext1/system/resources/Line";
 const char *lockPortrait = "/mnt/ext1/system/resources/Line/taskmgr_lock_background.bmp";
+// What the firmware shows at power-off while Settings > Personalize > Logos > Power-off logo is
+// the book cover (offlogo=@cover_logo); read at shutdown, not cached. Same 8-bit BMP format.
+const char *powerOffCover = "/mnt/ext1/system/logo/bookcover";
+QElapsedTimer lastPowerOffCopy; // under writeMutex
+bool powerOffStale = false; // lock bitmap written since the last copy; under writeMutex
+const int powerOffCopyIntervalMs = 30000;
 
 QVector<QRgb> greyTable() {
     QVector<QRgb> table(256);
@@ -68,6 +74,28 @@ int panelRotation() {
     return 0;
 }
 
+// Copies the lock bitmap on disk to the power-off file (atomically: a shutdown in the middle
+// must not leave a torn file). Caller holds writeMutex.
+bool copyLockToPowerOffLocked() {
+    QFile lock(lockPortrait);
+    if (!lock.open(QIODevice::ReadOnly))
+        return false;
+    const QByteArray bytes = lock.readAll();
+    lock.close();
+    if (bytes.isEmpty())
+        return false;
+    backupOnce(powerOffCover);
+    QSaveFile file(powerOffCover);
+    if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size())
+        return false;
+    const bool ok = file.commit();
+    if (ok) {
+        lastPowerOffCopy.start();
+        powerOffStale = false;
+    }
+    return ok;
+}
+
 bool writeLockImagesNow(const QImage &image, int rotation) {
     std::lock_guard<std::mutex> guard(writeMutex);
     QElapsedTimer clock;
@@ -82,8 +110,28 @@ bool writeLockImagesNow(const QImage &image, int rotation) {
     const bool ok = writeBmp8(portrait, lockPortrait);
     qInfo("kobalt-pb: lock image %s (rotation %d) in %lld ms", ok ? "written" : "NOT written", rotation,
           static_cast<long long>(clock.elapsed()));
+    // The power-off file follows at a slower pace (the first write of the book, then at most
+    // every 30 s while reading); a standby copies whatever is still pending (writePowerOffImage).
+    if (ok)
+        powerOffStale = true;
+    if (ok && (!lastPowerOffCopy.isValid() || lastPowerOffCopy.elapsed() >= powerOffCopyIntervalMs)) {
+        const bool copied = copyLockToPowerOffLocked();
+        qInfo("kobalt-pb: power-off image %s", copied ? "written" : "NOT written");
+    }
     return ok;
 }
+}
+
+bool writePowerOffImage() {
+    std::lock_guard<std::mutex> guard(writeMutex);
+    if (!powerOffStale || !QFile::exists(lockPortrait))
+        return false;
+    QElapsedTimer clock;
+    clock.start();
+    const bool ok = copyLockToPowerOffLocked();
+    qInfo("kobalt-pb: power-off image %s (standby) in %lld ms", ok ? "written" : "NOT written",
+          static_cast<long long>(clock.elapsed()));
+    return ok;
 }
 
 bool writeLockImages(const QImage &image) {
