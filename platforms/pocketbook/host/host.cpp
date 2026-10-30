@@ -18,6 +18,7 @@
 #include <QPointer>
 #include <QDynamicPropertyChangeEvent>
 #include <QLabel>
+#include <QPixmap>
 #include <QLineEdit>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -56,6 +57,9 @@ Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
     message->setAlignment(Qt::AlignCenter);
     message->setMargin(48);
     addWidget(message);
+    bootPage = new QLabel(this);
+    bootPage->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    addWidget(bootPage);
     openingPage = new QWidget(this);
     auto *body = new QVBoxLayout(openingPage);
     body->setContentsMargins(0, 0, 0, 0);
@@ -90,6 +94,7 @@ Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
         platform::setReaderRefreshWindow(reader);
         reader->checkpoint();
         qInfo("kobalt-pb: book opened");
+        markCurrentBook(bookPath, QFileInfo(bookPath).completeBaseName());
         // Lock image for the first standby of this book (cover decode is asynchronous: give it a
         // moment, and try again later in case it took longer).
         holdAwakeForRefresh();
@@ -108,11 +113,13 @@ Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
         updateKeepAwake();
         quitting = true;
         setUpdatesEnabled(false);
+        markCurrentBook({});
     });
     connect(&controller, &android::ReaderController::closed, this, [this] {
         qInfo("kobalt-pb: book closed");
         quitting = true;
         setUpdatesEnabled(false);
+        markCurrentBook({});
         if (closing)
             close();
         else
@@ -170,10 +177,28 @@ void Host::open(const QString &path) {
         showMessage(tr("Cannot read %1").arg(path) + "\n\n" + tr("Tap or press a key to leave."));
         return;
     }
-    setCurrentWidget(openingPage);
+    bookPath = file.absoluteFilePath();
+    // Reopened after a boot (or opened again): the page the boot logo shows, instead of the
+    // opening view, until the live page replaces it. The capture is in the panel's orientation
+    // and so is the host at start (pbink pins portrait, rotation 0), so it is painted as it is.
+    const QImage saved = savedBootLogo(bookPath);
+    if (!saved.isNull() && saved.size() == size()) {
+        bootPage->setPixmap(QPixmap::fromImage(saved));
+        setCurrentWidget(bootPage);
+        qInfo("kobalt-pb: showing the boot logo's page while the book loads");
+    } else {
+        setCurrentWidget(openingPage);
+    }
     openingBusy = true;
     updateKeepAwake();
-    controller.open(file.absoluteFilePath(), size());
+    controller.open(bookPath, size());
+}
+
+QImage Host::capturePanel() {
+    auto *native = QGuiApplication::platformNativeInterface();
+    if (auto fn = native ? native->platformFunction("pbinkPanelImage") : nullptr)
+        return reinterpret_cast<QImage (*)()>(fn)();
+    return {};
 }
 
 // Kobalt's own sleep sequence, run while the device is already behind the lock screen (or at
@@ -184,6 +209,8 @@ void Host::taskBackground() {
     if (!reader || quitting || asleep || currentWidget() != reader)
         return;
     asleep = true;
+    // The page as it was shown, before the sleep view is painted over it: the boot logo.
+    const QImage page = capturePanel();
     if (sleepRefreshTimer.isActive()) {
         sleepRefreshTimer.stop();
         releaseAwakeForRefresh();
@@ -206,7 +233,7 @@ void Host::taskBackground() {
     // A power-off usually follows a standby (long press on the lock screen): make sure the
     // power-off image is the sleep screen's bitmap, not an older copy, and the boot logo with it.
     writePowerOffImage();
-    updateBootLogo("standby");
+    updateBootLogo(page, "standby");
     // EVT_BACKGROUND precedes every standby and every USB export. The firmware's PC Link export
     // was seen to drop what the apps had written since the last sync(2) (a standby's suspend
     // syncs, fdatasync alone did not survive), so flush everything now; ~0.1-0.3 s.
@@ -314,9 +341,9 @@ void Host::refreshSleepScreen(const char *reason) {
     const bool queued = writeLockImagesAsync(image, [self, why](bool ok) {
         if (!self || quitting)
             return;
-        if (ok && !self->bootLogoForBook) {
+        if (ok && !self->bootLogoForBook && !self->asleep) {
             self->bootLogoForBook = true;
-            self->updateBootLogo("open");
+            self->updateBootLogo(capturePanel(), "open");
         }
         if (!ok || self->asleep) {
             if (ok)
@@ -353,11 +380,11 @@ void Host::updateKeepAwake() {
     keepAwake(openingBusy || downloadBusy || syncBusy || bootLogoBusy || sleepRefreshHolds > 0);
 }
 
-void Host::updateBootLogo(const char *reason) {
+void Host::updateBootLogo(const QImage &panel, const char *reason) {
     if (quitting || bootLogoWriteInFlight())
         return;
     QPointer<Host> self(this);
-    const bool started = writeBootLogo(reason, [self] {
+    const bool started = writeBootLogo(panel, bookPath, reason, [self] {
         if (!self)
             return;
         self->bootLogoBusy = false;

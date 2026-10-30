@@ -12,7 +12,7 @@
 #include <QScreen>
 #include <QVector>
 #include <QCoreApplication>
-#include <atomic>
+#include <inkview.h>
 #include <mutex>
 #include <thread>
 
@@ -32,9 +32,27 @@ const char *powerOffCover = "/mnt/ext1/system/logo/bookcover";
 QElapsedTimer lastPowerOffCopy; // under writeMutex
 bool powerOffStale = false; // lock bitmap written since the last copy; under writeMutex
 const int powerOffCopyIntervalMs = 30000;
-std::atomic<bool> bootLogoStale{false}; // power-off file written since the last boot logo write
 bool bootLogoInFlight = false; // GUI thread only
 const int bootLogoTimeoutMs = 60000;
+// inkview's CURRENTBOOK: the book open in the foreground task, which the firmware saves at
+// power-off and reopens at boot when its "open last book" setting is on (as KOReader does).
+const char *currentBookMarker = "/tmp/.current";
+
+QString bootLogoPath() {
+    return QCoreApplication::applicationDirPath() + QStringLiteral("/bootlogo.bmp");
+}
+QString bootLogoBookPath() {
+    return QCoreApplication::applicationDirPath() + QStringLiteral("/bootlogo.book");
+}
+
+bool writeBmp24(const QImage &image, const QString &path) {
+    // What KOReader hands the firmware's logo tool; the 8-bit form is untested there.
+    const QImage rgb = image.convertToFormat(QImage::Format_RGB888);
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly) || !rgb.save(&file, "BMP"))
+        return false;
+    return file.commit();
+}
 
 QVector<QRgb> greyTable() {
     QVector<QRgb> table(256);
@@ -96,7 +114,6 @@ bool copyLockToPowerOffLocked() {
     if (ok) {
         lastPowerOffCopy.start();
         powerOffStale = false;
-        bootLogoStale = true;
     }
     return ok;
 }
@@ -168,27 +185,15 @@ bool writeLockImagesAsync(const QImage &image, std::function<void(bool)> done) {
     return true;
 }
 
-bool writeBootLogo(const char *reason, std::function<void()> done) {
-    // The bootloader shows a logo kept in a flash partition; `iv2sh WriteStartupLogo <bmp>`
-    // stores one there (KOReader's Cover image plugin does the same; the firmware itself does it
-    // for its own reader when Settings > Personalize > Logos > Boot logo is the book cover, which
-    // is also what makes the setting show a book cover at all). The source is the power-off
-    // file, so boot and power-off screens agree. Slow (seconds): a background process, with the
-    // device kept awake by the caller; skipped while one runs or when the file has not changed.
-    if (bootLogoInFlight || !bootLogoStale || !QFile::exists(powerOffCover))
-        return false;
-    bootLogoInFlight = true;
-    bootLogoStale = false;
+namespace {
+void runBootLogoTool(const QString &why, std::function<void()> done) {
     auto *process = new QProcess(QCoreApplication::instance());
     auto *clock = new QElapsedTimer;
     clock->start();
-    const QString why = QString::fromLatin1(reason);
     QObject::connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), process,
                      [process, clock, why, done](int code, QProcess::ExitStatus) {
                          qInfo("kobalt-pb: boot logo write (%s) done in %lld ms, exit %d", qPrintable(why),
                                static_cast<long long>(clock->elapsed()), code);
-                         if (code != 0)
-                             bootLogoStale = true; // try again at the next occasion
                          delete clock;
                          process->deleteLater();
                          bootLogoInFlight = false;
@@ -201,9 +206,74 @@ bool writeBootLogo(const char *reason, std::function<void()> done) {
             process->kill();
         }
     });
-    process->start(QStringLiteral("/ebrmain/bin/iv2sh"), {QStringLiteral("WriteStartupLogo"), QString::fromLatin1(powerOffCover)});
-    qInfo("kobalt-pb: boot logo write started (%s)", reason);
+    process->start(QStringLiteral("/ebrmain/bin/iv2sh"), {QStringLiteral("WriteStartupLogo"), bootLogoPath()});
+}
+}
+
+bool writeBootLogo(const QImage &panelImage, const QString &bookPath, const char *reason,
+                   std::function<void()> done) {
+    // The bootloader shows a logo kept in a flash partition; `iv2sh WriteStartupLogo <bmp>`
+    // stores one there (KOReader's Cover image plugin does the same; the firmware itself does it
+    // for its own reader when Settings > Personalize > Logos > Boot logo is the book cover, which
+    // is also what makes the setting show a book cover at all). The image is the panel as it
+    // was: a device that powers itself off from standby boots straight into the page that was
+    // being read, and the reopen (see markCurrentBook) shows the same page while the book
+    // loads. Slow (seconds): a background process, with the device kept awake by the caller;
+    // skipped while one runs.
+    if (bootLogoInFlight || panelImage.isNull())
+        return false;
+    bootLogoInFlight = true;
+    const QString why = QString::fromLatin1(reason);
+    std::thread([panelImage, bookPath, why, done = std::move(done)] {
+        QElapsedTimer clock;
+        clock.start();
+        const bool ok = writeBmp24(panelImage, bootLogoPath());
+        if (ok) {
+            QSaveFile book(bootLogoBookPath());
+            if (book.open(QIODevice::WriteOnly)) {
+                book.write(bookPath.toUtf8());
+                book.commit();
+            }
+        }
+        qInfo("kobalt-pb: boot logo image %s (%s) in %lld ms", ok ? "written" : "NOT written", qPrintable(why),
+              static_cast<long long>(clock.elapsed()));
+        QMetaObject::invokeMethod(QCoreApplication::instance(), [ok, why, done] {
+            if (!ok) {
+                bootLogoInFlight = false;
+                if (done)
+                    done();
+                return;
+            }
+            runBootLogoTool(why, done);
+            qInfo("kobalt-pb: boot logo write started (%s)", qPrintable(why));
+        }, Qt::QueuedConnection);
+    }).detach();
     return true;
+}
+
+QImage savedBootLogo(const QString &bookPath) {
+    QFile book(bootLogoBookPath());
+    if (!book.open(QIODevice::ReadOnly) || QString::fromUtf8(book.readAll()) != bookPath)
+        return {};
+    return QImage(bootLogoPath());
+}
+
+void markCurrentBook(const QString &bookPath, const QString &title) {
+    // What KOReader's notifyBookState does: the marker file plus the task's subtask info, which
+    // is what the task manager and the "current book" logic read. Without them the firmware
+    // forgot the book at power-off and booted to its home screen instead of reopening it.
+    QFile::remove(QString::fromLatin1(currentBookMarker));
+    if (!bookPath.isEmpty()) {
+        QFile marker(QString::fromLatin1(currentBookMarker));
+        if (marker.open(QIODevice::WriteOnly)) {
+            marker.write(bookPath.toUtf8());
+            marker.close();
+        }
+    }
+    const QByteArray name = (bookPath.isEmpty() ? QStringLiteral("kobalt") : title + QStringLiteral(" - kobalt")).toUtf8();
+    const QByteArray book = (bookPath.isEmpty() ? QStringLiteral("N/A") : bookPath).toUtf8();
+    SetSubtaskInfo(GetCurrentTask(), 0, name.constData(), book.constData());
+    qInfo("kobalt-pb: current book %s", bookPath.isEmpty() ? "cleared" : "marked for the task manager");
 }
 
 bool bootLogoWriteInFlight() {

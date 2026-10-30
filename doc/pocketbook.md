@@ -22,9 +22,12 @@ page covers installing and using it. [Building](building.md#pocketbook) covers t
 - Automatic rotation from the gravity sensor, including starting in landscape or upside down.
 - Frontlight brightness and warmth in 1 % steps, from the light panel or the edge swipe.
 - The sleep screen shows the current page or the cover with progress and battery, in the
-  orientation the device is held in. The power-off and boot screens show the same image when
-  the PocketBook's Power-off logo and Boot logo settings (Settings → Personalize → Logos) are
-  the book cover.
+  orientation the device is held in. The power-off screen shows the same image, and the boot
+  screen shows the page as it was, when the PocketBook's Power-off logo and Boot logo settings
+  (Settings → Personalize → Logos) are the book cover.
+- A device that switched itself off (or was switched off from the lock screen) boots into the
+  page that was being read and reopens the book in Kobalt, when the PocketBook's "Open last
+  book at startup" setting is on.
 - Reading progress shared with the built-in reader: the home screen shows Kobalt's progress
   and the built-in reader opens where Kobalt left off, and vice versa.
 - KOsync progress sync (Settings → Sync), with Wi-Fi brought up automatically when needed.
@@ -91,10 +94,15 @@ would for the built-in reader; a copy from before Kobalt's first write is
   above.
 - **Standby**: the sleep screen is updated a moment after each page turn while the device is
   awake; the lock screen the firmware shows is therefore the page you were reading. The same
-  image is copied to the firmware's power-off cover file at every standby, and stored as the
-  boot logo (through the firmware's own tool, which takes a few seconds in the background) after
-  the book opens and at each standby. A power-off straight from a page, without a standby first,
-  shows the image of the last standby or open at the next boot.
+  image is copied to the firmware's power-off cover file at every standby. A capture of the page
+  is stored as the boot logo (through the firmware's own tool, which takes a few seconds in the
+  background) after the book opens and at each standby, and Kobalt shows that capture while the
+  book loads again, so a boot goes from the page to the same page. A power-off straight from a
+  page, without a standby first, shows the capture of the last standby or open at the next boot.
+- **Reopening at boot**: Kobalt registers the open book with the firmware the way KOReader
+  does, so the firmware's "Open last book at startup" (on by default) launches Kobalt with it
+  after a power-off. Closing the book in Kobalt clears that, and the device boots to its home
+  screen as usual.
 - **Logs**: `applications/kobalt/kobalt.log` on the device. Attach it when reporting a problem.
 
 ## What had to change for PocketBook
@@ -132,8 +140,12 @@ Sleep and standby:
   PocketBook firmware shows a fixed image it loads when the app starts, so Kobalt writes its
   sleep image into that file after every page turn and asks the firmware to reload it, timed so
   a lock pressed right after a page turn does not catch the device half asleep. The same image
-  goes to the firmware's power-off cover file and, through the firmware's own tool, to the boot
-  logo, so neither screen is left showing another app's picture of another book.
+  goes to the firmware's power-off cover file, and a capture of the page becomes the boot logo
+  through the firmware's own tool, so neither screen is left showing another app's picture of
+  another book.
+- **Reopening the book at boot.** The firmware remembers which book a task has open only when
+  the app tells it (a marker file and the task's subtask info, as KOReader does); Kobalt does so
+  now, so a device that switched itself off boots into the page and reopens the book.
 - **The device falling asleep mid-task.** A PocketBook goes into light sleep a few seconds after
   the last touch, even while the app is working; books stalled on the loading screen because of
   it. Kobalt keeps the device awake while opening a book, downloading or syncing.

@@ -21,13 +21,23 @@ bool writeLockImages(const QImage &image);
 // Copies the lock bitmap on disk to the power-off file now (blocking, tens of ms; waits for a
 // lock image write in progress). False when the power-off file is already that bitmap.
 bool writePowerOffImage();
-// Stores the power-off file as the boot logo through the firmware's own tool (iv2sh
-// WriteStartupLogo, which writes the bootloader's flash partition; the firmware does the same
-// for its reader when its Boot logo setting is the book cover). Slow, so it runs as a background
-// process: the caller keeps the device awake until `done` runs on the GUI thread. Returns false,
-// without calling `done`, when a write is running or the file has not changed since the last.
-bool writeBootLogo(const char *reason, std::function<void()> done = {});
+// Stores a capture of the panel (pbinkPanelImage, the page as it was shown) as the boot logo
+// through the firmware's own tool (iv2sh WriteStartupLogo, which writes the bootloader's flash
+// partition; the firmware does the same for its reader when its Boot logo setting is the book
+// cover). The bitmap is written on a worker thread (24-bit, as KOReader's) next to the binary,
+// with the book's path beside it, then the tool runs as a background process: the caller keeps
+// the device awake until `done` runs on the GUI thread. Returns false, without calling `done`,
+// when a write is running or the image is null.
+bool writeBootLogo(const QImage &panelImage, const QString &bookPath, const char *reason,
+                   std::function<void()> done = {});
 bool bootLogoWriteInFlight();
+// The last boot logo image, when it was captured for this book; null otherwise. Shown while the
+// book loads, so a reopen at boot goes boot logo -> same page -> live page.
+QImage savedBootLogo(const QString &bookPath);
+// Tells the firmware which book this task has open (inkview's /tmp/.current marker and the
+// subtask info, as KOReader does), so that a power-off saves it and the next boot reopens it
+// with Kobalt when the firmware's "open last book" setting is on. An empty path clears it.
+void markCurrentBook(const QString &bookPath, const QString &title = {});
 // The same on a worker thread (a write takes 0.2-0.4 s on the device). Returns false, without
 // calling `done`, for an image identical to the last one written at the same panel rotation; otherwise `done(ok)` runs on
 // the GUI thread afterwards.

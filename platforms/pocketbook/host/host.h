@@ -50,10 +50,11 @@ public:
     // timers). Counted: the page-turn chain and the wake reload hold it independently.
     bool openingBusy = false, downloadBusy = false, syncBusy = false, bootLogoBusy = false;
     int sleepRefreshHolds = 0;
-    // Boot logo from the power-off file: once after the book's first lock image, then at each
-    // standby whose power-off file changed. Awake until the firmware's tool has returned.
+    // Boot logo from a capture of the panel: once after the book's first lock image, then at
+    // each standby. Awake until the firmware's tool has returned.
     bool bootLogoForBook = false;
-    void updateBootLogo(const char *reason);
+    void updateBootLogo(const QImage &panel, const char *reason);
+    static QImage capturePanel();
     void holdAwakeForRefresh();
     void releaseAwakeForRefresh();
 
@@ -66,6 +67,8 @@ private:
     std::unique_ptr<ReaderOpeningView> opening;
     QWidget *openingPage;
     QLabel *message;
+    QLabel *bootPage; // the boot logo's page while a reopened book loads
+    QString bookPath;
     bool closing = false;
     QTimer turnTimer;
     static bool quitting;

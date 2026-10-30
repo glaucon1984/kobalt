@@ -99,6 +99,8 @@ QFunctionPointer PbInkIntegration::platformFunction(const QByteArray &function) 
         return QFunctionPointer(setRotationStatic);
     if (function == "pbinkRotation")
         return QFunctionPointer(rotationStatic);
+    if (function == "pbinkPanelImage")
+        return QFunctionPointer(panelImageStatic);
     if (function == "pbinkSetOrientation")
         return QFunctionPointer(setOrientationStatic);
     if (function == "pbinkNotifier")
@@ -130,6 +132,12 @@ int PbInkIntegration::rotationStatic()
 {
     auto self = static_cast<PbInkIntegration *>(QGuiApplicationPrivate::platformIntegration());
     return self->m_screen->rotation();
+}
+
+QImage PbInkIntegration::panelImageStatic()
+{
+    auto self = static_cast<PbInkIntegration *>(QGuiApplicationPrivate::platformIntegration());
+    return self->m_screen->panelImage();
 }
 
 void PbInkIntegration::setOrientationStatic(int orientation)

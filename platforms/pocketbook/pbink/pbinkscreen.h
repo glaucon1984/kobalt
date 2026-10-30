@@ -37,6 +37,8 @@ public:
     // Keep inkview's own task orientation at portrait (checked at start and when shown again).
     void lockPortrait();
     int rotation() const { return mRotation; }
+    // What is on the panel right now, in the panel's own orientation (a copy).
+    QImage panelImage() const { return mFbImage.copy(); }
     // Panel (touch) coordinates to logical screen coordinates.
     QPoint toLogical(const QPoint &panel) const { return mToLogical.map(panel); }
 
