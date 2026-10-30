@@ -269,6 +269,10 @@ void markCurrentBook(const QString &bookPath, const QString &title) {
             marker.write(bookPath.toUtf8());
             marker.close();
         }
+    } else {
+        // The book was closed on purpose: the next open of it is a fresh start with the opening
+        // view, not a resume from the boot capture. (A power-off leaves the capture valid.)
+        QFile::remove(bootLogoBookPath());
     }
     const QByteArray name = (bookPath.isEmpty() ? QStringLiteral("kobalt") : title + QStringLiteral(" - kobalt")).toUtf8();
     const QByteArray book = (bookPath.isEmpty() ? QStringLiteral("N/A") : bookPath).toUtf8();

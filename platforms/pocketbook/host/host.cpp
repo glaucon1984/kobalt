@@ -185,19 +185,17 @@ void Host::open(const QString &path) {
         return;
     }
     bookPath = file.absoluteFilePath();
-    // Reopened by the firmware right after a boot: the page the boot logo shows, instead of the
-    // opening view, until the live page replaces it, so the boot reads as one continuous page.
-    // The capture is in the panel's orientation and so is the host at start (pbink pins
-    // portrait, rotation 0), so it is painted as it is. A book opened by hand gets Kobalt's
-    // opening view as usual; "right after a boot" is read from the system uptime, since the
-    // firmware launches the app the same way in both cases.
-    const double uptime = uptimeSeconds();
-    const bool bootLaunch = uptime >= 0 && uptime < 180;
-    const QImage saved = bootLaunch ? savedBootLogo(bookPath) : QImage();
+    // Resumed after a power-off (the firmware reopens the book at boot, or the user does): the
+    // page the boot logo shows, instead of the opening view, until the live page replaces it,
+    // so the boot reads as one continuous page. The capture is in the panel's orientation and
+    // so is the host at start (pbink pins portrait, rotation 0), so it is painted as it is.
+    // A book that was closed on purpose has no capture any more (markCurrentBook) and gets
+    // Kobalt's opening view as usual; a different book never matches the capture's path.
+    const QImage saved = savedBootLogo(bookPath);
     if (!saved.isNull() && saved.size() == size()) {
         bootPage->setPixmap(QPixmap::fromImage(saved));
         setCurrentWidget(bootPage);
-        qInfo("kobalt-pb: showing the boot logo's page while the book loads (uptime %.0f s)", uptime);
+        qInfo("kobalt-pb: showing the boot logo's page while the book loads (uptime %.0f s)", uptimeSeconds());
     } else {
         setCurrentWidget(openingPage);
     }
