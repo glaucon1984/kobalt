@@ -50,6 +50,11 @@ public:
     // timers). Counted: the page-turn chain and the wake reload hold it independently.
     bool openingBusy = false, downloadBusy = false, syncBusy = false, bootLogoBusy = false;
     int sleepRefreshHolds = 0;
+    // The firmware suspends the CPU well under a second after a touch ends while the app allows
+    // it, and Qt timers sleep with it: the light notice's hide timer (850 ms) never fired and
+    // the notice stayed until the next tap. Awake from a touch until 2 s after its release.
+    bool inputBusy = false;
+    QTimer inputSettle;
     // Boot logo from a capture of the panel: once after the book's first lock image, then at
     // each standby. Awake until the firmware's tool has returned.
     bool bootLogoForBook = false;

@@ -126,6 +126,12 @@ Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
             qApp->quit();
     });
     qApp->installEventFilter(this);
+    inputSettle.setSingleShot(true);
+    inputSettle.setInterval(2000);
+    connect(&inputSettle, &QTimer::timeout, this, [this] {
+        inputBusy = false;
+        updateKeepAwake();
+    });
     sleepRefreshTimer.setSingleShot(true);
     sleepRefreshTimer.setInterval(300);
     connect(&sleepRefreshTimer, &QTimer::timeout, this, [this] { refreshSleepScreen("reading"); });
@@ -377,7 +383,7 @@ void Host::usbEvent(int type) {
 }
 
 void Host::updateKeepAwake() {
-    keepAwake(openingBusy || downloadBusy || syncBusy || bootLogoBusy || sleepRefreshHolds > 0);
+    keepAwake(openingBusy || downloadBusy || syncBusy || bootLogoBusy || inputBusy || sleepRefreshHolds > 0);
 }
 
 void Host::updateBootLogo(const QImage &panel, const char *reason) {
@@ -550,6 +556,17 @@ bool Host::eventFilter(QObject *object, QEvent *event) {
             setUpdatesEnabled(false);
         }
         return false;
+    }
+    if (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonRelease) {
+        if (event->type() == QEvent::MouseButtonPress) {
+            inputSettle.stop();
+            if (!inputBusy) {
+                inputBusy = true;
+                updateKeepAwake();
+            }
+        } else {
+            inputSettle.start();
+        }
     }
     if (event->type() == QEvent::Paint && object->objectName() == "rrPage") {
         flashAfterTurn();

@@ -10,6 +10,7 @@
 #include <QPointer>
 #include <QTime>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <inkview.h>
 #include <memory>
 
@@ -17,8 +18,25 @@ namespace kobalt::pocketbook {
 namespace {
 // inkview: GetFrontlightState() is the brightness 0..100 (negative when the light is off or
 // absent), GetFrontlightColor()/SetFrontlightColor() the warmth 0..100 on devices with one.
+// The edge drag calls setGestureLevel/setWarmth for every finger movement; the firmware's
+// calls are not instant (they are timed below and logged when slow), so the hardware is
+// written at most every lightWriteIntervalMs with the latest value, and the notice on screen
+// follows the finger instead of a queue of light changes.
+const int lightWriteIntervalMs = 120;
+template <typename Call>
+void timedLight(const char *what, int value, Call call) {
+    QElapsedTimer clock;
+    clock.start();
+    call();
+    if (clock.elapsed() > 20)
+        qInfo("kobalt-pb: %s(%d) took %lld ms", what, value, static_cast<long long>(clock.elapsed()));
+}
 class Light final : public LightControls {
 public:
+    Light() {
+        flush.setSingleShot(true);
+        QObject::connect(&flush, &QTimer::timeout, [this] { writePending(); });
+    }
     bool initialize() override {
         warm = GetFrontlightColor() >= 0;
         original = brightness();
@@ -44,7 +62,8 @@ public:
     }
     int setWarmth(int value) override {
         value = qBound(0, value, 100);
-        SetFrontlightColor(value);
+        pendingWarmth = value;
+        schedule();
         return value;
     }
     bool saveWarmth() override {
@@ -60,14 +79,18 @@ public:
     }
     int setGestureLevel(int percent) override {
         percent = qBound(0, percent, 100);
-        SetFrontlightState(percent);
+        pendingBrightness = percent;
+        schedule();
         return percent;
     }
     void finishGesture(bool save) override {
         // Only a cancelled gesture restores; a stray finish (e.g. at close) must not touch the light.
-        if (active && !save)
-            SetFrontlightState(original);
+        if (active && !save) {
+            pendingBrightness = -1;
+            timedLight("SetFrontlightState", original, [this] { SetFrontlightState(original); });
+        }
         active = false;
+        writePending(); // the last value of a saved gesture goes out now
     }
     int brightness() const override {
         return qMax(0, GetFrontlightState());
@@ -79,6 +102,33 @@ public:
 private:
     bool warm = false, active = false;
     int original = 0;
+    int pendingBrightness = -1, pendingWarmth = -1;
+    QTimer flush;
+    QElapsedTimer lastWrite;
+    void schedule() {
+        if (flush.isActive())
+            return;
+        const qint64 since = lastWrite.isValid() ? lastWrite.elapsed() : lightWriteIntervalMs;
+        if (since >= lightWriteIntervalMs)
+            writePending();
+        else
+            flush.start(int(lightWriteIntervalMs - since));
+    }
+    void writePending() {
+        flush.stop();
+        if (pendingBrightness >= 0) {
+            const int value = pendingBrightness;
+            pendingBrightness = -1;
+            timedLight("SetFrontlightState", value, [value] { SetFrontlightState(value); });
+            lastWrite.start();
+        }
+        if (pendingWarmth >= 0) {
+            const int value = pendingWarmth;
+            pendingWarmth = -1;
+            timedLight("SetFrontlightColor", value, [value] { SetFrontlightColor(value); });
+            lastWrite.start();
+        }
+    }
 };
 class Dictionary final : public DictionaryService {
 public:
