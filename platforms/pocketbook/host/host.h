@@ -55,6 +55,9 @@ public:
     // the notice stayed until the next tap. Awake from a touch until 2 s after its release.
     bool inputBusy = false;
     QTimer inputSettle;
+    // USB state at the last touch or key: a USB connection that is new at EVT_BACKGROUND is a PC
+    // plug (the firmware's PC Link / Charge prompt took the foreground), not a standby.
+    bool usbAtLastInput = false;
     // Boot logo from a capture of the panel: once after the book's first lock image, then at
     // each standby. Awake until the firmware's tool has returned.
     bool bootLogoForBook = false;

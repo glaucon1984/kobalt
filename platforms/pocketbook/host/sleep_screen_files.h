@@ -35,6 +35,9 @@ bool bootLogoWriteInFlight();
 // since (markCurrentBook with an empty path forgets it); null otherwise. Shown while the book
 // loads, so a reopen after a power-off goes boot logo -> same page -> live page.
 QImage savedBootLogo(const QString &bookPath);
+// The capture no longer stands for a session to resume (the book was closed, or a PC took the
+// storage): the next open of the book gets the opening view.
+void forgetBootLogo();
 // Tells the firmware which book this task has open (inkview's /tmp/.current marker and the
 // subtask info, as KOReader does), so that a power-off saves it and the next boot reopens it
 // with Kobalt when the firmware's "open last book" setting is on. An empty path clears it.

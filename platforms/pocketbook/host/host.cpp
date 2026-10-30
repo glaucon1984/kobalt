@@ -228,8 +228,13 @@ void Host::taskBackground() {
     if (!reader || quitting || asleep || currentWidget() != reader)
         return;
     asleep = true;
+    // A USB cable to a PC arrives as this same event (the firmware's PC Link / Charge prompt
+    // takes the foreground); PC Link then takes the storage away and ends the app without a
+    // close. Such a session is not resumed from the boot capture: the next open gets the
+    // opening view. Told apart from a standby on the charger by the connection being new.
+    const bool usbPlug = IsUSBconnected() > 0 && !usbAtLastInput;
     // The page as it was shown, before the sleep view is painted over it: the boot logo.
-    const QImage page = capturePanel();
+    const QImage page = usbPlug ? QImage() : capturePanel();
     if (sleepRefreshTimer.isActive()) {
         sleepRefreshTimer.stop();
         releaseAwakeForRefresh();
@@ -252,7 +257,12 @@ void Host::taskBackground() {
     // A power-off usually follows a standby (long press on the lock screen): make sure the
     // power-off image is the sleep screen's bitmap, not an older copy, and the boot logo with it.
     writePowerOffImage();
-    updateBootLogo(page, "standby");
+    if (usbPlug) {
+        forgetBootLogo();
+        qInfo("kobalt-pb: USB connected: boot capture forgotten");
+    } else {
+        updateBootLogo(page, "standby");
+    }
     // EVT_BACKGROUND precedes every standby and every USB export. The firmware's PC Link export
     // was seen to drop what the apps had written since the last sync(2) (a standby's suspend
     // syncs, fdatasync alone did not survive), so flush everything now; ~0.1-0.3 s.
@@ -572,6 +582,7 @@ bool Host::eventFilter(QObject *object, QEvent *event) {
     }
     if (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonRelease) {
         if (event->type() == QEvent::MouseButtonPress) {
+            usbAtLastInput = IsUSBconnected() > 0;
             inputSettle.stop();
             if (!inputBusy) {
                 inputBusy = true;
@@ -592,6 +603,8 @@ bool Host::eventFilter(QObject *object, QEvent *event) {
     }
     if (event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease) {
         auto *key = static_cast<QKeyEvent *>(event);
+        if (event->type() == QEvent::KeyPress)
+            usbAtLastInput = IsUSBconnected() > 0;
         if (key->key() == Qt::Key_Home || key->key() == Qt::Key_Back) {
             if (event->type() == QEvent::KeyPress)
                 close();
