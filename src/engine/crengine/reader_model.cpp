@@ -573,9 +573,24 @@ QImage ReaderModel::coverImage(QSize maximumSize, const QString &preferredPath) 
         }
         // A resource stream can decode a placeholder while its image is deferred.
         // Copy the cover bytes before rendering an image that must outlive the book.
-        auto bytes = LVCreateMemoryStream(stream);
+        // Read them here: CREngine's own stream-to-memory copy refuses anything over
+        // 2 MiB, and publishers' covers are often larger than that (seen: 2.35 MB).
+        QByteArray copy(int(length), Qt::Uninitialized);
+        lvsize_t total = 0;
+        while (total < lvsize_t(length)) {
+            lvsize_t read = 0;
+            if (stream->Read(copy.data() + total, lvsize_t(length) - total, &read) != LVERR_OK || read == 0) {
+                break;
+            }
+            total += read;
+        }
+        if (total != lvsize_t(length)) {
+            why("memory copy", qint64(total));
+            return {};
+        }
+        auto bytes = LVCreateMemoryStream(copy.data(), copy.size(), true, LVOM_READ);
         if (bytes.isNull()) {
-            why("memory copy", qint64(length));
+            why("memory stream", qint64(length));
             return {};
         }
         auto cover = LVCreateStreamImageSource(bytes);
