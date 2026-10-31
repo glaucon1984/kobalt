@@ -1,0 +1,26 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 22, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "mac", "generator": "Ninja",
+      "binaryDir": "${sourceDir}/../../build/launcher-mac",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" },
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "CMAKE_OSX_DEPLOYMENT_TARGET": "14.0" }
+    },
+    {
+      "name": "linux", "generator": "Ninja",
+      "binaryDir": "${sourceDir}/../../build/launcher-linux",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "mac", "configurePreset": "mac", "jobs": 2 },
+    { "name": "linux", "configurePreset": "linux", "jobs": 2 }
+  ],
+  "testPresets": [
+    { "name": "mac", "configurePreset": "mac", "output": { "outputOnFailure": true } },
+    { "name": "linux", "configurePreset": "linux", "output": { "outputOnFailure": true } }
+  ]
+}

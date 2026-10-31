@@ -20,7 +20,9 @@ reader-settings.json. Book settings, positions, bookmarks and annotations
 are in kobalt.sqlite. Kobalt also saves your position to Nickel when you
 leave a book. Existing saved data is imported after an upgrade. Original
 files are kept in migration-backup/; keep that backup until you have
-checked your books.
+checked your books. If saved data is damaged or comes from a newer
+version, Kobalt moves it to backups/, starts again from the defaults and
+tells you.
 
 To remove Kobalt, delete the file uninstall, or this whole folder, and
 restart the device. Saved positions and settings stay unless you delete
@@ -33,9 +35,12 @@ startup-session or active-session.json here. While either file exists,
 Kobalt stays off and Nickel's reader is used. Look at the logs first,
 then delete the file and restart to try Kobalt again.
 
-To enable diagnostics, create diagnostics-enabled here and restart.
-Logs and inspection reports then go in diagnostics/. events.jsonl and
+Kobalt always keeps an event log in diagnostics/. events.jsonl and
 events.jsonl.previous are limited to 128 KiB each. They contain no book
-text or account data. state.json and session.json can contain book
-identifiers; keep them private. Old reports are retained under
-migration-backup/diagnostics/.
+text or account data. To also write the inspection reports state.json
+and session.json there, create diagnostics-enabled here and restart.
+Those can contain book identifiers; keep them private. Old reports are
+retained under migration-backup/diagnostics/.
+
+When Nickel crashes, Kobalt writes a report in crash-reporting/. It
+keeps the newest 20 reports. They contain no book text.

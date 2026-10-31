@@ -7,6 +7,13 @@
 # CALIBRATE adds an A/A pair to build/eval/calibration.json.
 cmake_minimum_required(VERSION 3.22)
 get_filename_component(root "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+    set(desktop_platform mac)
+elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+    set(desktop_platform linux)
+else()
+    message(FATAL_ERROR "Native evaluation supports macOS and Linux")
+endif()
 set(eval "${root}/build/eval")
 if(NOT DEFINED BASE)
     set(BASE baseline)
@@ -105,7 +112,7 @@ endforeach()
 file(WRITE "${output}/commits.txt" "${commits}\n")
 file(WRITE "${output}/changes.txt" "${files}\n")
 
-execute_process(COMMAND "${CMAKE_COMMAND}" --build --preset mac-eval
+execute_process(COMMAND "${CMAKE_COMMAND}" --build --preset ${desktop_platform}-eval
     WORKING_DIRECTORY "${root}/platforms/desktop" OUTPUT_QUIET COMMAND_ERROR_IS_FATAL ANY)
 set(calibration "")
 if(EXISTS "${eval}/calibration.json" OR CALIBRATE)
@@ -118,7 +125,7 @@ if(CALIBRATE)
     endif()
     list(APPEND calibration --record-calibration)
 endif()
-execute_process(COMMAND "${root}/build/desktop-mac/kobalt-eval-compare" --base "${base}" --target "${target}"
+execute_process(COMMAND "${root}/build/desktop-${desktop_platform}/kobalt-eval-compare" --base "${base}" --target "${target}"
     --output "${output}" --config "${root}/platforms/eval/eval.json" ${calibration}
     --changes "${output}/changes.txt" --commits "${output}/commits.txt"
     COMMAND_ERROR_IS_FATAL ANY)

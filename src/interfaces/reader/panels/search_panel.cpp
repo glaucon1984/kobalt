@@ -254,7 +254,7 @@ void SearchPanel::redraw() {
         rowHeight = qMax(int(m::list::threeLines), m::search::excerptTop + qCeil(lines) + m::search::rowBottom);
     }
     const bool returning = canReturn && !hits.isEmpty();
-    const int listTop = c::headerHeight + (returning ? m::list::twoLines : 0);
+    const int listTop = c::headerHeight() + (returning ? m::list::twoLines : 0);
     pageSize = qMax(1, (height() - listTop - c::actionHeight) / rowHeight);
     const int count = qMax(1, (int(hits.size()) + pageSize - 1) / pageSize);
     resultPage = qBound(0, first / pageSize, count - 1);
@@ -274,7 +274,7 @@ void SearchPanel::redraw() {
     const int used = listTop + qMin(pageSize, qMax(0, int(hits.size()) - resultPage * pageSize)) * rowHeight;
     pager->setBlankArea({c::inset, used, width() - 2 * c::inset, pager->y() - used});
     original->setVisible(returning);
-    original->setGeometry(0, c::headerHeight, width(), m::list::twoLines);
+    original->setGeometry(0, c::headerHeight(), width(), m::list::twoLines);
     const bool waiting = hits.isEmpty() && !scanning;
     empty->setVisible(waiting);
     hint->setVisible(waiting);
@@ -284,7 +284,7 @@ void SearchPanel::redraw() {
     hint->setText(submittedQuery.isEmpty() ? strings::get("search_panel.search_hint")
                                            : strings::get("search_panel.no_matches_hint"));
     const int emptyHeight = empty->heightForWidth(textWidth), hintHeight = hint->heightForWidth(textWidth);
-    empty->setGeometry(c::inset, c::headerHeight + m::search::emptyTop, textWidth, emptyHeight);
+    empty->setGeometry(c::inset, c::headerHeight() + m::search::emptyTop, textWidth, emptyHeight);
     hint->setGeometry(c::inset, empty->geometry().bottom() + 1 + c::textGap, textWidth, hintHeight);
     edit->setGeometry(0, hint->geometry().bottom() + 1 + m::search::emptyBottom, width(), m::list::twoLines);
     auto family = font.family();

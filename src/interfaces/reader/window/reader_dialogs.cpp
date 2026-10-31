@@ -13,9 +13,11 @@
 #include "reading/appearance_settings.h"
 #include "reading/page_navigation.h"
 #include "reading/sleep_screen.h"
+#include "reading/session_timeout.h"
 #include "storage/reader_storage.h"
 #include <QDateTime>
 #include <QGridLayout>
+#include <utility>
 
 namespace kobalt::reader {
 namespace strings = kobalt::strings;
@@ -275,7 +277,7 @@ void Reader::buildProgressChoice(const kobalt::ReadingProgress &shown, int direc
             return;
         book->acknowledge(shown, false);
         dismissProgressChoice();
-        save();
+        save(false, true);
         refresh();
         progressTick();
     });
@@ -303,7 +305,7 @@ void Reader::buildProgressChoice(const kobalt::ReadingProgress &shown, int direc
             }
             book->acknowledge(shown, true);
             dismissProgressChoice();
-            save();
+            save(false, true);
         });
     });
     card->fitToWidth(qMin<int>(m::notice::cardWidth, width() - 2 * m::notice::sideClearance));
@@ -417,7 +419,7 @@ void Reader::showFinishChoice() {
         finishChoiceResolved = exitPending || finished;
         exitPending = exitPending || finished;
         updateOrientationBlock();
-        save();
+        save(false, true);
         refresh();
     };
     connect(choice->secondaryButton(), &QPushButton::clicked, this, [choose] {
@@ -596,6 +598,19 @@ void Reader::showBookmarkError() {
 void Reader::showHighlightError() {
     showAnnotationError(strings::get("annotations.change_not_saved"), strings::get("annotations.title"),
                         "rrHighlightError");
+}
+
+bool Reader::showNotice(const ReaderNotice &notice) {
+    if (notice.message.isEmpty() || annotationErrorDialog || closing || lifecycleHidden || services.suspended() ||
+        !isVisible())
+        return false;
+    showAnnotationError(notice.message, notice.title, notice.name);
+    return true;
+}
+
+void Reader::showStartupNotice() {
+    if (showNotice(services.startupNotice))
+        services.startupNotice = {};
 }
 
 // `name` names the notice; its message and button add `Message` and `Confirm`.
@@ -787,7 +802,13 @@ QString sleepTileExplanation(sleep::Tile tile) {
 }
 }
 
+namespace {
+QString sessionTimeoutLabel(int minutes) {
+    return strings::get(QString("settings.session_timeout_%1").arg(minutes).toLatin1().constData());
+}
+}
 void Reader::showSleepScreen() {
+    sessionTimeoutButton->setCaption(sessionTimeoutLabel(sessionTimeout::minutes(preferences)).toUpper());
     sleepScreenButton->setCaption(sleepScreenButton->isEnabled() ? sleepLabel(sleep::mode(preferences)).toUpper()
                                                                  : strings::get("settings.unsupported_caption"));
     sleepTileButton->setCaption(sleepTileButton->isEnabled() ? sleepTileLabel(sleep::tile(preferences)).toUpper()
@@ -834,6 +855,22 @@ void Reader::openSleepScreen() {
                     });
 }
 
+void Reader::openSessionTimeout() {
+    QVector<SleepOption> options;
+    int current = 0;
+    for (const auto minutes : sessionTimeout::choices) {
+        if (minutes == sessionTimeout::minutes(preferences)) current = options.size();
+        options.append({QString::number(minutes), sessionTimeoutLabel(minutes),
+                        minutes == 0 ? strings::get("settings.session_timeout_never_description") : QString()});
+    }
+    openSleepChoice("rrSessionTimeout", "rrSessionTimeout_", strings::get("settings.session_timeout"), options, current,
+                    [this](int index) {
+                        auto next = preferences;
+                        next[sessionTimeout::preferenceKey] = sessionTimeout::choices[index];
+                        saveSleepPreferences(next);
+                    }, strings::get("settings.session_timeout_description"));
+}
+
 void Reader::openSleepTile() {
     QVector<SleepOption> options;
     int current = 0;
@@ -851,7 +888,8 @@ void Reader::openSleepTile() {
 }
 
 void Reader::openSleepChoice(const QString &name, const QString &optionPrefix, const QString &heading,
-                             const QVector<SleepOption> &options, int current, std::function<void(int)> chosen) {
+                             const QVector<SleepOption> &options, int current, std::function<void(int)> chosen,
+                             const QString &description) {
     if (sleepPopup) {
         return;
     }
@@ -870,6 +908,12 @@ void Reader::openSleepChoice(const QString &name, const QString &optionPrefix, c
     card->rows()->addSpacing(m::notice::cardMargins.top());
     auto *title = card->title(heading, name + "Title");
     title->setContentsMargins(c::inset, 0, c::inset, 0);
+    if (!description.isEmpty()) {
+        card->rows()->addSpacing(m::spacing::row);
+        auto *hint = card->message(description, name + "Hint");
+        readerStyle(hint, styles::font(c::descriptionText));
+        hint->setContentsMargins(c::inset, 0, c::inset, 0);
+    }
     card->rows()->addSpacing(m::notice::cardMargins.bottom());
     const int cardWidth = qMin<int>(m::notice::cardWidth, width() - 2 * m::notice::sideClearance);
     auto *choices = new ui::RadioList(card);
@@ -1202,7 +1246,7 @@ QString tappableLinksDescription(const QString &mode) {
 }
 
 void Reader::showTappableLinks() {
-    const auto mode = preferences.value("tappable_links").toString("off");
+    const auto mode = preferences.value("tappable_links").toString("footnotes");
     tappableLinksButton->setCaption(tappableLinksLabel(mode).toUpper());
 }
 
@@ -1244,8 +1288,8 @@ void Reader::openTappableLinks() {
     choices->setObjectName("rrTappableLinksChoices");
     choices->setMinimumRowHeight(c::listActionHeight);
     choices->setTopDivider(true);
-    const QStringList modes{"off", "footnotes", "all"};
-    const auto current = preferences.value("tappable_links").toString("off");
+    const QStringList modes{"footnotes", "all", "off"};
+    const auto current = preferences.value("tappable_links").toString("footnotes");
     for (const auto &mode : modes) {
         choices->add("rrTappableLinks_" + mode, tappableLinksLabel(mode), tappableLinksDescription(mode));
         if (mode == current)

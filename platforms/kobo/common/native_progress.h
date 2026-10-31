@@ -17,6 +17,7 @@ public:
     bool write(const ReadingProgress &expected, const QString &location, double percent, bool finished,
                ReadingProgress *verified, QString *error, const ReadingEstimates *estimates = nullptr,
                const ReadingActivity *activity = nullptr);
+    bool markReading();
     static void disconnected();
     bool deviceTransition() const {
         return transitioning;

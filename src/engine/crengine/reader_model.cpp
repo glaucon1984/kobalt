@@ -371,7 +371,11 @@ bool ReaderModel::saveDocumentCache() {
         return false;
     auto *document = engine_->getDocument();
     DocumentCacheScope cache(cacheDirectory_);
-    if (!cache.enabled() || engine_->updateCache() != CR_DONE)
+    if (!cache.enabled())
+        return false;
+    // The no-argument update serializes even a clean cache. Keep that path for
+    // creation and dirty documents; an existing clean cache needs no update.
+    if ((!document->hasCacheFile() || document->isCacheFileStale()) && engine_->updateCache() != CR_DONE)
         return false;
     if (document->hasCacheFile()) {
         if (!document->updateCacheFileName())
@@ -427,6 +431,8 @@ void ReaderModel::configure(QSize size, const QJsonObject &settings) {
         widowsOrphans_ = "publisher";
     pixels_ = qBound(minimumFontPixels(), saved.value("font_pixels").toInt(defaultFontPixels()), maximumFontPixels());
     spacing_ = qBound(100, saved.value("line_spacing").toInt(defaultLineSpacing), maximumLineSpacing);
+    paragraphSpacing_ = appearance::paragraphSpacing(saved.value("paragraph_spacing"));
+    paragraphIndent_ = appearance::paragraphIndent(saved.value("paragraph_indent"));
     margin_ = qBound(0, saved.value("margin_pixels").toInt(defaultMarginPixels()), maximumMarginPixels());
     topMargin_ =
         qBound(0, saved.value("top_margin_pixels").toInt(defaultVerticalMarginPixels(margin_)), maximumMarginPixels());
@@ -438,6 +444,10 @@ void ReaderModel::configure(QSize size, const QJsonObject &settings) {
         hyphenation_ = "off";
     weight_ = qBound(0, saved.value("weight_steps").toInt(0), 12);
     bionic_ = saved.value("bold_reading").toString("off");
+    const auto beautifier = appearance::beautifierSettings(saved);
+    beautifierInitials_ = beautifier.value("beautifier_initials").toBool();
+    beautifierSpacing_ = beautifier.value("beautifier_spacing").toBool();
+    beautifierIndent_ = beautifier.value("beautifier_indent").toBool();
     // Preserve enabled Bionic reading from the retired thickness mode.
     if (bionic_ == "synthetic")
         bionic_ = "bold";
@@ -553,7 +563,9 @@ QString ReaderModel::title() const {
 QString ReaderModel::author() const {
     return engine_ ? qstring(engine_->getAuthors()) : QString();
 }
-QImage ReaderModel::coverImage(QSize maximumSize, const QString &preferredPath) const {
+QImage ReaderModel::coverImage(QSize maximumSize, const QString &preferredPath, QString *usedPath) const {
+    if (usedPath)
+        usedPath->clear();
     if (!engine_ || maximumSize.isEmpty() || qint64(maximumSize.width()) * maximumSize.height() > 4 * 1024 * 1024) {
         diagnostic("cover-decode", {{"reason", !engine_ ? "no engine" : "request size"}}, false);
         return {};
@@ -634,6 +646,8 @@ QImage ReaderModel::coverImage(QSize maximumSize, const QString &preferredPath) 
     if (!preferredPath.isEmpty()) {
         const auto image = decode(LVOpenFileStream(cre(preferredPath).c_str(), LVOM_READ));
         if (!image.isNull()) {
+            if (usedPath)
+                *usedPath = preferredPath;
             return image;
         }
     }
@@ -699,6 +713,19 @@ bool ReaderModel::style(int pixels, int spacing, const QString &face, int margin
 bool ReaderModel::applyAppearance(const QJsonObject &settings, QSize size, OpeningProgress progress) {
     const int pixels = settings.value("font_pixels").toInt(pixels_);
     const int spacing = settings.value("line_spacing").toInt(spacing_);
+    const int paragraphSpacing = settings.contains("paragraph_spacing")
+        ? appearance::paragraphSpacing(settings.value("paragraph_spacing")) : paragraphSpacing_;
+    if (settings.contains("paragraph_spacing") && settings.value("paragraph_spacing") != paragraphSpacing)
+        return false;
+    const int paragraphIndent = settings.contains("paragraph_indent")
+        ? appearance::paragraphIndent(settings.value("paragraph_indent")) : paragraphIndent_;
+    if (settings.contains("paragraph_indent") && settings.value("paragraph_indent") != paragraphIndent)
+        return false;
+    for (const auto *key : appearance::beautifierKeys)
+        if (settings.contains(key) && !settings.value(key).isBool()) return false;
+    const bool beautifierInitials = settings.value("beautifier_initials").toBool(beautifierInitials_);
+    const bool beautifierSpacing = settings.value("beautifier_spacing").toBool(beautifierSpacing_);
+    const bool beautifierIndent = settings.value("beautifier_indent").toBool(beautifierIndent_);
     const int margin = settings.value("margin_pixels").toInt(margin_);
     const int topMargin = settings.value("top_margin_pixels").toInt(topMargin_);
     const int bottomMargin = settings.value("bottom_margin_pixels").toInt(bottomMargin_);
@@ -758,9 +785,12 @@ bool ReaderModel::applyAppearance(const QJsonObject &settings, QSize size, Openi
     const bool bionicChanged = bionic != bionic_;
     // Outline thickness changes pixels only. Keep the formatted page and its anchors.
     const bool thicknessChanged = weight != weight_;
-    const bool styled = fallbackFaces != fallbackFaces_ || avoidWastefulStyling != avoidWastefulStyling_ ||
+    const bool styled = beautifierInitials != beautifierInitials_ || beautifierSpacing != beautifierSpacing_ ||
+        beautifierIndent != beautifierIndent_ || fallbackFaces != fallbackFaces_ || avoidWastefulStyling != avoidWastefulStyling_ ||
                         wordSpacing != wordSpacing_ || tracking != justificationTracking_ || widowsOrphans != widowsOrphans_ ||
                         bionicChanged || axisChanged || opticalChanged || pixels != pixels_ || spacing != spacing_ ||
+                        paragraphSpacing != paragraphSpacing_ ||
+                        paragraphIndent != paragraphIndent_ ||
                         face != face_ || defaultFace != defaultFace_ || margin != margin_ || topMargin != topMargin_ ||
                         bottomMargin != bottomMargin_ || alignment != alignment_ || hyphenation != hyphenation_;
     const bool resized = size != size_ || columns != columns_ || columnSpacing != columnSpacing_;
@@ -774,6 +804,11 @@ bool ReaderModel::applyAppearance(const QJsonObject &settings, QSize size, Openi
     OpeningCallback callback(engine_, std::move(progress));
     pixels_ = pixels;
     spacing_ = spacing;
+    paragraphSpacing_ = paragraphSpacing;
+    paragraphIndent_ = paragraphIndent;
+    beautifierInitials_ = beautifierInitials;
+    beautifierSpacing_ = beautifierSpacing;
+    beautifierIndent_ = beautifierIndent;
     face_ = face;
     defaultFace_ = defaultFace;
     fallbackFaces_ = fallbackFaces;
@@ -919,10 +954,26 @@ void ReaderModel::applyStyleSheet() {
             "math, math * { font-family: math !important; }\n";
     }
     // Like Nickel's line-height override, leave inline spans and media alone.
-    // Relative font sizes, indentation and paragraph margins remain publisher CSS.
+    // Relative font sizes remain publisher CSS.
     overrides +=
         QString("body,p,div,section,article,blockquote,li,dt,dd,h1,h2,h3,h4,h5,h6 { line-height:%1% !important; }")
             .arg(spacing_);
+    {
+        const QString prose = "p[data-kobalt-beautify=\"body\"], p[data-kobalt-beautify=\"opening\"], p[data-kobalt-beautify=\"first-letter\"]";
+        if (beautifierSpacing_)
+            overrides += prose + " { margin-bottom:0 !important; padding-bottom:0 !important; }\n";
+        if (beautifierIndent_)
+            overrides += prose + " { text-indent:1.2em !important; }\n"
+                "p[data-kobalt-beautify=\"opening\"], p[data-kobalt-beautify=\"first-letter\"] { text-indent:0 !important; }\n";
+        if (beautifierInitials_)
+            overrides += "p[data-kobalt-beautify=\"first-letter\"]::first-letter, [data-kobalt-first-letter=\"1\"]::first-letter, span[data-kobalt-initial=\"1\"] { font-size:1em !important; font-family:inherit !important; font-weight:inherit !important; font-style:inherit !important; float:none !important; line-height:inherit !important; margin:0 !important; padding:0 !important; initial-letter:normal !important; }\n";
+    }
+    if (paragraphSpacing_ >= 0)
+        overrides += QString("p[data-kobalt-paragraph=\"1\"] { margin-top:0 !important; margin-bottom:%1em !important; padding-top:0 !important; padding-bottom:0 !important; }\n")
+                         .arg(paragraphSpacing_ / 100.0, 0, 'f', 2);
+    if (paragraphIndent_ >= 0)
+        overrides += QString("p[data-kobalt-paragraph=\"1\"] { text-indent:%1em !important; }\n")
+                         .arg(paragraphIndent_ / 100.0, 0, 'f', 2);
     // Only marked text blocks override publisher alignment; decorative blocks keep it.
     if (alignment_ != "publisher")
         overrides +=
@@ -1348,6 +1399,10 @@ QJsonObject ReaderModel::state() const {
                                {"position", position()},
                                {"font_pixels", pixels_},
                                {"line_spacing", spacing_},
+                               {"paragraph_spacing", paragraphSpacing_},
+                               {"paragraph_indent", paragraphIndent_},
+                               {"beautifier_initials", beautifierInitials_}, {"beautifier_spacing", beautifierSpacing_},
+                               {"beautifier_indent", beautifierIndent_},
                                {"line_spacing_version", 1},
                                {"font_face", face_},
                                {"default_font_face", defaultFace_},

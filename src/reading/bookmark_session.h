@@ -66,6 +66,8 @@ public:
     }
     // Waits for the running and pending save, for example before USB export.
     void flush();
+    bool hasFailedSave() const { return retryPending; }
+    bool retryFailedSave();
     // One validity check for callers rendering an entire bookmark list.
     QVector<int> resolvedPages() const { return resolved() ? pages_ : QVector<int>{}; }
     // The known pages changed: a lookup finished, needs repeating, or merged
@@ -103,6 +105,8 @@ private:
     std::unique_ptr<storage::RecordWriter> writer;
     std::shared_ptr<BookmarkStore> saver;
     QVector<Bookmark> saved;
+    QVector<Bookmark> retryBookmarks;
+    bool retryPending = false;
     QHash<QString, int> restore;
     QString restoreLayout;
     quint64 restoreRevision = 0, posted = 0, reported = 0;

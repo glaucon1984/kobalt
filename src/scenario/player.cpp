@@ -16,6 +16,7 @@
 #include <QWidget>
 #include <QWindow>
 #include <deque>
+#include <memory>
 
 namespace kobalt::scenario {
 namespace {
@@ -78,21 +79,33 @@ private:
     std::deque<QJsonObject> queue;
 };
 
+// A closed sheet keeps its names until its deferred deletion. Qt 5 runs that
+// only after the player's nested event loops end, so the next sheet of the
+// same kind exists beside it. Prefer a visible widget over a hidden one.
 QWidget *find(const Host &host, const QString &name) {
+    QWidget *hidden = nullptr;
+    const auto search = [&](QWidget *root) -> QWidget * {
+        auto matches = root->findChildren<QWidget *>(name);
+        if (root->objectName() == name)
+            matches.prepend(root);
+        for (auto *widget : matches) {
+            if (widget->isVisible())
+                return widget;
+            if (!hidden)
+                hidden = widget;
+        }
+        return nullptr;
+    };
     if (auto *reader = host.reader ? host.reader() : nullptr) {
-        if (reader->objectName() == name)
-            return reader;
-        if (auto *widget = reader->findChild<QWidget *>(name))
+        if (auto *widget = search(reader))
             return widget;
     }
     // Popups are windows of their own.
     for (auto *window : QApplication::topLevelWidgets()) {
-        if (window->objectName() == name)
-            return window;
-        if (auto *widget = window->findChild<QWidget *>(name))
+        if (auto *widget = search(window))
             return widget;
     }
-    return nullptr;
+    return hidden;
 }
 bool visible(const Host &host, const QString &name) {
     const auto *widget = find(host, name);
@@ -135,6 +148,15 @@ public:
 
     // Runs one step for the given repetition. Returns an empty string or the reason it failed.
     QString step(const QJsonObject &step, int repetition) {
+        if (step.contains("sleep_persistence")) {
+            if (!host.sleepPersistence) {
+                unsupported = true;
+                return "the host has no sleep persistence benchmark";
+            }
+            const auto result = host.sleepPersistence(step.value("sleep_persistence").toObject());
+            matched["sleep-persistence"] = result;
+            return result.value("error").toString();
+        }
         if (step.contains("press")) {
             if (step.contains("unless") && visible(host, step.value("unless").toString()))
                 return {};
@@ -296,13 +318,16 @@ public:
     }
     // The sample for one repetition, and its stages.
     bool sample(const QJsonObject &spec, double &value, QJsonObject &stages) {
-        // Every diagnostics event carries the process's memory use.
+        // Request memory explicitly; normal events do not sample the process.
         if (spec.contains("memory")) {
-            diagnostic("scenario-memory", QJsonObject(), false);
+            auto sample = std::make_shared<QJsonObject>();
+            sampleDiagnosticMemory([sample](QJsonObject fields) {
+                qt::invoke(qApp, [sample, fields] { *sample = fields; }, Qt::QueuedConnection);
+            });
+            if (!waitUntil([sample] { return !sample->isEmpty(); }, 5000)) return false;
             const auto field = spec.value("memory").toString();
-            const auto event = events.next("scenario-memory", {}, 5000);
-            value = event.value(field).toDouble();
-            return event.value(field).isDouble();
+            value = sample->value(field).toDouble();
+            return sample->value(field).isDouble();
         }
         if (spec.contains("timer")) {
             if (!mark.isValid())
@@ -334,6 +359,7 @@ public:
         matched.clear();
         mark.invalidate();
     }
+    QJsonObject details() const { return matched.value("sleep-persistence"); }
     // Set when a step needed a book the host cannot open.
     bool unsupported = false;
 
@@ -359,9 +385,8 @@ bool wanted(const QString &id, const QString &filter) {
 
 QVector<QJsonObject> run(const QJsonObject &file, const Host &host, const Options &options) {
     QVector<QJsonObject> results;
-    // Durable diagnostics events would add storage syncs that a reader without
-    // diagnostics never makes.
-    setDiagnosticsSync(false);
+    // Keep normal warning/error and lifecycle syncs in the measurements.
+    // Older baselines that disabled them are not directly comparable.
     // Nor may a run reach a sync server: it would measure the network and
     // upload the test books' positions. A Kobo set up for scenarios pauses
     // syncs for its whole session, so keep a pause that was already there.
@@ -370,7 +395,6 @@ QVector<QJsonObject> run(const QJsonObject &file, const Host &host, const Option
     struct Restore {
         bool syncPaused;
         ~Restore() {
-            setDiagnosticsSync(true);
             kosync::pauseAutomatic(syncPaused);
         }
     } restore{syncPaused};
@@ -381,6 +405,8 @@ QVector<QJsonObject> run(const QJsonObject &file, const Host &host, const Option
         const auto id = scenario.value("id").toString();
         if (!wanted(id, options.filter))
             continue;
+        if (scenario.value("opt_in").toBool() && options.filter.isEmpty())
+            continue;
         if (options.started)
             options.started(id);
         auto result = qt::object({{"id", id},
@@ -389,7 +415,22 @@ QVector<QJsonObject> run(const QJsonObject &file, const Host &host, const Option
                                   {"unit", scenario.value("unit").toString("ms")},
                                   {"fixture", scenario.value("fixture").toObject()}});
         QJsonArray samples;
+        QJsonArray details;
         QJsonObject stages;
+        if (needs(scenario, "sleep-persistence") && !host.sleepPersistence) {
+            result["status"] = QStringLiteral("skipped");
+            result["reason"] = QStringLiteral("the host has no sleep persistence benchmark");
+            result["samples"] = samples;
+            result["stages"] = stages;
+            results.append(result);
+            continue;
+        }
+        // Cleanup runs after failures too. Sleep overrides exist only in memory.
+        struct SleepCleanup {
+            const Host &host;
+            bool enabled;
+            ~SleepCleanup() { if (enabled) host.sleepPersistence({}); }
+        } sleepCleanup{host, needs(scenario, "sleep-persistence") && bool(host.sleepPersistence)};
         if (needs(scenario, "dictionary") && host.dictionary && !host.dictionary()) {
             result["status"] = QStringLiteral("skipped");
             result["reason"] = QStringLiteral("no dictionary is installed");
@@ -415,6 +456,18 @@ QVector<QJsonObject> run(const QJsonObject &file, const Host &host, const Option
                 failure = "no sample";
             if (failure.isEmpty())
                 failure = runner.steps(scenario.value("after").toArray(), index);
+            if (needs(scenario, "sleep-persistence")) {
+                auto detail = runner.details();
+                detail["trial"] = index;
+                detail["warmup"] = index < warmup;
+                detail["status"] = QString(failure.isEmpty() ? "completed" : "failed");
+                if (failure.isEmpty()) {
+                    detail["sample"] = sample;
+                    detail["sample_stages"] = parts;
+                } else
+                    detail["error"] = failure;
+                details.append(detail);
+            }
             if (!failure.isEmpty() || index < warmup)
                 continue;
             samples.append(sample);
@@ -432,6 +485,8 @@ QVector<QJsonObject> run(const QJsonObject &file, const Host &host, const Option
             result["reason"] = failure;
         result["samples"] = samples;
         result["stages"] = stages;
+        if (!details.isEmpty())
+            result["details"] = details;
         results.append(result);
     }
     return results;

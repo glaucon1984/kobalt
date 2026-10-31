@@ -10,6 +10,7 @@
 #include "interfaces/reader/ui/style/theme.h"
 #include "interfaces/reader_window.h"
 #include "interfaces/reader_interface.h"
+#include "interfaces/reader/views/opening.h"
 #include "reading/reading_book.h"
 #include "reading/appearance_settings.h"
 #include "reading/reader_session.h"
@@ -33,6 +34,7 @@
 #include "platform/api/reader_host_services.h"
 #include "platform/api/reader_orientation.h"
 #include "ui/screen_refresh.h"
+#include "support/main_thread.h"
 #include <QCheckBox>
 #include <array>
 #include <atomic>
@@ -72,8 +74,11 @@ public:
     void preparePresentation(std::function<void(bool)> finished) override;
     void checkpoint() override;
     bool flushBeforeStandby() override;
+    bool pendingStorageSave() const override;
+    void revokeNativeReading() override;
+    void finishStorageSave(std::function<void(bool)> finished, bool nativeAllowed = true) override;
     void prepareUsb(std::function<void()> finished) override;
-    void prepareShutdown(std::function<void()> finished) override;
+    void prepareShutdown(std::function<void()> finished, bool allowFailedSave = false) override;
     sleep::Snapshot powerScreenSnapshot() override;
     void sleepReader() override;
     bool pendingNetworkSync() const override {
@@ -120,8 +125,6 @@ private:
     // Construction, in this order. Each step builds one group of widgets and
     // connects its signals.
     void saveNativeProgress();
-    void scheduleNativeOpeningSave();
-    QTimer *nativeOpeningSaveTimer = nullptr;
     QString savedNativeAnchor;
     int savedNativePage = -1, savedNativePages = -1;
     void buildReadingPage();
@@ -273,6 +276,7 @@ private:
     bool exitPending = false, exportRunning = false;
     bool lifecycleHidden = false;
     QImage sleepImage, sleepCover;
+    QFileInfo sleepCoverSource;
     sleep::Snapshot exitSleepSnapshot;
     QString sleepProgress, sleepRemaining;
     int sleepPercent = -1;
@@ -461,12 +465,14 @@ private:
     void showSleepScreen();
     void openSleepScreen();
     void openSleepTile();
+    void openSessionTimeout();
     struct SleepOption {
         QString value, label, explanation;
     };
-    // The sleep screen and sleep tile choices share one popup.
+    // Sleep and session choices share one popup.
     void openSleepChoice(const QString &name, const QString &optionPrefix, const QString &heading,
-                         const QVector<SleepOption> &options, int current, std::function<void(int)> chosen);
+                         const QVector<SleepOption> &options, int current, std::function<void(int)> chosen,
+                         const QString &description = {});
     bool saveSleepPreferences(const QJsonObject &next);
     void closeSleepScreen();
     void showTapZones();
@@ -527,7 +533,7 @@ private:
     ui::DescribedOption *bionicOption = nullptr;
     kobalt::ui::CaptionButton *refreshButton = nullptr;
     QPointer<kobalt::ui::ModalOverlay> refreshPopup;
-    kobalt::ui::CaptionButton *sleepScreenButton = nullptr, *sleepTileButton = nullptr;
+    kobalt::ui::CaptionButton *sleepScreenButton = nullptr, *sessionTimeoutButton = nullptr, *sleepTileButton = nullptr;
     QPointer<kobalt::ui::ModalOverlay> sleepPopup;
     kobalt::ui::CaptionButton *pageNavigationButton = nullptr, *tapZonesButton = nullptr,
                               *navigationBarButton = nullptr;
@@ -536,6 +542,9 @@ private:
     kobalt::ui::CaptionButton *menuViewButton = nullptr, *tappableLinksButton = nullptr;
     int settingsColumnSpacing = defaultColumnSpacingPercent;
     int settingsWordSpacing = 100;
+    int settingsParagraphSpacing = -1;
+    int settingsParagraphIndent = -1;
+    QJsonObject settingsBeautifier;
     int settingsTracking = 0;
     QString settingsWidowsOrphans = "publisher";
     QString settingsVerticalSpacing = "off", settingsVerticalSpacingScope = "all";
@@ -547,7 +556,7 @@ private:
     // The selected option of a SettingsPanel::AdvancedText setting, in sheet order.
     int stylingChoice(int feature) const;
     // The latest sample render of each setting. Setting one stops its render.
-    std::array<std::shared_ptr<std::atomic_bool>, 5> stylingSampleRenders;
+    std::array<std::shared_ptr<std::atomic_bool>, 6> stylingSampleRenders;
     // Includes queued renders until their results reach the GUI thread.
     int stylingSamplesPending = 0;
     void cancelStylingSamples();
@@ -583,30 +592,25 @@ private:
     void showBookmarkError();
     void showHighlightError();
     void showAnnotationError(const QString &message, const QString &title, const QString &name);
+    void showStartupNotice();
+    bool showNotice(const ReaderNotice &notice) override;
     void showFormattingWarning();
     bool flashAfterMenu = false, flashAfterPagePreview = false;
     void requestFlash(const char *reason);
     bool turnPainted = false;
-    // Position saves wait until input has been quiet, so their storage syncs
-    // do not land on a page turn. See saveSoon().
-    QTimer *idleSaveTimer = nullptr;
-    QElapsedTimer lastInput, unsavedSince;
+    // Reading activity queues a due batch without a periodic wake timer.
+    bool lowBattery = false;
     bool localSaveDue = false, standbyFlushQueued = false;
-    void scheduleIdleSave();
     void runIdleSave(bool beforeStandby);
-    int idleSaveDelay() const;
     void showFinishChoice();
-    // Like Nickel's reader, record the opening in Nickel's database once the
-    // book is on screen: the position, the reading status and the time. Nickel
-    // shows the most recently read book on the sleep screen and on Home.
-    // Checking Nickel's progress at opening has already compared the times.
+    // Record the local opening after the first page paints. Native status is
+    // attempted once during preparePresentation, before this window takes input.
     bool recordedOpening = false;
     // Stages of the opening and of the close, for "reader-shown" and "book-close".
     QJsonObject openingStages;
     QElapsedTimer openingStarted, building, showing;
     bool shownOnce = false;
-    // The opening is recorded only after the first page has painted, so its
-    // synchronous saves never delay that page.
+    // Local opening saves are queued after the first page paints.
     bool pagePainted = false;
     kobalt::ActionTiming closingTimes;
     void reportShown();
@@ -614,7 +618,31 @@ private:
     void locateOnPage(const kobalt::SearchHit &hit, std::function<void(QPoint)> found, int attempt);
     void recordOpening();
     void finishExit();
+    void saveExit(quint64 request);
+    void finishExitNative(quint64 request, const QString &location, const QString &error);
+    void finishExitSaved(quint64 request);
+    void saveTransition(quint64 request, bool usb, const QString &location, const QString &error,
+                        bool mapped, std::function<void()> finished, int failures = 0);
+    void finishStorageData(std::function<void(bool)> finished, bool nativeAllowed, int failures = 0);
+    bool allowFailedTransition = false;
+    void transitionSaveError(std::function<void()> retry, std::function<void()> discard);
+    void failExit(quint64 request, const QString &error = {});
+    void cancelExit();
+    void showSaving(int progress);
+    void hideSaving();
+    bool closeSaveRetried = false, closeWithoutSaving = false;
+    quint64 closeRequest = 0;
+    QElapsedTimer closeStage;
+    int closeSaveProgress = 0;
+    std::unique_ptr<SavingView> savingView;
+    QPointer<kobalt::ui::ChoiceModal> closeSaveError;
+    std::unique_ptr<storage::RecordWriter> reportWriter, preferencesWriter;
     void saveSoon();
-    void save(bool snapshot = false, bool background = false);
+    void save(bool snapshot = false, bool background = false, bool persist = true);
+    // True while a tap can turn the page. The main thread then must not write
+    // storage or wait for another thread; see support/main_thread.h.
+    bool takesInput() const;
+    // Declared last, so it is unregistered before the members it reads.
+    mainthread::Interaction interaction{[this] { return takesInput(); }};
 };
 }

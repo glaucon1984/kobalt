@@ -397,6 +397,8 @@ QHBoxLayout *labeledRow(QWidget *parent, QVBoxLayout *rows, const QString &label
     auto *caption = new ui::InterfaceLabel(label, parent);
     caption->setFixedWidth(m::control::captionWidth);
     caption->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    // Large text can need a second line, as slider captions do.
+    caption->setWordWrap(true);
     readerStyle(caption, styles::font(m::text::secondary));
     line->addWidget(caption);
     return line;

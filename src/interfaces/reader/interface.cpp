@@ -25,7 +25,7 @@ const ReaderInterface &readerInterface() {
             ui::setInterfaceWeight(ui::heavierTextSteps);
             return createOpening(background, preferences, std::move(presentation));
         },
-        readingViewport, ui::setDensity};
+        readingViewport, ui::setDensity, ui::setLargeText};
     return implementation;
 }
 }

@@ -1,3 +1,7 @@
+# A launcher run owns this root so cancellation can remove only its scratch state.
+if(NOT "$ENV{KOBALT_TEST_TMP_ROOT}" STREQUAL "")
+    set(TEST_TMP_ROOT "$ENV{KOBALT_TEST_TMP_ROOT}")
+endif()
 cmake_minimum_required(VERSION 3.22)
 include("${CMAKE_CURRENT_LIST_DIR}/strings.cmake")
 if(DEFINED INPUT)

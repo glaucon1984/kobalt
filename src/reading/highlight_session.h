@@ -64,6 +64,8 @@ public:
     }
     // Waits for the running and pending save, for example before USB export.
     void flush();
+    bool hasFailedSave() const { return retryPending_; }
+    bool retryFailedSave();
     // `failed` reports a refused edit or a failed save. `saveFailed` reports
     // only a failed save, after the list has returned to the saved one.
     std::function<void()> changed, failed, saveFailed;
@@ -91,6 +93,8 @@ private:
     std::unique_ptr<storage::RecordWriter> writer_;
     std::shared_ptr<HighlightStore> saver_;
     QVector<Highlight> saved_;
+    QVector<Highlight> retryHighlights_;
+    bool retryPending_ = false;
     quint64 posted_ = 0, reported_ = 0, adopted_ = 0;
     // Counts errors, so a save clears only errors set before it was posted.
     quint64 errors_ = 0;

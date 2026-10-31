@@ -166,6 +166,15 @@
       "sample": {"memory": "rss_kib"}
     },
     {
+      "id": "memory.kobalt.reading",
+      "kind": "memory",
+      "unit": "KiB",
+      "paths": ["src/", "dependencies/"],
+      "book": "benchmark",
+      "repeat": 1,
+      "sample": {"memory": "kobalt_rss_kib"}
+    },
+    {
       "id": "panel.settings",
       "kind": "e2e",
       "paths": ["src/interfaces/reader/settings/", "src/interfaces/reader/ui/", "src/interfaces/reader/window/reader_settings.cpp"],
@@ -321,6 +330,113 @@
       "paths": ["src/", "dependencies/"],
       "repeat": 1,
       "sample": {"memory": "peak_rss_kib"}
+    },
+    {
+      "id": "memory.kobalt.peak",
+      "kind": "memory",
+      "unit": "KiB",
+      "paths": ["src/", "dependencies/"],
+      "repeat": 1,
+      "sample": {"memory": "kobalt_peak_kib"}
+    },
+    {
+      "id": "sleep.close.stock",
+      "kind": "e2e",
+      "opt_in": true,
+      "paths": ["src/storage/sleep_snapshot.cpp","src/interfaces/reader/window/reader.cpp","platforms/kobo/common/"],
+      "book": "benchmark",
+      "needs": ["sleep-persistence"],
+      "warmup": 1,
+      "repeat": 3,
+      "setup": [
+        {"sleep_persistence":{"action":"configure","mode":"stock"}},
+        {"open":"benchmark"},
+        {"press":"rrPage","unless":"rrNavChapters"},
+        {"visible":"rrNavChapters"},
+        {"press":"rrNavChapters"},
+        {"visible":"rrChapter1"},
+        {"press":"rrChapter1"},
+        {"settle":true},
+        {"key":"PageDown"},
+        {"settle":true}
+      ],
+      "steps": [
+        {"settle":true},
+        {"sleep_persistence":{"action":"ready"}},
+        {"close":true},
+        {"event":"book-close"},
+        {"sleep_persistence":{"action":"drain"}}
+      ],
+      "after": [
+        {"open":"benchmark"}
+      ],
+      "sample": {"event":"book-close","field":"total_ms","stages":true}
+    },
+    {
+      "id": "sleep.close.page",
+      "kind": "e2e",
+      "opt_in": true,
+      "paths": ["src/storage/sleep_snapshot.cpp","src/interfaces/reader/window/reader.cpp","platforms/kobo/common/"],
+      "book": "benchmark",
+      "needs": ["sleep-persistence"],
+      "warmup": 1,
+      "repeat": 3,
+      "setup": [
+        {"sleep_persistence":{"action":"configure","mode":"page"}},
+        {"open":"benchmark"},
+        {"press":"rrPage","unless":"rrNavChapters"},
+        {"visible":"rrNavChapters"},
+        {"press":"rrNavChapters"},
+        {"visible":"rrChapter1"},
+        {"press":"rrChapter1"},
+        {"settle":true},
+        {"key":"PageDown"},
+        {"settle":true}
+      ],
+      "steps": [
+        {"settle":true},
+        {"sleep_persistence":{"action":"ready"}},
+        {"close":true},
+        {"event":"book-close"},
+        {"sleep_persistence":{"action":"drain"}}
+      ],
+      "after": [
+        {"open":"benchmark"}
+      ],
+      "sample": {"event":"book-close","field":"total_ms","stages":true}
+    },
+    {
+      "id": "sleep.close.cover",
+      "kind": "e2e",
+      "opt_in": true,
+      "paths": ["src/storage/sleep_snapshot.cpp","src/interfaces/reader/window/reader.cpp","platforms/kobo/common/"],
+      "book": "benchmark",
+      "needs": ["sleep-persistence"],
+      "warmup": 1,
+      "repeat": 3,
+      "setup": [
+        {"sleep_persistence":{"action":"configure","mode":"cover"}},
+        {"open":"benchmark"},
+        {"press":"rrPage","unless":"rrNavChapters"},
+        {"visible":"rrNavChapters"},
+        {"press":"rrNavChapters"},
+        {"visible":"rrChapter1"},
+        {"press":"rrChapter1"},
+        {"settle":true},
+        {"key":"PageDown"},
+        {"settle":true}
+      ],
+      "steps": [
+        {"settle":true},
+        {"sleep_persistence":{"action":"ready"}},
+        {"close":true},
+        {"event":"book-close"},
+        {"sleep_persistence":{"action":"drain"}}
+      ],
+      "after": [
+        {"open":"benchmark"}
+      ],
+      "sample": {"event":"book-close","field":"total_ms","stages":true}
     }
   ]
 }

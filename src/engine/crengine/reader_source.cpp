@@ -5,6 +5,7 @@
 #include "kobo_styles.h"
 #include "reader_render_callback.h"
 #include "reader_alignment.h"
+#include "reader_beautifier.h"
 #include "reader_page_layout.h"
 #include "document_cache.h"
 #include "engine_activity.h"
@@ -455,6 +456,7 @@ bool ReaderModel::openSource(std::shared_ptr<ReaderSource> source, QSize size, c
             stylesheet->pop();
         }
         markBodyAlignment(document);
+        markBeautifierContent(document);
         markChapterLeadingImages(engine_.get());
         markKoboLinkDecorations();
         // Loading computed styles before the body markers existed, including in previews.

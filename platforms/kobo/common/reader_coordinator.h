@@ -3,6 +3,7 @@
 #include "native_dialog_overlay.h"
 #include "engine/crengine/reader_model.h"
 #include "reading/reading_progress.h"
+#include "storage/reading_history.h"
 #include <QObject>
 #include <QPointer>
 #include <QTimer>
@@ -101,13 +102,18 @@ private:
     unsigned generation = 0;
     bool busy = false;
     bool profilePrepared = false;
+    // Shown by the next reader: a saved-data reset, or a benchmark result that
+    // no reader was open to show.
+    kobalt::ReaderNotice pendingNotice;
+    std::shared_ptr<kobalt::ReadingHistory::Profile> historyProfile;
     bool homeAfterClose = false;
     void finishHomeNavigation();
 
     void status(const QString &value, const QString &reason = {});
     void hideLoading();
     void drainReadingJobs(std::function<void()> finished);
-    void disposeForTransition(std::function<void()> finished);
+    void disposeForTransition(std::function<void()> finished, bool nativeAllowed = true);
+    void finishDisposal(const QString &finalStatus, bool nativeAllowed);
     void release(bool endAuthorization = true);
     void cancelOpening();
     void fail(const QString &reason, kobalt::OpeningFallback state = kobalt::OpeningFallback::Failure,

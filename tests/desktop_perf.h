@@ -283,6 +283,7 @@ int run(const QString &output) {
     const auto events = qEnvironmentVariable("KOBALT_PERF_EVENTS");
     if (!events.isEmpty()) {
         QFile::remove(events);
+        kobalt::flushDiagnostics();
         if (!QFile::copy(logs.path() + "/events.jsonl", events))
             qCritical().noquote() << "Could not keep the events in" << events;
     }

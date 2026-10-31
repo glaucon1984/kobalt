@@ -354,6 +354,17 @@ int main(int argc, char **argv) {
         });
         require(session.page(0) >= 0 && session.endPage(0) >= session.page(0) && session.highlights().size() == 2,
                 "Reflow lost or merged highlights");
+        const auto beforeBeautifier = passages(session);
+        for (bool enabled : {true, false}) {
+            require(model.setBookBeautifier(enabled), "Cannot toggle beautifier with saved highlights");
+            waitUntil([&] { return !model.busy(); });
+            waitUntil([&] { session.sync(); return session.resolved(); });
+            const auto after = passages(session);
+            require(after.size() == beforeBeautifier.size(), "Beautifier lost highlights");
+            for (int i = 0; i < after.size(); ++i)
+                require(samePassage(after[i], beforeBeautifier[i]) && session.page(i) >= 0,
+                        "Beautifier changed a highlight or lost its source location");
+        }
         const auto cachedLocations = session.locations();
         require(session.recolor(passage.id, "pink") && session.resolved() &&
                     session.locations().pages == cachedLocations.pages && session.locations().order == cachedLocations.order,

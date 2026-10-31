@@ -112,7 +112,7 @@ private:
                                                        {"elapsed_ms", double(elapsed_.elapsed())},
                                                        {"image", imageFileName(name_)},
                                                        {"native_bytes", body_.size()},
-                                                       {"reply_error", reply_ ? int(reply_->error()) : -1}});
+                                                       {"reply_error", reply_ ? int(reply_->error()) : -1}}, kobalt::DiagnosticSeverity::Error);
     }
     void reject(const char *stage = "request") {
         trace(stage);
@@ -437,7 +437,7 @@ bool ResourceServer::open(const QString &path, const OpenArchive &openArchive) {
     if (data_)
         return false;
     if (resourceSecret().isEmpty()) {
-        diagnostic("native-resource-failed", {{"stage", "secret"}});
+        diagnostic("native-resource-failed", {{"stage", "secret"}}, kobalt::DiagnosticSeverity::Error);
         return false;
     }
     auto data = std::make_unique<Data>();
@@ -445,12 +445,12 @@ bool ResourceServer::open(const QString &path, const OpenArchive &openArchive) {
     Publication publication;
     QString error;
     if (!file.open(QIODevice::ReadOnly)) {
-        diagnostic("native-resource-failed", {{"stage", "file-open"}, {"error", int(file.error())}});
+        diagnostic("native-resource-failed", {{"stage", "file-open"}, {"error", int(file.error())}}, kobalt::DiagnosticSeverity::Error);
         return false;
     }
     if (!publication.inspect(file, &error)) {
         diagnostic("native-resource-failed",
-                   {{"stage", "publication-inspection"}, {"error_code", diagnosticErrorCode(error)}});
+                   {{"stage", "publication-inspection"}, {"error_code", diagnosticErrorCode(error)}}, kobalt::DiagnosticSeverity::Error);
         return false;
     }
     if (!openArchive)
@@ -471,12 +471,12 @@ bool ResourceServer::open(const QString &path, const OpenArchive &openArchive) {
         diagnostic("loopback-setup", {{"configured", configured}, {"error", loopbackError}});
     }
     if (loopbackError && loopbackError != ENOTSUP) {
-        diagnostic("native-resource-failed", {{"stage", "loopback-setup"}, {"error", loopbackError}});
+        diagnostic("native-resource-failed", {{"stage", "loopback-setup"}, {"error", loopbackError}}, kobalt::DiagnosticSeverity::Error);
         return false;
     }
     if (!data->listener.listen(QHostAddress::LocalHost, 0)) {
         diagnostic("native-resource-failed",
-                   {{"stage", "loopback-listen"}, {"error", int(data->listener.serverError())}});
+                   {{"stage", "loopback-listen"}, {"error", int(data->listener.serverError())}}, kobalt::DiagnosticSeverity::Error);
         return false;
     }
     data_ = std::move(data);

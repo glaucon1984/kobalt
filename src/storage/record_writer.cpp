@@ -1,4 +1,5 @@
 #include "record_writer.h"
+#include "support/main_thread.h"
 #include <algorithm>
 #include <cerrno>
 #include <cassert>
@@ -73,6 +74,7 @@ public:
             operation();
             return;
         }
+        mainthread::BlockingOperation blockingOperation("profile-database");
         Call request{operation};
         std::unique_lock<std::mutex> lock(mutex);
         calls.push_back(&request);
@@ -84,6 +86,7 @@ public:
             std::rethrow_exception(request.error);
     }
     void drain() {
+        mainthread::BlockingOperation blockingOperation("profile-database-drain");
         std::unique_lock<std::mutex> lock(mutex);
         assertNotRunner();
         finished.wait(lock, [this] { return queue.empty() && calls.empty() && !busy; });
@@ -217,15 +220,18 @@ private:
 
 RecordWriter::RecordWriter() = default;
 RecordWriter::~RecordWriter() {
+    mainthread::BlockingOperation operation("record-writer-close", !idle());
     WriterThread::instance().remove(this);
 }
 void RecordWriter::post(Write write, Done done) {
     WriterThread::instance().post(this, std::move(write), std::move(done));
 }
 void RecordWriter::cancel() {
+    mainthread::BlockingOperation operation("record-writer-cancel", !idle());
     WriterThread::instance().cancel(this);
 }
 bool RecordWriter::writeNow(Write write) {
+    mainthread::BlockingOperation blockingOperation("record-writer-write");
     bool saved = false;
     WriterThread::instance().post(this, std::move(write), [&saved](bool result) {
         saved = result;
@@ -234,6 +240,7 @@ bool RecordWriter::writeNow(Write write) {
     return saved;
 }
 bool RecordWriter::flush(int milliseconds) {
+    mainthread::BlockingOperation operation("record-writer-flush", milliseconds != 0 && !idle());
     return WriterThread::instance().flush(this, milliseconds);
 }
 bool RecordWriter::idle() const {

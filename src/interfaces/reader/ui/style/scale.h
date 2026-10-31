@@ -9,6 +9,8 @@ namespace kobalt::ui {
 inline constexpr int designPpi = 300;
 namespace detail {
 inline int ppi = designPpi;
+inline qreal textScale = 1;
+inline qreal iconScale = 1;
 }
 // Set before any view is built. Views read sizes when they lay out, so a view
 // built earlier keeps the sizes of the old density.
@@ -26,6 +28,66 @@ inline int px(int design) {
     const int scaled = qRound(design * qreal(detail::ppi) / designPpi);
     return scaled ? scaled : (design > 0 ? 1 : -1);
 }
+
+// Large text enlarges interface text by this factor on top of the density.
+// Controls, icons and spacing keep their size; rows that hold text grow with
+// it. Set before any view is built, as the density is.
+inline void setTextScale(qreal scale) {
+    detail::textScale = scale > 0 ? scale : 1;
+}
+inline qreal textScale() {
+    return detail::textScale;
+}
+// Large text can also enlarge the icons that sit in cells, which keep their size.
+inline void setIconScale(qreal scale) {
+    detail::iconScale = scale > 0 ? scale : 1;
+}
+// An icon size in device pixels.
+inline int iconPx(int design) {
+    const int pixels = px(design);
+    return detail::iconScale == 1 ? pixels : qRound(pixels * detail::iconScale);
+}
+// The size of an icon in a cell, which large text can enlarge.
+class IconPx {
+public:
+    constexpr explicit IconPx(int design) : value(design) {}
+    operator int() const {
+        return iconPx(value);
+    }
+    constexpr int design() const {
+        return value;
+    }
+
+private:
+    int value;
+};
+// Applies a platform's text size setting. Text grows up to 150%: controls
+// keep their size, and larger text no longer fits their fixed cells and
+// caption columns. Icons in cells grow less, to 120% at the largest step.
+inline void setLargeText(qreal requested) {
+    const qreal text = qBound<qreal>(1, requested, 1.5);
+    setTextScale(text);
+    setIconScale(1 + (text - 1) * 0.4);
+}
+// A text size in device pixels.
+inline int textPx(int design) {
+    const int pixels = px(design);
+    return detail::textScale == 1 ? pixels : qRound(pixels * detail::textScale);
+}
+// A font size in design pixels, which large text enlarges.
+class TextPx {
+public:
+    constexpr explicit TextPx(int design) : value(design) {}
+    operator int() const {
+        return textPx(value);
+    }
+    constexpr int design() const {
+        return value;
+    }
+
+private:
+    int value;
+};
 
 // A metric in design pixels. It converts to device pixels where it is used. A
 // sum of metrics scales each part and then adds them, so edges that add up on

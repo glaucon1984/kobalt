@@ -4,6 +4,7 @@
 #include "interfaces/reader/ui/controls/text.h"
 #include "interfaces/reader/ui/controls/options.h"
 #include "interfaces/reader/ui/controls/panels.h"
+#include "interfaces/reader/ui/controls/sliders.h"
 #include "interfaces/reader/ui/dialogs/modals.h"
 #include "interfaces/reader/ui/style/theme.h"
 #include "interfaces/reader/ui/panel_timing.h"
@@ -50,6 +51,8 @@ public:
     void show(const StyleSample &sample, int choice) {
         pages = sample.spreads.value(choice);
         lines = sample.crops.value(choice);
+        gaps = sample.cropGaps.value(choice);
+        setProperty("paragraph_gap_count", gaps.size());
         readingArea = sample.readingArea;
         edge = sample.details.value(choice);
         edgeArea = sample.detailArea;
@@ -78,6 +81,16 @@ protected:
             painter.setBrush(Qt::NoBrush);
             painter.drawRect(bounds.adjusted(.5, .5, -.5, -.5));
         };
+        const auto hatch = [&painter, ink](const QRectF &area) {
+            painter.save();
+            painter.setClipRect(area, Qt::IntersectClip);
+            QPen pen(ink, 1);
+            pen.setCosmetic(true);
+            painter.setPen(pen);
+            for (qreal x = area.left() - area.height(); x < area.right(); x += ui::px(10))
+                painter.drawLine(QPointF(x, area.bottom()), QPointF(x + area.height(), area.top()));
+            painter.restore();
+        };
         const qreal ratio = qMax<qreal>(1, devicePixelRatio());
         const int padding = ui::px(20);
         if (!lines.isNull()) {
@@ -97,6 +110,12 @@ protected:
             const auto sheet = target.adjusted(0, -paperHeight, 0, paperHeight);
             painter.fillRect(sheet, QColor::fromRgb(lines.pixel(0, 0)));
             painter.drawImage(target, lines);
+            const qreal scale = qreal(target.width()) / lines.width();
+            painter.save();
+            painter.setClipRect(target);
+            for (const auto &gap : gaps)
+                hatch(QRectF(QPointF(target.topLeft()) + QPointF(gap.topLeft()) * scale, QSizeF(gap.size()) * scale));
+            painter.restore();
             frame(sheet);
             return;
         }
@@ -133,18 +152,8 @@ protected:
         };
         painter.save();
         painter.setClipRect(target);
-        QPen hatch(ink, 1);
-        hatch.setCosmetic(true);
-        for (const auto &rect : spare) {
-            const auto area = mapped(rect);
-            painter.save();
-            painter.setClipRect(area, Qt::IntersectClip);
-            painter.setPen(hatch);
-            const qreal step = ui::px(10);
-            for (qreal x = area.left() - area.height(); x < area.right(); x += step)
-                painter.drawLine(QPointF(x, area.bottom()), QPointF(x + area.height(), area.top()));
-            painter.restore();
-        }
+        for (const auto &rect : spare)
+            hatch(mapped(rect));
         dashed(mapped(edgeArea));
         painter.restore();
         frame(target.toAlignedRect());
@@ -156,6 +165,7 @@ private:
     QRectF readingArea;
     QRect edgeArea;
     QVector<QRect> spare;
+    QVector<QRect> gaps;
     int edgeHeight = 0;
 };
 QPushButton *actionButton(QWidget *parent, QBoxLayout *layout, const char *name, const QString &text) {
@@ -418,6 +428,10 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
                                               strings::get("settings.word_spacing"), [] {});
     trackingButton = ui::makeCaptionButton(stylingPage, stylingRows, "rrJustificationTracking",
                                            strings::get("settings.justification_tracking"), [] {});
+    section(stylingPage, stylingRows, "rrParagraphSpacingSection", strings::get("settings.section_paragraphs"));
+    paragraphSpacingButton = ui::makeCaptionButton(stylingPage, stylingRows, "rrParagraphSpacing",
+        strings::get("settings.paragraph_spacing"), [] {});
+    paragraphSpacingButton->setDescription(strings::get("settings.paragraph_spacing_summary"));
     section(stylingPage, stylingRows, "rrVerticalSpacingSection", strings::get("settings.section_page_breaks"));
     widowsOrphansButton = ui::makeCaptionButton(stylingPage, stylingRows, "rrWidowsOrphans",
                                                strings::get("settings.widows_orphans"), [] {});
@@ -428,6 +442,9 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
         strings::get("settings.vertical_spacing_apply_to"), [] {});
     verticalSpacingScopeButton->setDescription(strings::get("settings.vertical_spacing_scope_description"));
     section(stylingPage, stylingRows, "rrSmartStylingSection", strings::get("settings.section_smart_styling"));
+    beautifierButton = ui::makeCaptionButton(stylingPage, stylingRows, "rrBeautifierSettings",
+        strings::get("reader.book_beautifier"), [] {});
+    beautifierButton->setDescription(strings::get("settings.beautifier_summary"));
     avoidWastefulStylingOption =
         check(stylingPage, "rrAvoidWastefulStyling", strings::get("settings.avoid_wasteful_styling"),
               strings::get("settings.avoid_wasteful_styling_description"));
@@ -470,7 +487,9 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
               strings::get("settings.hide_nonlinear_fragments_description"));
     stylingRows->addWidget(hideNonlinearOption);
     for (const auto &[button, icon] :
-         {std::pair{wordSpacingButton, ui::ControlIcon::SpreadHorizontal},
+         {std::pair{beautifierButton, ui::ControlIcon::MagicWand},
+          std::pair{wordSpacingButton, ui::ControlIcon::SpreadHorizontal},
+          std::pair{paragraphSpacingButton, ui::ControlIcon::Paragraph},
           std::pair{trackingButton, ui::ControlIcon::AlignJustify},
           std::pair{widowsOrphansButton, ui::ControlIcon::Paragraph},
           std::pair{verticalSpacingButton, ui::ControlIcon::SpreadVertical},
@@ -511,6 +530,9 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     if (!inputs.sleepScreenSupported)
         sleepTileButton->setCaption(strings::get("settings.unsupported_caption"));
     systemRows->addWidget(sleepTileButton);
+    sessionTimeoutButton = ui::makeCaptionButton(systemPage, nullptr, "rrSessionTimeout",
+                                                strings::get("settings.session_timeout"), [] {});
+    systemRows->addWidget(sessionTimeoutButton);
     section(systemPage, systemRows, "rrSystemInterfaceSection", strings::get("settings.section_user_interface"));
     uiFontButton = ui::makeCaptionButton(systemPage, nullptr, "rrUiFont", strings::get("settings.ui_font"), [] {});
     uiMonoFontButton =
@@ -680,11 +702,11 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     resetRow->setStretch(1, 1);
     resetRow->setStretch(2, 0);
     for (auto *button :
-         {resetDefaults, refreshButton, columnSpacingButton, sleepScreenButton, sleepTileButton, pageNavigationButton,
+         {resetDefaults, refreshButton, columnSpacingButton, sleepScreenButton, sleepTileButton, sessionTimeoutButton, pageNavigationButton,
           tapZonesButton, tappableLinksButton, navigationBarButton,
           menuViewButton, uiFontButton, uiMonoFontButton, headerFooterFontButton, headerFooterWeightButton,
           dictionaryFontButton, dictionaryFontSizeButton,
-          defaultFontButton, serifFontButton, sansFontButton, monoFontButton, wordSpacingButton, trackingButton, widowsOrphansButton, verticalSpacingButton, verticalSpacingScopeButton}) {
+          defaultFontButton, serifFontButton, sansFontButton, monoFontButton, beautifierButton, wordSpacingButton, paragraphSpacingButton, trackingButton, widowsOrphansButton, verticalSpacingButton, verticalSpacingScopeButton}) {
         button->setRule(Qt::BottomEdge);
         // The refresh row's caption shows its current choice, set when Settings opens.
         if (button == resetDefaults)
@@ -696,7 +718,7 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
                 .arg(int(c::labelText))
                 .arg(int(c::listActionHeight))
                 .arg(int(c::inset)));
-        if (button == wordSpacingButton || button == trackingButton || button == widowsOrphansButton || button == verticalSpacingButton || button == verticalSpacingScopeButton) {
+        if (button == beautifierButton || button == wordSpacingButton || button == paragraphSpacingButton || button == trackingButton || button == widowsOrphansButton || button == verticalSpacingButton || button == verticalSpacingScopeButton) {
             button->setMaximumHeight(QWIDGETSIZE_MAX);
             readerStyle(button, QString("QPushButton{font-size:%1px;border:0;border-radius:0;text-align:left;padding:0;background:palette(window);color:palette(window-text);}").arg(int(c::labelText)));
             button->setMinimumHeight(c::listActionHeight);
@@ -1054,6 +1076,69 @@ QString SettingsPanel::columnSpacingLabel(int percent) {
     return percent == defaultColumnSpacingPercent ? strings::get("settings.column_spacing_default")
                                                  : QString::number(percent / 100.0, 'f', 1) + QChar(0x00d7);
 }
+QString SettingsPanel::paragraphSpacingLabel(int percent) {
+    return percent < 0 ? strings::get("reader.publisher_spacing")
+        : strings::get("common.percent").arg(percent);
+}
+void SettingsPanel::showBeautifier(const QJsonObject &current, std::function<void(QJsonObject)> chosen) {
+    if (fontDialog) return;
+    fontDialog = new ui::ModalOverlay(parentWidget());
+    fontDialog->setObjectName("rrBeautifierPopup");
+    fontDialog->setDimmed(true);
+    fontDialog->setGeometry(parentWidget()->rect());
+    fontDialog->dismissed = [this] { dismissFontChoices(); };
+    auto *card = fontDialog->card();
+    auto *rows = card->rows();
+    rows->setContentsMargins(m::control::border, m::notice::cardMargins.top(), m::control::border, m::control::border);
+    rows->setSpacing(0);
+    auto *heading = card->title(strings::get("reader.book_beautifier"));
+    heading->setContentsMargins(c::inset, 0, c::inset, m::notice::cardMargins.bottom());
+    auto *hint = card->message(strings::get("settings.beautifier_description"));
+    hint->setContentsMargins(c::inset, 0, c::inset, m::notice::cardMargins.bottom());
+    readerStyle(hint, styles::font(c::descriptionText));
+    QVector<ui::DescribedOption *> options;
+    const QStringList names{"rrBeautifierInitials", "rrBeautifierSpacing", "rrBeautifierIndent"};
+    const QStringList labels{"initials", "spacing", "indent"};
+    for (int i = 0; i < int(appearance::beautifierKeys.size()); ++i) {
+        const auto prefix = "settings.beautifier_" + labels[i];
+        auto *option = new ui::DescribedOption(strings::get(prefix.toUtf8().constData()),
+            strings::get((prefix + "_description").toUtf8().constData()), card);
+        option->setObjectName(names[i]);
+        auto presentation = option->presentation();
+        presentation.indicator = ui::DescribedOption::Indicator::Square;
+        presentation.pressedFill = true;
+        presentation.leadingIndicator = true;
+        presentation.dividers = Qt::BottomEdge;
+        if (i == 0) presentation.dividers |= Qt::TopEdge;
+        presentation.horizontalInset = c::inset;
+        presentation.labelPixels = c::labelText;
+        presentation.descriptionPixels = c::descriptionText;
+        presentation.indicatorSize = {c::checkSize, c::checkSize};
+        presentation.minimumRowHeight = c::optionHeight;
+        option->setPresentation(presentation);
+        option->setChecked(current.value(appearance::beautifierKeys[i]).toBool(false));
+        rows->addWidget(option);
+        options.append(option);
+    }
+    auto *cancel = ui::makeModalButton(card, {strings::get("common.cancel"), "rrBeautifierCancel"}, false);
+    auto *done = ui::makeModalButton(card, {strings::get("common.done"), "rrBeautifierDone"}, true);
+    card->adaptiveActions({cancel, done});
+    connect(cancel, &QPushButton::clicked, this, [this] { dismissFontChoices(); });
+    connect(done, &QPushButton::clicked, this, [this, options, chosen] {
+        QJsonObject value;
+        for (int i = 0; i < options.size(); ++i) value[appearance::beautifierKeys[i]] = options[i]->isChecked();
+        dismissFontChoices();
+        chosen(value);
+    });
+    const int width = qMin<int>(ui::px(1064), parentWidget()->width() - 2 * m::notice::sideClearance);
+    for (auto *option : options) option->setFixedHeight(option->heightForWidth(width - 2 * m::control::border));
+    card->fitToWidth(width);
+    fontDialog->centerCard();
+    fontDialog->show();
+    fontDialog->raise();
+    fontDialog->setFocus();
+}
+
 void SettingsPanel::showColumnSpacingChoices(int current, std::function<void(int)> chosen) {
     if (fontDialog)
         return;
@@ -1096,7 +1181,7 @@ namespace {
 // The styling sheet is wider than other choices so its sample pages are large
 // enough to read. It leaves the usual clearance at the screen edges.
 int stylingSheetWidth(const QWidget *parent) {
-    return qMax(1, parent->width() - 2 * int(m::notice::sideClearance));
+    return qMax(1, qMin(int(ui::px(1264)), parent->width() - 2 * int(m::notice::sideClearance)));
 }
 // Width available to the sample inside the sheet's border and side padding.
 int stylingSampleWidth(const QWidget *parent) {
@@ -1146,19 +1231,41 @@ QSize SettingsPanel::stylingCropSize(QSize readingPage, int horizontalMargin) co
     const qreal scale = qMin<qreal>(1, stylingSampleWidth(parentWidget()) * ratio / text);
     return {text, qMin(readingPage.height(), qRound(ui::px(300) * ratio / scale))};
 }
+QSize SettingsPanel::stylingTextPageSize(QSize readingPage, int horizontalMargin) const {
+    // Reflow wide reading lines for the capped modal instead of shrinking their
+    // glyphs. Keep the book's margins and the paper beside the cropped text.
+    const qreal ratio = qMax<qreal>(1, devicePixelRatio());
+    if (readingPage.width() <= ui::px(1264) * ratio)
+        return readingPage;
+    const int side = qMin(horizontalMargin, int(ui::px(16)));
+    readingPage.setWidth(qMin(readingPage.width(),
+        qRound(stylingSampleWidth(parentWidget()) * ratio) + 2 * horizontalMargin - 2 * side));
+    return readingPage;
+}
 void SettingsPanel::showAdvancedTextChoices(AdvancedText feature, int current, std::function<void(int)> chosen,
                                             const QString &alignment) {
+    showStylingChoices(feature, current, std::move(chosen), alignment, -1, {});
+}
+void SettingsPanel::showParagraphAdjustments(int spacing, int indent, std::function<void(int, int)> chosen) {
+    showStylingChoices(AdvancedText::ParagraphSpacing, spacing, {}, {}, indent, std::move(chosen));
+}
+void SettingsPanel::showStylingChoices(AdvancedText feature, int current, std::function<void(int)> chosen,
+                                      const QString &alignment, int indent,
+                                      std::function<void(int, int)> paragraphChosen) {
     if (fontDialog)
         return;
     ui::PanelTiming timing("styling");
     timing.field("feature", int(feature));
     fontDialog = new ui::ModalOverlay(parentWidget());
     const bool tracking = feature == AdvancedText::Tracking;
+    const bool paragraph = feature == AdvancedText::ParagraphSpacing;
     const bool spacing = feature == AdvancedText::WordSpacing || tracking;
     const bool vertical = feature == AdvancedText::VerticalSpacing || feature == AdvancedText::VerticalSpacingScope;
     QString key, prefix;
     QStringList values;
     switch (feature) {
+    case AdvancedText::ParagraphSpacing:
+        key = "settings.paragraph_spacing"; prefix = "rrParagraphSpacing"; break;
     case AdvancedText::WordSpacing:
         key = "settings.word_spacing"; prefix = "rrWordSpacing"; values = QStringList{"narrow", "normal", "wide"}; break;
     case AdvancedText::Tracking:
@@ -1206,14 +1313,14 @@ void SettingsPanel::showAdvancedTextChoices(AdvancedText feature, int current, s
     const qreal ratio = qMax<qreal>(1, devicePixelRatio());
     const int edgeHeight = vertical ? stylingEdgeHeight() : 0;
     preview->setEdgeHeight(edgeHeight);
-    const int sampleHeight = spacing ? ui::px(300) + 2 * ui::px(24)
+    const int sampleHeight = paragraph ? qMin(int(ui::px(580) + 2 * ui::px(24)), parentWidget()->height() * 2 / 5) : spacing ? ui::px(300) + 2 * ui::px(24)
                                      : qRound(stylingPageSize(styleSamplePageSize(), vertical).height() / ratio) +
                                            (edgeHeight ? edgeHeight + ui::px(16) : 0);
     preview->setFixedHeight(sampleHeight + 2 * ui::px(stylingPreviewPadding));
     rows->addWidget(preview);
     stylingPreview = preview;
     stylingFeature = feature;
-    stylingChoice = current;
+    stylingChoice = paragraph ? 0 : current;
     stylingSampleReady = [timing, preview = QPointer<QWidget>(preview)]() mutable {
         timing.stage("sample");
         timing.finish(preview);
@@ -1273,7 +1380,48 @@ void SettingsPanel::showAdvancedTextChoices(AdvancedText feature, int current, s
             buttons[other]->setChecked(other == index);
         description->setText(text("_" + values[index]) + ". " + text("_" + values[index] + "_description"));
     };
-    describe(current);
+    if (paragraph) {
+        const auto [area, controls] = padded({c::inset, ui::px(12), c::inset, ui::px(16)});
+        area->setObjectName("rrParagraphControls");
+        rows->removeWidget(area);
+        rows->insertWidget(rows->indexOf(choices), area);
+        choices->hide();
+        auto *slider = ui::sliderRow(area, controls, "rrParagraphSpacingSlider", "rrParagraphSpacingValue",
+            strings::get("settings.paragraph_gap"), "rrParagraphSpacingLess", "rrParagraphSpacingMore",
+            -1, 200, 1, {}, {}, {}, {strings::get("reader.publisher_spacing"), "0", "50%", "100%", "150%", "200%"});
+        slider->setMarkers({-1, 0, 50, 100, 150, 200}, ui::SettingSlider::MarkerMode::Stops);
+        description->setText(strings::get("settings.paragraph_choices_description"));
+        area->findChild<QLabel *>("rrParagraphSpacingSliderCurrentPrefix")->hide();
+        const auto showValue = [slider, area](int value) {
+            area->findChild<QLabel *>("rrParagraphSpacingValue")->setText(
+                strings::get("controls.currently") + ' ' + paragraphSpacingLabel(value));
+            slider->setAccessibleDescription(paragraphSpacingLabel(value));
+        };
+        connect(slider, &QSlider::valueChanged, slider, showValue);
+        slider->setValue(current);
+        showValue(current);
+        auto *indentSlider = ui::sliderRow(area, controls, "rrParagraphIndentSlider", "rrParagraphIndentValue",
+            strings::get("settings.paragraph_indent"), "rrParagraphIndentLess", "rrParagraphIndentMore",
+            -1, 300, 1, {}, {}, {}, {strings::get("reader.publisher_spacing"), "0", "100%", "200%", "300%"});
+        indentSlider->setMarkers({-1, 0, 100, 200, 300}, ui::SettingSlider::MarkerMode::Stops);
+        area->findChild<QLabel *>("rrParagraphIndentSliderCurrentPrefix")->hide();
+        const auto showIndent = [indentSlider, area](int value) {
+            area->findChild<QLabel *>("rrParagraphIndentValue")->setText(
+                strings::get("controls.currently") + ' ' + paragraphSpacingLabel(value));
+            indentSlider->setAccessibleDescription(paragraphSpacingLabel(value));
+        };
+        connect(indentSlider, &QSlider::valueChanged, indentSlider, showIndent);
+        slider->committed = [indentSlider, paragraphChosen](int value) {
+            paragraphChosen(value, indentSlider->value());
+        };
+        indentSlider->committed = [slider, paragraphChosen](int value) {
+            paragraphChosen(slider->value(), value);
+        };
+        indentSlider->setValue(indent);
+        showIndent(indent);
+    } else {
+        describe(current);
+    }
     for (int index = 0; index < buttons.size(); ++index)
         connect(buttons[index], &QPushButton::clicked, this, [this, index, describe, chosen] {
             stylingChoice = index;
@@ -1295,6 +1443,8 @@ void SettingsPanel::showAdvancedTextChoices(AdvancedText feature, int current, s
     QStringList descriptions;
     for (const auto &value : values)
         descriptions.append(text("_" + value) + ". " + text("_" + value + "_description"));
+    if (paragraph)
+        descriptions = QStringList{strings::get("settings.paragraph_choices_description")};
     reserve(description, descriptions);
     card->fitToWidth(cardWidth);
     fontDialog->centerCard();

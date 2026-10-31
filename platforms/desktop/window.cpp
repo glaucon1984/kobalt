@@ -182,6 +182,9 @@ Window::Window(storage::Paths paths, EngineFontInputs fonts, QString placeholder
               services.battery = [this] {
                   return screenPreset ? BatteryStatus{100, false} : BatteryStatus{};
               };
+              services.textScale = [this] {
+                  return textSize / 100.0;
+              };
               if (configureServices)
                   configureServices(services);
               return services;
@@ -226,11 +229,20 @@ Window::Window(storage::Paths paths, EngineFontInputs fonts, QString placeholder
     resolutionPicker->setObjectName("desktopResolutionPicker");
     resolutionPicker->setAccessibleName(tr("Rendering resolution"));
     resolutionPicker->setToolTip(
-        tr("Change preview sharpness without changing the book layout. Native uses the Mac display resolution."));
+        tr("Change preview sharpness without changing the book layout. Native uses the display resolution."));
     resolutionPicker->addItem(tr("212 DPI"), 212);
     resolutionPicker->addItem(tr("300 DPI"), 300);
     resolutionPicker->addItem(tr("Native"), 0);
     resolutionPicker->setCurrentIndex(resolutionPicker->findData(renderingDpi));
+    // Kobo's Large Print and Android's font size set the same scale.
+    textSizePicker = new QComboBox(toolbar);
+    textSizePicker->setObjectName("desktopTextSizePicker");
+    textSizePicker->setAccessibleName(tr("Text size"));
+    textSizePicker->setToolTip(tr("Enlarge interface text, as the system text size does on Kobo and Android. "
+                                  "Applies to the Library at once and to a book when it opens."));
+    for (const int percent : {100, 125, 150})
+        textSizePicker->addItem(tr("%1%").arg(percent), percent);
+    textSizePicker->setCurrentIndex(textSizePicker->findData(textSize));
     auto *contents = new QWidget(toolbar);
     contents->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     auto *layout = new QGridLayout(contents);
@@ -252,6 +264,7 @@ Window::Window(storage::Paths paths, EngineFontInputs fonts, QString placeholder
     choices->setSpacing(8);
     choices->addWidget(screenPicker, 1);
     choices->addWidget(resolutionPicker);
+    choices->addWidget(textSizePicker);
     rotateAction = new QAction(tr("Rotate Device"), this);
     rotateAction->setObjectName("desktopRotateDevice");
     rotateAction->setCheckable(true);
@@ -290,8 +303,17 @@ Window::Window(storage::Paths paths, EngineFontInputs fonts, QString placeholder
         renderingDpi = resolutionPicker->currentData().toInt();
         sizeCanvas();
     });
-    start = new android::StartScreen(readerServices().presentation, store);
-    start->library()->setKeyboardFactory(readerServices().keyboard);
+    start = new android::StartScreen(readerServices().presentation, store, [this] {
+        return textSize / 100.0;
+    });
+    start->setKeyboardFactory(readerServices().keyboard);
+    connect(textSizePicker, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] {
+        textSize = textSizePicker->currentData().toInt();
+        // An open book keeps its size until it closes, and the Library takes
+        // the new size when it is shown again.
+        if (!controller.window())
+            start->applyTextSize();
+    });
     start->setDark(controller.preferences().value("dark_mode").toBool(false));
     connect(start, &android::StartScreen::bookRequested, this, &Window::openBook);
     connect(start, &android::StartScreen::libraryOpenRequested, this, &Window::chooseBook);
@@ -352,6 +374,7 @@ Window::Window(storage::Paths paths, EngineFontInputs fonts, QString placeholder
     };
     screenActions = choicesMenu(screenPicker, tr("Device"), "desktopDeviceMenu");
     resolutionActions = choicesMenu(resolutionPicker, tr("Rendering Resolution"), "desktopResolutionMenu");
+    textSizeActions = choicesMenu(textSizePicker, tr("Text Size"), "desktopTextSizeMenu");
     view->addAction(rotateAction);
     connect(rotateAction, &QAction::toggled, this, [this, rotate](bool landscape) {
         rotate->setChecked(landscape);
@@ -525,9 +548,11 @@ void Window::selectScreen(int index) {
 void Window::setPreviewControlsEnabled(bool enabled) {
     screenPicker->setEnabled(enabled);
     resolutionPicker->setEnabled(enabled);
+    textSizePicker->setEnabled(enabled);
     rotateAction->setEnabled(enabled && screenPreset != 0);
     screenActions->setEnabled(enabled);
     resolutionActions->setEnabled(enabled);
+    textSizeActions->setEnabled(enabled);
 }
 void Window::chooseBook() {
     const auto path = QFileDialog::getOpenFileName(this, tr("Open EPUB"), {}, tr("EPUB books (*.epub)"));

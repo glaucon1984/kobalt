@@ -33,6 +33,11 @@ struct WifiStatus {
 // callback except automaticBookOpening, setAutomaticBookOpening,
 // debugProgressAction, observeBattery, observeBluetooth, observeWifi, remoteKeyActivity and syncNetwork is required,
 // including unsupported hosts.
+// A notice in the reader's usual notice card. `name` is the card's object
+// name; its message and button add `Message` and `Confirm`.
+struct ReaderNotice {
+    QString title, message, name;
+};
 struct ReaderHostServices {
     // Human-readable model used for the default sync device name.
     QString deviceName;
@@ -73,6 +78,11 @@ struct ReaderHostServices {
     std::function<QStringList()> fontFamilies;
     std::function<QFont()> uiFont;
     std::function<bool()> suspended, lightAvailable, animationsAvailable;
+    // Optional: the platform's text size setting, where 1 is standard. On
+    // Android and desktop, the reader applies it when a book opens and the
+    // Library when it is shown. Kobo applies Nickel's Large Print scale in its
+    // coordinator instead.
+    std::function<qreal()> textScale;
     std::function<void()> cancelAnimation;
     std::function<std::unique_ptr<LightControls>(QWidget *)> light;
     std::function<std::unique_ptr<DictionaryService>()> dictionary;
@@ -85,6 +95,9 @@ struct ReaderHostServices {
     std::function<QJsonObject(const QJsonObject &)> debugProgressAction;
     std::function<bool()> browserAvailable;
     std::function<bool(const QUrl &, QWidget *)> openBrowser;
+    // Optional notice the reader shows once its first page has painted, for
+    // example after profile preparation reset unusable saved data.
+    ReaderNotice startupNotice;
     bool complete() const {
         return bool(automaticBookOpening) == bool(setAutomaticBookOpening) && clock && battery && pageButtons &&
                reverseLandscapeButtons && pageButtonDirection && fontFamilies && uiFont && suspended &&

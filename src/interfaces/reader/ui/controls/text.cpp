@@ -310,6 +310,18 @@ QSize InterfaceLabel::sizeHint() const {
     size += QSize(margins.left() + margins.right() + 2 * margin(), margins.top() + margins.bottom() + 2 * margin());
     return size;
 }
+bool InterfaceLabel::event(QEvent *event) {
+    // A new parent or style makes QFrame set its contents margins again from
+    // its contents rectangle. Before the first layout a label keeps Qt's
+    // default size, and margins at a large interface scale can exceed it.
+    // QFrame then finds no valid rectangle and drops them.
+    const auto margins = contentsMargins();
+    const bool exceeded = margins.left() + margins.right() >= width() || margins.top() + margins.bottom() >= height();
+    const bool handled = QLabel::event(event);
+    if (exceeded && contentsMargins() != margins)
+        setContentsMargins(margins);
+    return handled;
+}
 void InterfaceLabel::paintEvent(QPaintEvent *event) {
     if (!needsPrivateText(text(), font()) || text().isEmpty()) {
         QLabel::paintEvent(event);

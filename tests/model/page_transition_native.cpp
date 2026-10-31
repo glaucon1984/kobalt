@@ -90,10 +90,11 @@ int main(int argc, char **argv) {
                             require(requests.size() == (quality || success ? 1u : 2u),
                                     "Turn submitted an extra refresh");
                             for (const auto &region : requests)
-                                require(region == QRegion(reader.rect()), "Cleanup was restricted to an image region");
+                                require(region == QRegion(reader.rect()), "A turn refresh was restricted to an image region");
                             require(arms == (quality ? 0 : 1),
-                                    "Image-quality turn armed a sweep or text turn skipped it");
-                            require(policies[0] == (quality ? 20u : 10u), "Turn selected the wrong refresh policy");
+                                    "Picture turn armed a sweep or text turn skipped it");
+                            // Picture turns refresh like Nickel, with the ordinary policy and no cleanup flash.
+                            require(policies[0] == 10u, "Turn selected the wrong refresh policy");
                             if (!quality && !success)
                                 require(policies[1] == 20, "Failed sweep did not clean the entire page");
                             require(repairs == 0, "Turn attempted a post-sweep regional repair");
@@ -115,5 +116,5 @@ int main(int argc, char **argv) {
                 !submitted,
             "Non-turn submitted an animation");
     std::puts(
-        "PASS: image-quality turns use one cleanup, text sweeps preserve final pixels and failures clean the whole page");
+        "PASS: picture turns use one ordinary full refresh, text sweeps preserve final pixels and failures clean the whole page");
 }

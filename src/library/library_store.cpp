@@ -1,6 +1,7 @@
 #include "library_store.h"
 #include "book_metadata.h"
 #include "support/diagnostics.h"
+#include "support/main_thread.h"
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -16,7 +17,7 @@ Store::Store(QString directory, std::shared_ptr<Source> source, QObject *parent)
     : QObject(parent), directory(directory), coverDirectory(directory + "/library-covers"),
       scanner(std::move(source), coverDirectory) {
     ready = data.loadDatabase(directory);
-    if (!ready) diagnostic("library-storage-unavailable");
+    if (!ready) diagnostic("library-storage-unavailable", {}, kobalt::DiagnosticSeverity::Warning);
     saving.setSingleShot(true);
     saving.setInterval(500);
     connect(&saving, &QTimer::timeout, this, &Store::save);
@@ -175,9 +176,12 @@ void Store::setSettings(const Settings &settings) {
     touch();
 }
 void Store::save() {
+    // Known exception: the Android and desktop library still saves on the
+    // main thread, also while a book is open.
+    mainthread::AllowBlocking allow("library save");
     saving.stop();
     QDir().mkpath(directory);
-    if (ready && !data.saveDatabase(directory)) diagnostic("library-save-failed");
+    if (ready && !data.saveDatabase(directory)) diagnostic("library-save-failed", {}, kobalt::DiagnosticSeverity::Error);
 }
 void Store::touch() {
     saving.start();

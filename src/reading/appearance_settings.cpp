@@ -3,6 +3,7 @@
 #include "page_navigation.h"
 #include "header_footer.h"
 #include "sleep_screen.h"
+#include "session_timeout.h"
 #include <QStringList>
 
 namespace kobalt::appearance {
@@ -33,6 +34,11 @@ QJsonObject globalPreferences(QJsonObject preferences) {
     if (!preferences.contains("bold_reading") && preferences.contains("bionic_reading"))
         preferences["bold_reading"] = preferences.value("bionic_reading");
     preferences.remove("bionic_reading");
+    if (preferences.contains("book_beautifier")) {
+        const auto rules = beautifierSettings(preferences);
+        for (const auto *key : beautifierKeys) preferences[key] = rules.value(key);
+        preferences.remove("book_beautifier");
+    }
     if (!preferences.contains("header_footer") && preferences.value(lastPresetKey).isString())
         preferences["header_footer"] = preferences.value(lastPresetKey);
     preferences.remove(lastPresetKey);
@@ -73,6 +79,8 @@ QJsonObject cleanPreferences(QJsonObject preferences) {
                             "hide_nonlinear_fragments", "avoid_wasteful_styling",
                             "minimal_annotation_mode", "show_header", "show_footer", "show_clock", "auto_rotate"})
         if (preferences.contains(key) && !preferences.value(key).isBool()) preferences.remove(key);
+    for (const auto *key : beautifierKeys)
+        if (preferences.contains(key) && !preferences.value(key).isBool()) preferences.remove(key);
     const auto choice = [&](const char *key, const QStringList &values) {
         if (preferences.contains(key) && !values.contains(preferences.value(key).toString())) preferences.remove(key);
     };
@@ -86,6 +94,9 @@ QJsonObject cleanPreferences(QJsonObject preferences) {
     choice("marks_sort", {"position", "newest", "oldest"});
     choice("sleep_screen", {"stock", "cover", "page"});
     choice("sleep_tile", {"card", "band", "bookmark"});
+    if (preferences.contains(sessionTimeout::preferenceKey) &&
+        !sessionTimeout::valid(preferences.value(sessionTimeout::preferenceKey)))
+        preferences.remove(sessionTimeout::preferenceKey);
     choice("header_footer", {"default", "alternative_a", "alternative_b", "custom"});
     choice("default_menu_view", {"none", "seek", "stats"});
     choice("navigation_bar_buttons", {"chapters", "pages"});
@@ -106,6 +117,10 @@ QJsonObject cleanPreferences(QJsonObject preferences) {
             value.toDouble() > maximum || value.toDouble() != value.toInt())) preferences.remove(key);
     };
     number("column_spacing_percent", 100, 300);
+    if (preferences.contains("paragraph_spacing"))
+        preferences["paragraph_spacing"] = paragraphSpacing(preferences.value("paragraph_spacing"));
+    if (preferences.contains("paragraph_indent"))
+        preferences["paragraph_indent"] = paragraphIndent(preferences.value("paragraph_indent"));
     number("dictionary_font_size", 80, 140);
     if (preferences.contains("dictionary_font_size") &&
         !validDictionaryFontSize(preferences.value("dictionary_font_size").toInt()))
@@ -122,6 +137,8 @@ QJsonObject cleanPreferences(QJsonObject preferences) {
 }
 QJsonObject bookDefaults(const QJsonObject &preferences) {
     auto defaults = typographyDefaults();
+    const auto beautifier = beautifierSettings(preferences);
+    for (const auto *key : beautifierKeys) defaults[key] = beautifier.value(key);
     defaults.remove("font_face");
     applyFontDefault(defaults, preferences);
     defaults["vertical_justification"] = verticalSpacingMode(preferences.value("vertical_justification"));
@@ -141,6 +158,8 @@ QJsonObject bookDefaults(const QJsonObject &preferences) {
         defaults[key] = readingPixels(qBound(0, design, 120));
     }
     defaults["word_spacing"] = preferences.value("word_spacing").toInt(100);
+    defaults["paragraph_spacing"] = paragraphSpacing(preferences.value("paragraph_spacing"));
+    defaults["paragraph_indent"] = paragraphIndent(preferences.value("paragraph_indent"));
     defaults["justification_tracking"] = preferences.value("justification_tracking").toInt(0);
     defaults["widows_orphans"] = preferences.value("widows_orphans").toString("publisher");
     if (!preferences.value(inheritTextLayoutKey).toBool(true)) {
@@ -175,6 +194,9 @@ void applyBookDefaults(QJsonObject &saved, const QJsonObject &defaults) {
     applyFontDefault(saved, defaults);
     for (const auto *key : marginKeys)
         saved[key] = defaults.value(key);
+    const auto beautifier = beautifierSettings(defaults);
+    for (const auto *key : beautifierKeys) saved[key] = beautifier.value(key);
+    saved.remove("book_beautifier");
     // Settings choices replace stale book values.
     saved["columns"] = 1;
     saved["vertical_justification"] = verticalSpacingMode(defaults.value("vertical_justification"));
@@ -182,6 +204,8 @@ void applyBookDefaults(QJsonObject &saved, const QJsonObject &defaults) {
     saved["two_columns_landscape"] = defaults.value("two_columns_landscape").toBool(false);
     saved["column_spacing_percent"] = defaults.value("column_spacing_percent").toInt(defaultColumnSpacingPercent);
     saved["word_spacing"] = defaults.value("word_spacing").toInt(100);
+    saved["paragraph_spacing"] = paragraphSpacing(defaults.value("paragraph_spacing"));
+    saved["paragraph_indent"] = paragraphIndent(defaults.value("paragraph_indent"));
     saved["justification_tracking"] = defaults.value("justification_tracking").toInt(0);
     saved["widows_orphans"] = defaults.value("widows_orphans").toString("publisher");
 }

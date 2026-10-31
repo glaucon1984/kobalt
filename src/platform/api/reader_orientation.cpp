@@ -29,6 +29,7 @@ Qt::ScreenOrientation orientationAxis(Qt::ScreenOrientation orientation) {
         return Qt::PrimaryOrientation;
     }
 }
+#ifndef KOBALT_NO_SENSORS
 Qt::ScreenOrientation readingOrientation(const QOrientationReading *reading) {
     switch (reading->orientation()) {
     case QOrientationReading::TopUp:
@@ -43,6 +44,7 @@ Qt::ScreenOrientation readingOrientation(const QOrientationReading *reading) {
         return Qt::PrimaryOrientation;
     }
 }
+#endif
 }
 
 Qt::ScreenOrientation shownOrientation(const QScreen *screen) {
@@ -54,7 +56,15 @@ Qt::ScreenOrientation shownOrientation(const QScreen *screen) {
 
 ReaderOrientation::ReaderOrientation(QOrientationSensor *sensor, std::function<void(Qt::ScreenOrientation)> turn,
                                      std::function<void(bool)> rotationOwnership)
-    : rotationOwnership(std::move(rotationOwnership)), sensor(sensor), turn(std::move(turn)) {
+    : rotationOwnership(std::move(rotationOwnership)),
+#ifndef KOBALT_NO_SENSORS
+      sensor(sensor),
+#endif
+      turn(std::move(turn)) {
+#ifdef KOBALT_NO_SENSORS
+    Q_ASSERT(!sensor);
+    Q_UNUSED(sensor);
+#endif
     debounce.setSingleShot(true);
     debounce.setInterval(250);
     connect(&debounce, &QTimer::timeout, this, [this] {
@@ -85,7 +95,9 @@ void ReaderOrientation::start(Qt::ScreenOrientation orientation) {
     if (!waking) {
         nativeOrientation = orientation;
         heldOrientation = Qt::PrimaryOrientation;
+#ifndef KOBALT_NO_SENSORS
         latestReading = QOrientationReading::Undefined;
+#endif
         latestTimestamp = 0;
     }
     sleeping = false;
@@ -95,6 +107,7 @@ void ReaderOrientation::start(Qt::ScreenOrientation orientation) {
         rotationOwnership(true);
     }
     auto initial = waking ? currentOrientation : Qt::PrimaryOrientation;
+#ifndef KOBALT_NO_SENSORS
     if (sensor) {
         if (!waking) {
             sensor->addFilter(this);
@@ -108,6 +121,7 @@ void ReaderOrientation::start(Qt::ScreenOrientation orientation) {
             initial = heldOrientation;
         }
     }
+#endif
     const auto shown = waking ? currentOrientation : orientation;
     apply(permits(initial) ? initial : permits(shown) ? shown : manualOrientation);
     if (sensor) {
@@ -123,19 +137,24 @@ void ReaderOrientation::stop(bool keepForSleep) {
         // orientation saved at the first start(), even after releasing input.
         if (sleeping && !keepForSleep) {
             sleeping = false;
+#ifndef KOBALT_NO_SENSORS
             if (sensor) {
                 sensor->removeFilter(this);
             }
+#endif
             if (nativeOrientation != Qt::PrimaryOrientation) {
                 apply(nativeOrientation);
             }
         }
         return;
     }
+#ifndef KOBALT_NO_SENSORS
     const bool handback = !keepForSleep && !frozen && sensor && !startedSensor && sensor->isActive();
+#endif
     active = false;
     debounce.stop();
     pending = Qt::PrimaryOrientation;
+#ifndef KOBALT_NO_SENSORS
     if (sensor) {
         if (!keepForSleep) {
             sensor->removeFilter(this);
@@ -144,6 +163,7 @@ void ReaderOrientation::stop(bool keepForSleep) {
             sensor->stop();
         }
     }
+#endif
     startedSensor = false;
     // A half turn keeps the sleep image's geometry. A quarter turn must give
     // Nickel its original geometry back before relinquishing rotation.
@@ -153,6 +173,7 @@ void ReaderOrientation::stop(bool keepForSleep) {
     if (nativeOrientation != Qt::PrimaryOrientation && (!sleeping || !sameAxis)) {
         apply(nativeOrientation);
     }
+#ifndef KOBALT_NO_SENSORS
     if (handback && sensor && sensor->isActive() && latestReading >= QOrientationReading::TopUp &&
         latestReading <= QOrientationReading::RightUp) {
         // Rejected samples never reached the borrowed sensor's cache or its
@@ -165,6 +186,7 @@ void ReaderOrientation::stop(bool keepForSleep) {
             QMetaObject::invokeMethod(sensor.data(), "readingChanged", Qt::DirectConnection);
         }
     }
+#endif
     if (rotationOwnership) {
         rotationOwnership(false);
     }
@@ -199,6 +221,7 @@ bool ReaderOrientation::setAutomatic(bool enabled) {
     }
     return !enabled || automaticRotation;
 }
+#ifndef KOBALT_NO_SENSORS
 bool ReaderOrientation::startSensor() {
     if (sensor->isActive()) {
         return true;
@@ -209,11 +232,15 @@ bool ReaderOrientation::startSensor() {
     }
     return startedSensor;
 }
+#else
+bool ReaderOrientation::startSensor() { return false; }
+#endif
 void ReaderOrientation::setBlocked(bool value) {
     blocked = value;
     if (!blocked && pending != Qt::PrimaryOrientation && !debounce.isActive())
         debounce.start(0);
 }
+#ifndef KOBALT_NO_SENSORS
 bool ReaderOrientation::filter(QOrientationReading *reading) {
     if (sleeping || frozen) {
         return false;
@@ -228,6 +255,7 @@ bool ReaderOrientation::filter(QOrientationReading *reading) {
     // Nickel keeps its connection. Final close releases the filter.
     return false;
 }
+#endif
 bool ReaderOrientation::permits(Qt::ScreenOrientation orientation) const {
     return orientation != Qt::PrimaryOrientation && (automaticRotation || orientation == manualOrientation ||
                                                      (sensor && orientationAxis(orientation) == manualOrientation));

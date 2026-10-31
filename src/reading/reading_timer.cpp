@@ -41,7 +41,7 @@ qint64 ReadingTimer::elapsed() const {
     const auto current = clock();
     if (current < baseline) {
         if (!failed)
-            diagnostic("reading-clock-read-failed", {}, false);
+            diagnostic("reading-clock-read-failed", {}, kobalt::DiagnosticSeverity::Error);
         failed = true;
         // Keep the last valid duration until this clock recovers. Switching to
         // the fallback here would mix clock origins and discard standby time.

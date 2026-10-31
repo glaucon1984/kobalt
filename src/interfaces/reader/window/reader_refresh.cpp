@@ -59,7 +59,7 @@ void Reader::refresh() {
         !model->busy() && model->turnDirection() != 0 && model->image().cacheKey() != page->image.cacheKey();
     if (!turnFrame || book->usesLocalPace())
         observeReading();
-    const bool afterTurn = !turnFrame && std::exchange(turnPainted, false);
+    if (!turnFrame) turnPainted = false;
     if (!publishPendingDarkMode())
         return;
     // syncFrameState consumes the completed jump and its return history.
@@ -88,12 +88,9 @@ void Reader::refresh() {
     }
     syncAppearanceControls(pickingFont);
     syncReadingControls();
-    // A jump saves at once, but on the book's writer thread: this pass runs
-    // on the tap. A layout change still saves synchronously in checkpoint().
-    if (afterTurn)
-        saveSoon();
-    else
-        save(false, true);
+    // Jumps and layout changes join the activity batch. Layout memory is
+    // saved separately because it is a user setting.
+    saveSoon();
     // Wait for the selected preview page before clearing the dimmed frame.
     // Settings can also close the menu later than the tap, after applying.
     if ((flashAfterMenu || flashAfterPagePreview) && (!flashAfterPagePreview || !model->busy()) && isVisible() &&
@@ -185,6 +182,7 @@ void Reader::finishAppearanceApply() {
         const bool successful = model->error().isEmpty();
         appearanceEdit.completeApply(successful, exitPending);
         if (successful) {
+            book->rememberAppearance();
             // Keep Settings covering the page until the destination preview
             // is ready. Showing the reading bars here adds a full refresh.
             if (!switchingAppearance) {
@@ -256,7 +254,8 @@ void Reader::paintTurn() {
     // paint_ms covers the damage, the paint and the flush that follow.
     const double rendered = turnStarted.isValid() ? turnStarted.nsecsElapsed() / 1e6 : 0;
     QElapsedTimer painting;
-    painting.start();
+    if (turnStarted.isValid())
+        painting.start();
     page->progressFraction = pageProgressFraction(model->page(), model->pages());
     page->preparedDamage = model->damage();
     page->preparedFrom = model->damageFrom();
@@ -504,7 +503,7 @@ void Reader::updateMenuStatus() {
         menuClock->setText(time);
     const auto battery = services.battery();
     menuBattery->setStatus(battery.percent, battery.charging);
-    const auto reading = book->readingMilliseconds();
+    const auto reading = book->sessionReadingMilliseconds();
     const auto session = reading > 300000 ? strings::get("reader.session_minutes").arg(reading / 60000) : QString();
     if (menuSession->text() != session)
         menuSession->setText(session);
@@ -515,7 +514,7 @@ void Reader::updateMenuStatus() {
 
 // Stats and the reading strips use the same platform or session estimates.
 void Reader::updateReadingStats() {
-    const auto reading = book->readingMilliseconds();
+    const auto reading = book->sessionReadingMilliseconds();
     const auto estimates = book->estimates();
     chapterGraph->setReading(int(reading / 60000), model->totalWords(), estimates.chapterMilliseconds,
                              estimates.bookMilliseconds);

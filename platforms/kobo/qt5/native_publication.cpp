@@ -59,7 +59,7 @@ bool NativePublication::open(const void *volume, const void *bookmark, QString *
     location_.clear();
     coverPath_.clear();
     auto fail = [&](const char *stage, const QString &reason) {
-        diagnostic("native-publication-failed", {{"stage", QString::fromLatin1(stage)}});
+        diagnostic("native-publication-failed", {{"stage", QString::fromLatin1(stage)}}, kobalt::DiagnosticSeverity::Error);
         if (error)
             *error = reason;
         return false;

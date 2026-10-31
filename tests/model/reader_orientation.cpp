@@ -1,3 +1,4 @@
+#ifndef KOBALT_NO_SENSORS
 #include "platform/api/reader_orientation.h"
 #include "orientation_sensor.h"
 
@@ -335,3 +336,38 @@ int main(int argc, char **argv) {
     checkPendingReadingAtSleep(factory);
     std::puts("PASS: sensor locks, opening, sleep/wake/close lifecycle, latest readings and sensor ownership");
 }
+
+#else
+#include "platform/api/reader_orientation.h"
+#include <QCoreApplication>
+#include <cstdlib>
+
+int main(int argc, char **argv) {
+    QCoreApplication app(argc, argv);
+    Qt::ScreenOrientation shown = Qt::PrimaryOrientation;
+    int ownership = 0;
+    kobalt::ReaderOrientation rotation(nullptr, [&](Qt::ScreenOrientation value) { shown = value; },
+        [&](bool owns) { ownership += owns ? 1 : -1; });
+    auto require = [](bool valid) { if (!valid) std::abort(); };
+    require(!rotation.automaticAvailable() && !rotation.setAutomatic(true));
+    rotation.configure({{"orientation", int(Qt::InvertedLandscapeOrientation)}, {"auto_rotate", true}});
+    require(rotation.manual() == Qt::InvertedLandscapeOrientation && !rotation.automatic());
+    rotation.start(Qt::PortraitOrientation);
+    require(shown == Qt::InvertedLandscapeOrientation && ownership == 1);
+    rotation.rotate();
+    require(shown == Qt::PortraitOrientation);
+    rotation.rotate();
+    require(shown == Qt::LandscapeOrientation);
+    rotation.freeze();
+    rotation.rotate();
+    require(shown == Qt::LandscapeOrientation);
+    rotation.stop(true);
+    require(shown == Qt::PortraitOrientation && ownership == 0);
+    rotation.start(Qt::PortraitOrientation);
+    rotation.configure({{"orientation", int(Qt::InvertedPortraitOrientation)}});
+    require(shown == Qt::InvertedPortraitOrientation);
+    require(rotation.settings().value("orientation").toInt() == int(Qt::InvertedPortraitOrientation));
+    rotation.stop();
+    require(shown == Qt::PortraitOrientation && ownership == 0);
+}
+#endif

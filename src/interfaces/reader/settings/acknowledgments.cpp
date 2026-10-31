@@ -232,7 +232,7 @@ void Acknowledgments::redraw(bool paging) {
         label->setVisible(reading);
     int count = 1;
     if (reading) {
-        int y = c::headerHeight + c::blockTop;
+        int y = c::headerHeight() + c::blockTop;
         description->setGeometry(c::inset, y, textWidth, description->heightForWidth(textWidth));
         y = description->geometry().bottom() + 1 + c::textGap;
         const int captionLine = ui::interfaceLineHeight(ui::captionFont()) + c::textGap;
@@ -256,7 +256,7 @@ void Acknowledgments::redraw(bool paging) {
         text->page = wanted;
         count = text->pages();
     } else {
-        intro->setGeometry(c::inset, c::headerHeight + c::blockTop, textWidth, intro->heightForWidth(textWidth));
+        intro->setGeometry(c::inset, c::headerHeight() + c::blockTop, textWidth, intro->heightForWidth(textWidth));
         divider = intro->geometry().bottom() + 1 + c::blockTop;
     }
     const int rowsTop = divider + m::control::border;

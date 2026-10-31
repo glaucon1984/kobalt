@@ -248,6 +248,7 @@ int run(int argc, char **argv) {
             opened.exec();
             warning.reset();
             openWarning(*retainedWarning);
+            flushDiagnostics();
             QFile log(diagnostics.path() + "/events.jsonl");
             require(log.open(QIODevice::ReadOnly), "Cannot read formatting diagnostics");
             int warnings = 0;

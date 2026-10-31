@@ -50,7 +50,10 @@ public:
     static QString dictionaryFontSizeLabel(int percent);
     void showColumnSpacingChoices(int current, std::function<void(int)> chosen);
     static QString columnSpacingLabel(int percent);
-    enum class AdvancedText { WordSpacing, Tracking, Pagination, VerticalSpacing, VerticalSpacingScope };
+    enum class AdvancedText { WordSpacing, Tracking, Pagination, VerticalSpacing, VerticalSpacingScope, ParagraphSpacing };
+    static QString paragraphSpacingLabel(int percent);
+    void showBeautifier(const QJsonObject &current, std::function<void(QJsonObject)> chosen);
+    void showParagraphAdjustments(int spacing, int indent, std::function<void(int, int)> chosen);
     // The sheet stays open while choosing, so each choice can be compared in
     // its preview.
     void showAdvancedTextChoices(AdvancedText feature, int current, std::function<void(int)> chosen,
@@ -68,6 +71,7 @@ public:
     // The page region, in device pixels, that fills the magnified edge.
     QSize stylingEdgeSize(QSize readingPage) const;
     QSize stylingCropSize(QSize readingPage, int horizontalMargin) const;
+    QSize stylingTextPageSize(QSize readingPage, int horizontalMargin) const;
     QPointer<ui::ModalOverlay> fontDialog;
     ui::CellButton *closeButton = nullptr;
     void showDictionaries(bool visible);
@@ -88,7 +92,8 @@ public:
     ui::CaptionButton *columnSpacingButton = nullptr;
     ui::CaptionButton *verticalSpacingButton = nullptr, *verticalSpacingScopeButton = nullptr;
     ui::CaptionButton *wordSpacingButton = nullptr, *trackingButton = nullptr, *widowsOrphansButton = nullptr;
-    ui::CaptionButton *sleepScreenButton = nullptr, *sleepTileButton = nullptr, *menuViewButton = nullptr;
+    ui::CaptionButton *paragraphSpacingButton = nullptr, *beautifierButton = nullptr;
+    ui::CaptionButton *sleepScreenButton = nullptr, *sessionTimeoutButton = nullptr, *sleepTileButton = nullptr, *menuViewButton = nullptr;
     ui::CaptionButton *pageNavigationButton = nullptr, *tapZonesButton = nullptr, *navigationBarButton = nullptr,
                       *tappableLinksButton = nullptr;
     ui::DescribedOption *bionicOption = nullptr;
@@ -104,6 +109,8 @@ protected:
     void resizeEvent(QResizeEvent *event) override;
 
 private:
+    void showStylingChoices(AdvancedText feature, int current, std::function<void(int)> chosen,
+                            const QString &alignment, int indent, std::function<void(int, int)> paragraphChosen);
     QWidget *tabRail = nullptr;
     QWidget *optionsViewport = nullptr, *optionsClip = nullptr;
     ui::PagerBar *optionsPager = nullptr;

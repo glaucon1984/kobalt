@@ -276,21 +276,7 @@ QString sleepTimeLeft(qint64 milliseconds) {
     return strings::get("sleep.time_left").arg(time);
 }
 QImage sleepCoverBackground(const QImage &cover, QSize size) {
-    if (cover.isNull() || size.isEmpty() || qint64(size.width()) * size.height() > 4 * 1024 * 1024) {
-        return {};
-    }
-    QImage background(size, QImage::Format_RGB32);
-    if (background.isNull()) {
-        return {};
-    }
-    background.fill(Qt::black);
-    const auto fitted = cover.size().scaled(size, Qt::KeepAspectRatio);
-    QPainter painter(&background);
-    painter.setRenderHint(QPainter::SmoothPixmapTransform);
-    painter.drawImage(QRect(QPoint((size.width() - fitted.width()) / 2, (size.height() - fitted.height()) / 2), fitted),
-                      cover);
-    painter.end();
-    return background;
+    return sleep::coverBackground(cover, size);
 }
 QRect sleepScreenCardRect(QSize size, bool showRemaining, sleep::Tile tile) {
     switch (tile) {

@@ -353,6 +353,39 @@ void destructionDrainsLatestSnapshot() {
             sql(root.path(), "SELECT status FROM reading_sessions").toString() == "completed",
             "Destruction lost the latest queued boundary");
 }
+void sleepingObservations() {
+    QTemporaryDir root;
+    qint64 utc = 100000;
+    ReadingHistory history(root.path(), "sleep", {}, {}, "Sleep", "Author", [&] { return utc; });
+    history.start(0, "start");
+    utc += 1000;
+    history.pause(1000, "sleep");
+    require(history.save(), "Sleep fixture");
+    const auto id = sql(root.path(), "SELECT id FROM reading_sessions");
+    utc += 60000;
+    history.pause(999999, "wrong"); history.update(999999, "wrong");
+    require(history.save() && sql(root.path(), "SELECT active_ms FROM reading_sessions").toLongLong() == 1000 &&
+            sql(root.path(), "SELECT observed FROM reading_sessions").toLongLong() == 101000,
+            "Repeated sleeping checkpoints changed the final observation");
+    history.start(1000, "wake");
+    require(history.save() && sql(root.path(), "SELECT id FROM reading_sessions") == id,
+            "Resuming replaced the paused UUID");
+    utc += 1000;
+    history.pause(2000, "second-sleep");
+    const auto observed = utc;
+    utc += 900000;
+    history.stop(2000, "wrong");
+    sql(root.path(), "CREATE TRIGGER fail_sleep BEFORE UPDATE ON reading_sessions BEGIN SELECT RAISE(ABORT,'test'); END");
+    require(!history.save(), "Failed completion write succeeded");
+    history.start(2000, "second-wake");
+    history.stop(3000, "end");
+    sql(root.path(), "DROP TRIGGER fail_sleep");
+    require(history.save() && sql(root.path(), "SELECT COUNT(*) FROM reading_sessions WHERE status='completed'").toInt() == 2 &&
+            sql(root.path(), "SELECT SUM(active_ms) FROM reading_sessions").toLongLong() == 3000 &&
+            sql(root.path(), "SELECT observed FROM reading_sessions WHERE id='" + id.toString() + "'").toLongLong() == observed &&
+            sql(root.path(), "SELECT end_position FROM reading_sessions WHERE id='" + id.toString() + "'").toString() == "second-sleep",
+            "Completion retry lost a sleeping interval or attached wake time/position");
+}
 void intervals() {
 
 
@@ -477,6 +510,7 @@ int main(int argc, char **argv) {
     rejectsVersionTwoWithoutBookIdentityUniqueness();
     migrationRejectsOrphanedAnnotations();
     intervals();
+    sleepingObservations();
     coalescedFailureRetainsEveryInterval();
     destructionDrainsLatestSnapshot();
     crashRecoveryDoesNotStealLiveProfileOwnership();

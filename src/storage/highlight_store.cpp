@@ -1,4 +1,5 @@
 #include "highlight_store.h"
+#include "support/main_thread.h"
 #include "bookmark_store.h"
 #include "reader_storage.h"
 #include "support/qt_compat.h"
@@ -20,6 +21,7 @@ bool problem(QString *error, const char *text) {
     return false;
 }
 bool write(const QString &path, const QByteArray &bytes) {
+    mainthread::BlockingOperation blockingOperation("highlight-write");
     QSaveFile file(path);
     return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size() && file.commit();
 }

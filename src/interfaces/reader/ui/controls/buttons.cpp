@@ -148,9 +148,11 @@ void Button::paintEvent(QPaintEvent *) {
     } else {
         if (!isEnabled())
             painter.setOpacity(.4);
+        // Toolbar cells keep their size; large text can enlarge their icons.
+        const QSize glyph = toolbar ? iconSize() * detail::iconScale : iconSize();
         icon().paint(&painter,
-                     QRect((width() - iconSize().width()) / 2, (height() - iconSize().height()) / 2, iconSize().width(),
-                           iconSize().height()),
+                     QRect((width() - glyph.width()) / 2, (height() - glyph.height()) / 2, glyph.width(),
+                           glyph.height()),
                      Qt::AlignCenter, QIcon::Normal, active ? QIcon::On : QIcon::Off);
     }
 }

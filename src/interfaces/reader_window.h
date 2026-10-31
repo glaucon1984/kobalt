@@ -11,6 +11,7 @@ class ReaderSession;
 class ReaderOrientation;
 class ReadingBook;
 struct ReaderHostServices;
+struct ReaderNotice;
 
 // The firmware controller owns opening, authorization and publication lifetime.
 // The window returns a retained engine session only after a normal close.
@@ -30,9 +31,20 @@ public:
     virtual bool flushBeforeStandby() {
         return true;
     }
+    virtual bool pendingStorageSave() const { return false; }
+    // Shows a notice over the page. False when the window cannot show one now,
+    // for example while it is hidden or another notice is open.
+    virtual bool showNotice(const ReaderNotice &) { return false; }
+    // Cancel revoked native work before hiding can stop the reading interval.
+    virtual void revokeNativeReading() {}
+    // Revocation drains local data without writing through a revoked native account.
+    virtual void finishStorageSave(std::function<void(bool)> finished, bool nativeAllowed = true) {
+        (void)nativeAllowed;
+        finished(true);
+    }
     // Limit the native-position wait to two seconds before file release.
     virtual void prepareUsb(std::function<void()> finished) = 0;
-    virtual void prepareShutdown(std::function<void()> finished) = 0;
+    virtual void prepareShutdown(std::function<void()> finished, bool allowFailedSave = false) = 0;
     virtual sleep::Snapshot powerScreenSnapshot() { return {}; }
     virtual void sleepReader() = 0;
     // A bounded final upload can briefly keep the CPU awake after the sleep view appears.

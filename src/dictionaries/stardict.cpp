@@ -1,4 +1,5 @@
 #include "stardict.h"
+#include "support/main_thread.h"
 #include <QFile>
 #include <QDir>
 #include <QtEndian>
@@ -184,6 +185,7 @@ struct Body {
 bool index(const QString &path, int suffix, quint32 bodyLength, quint32 wordCount, QString *error,
            const std::function<bool()> &cancelled, quint32 expectedCount) {
     QFile file(path);
+    mainthread::BlockingOperation blockingOperation("dictionary-index-write");
     QSaveFile positions(path + ".kobalt");
     if (!file.open(QIODevice::ReadOnly) || !positions.open(QIODevice::WriteOnly))
         return fail(error, "Cannot read dictionary index.");

@@ -7,7 +7,11 @@
 #include <QLineEdit>
 #include <QPointer>
 #include <QTime>
+#ifdef Q_OS_MACOS
 #include <sys/sysctl.h>
+#else
+#include <QSysInfo>
+#endif
 
 namespace kobalt::desktop {
 namespace {
@@ -87,11 +91,15 @@ public:
 }
 ReaderHostServices readerServices() {
     ReaderHostServices result;
+#ifdef Q_OS_MACOS
     result.deviceName = QStringLiteral("Mac");
     char model[256] = {};
     size_t modelSize = sizeof(model);
     if (::sysctlbyname("hw.model", model, &modelSize, nullptr, 0) == 0 && modelSize > 1)
         result.deviceName = QString::fromLatin1(model, int(qMin(modelSize - 1, sizeof(model) - 1)));
+#else
+    result.deviceName = QSysInfo::prettyProductName();
+#endif
     result.colorDisplay = [] {
         return true;
     };

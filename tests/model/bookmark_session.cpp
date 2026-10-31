@@ -189,6 +189,7 @@ int main(int argc, char **argv) {
             drain(model);
             require(failed == 1 && added == 0 && failedLoad.bookmarks().isEmpty() && read(path) == original,
                     "Editing after a failed load changed the saved bytes or announced success");
+            flushDiagnostics();
             const auto events = read(diagnostics.path() + "/events.jsonl");
             require(!events.contains(failedRoot.path().toUtf8()) && !events.contains("private-book.epub") &&
                         !events.contains("/bookmarks.json"),
@@ -267,6 +268,7 @@ int main(int argc, char **argv) {
             });
             require(failedSave.error().isEmpty() && failedSave.bookmarks().size() == 2,
                     "A successful retry kept the save error");
+            flushDiagnostics();
             const auto events = read(diagnostics.path() + "/events.jsonl");
             require(!events.contains(failedRoot.path().toUtf8()) && !events.contains("/bookmarks.json") &&
                         !events.contains("private-book.epub"),
@@ -414,6 +416,16 @@ int main(int argc, char **argv) {
         waitUntil([&] {
             return !model.busy();
         });
+        const auto beforeBeautifier = session->bookmarks();
+        for (bool enabled : {true, false}) {
+            require(model.setBookBeautifier(enabled), "Cannot toggle beautifier with bookmarks");
+            waitUntil([&] { return !model.busy(); });
+            waitUntil([&] { session->sync(); return session->resolved(); });
+            require(session->bookmarks().size() == beforeBeautifier.size(), "Beautifier lost bookmarks");
+            for (int i = 0; i < beforeBeautifier.size(); ++i)
+                require(session->bookmarks()[i].position == beforeBeautifier[i].position && session->page(i) >= 0,
+                        "Beautifier changed a bookmark anchor");
+        }
         const int pagesBefore = model.pages();
         require(model.style(minimumFontPixels(), 100), "Cannot change the text size");
         waitUntil([&] {

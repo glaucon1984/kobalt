@@ -1,20 +1,30 @@
 cmake_minimum_required(VERSION 3.22)
 project(Kobalt LANGUAGES C CXX)
 
-if(NOT APPLE)
-    message(FATAL_ERROR "Only the Mac development app is configured so far.")
+if(NOT APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR "The desktop app supports macOS and Linux.")
+endif()
+
+if(APPLE)
+    set(KOBALT_DESKTOP_PLATFORM mac)
+else()
+    set(KOBALT_DESKTOP_PLATFORM linux)
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 include(CTest)
-set(qt_components Core Gui Widgets Network Sensors Sql)
+option(KOBALT_DESKTOP_SENSORS "Build real sensor adapter and sensor integration checks" OFF)
+set(qt_components Core Gui Widgets Network Sql)
+if(KOBALT_DESKTOP_SENSORS)
+    list(APPEND qt_components Sensors)
+endif()
 if(BUILD_TESTING)
     # The scenario player sends input through the window system, as real input arrives.
     list(APPEND qt_components Test GuiPrivate)
 endif()
-find_package(Qt6 6.11.3 EXACT REQUIRED COMPONENTS ${qt_components})
+find_package(Qt6 6.11 REQUIRED COMPONENTS ${qt_components})
 file(REAL_PATH "${Qt6_DIR}/.." qt_config_root)
 foreach(component IN LISTS qt_components)
     file(REAL_PATH "${Qt6${component}_DIR}/.." component_root)
@@ -68,7 +78,7 @@ file(GLOB_RECURSE shared CONFIGURE_DEPENDS
 add_library(kobalt-core OBJECT ${shared} display.cpp
     "${source}/assets/assets.cpp" "${source}/assets/bundled_fonts.cpp" "${source}/assets/font_catalog.cpp"
     "${source}/assets/system_fonts.cpp"
-    "${source}/support/diagnostics.cpp"
+    "${source}/support/diagnostics.cpp" "${source}/support/main_thread.cpp"
     "${source}/publication/publication.cpp" "${source}/publication/zip_resource.cpp"
     "${source}/publication/resource_cache.cpp" "${source}/publication/local_resources.cpp"
     "${source}/publication/image_policy.cpp" "${source}/publication/layout_compatibility.cpp"
@@ -84,7 +94,15 @@ target_include_directories(kobalt-core SYSTEM PUBLIC
     "${KOBALT_TEST_PNG_INCLUDE}")
 include("${KOBALT_ROOT}/platforms/cache-policy.cmake")
 target_compile_definitions(kobalt-core PUBLIC KOBALT_READER_HARDWARE KOBALT_VERSION="${KOBALT_VERSION}"
-    KOBALT_LAYOUT_POLICY="${layout_policy}" fdatasync=fsync)
+    KOBALT_LAYOUT_POLICY="${layout_policy}")
+if(APPLE)
+    target_compile_definitions(kobalt-core PUBLIC fdatasync=fsync)
+endif()
+if(KOBALT_DESKTOP_SENSORS)
+    target_link_libraries(kobalt-core PUBLIC Qt6::Sensors)
+else()
+    target_compile_definitions(kobalt-core PUBLIC KOBALT_NO_SENSORS)
+endif()
 target_compile_options(kobalt-core PRIVATE -Wall -Wextra)
 option(KOBALT_SQLITE_ANNOTATIONS_DEFAULT "Use SQLite annotation storage by default" ON)
 if(KOBALT_SQLITE_ANNOTATIONS_DEFAULT)
@@ -94,7 +112,7 @@ else()
     set_source_files_properties("${source}/storage/annotation_database.cpp" PROPERTIES
         COMPILE_DEFINITIONS KOBALT_SQLITE_ANNOTATIONS_DEFAULT=0)
 endif()
-target_link_libraries(kobalt-core PUBLIC Qt6::Widgets Qt6::Network Qt6::Sensors Qt6::Sql
+target_link_libraries(kobalt-core PUBLIC Qt6::Widgets Qt6::Network Qt6::Sql
     "${CRENGINE_BUILD}/libcrengine.a"
     "${KOBALT_TEST_DEPENDENCIES}/lib/libharfbuzz.a" "${KOBALT_TEST_DEPENDENCIES}/lib/libxxhash.a"
     "${KOBALT_TEST_DEPENDENCIES}/lib/libutf8proc.a" "${KOBALT_TEST_DEPENDENCIES}/lib/libjpeg.a"
@@ -102,13 +120,21 @@ target_link_libraries(kobalt-core PUBLIC Qt6::Widgets Qt6::Network Qt6::Sensors 
     "${KOBALT_TEST_DEPENDENCIES}/lib/libfribidi.a" "${KOBALT_TEST_DEPENDENCIES}/lib/libunibreak.a"
     "${KOBALT_TEST_PNG}" z)
 # The engine and Qt must keep separate FreeType glyph implementations.
-target_link_options(kobalt-core INTERFACE "LINKER:-force_load,${KOBALT_TEST_DEPENDENCIES}/lib/libfreetype.a")
+if(APPLE)
+    target_link_options(kobalt-core INTERFACE "LINKER:-force_load,${KOBALT_TEST_DEPENDENCIES}/lib/libfreetype.a")
+else()
+    # Keep private static dependencies out of the executable dynamic symbol table,
+    # so Qt and its plugins resolve their own font and image library symbols.
+    target_link_options(kobalt-core INTERFACE "LINKER:--exclude-libs,ALL")
+endif()
 file(GLOB_RECURSE interfaces CONFIGURE_DEPENDS "${source}/interfaces/*.cpp")
 add_library(kobalt-desktop OBJECT ${interfaces}
     window.cpp services.cpp
     ../android/reader.cpp ../android/start_screen.cpp
     "${source}/platform/api/reader_orientation.cpp")
 target_link_libraries(kobalt-desktop PUBLIC kobalt-core)
+set_source_files_properties("${source}/interfaces/reader/views/reading_page.cpp" PROPERTIES
+    COMPILE_DEFINITIONS KOBALT_DESKTOP_POINTER)
 target_compile_options(kobalt-desktop PRIVATE -Wall -Wextra)
 # A build from a linked Git worktree is a variant named after the worktree's
 # folder. A variant has its own name, bundle identifier and profile, so it can
@@ -127,14 +153,20 @@ if(EXISTS "${KOBALT_ROOT}/.git")
         get_filename_component(default_variant "${KOBALT_ROOT}" NAME)
     endif()
 endif()
-set(KOBALT_MAC_VARIANT "${default_variant}" CACHE STRING "Name of a side-by-side Mac development build; empty for the regular app")
-if(NOT KOBALT_MAC_VARIANT MATCHES "^[A-Za-z0-9-]*$")
-    message(FATAL_ERROR "KOBALT_MAC_VARIANT may only hold letters, digits and hyphens.")
+if(APPLE)
+    set(variant_option KOBALT_MAC_VARIANT)
+else()
+    set(variant_option KOBALT_LINUX_VARIANT)
 endif()
-if(KOBALT_MAC_VARIANT)
-    set(KOBALT_BUNDLE_NAME "Kobalt (${KOBALT_MAC_VARIANT})")
-    set(KOBALT_BUNDLE_IDENTIFIER "com.nicoverbruggen.kobalt.desktop.variant.${KOBALT_MAC_VARIANT}")
-    set(KOBALT_PROFILE_NAME "Kobalt-${KOBALT_MAC_VARIANT}")
+set(${variant_option} "${default_variant}" CACHE STRING "Name of a side-by-side desktop development build; empty for the regular app")
+set(desktop_variant "${${variant_option}}")
+if(NOT desktop_variant MATCHES "^[A-Za-z0-9-]*$")
+    message(FATAL_ERROR "${variant_option} may only hold letters, digits and hyphens.")
+endif()
+if(desktop_variant)
+    set(KOBALT_BUNDLE_NAME "Kobalt (${desktop_variant})")
+    set(KOBALT_BUNDLE_IDENTIFIER "com.nicoverbruggen.kobalt.desktop.variant.${desktop_variant}")
+    set(KOBALT_PROFILE_NAME "Kobalt-${desktop_variant}")
     set(KOBALT_DOCUMENT_TYPES "")
 else()
     set(KOBALT_BUNDLE_NAME "Kobalt")
@@ -147,38 +179,41 @@ else()
         <key>LSItemContentTypes</key><array><string>org.idpf.epub-container</string></array>
     </dict></array>")
 endif()
-message(STATUS "Mac app: ${KOBALT_BUNDLE_NAME}, ${KOBALT_BUNDLE_IDENTIFIER}")
-add_executable(Kobalt MACOSX_BUNDLE main.cpp)
+message(STATUS "Desktop app: ${KOBALT_BUNDLE_NAME}, ${KOBALT_BUNDLE_IDENTIFIER}")
+add_executable(Kobalt main.cpp)
+if(APPLE)
+    set_target_properties(Kobalt PROPERTIES MACOSX_BUNDLE ON)
+    set(runtime_asset_path "../Resources/assets")
+else()
+    set(runtime_asset_path "assets/runtime")
+endif()
 target_link_libraries(Kobalt PRIVATE kobalt-desktop kobalt-core)
 # The profile folder under Application Support follows the application name.
-target_compile_definitions(Kobalt PRIVATE KOBALT_PROFILE_NAME="${KOBALT_PROFILE_NAME}")
+target_compile_definitions(Kobalt PRIVATE KOBALT_PROFILE_NAME="${KOBALT_PROFILE_NAME}"
+    KOBALT_RUNTIME_ASSET_PATH="${runtime_asset_path}")
 set_target_properties(Kobalt PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in")
 set(resources "${KOBALT_ROOT}/assets")
 file(GLOB notices CONFIGURE_DEPENDS "${resources}/notices/*")
 qt_add_resources(kobalt-desktop desktop_artwork PREFIX "/desktop" BASE "${resources}" FILES "${resources}/kobalt-android.svg")
-qt_add_resources(kobalt-desktop notices PREFIX "/kobalt" BASE "${resources}" FILES "${resources}/acknowledgments.json" ${notices})
-set(bundle_assets "${CMAKE_CURRENT_BINARY_DIR}/Kobalt.app/Contents/Resources/assets")
-add_custom_command(OUTPUT "${bundle_assets}/manifest.json"
-    COMMAND "${CMAKE_COMMAND}" -E rm -rf "${bundle_assets}"
-    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${KOBALT_ASSETS}" "${bundle_assets}"
-    DEPENDS ${KOBALT_ASSET_INPUTS}
-    VERBATIM)
-add_custom_target(kobalt-runtime-assets DEPENDS "${bundle_assets}/manifest.json")
-add_dependencies(Kobalt kobalt-runtime-assets)
+qt_add_resources(kobalt-desktop notices PREFIX "/kobalt" BASE "${resources}" FILES "${resources}/acknowledgments.json" ${notices}
+    "${resources}/samples/words-and-letters.html" "${resources}/samples/layout.html")
+if(APPLE)
+    set(bundle_assets "${CMAKE_CURRENT_BINARY_DIR}/Kobalt.app/Contents/Resources/assets")
+    add_custom_command(OUTPUT "${bundle_assets}/manifest.json"
+        COMMAND "${CMAKE_COMMAND}" -E rm -rf "${bundle_assets}"
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory "${KOBALT_ASSETS}" "${bundle_assets}"
+        DEPENDS ${KOBALT_ASSET_INPUTS}
+        VERBATIM)
+    add_custom_target(kobalt-runtime-assets DEPENDS "${bundle_assets}/manifest.json")
+    add_dependencies(Kobalt kobalt-runtime-assets)
+endif()
 
 # Compares two release-evaluation runs; see doc/release-evaluation.md.
 add_executable(kobalt-eval-compare EXCLUDE_FROM_ALL "${KOBALT_ROOT}/platforms/eval/compare.cpp")
 target_link_libraries(kobalt-eval-compare PRIVATE Qt6::Gui)
 
 if(BUILD_TESTING)
-    add_executable(kobalt-annotation-engine-benchmark EXCLUDE_FROM_ALL "${KOBALT_ROOT}/tests/annotation_engine_benchmark.cpp")
-    target_link_libraries(kobalt-annotation-engine-benchmark PRIVATE kobalt-desktop kobalt-core)
-    target_include_directories(kobalt-annotation-engine-benchmark PRIVATE "${KOBALT_ROOT}/tests/support")
-    target_compile_definitions(kobalt-annotation-engine-benchmark PRIVATE KOBALT_TEST_ASSET_ROOT="${KOBALT_ASSETS}")
-    add_executable(kobalt-annotation-gui-benchmark EXCLUDE_FROM_ALL "${KOBALT_ROOT}/tests/annotation_gui_benchmark.cpp")
-    target_link_libraries(kobalt-annotation-gui-benchmark PRIVATE kobalt-desktop kobalt-core)
-    target_compile_definitions(kobalt-annotation-gui-benchmark PRIVATE KOBALT_TEST_ASSET_ROOT="${KOBALT_ASSETS}")
     add_test(NAME build.cachePolicy COMMAND "${CMAKE_COMMAND}"
         "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/cache-policy-test"
         "-DPOLICY_FILE=${KOBALT_ROOT}/platforms/cache-policy.cmake"
@@ -219,10 +254,10 @@ if(BUILD_TESTING)
         KOBALT_TEST_VARIABLE_FONT="${test_variable_font}" KOBALT_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/test-tmp")
     set(headless_environment "QT_QPA_PLATFORM=minimal:enable_fonts:freetype" "QT_STYLE_OVERRIDE=Fusion" "TMPDIR=${CMAKE_CURRENT_BINARY_DIR}/test-tmp")
-    foreach(check annotationDefaultView galleryWorkerFailure galleryIntegrity sameProcessReadersDoNotRecoverEachOther standaloneHistorySourceKeys verticalJustification startup libraryOnboarding reading errors diagnostics storageDiagnostics timingEvents features stylesheet bookmarks bookmarkMerge annotations annotationModeFeedback annotationSelection coordinateProbeSerialization annotationGripMenus annotationCrossPageDrag selectionCrossPageDrag annotationCrossPageOverlap annotationOverlap touchCursor touchCursorOutsideReader links tappableLinks bookmarkCornerLinks
-            annotationSectionBoundary headerFooterSizes headerFooterDismissal settings publisherFontDefault advancedText globalLayout columns fullWidthPanels dictionaryRedraw dictionaryAppearance dictionaryEditing dictionaryDismissal opticalSize desktopControls navigation bookmarkReturn booxMenuDismissalRefresh booxRetirementFrame annotationTwoFingerTapConsumesWholeSequence annotationRightClickRejectsChords library libraryTextInheritance libraryGridRows libraryHold libraryAtStart)
+    foreach(check annotationDefaultView galleryWorkerFailure galleryIntegrity sameProcessReadersDoNotRecoverEachOther standaloneHistorySourceKeys verticalJustification startup libraryOnboarding reading errors diagnostics storageDiagnostics timingEvents features stylesheet bookmarks bookmarkMerge annotations annotationModeFeedback annotationSelection coordinateProbeSerialization annotationGripMenus annotationCrossPageDrag selectionCrossPageDrag annotationCrossPageOverlap annotationOverlap touchCursor touchCursorOutsideReader links footnoteHitTargets footnoteHighlightShapes revealedLinkPress tappableLinks bookmarkCornerLinks
+            annotationSectionBoundary headerFooterSizes headerFooterDismissal settings publisherFontDefault advancedText globalLayout columns fullWidthPanels dictionaryRedraw dictionaryAppearance dictionaryEditing dictionaryDismissal opticalSize desktopControls navigation largeInterfaceScale largeInterfaceScaleLongExit bookmarkReturn booxMenuDismissalRefresh booxRetirementFrame annotationTwoFingerTapConsumesWholeSequence annotationRightClickRejectsChords library libraryTextInheritance libraryGridRows libraryHold libraryScanningCaption libraryAtStart)
         set(lane fast)
-        if(check MATCHES "^(annotationDefaultView|sameProcessReadersDoNotRecoverEachOther|standaloneHistorySourceKeys|verticalJustification|features|diagnostics|stylesheet|bookmarks|bookmarkMerge|annotations|annotationModeFeedback|annotationSelection|coordinateProbeSerialization|annotationGripMenus|annotationCrossPageDrag|annotationSectionBoundary|selectionCrossPageDrag|annotationCrossPageOverlap|annotationOverlap|touchCursor|touchCursorOutsideReader|links|tappableLinks|bookmarkCornerLinks|headerFooterSizes|headerFooterDismissal|settings|publisherFontDefault|advancedText|globalLayout|columns|fullWidthPanels|dictionaryRedraw|dictionaryAppearance|dictionaryEditing|dictionaryDismissal|opticalSize|desktopControls|navigation|bookmarkReturn|booxMenuDismissalRefresh|booxRetirementFrame|library|libraryTextInheritance|libraryGridRows|libraryHold|libraryAtStart)$")
+        if(check MATCHES "^(annotationDefaultView|sameProcessReadersDoNotRecoverEachOther|standaloneHistorySourceKeys|verticalJustification|features|diagnostics|stylesheet|bookmarks|bookmarkMerge|annotations|annotationModeFeedback|annotationSelection|coordinateProbeSerialization|annotationGripMenus|annotationCrossPageDrag|annotationSectionBoundary|selectionCrossPageDrag|annotationCrossPageOverlap|annotationOverlap|touchCursor|touchCursorOutsideReader|links|tappableLinks|bookmarkCornerLinks|headerFooterSizes|headerFooterDismissal|settings|publisherFontDefault|advancedText|globalLayout|columns|fullWidthPanels|dictionaryRedraw|dictionaryAppearance|dictionaryEditing|dictionaryDismissal|opticalSize|desktopControls|navigation|largeInterfaceScale|largeInterfaceScaleLongExit|bookmarkReturn|booxMenuDismissalRefresh|booxRetirementFrame|library|libraryTextInheritance|libraryGridRows|libraryHold|libraryScanningCaption|libraryAtStart)$")
             set(lane integration)
         endif()
         set(test_timeout 30)
@@ -276,6 +311,14 @@ if(BUILD_TESTING)
     set_target_properties(kobalt-regression-runtime PROPERTIES AUTOMOC OFF)
     target_link_libraries(kobalt-regression-runtime PUBLIC kobalt-core)
     add_custom_target(kobalt-tests DEPENDS kobalt-desktop-tests kobalt-eval-compare)
+    add_executable(kobalt-startup-recovery-tests "${KOBALT_ROOT}/tests/startup_recovery.c"
+        "${KOBALT_ROOT}/platforms/kobo/common/startup_recovery.c")
+    set_target_properties(kobalt-startup-recovery-tests PROPERTIES AUTOMOC OFF)
+    target_include_directories(kobalt-startup-recovery-tests PRIVATE "${KOBALT_ROOT}")
+    target_compile_options(kobalt-startup-recovery-tests PRIVATE -Wall -Wextra -Werror)
+    add_dependencies(kobalt-tests kobalt-startup-recovery-tests)
+    add_test(NAME platform.startup-recovery COMMAND kobalt-startup-recovery-tests)
+    set_tests_properties(platform.startup-recovery PROPERTIES LABELS "platform" TIMEOUT 30)
     add_test(NAME build.eval-device-outcomes COMMAND "${CMAKE_COMMAND}"
         "-DTEST_EXECUTABLE=${CMAKE_COMMAND}"
         "-DTEST_ARGUMENTS=-DCOMPARE=$<TARGET_FILE:kobalt-eval-compare>;-P;${KOBALT_ROOT}/tests/eval_device_outcomes.cmake"
@@ -300,21 +343,25 @@ if(BUILD_TESTING)
             appearanceSleepRetainsDraft appearanceFailedPreviewDismisses appearanceApplyFailureCanExit
             appearanceCloseDuringPreview appearanceSleepDuringFirstEdit appearanceDragsDuringPreview
             pageTurnsResumeWhenReaderIsShownAfterSleep clockStopsWhileReaderIsHidden closeWithPendingBookmark
+            closeWaitsForLocalSave closeRetriesRequiredNativeSaves quitAfterFailedLocalSaveRetry closeWaitsForNativeTimeBeforePosition revokedNativeDrainRetainsLocalSave
             pageGestureBurstKeepsOnePendingTurn exitThroughReaderAndReopen exitGuardUsesTapTime staleSearchReplyIgnored searchSurvivesReflow
             searchHighlightClearsOnReflow
             sleepRequestFreezesOrientationBeforeHandoff closePublishesHeldOrientationBeforeBackgroundPaint
             closeRestoresOrientationBeforeBackgroundPaint rotationOwnership customSleepScreenIsOptIn
             closedReaderRetainsSleepScreen usbRetainsBackdropBeforeReleasingReader persistedSleepScreenRejectsStaleAndDamagedFrames
-            homeSleepScreenRequiresUnambiguousLastBook nativeOpeningSaveRetries
+            homeSleepScreenRequiresUnambiguousLastBook nativeOpeningStatus
             sleepScreenUpdatesWhilePluggedIn sleepScreenDimsOnlyItsOwnedPage sleepTilesRepaintOnlyTheirArea
             sleepSnapshotMatchesTheDisplayedPage
             sleepSnapshotReplacesEachClockWithoutChangingTheReadingPage sleepTimeLeftUsesHoursAboveTwoHours
             sleepScreenModesKeepTheStockDefaultAndMigrateTheOptIn sleepCoverFitsWithoutCroppingOrDimming
             sleepCoverDecodingIsBoundedAndHonorsSourceCancellation wifiStatus remoteKeyActivityRequiresActiveReading
-            finishChoiceSurvivesSleepAndRequiresActiveReader progressPercentagesAgree kosyncAccountGating kosyncOpening kosyncNetwork kosyncManualToolbar kosyncManualConnection kosyncPasswordSleep kosyncFinal nativeProgressWaitsForSleep positionSavesWaitForQuietInput usbFinalSave
+            finishChoiceSurvivesSleepAndRequiresActiveReader progressPercentagesAgree kosyncAccountGating kosyncOpening kosyncNetwork kosyncManualToolbar kosyncManualConnection kosyncPasswordSleep kosyncFinal nativeProgressWaitsForSleep appearanceRetryCooldown closeWithUnusableSettings recoveryNoticeAfterFirstPage benchmarkNoticeAfterRun activityBatchesAndLowBattery usbFinalSave
             progressChoiceKeepAndGo finishedSyncWithoutPositionKeepsLocalReading
             progressChoiceForOlderAlert progressChoiceUnavailablePosition
             appearanceOpeningDoesNotRepaintToolbar annotationFramesKeepFirstPaintComplete annotationListResolvesPagesOnDemand)
+        if(NOT KOBALT_DESKTOP_SENSORS AND check MATCHES "^(sleepRequestFreezesOrientationBeforeHandoff|closePublishesHeldOrientationBeforeBackgroundPaint)$")
+            continue()
+        endif()
         add_test(NAME lifecycle.${check} COMMAND "${CMAKE_COMMAND}"
             "-DTEST_EXECUTABLE=$<TARGET_FILE:kobalt-reader-lifecycle-tests>" "-DTEST_ARGUMENTS=${check}"
             "-DTEST_TIMEOUT=120" "-DTEST_TMP_ROOT=${CMAKE_CURRENT_BINARY_DIR}/test-tmp"
@@ -323,7 +370,25 @@ if(BUILD_TESTING)
             LABELS "lifecycle;integration" TIMEOUT 125)
     endforeach()
     add_executable(kobalt-shutdown-tests "${KOBALT_ROOT}/tests/kobo_shutdown.cpp"
-        "${KOBALT_ROOT}/platforms/kobo/common/native_lifecycle.cpp")
+        "${KOBALT_ROOT}/platforms/kobo/common/startup_recovery.c"
+        "${KOBALT_ROOT}/platforms/kobo/common/native_lifecycle.cpp"
+        "${KOBALT_ROOT}/platforms/kobo/common/screensaver_compatibility.cpp")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(kobalt-screensaver-loader-tests "${KOBALT_ROOT}/tests/screensaver_loader.cpp"
+            "${KOBALT_ROOT}/platforms/kobo/common/screensaver_compatibility.cpp")
+        target_include_directories(kobalt-screensaver-loader-tests PRIVATE "${KOBALT_ROOT}" "${KOBALT_ROOT}/src")
+        target_link_libraries(kobalt-screensaver-loader-tests PRIVATE Qt6::Core ${CMAKE_DL_LIBS})
+        target_link_options(kobalt-screensaver-loader-tests PRIVATE "-Wl,--wrap=dl_iterate_phdr,--wrap=dlopen")
+        target_compile_options(kobalt-screensaver-loader-tests PRIVATE -Wall -Wextra -Werror)
+        add_dependencies(kobalt-tests kobalt-screensaver-loader-tests)
+        add_test(NAME platform.screensaver-loader COMMAND kobalt-screensaver-loader-tests)
+        set_tests_properties(platform.screensaver-loader PROPERTIES LABELS "platform" TIMEOUT 30)
+    endif()
+    add_library(kobalt-screensaver-fixture SHARED "${KOBALT_ROOT}/tests/support/screensaver_fixture.cpp")
+    target_include_directories(kobalt-screensaver-fixture PRIVATE "${KOBALT_ROOT}")
+    target_compile_definitions(kobalt-shutdown-tests PRIVATE
+        KOBALT_SCREENSAVER_FIXTURE="$<TARGET_FILE:kobalt-screensaver-fixture>")
+    add_dependencies(kobalt-shutdown-tests kobalt-screensaver-fixture)
     set_target_properties(kobalt-shutdown-tests PROPERTIES ENABLE_EXPORTS ON)
     target_compile_definitions(kobalt-shutdown-tests PRIVATE KOBALT_CONFIG_DIR="." KOBALT_SYSTEM_FONT_DIRECTORY="")
     target_link_libraries(kobalt-shutdown-tests PRIVATE kobalt-regression-runtime Qt6::Test)
@@ -335,9 +400,38 @@ if(BUILD_TESTING)
         -P "${CMAKE_CURRENT_SOURCE_DIR}/run-test.cmake")
     set_tests_properties(platform.shutdown PROPERTIES ENVIRONMENT "${headless_environment}"
         LABELS "platform;integration" TIMEOUT 125)
+    add_executable(kobalt-sleep-persistence-tests "${KOBALT_ROOT}/tests/sleep_persistence.cpp"
+        "${source}/storage/sleep_snapshot.cpp" "${source}/support/main_thread.cpp"
+        "${source}/support/diagnostics.cpp")
+    target_include_directories(kobalt-sleep-persistence-tests PRIVATE "${source}" "${CMAKE_CURRENT_BINARY_DIR}")
+    target_link_libraries(kobalt-sleep-persistence-tests PRIVATE Qt6::Core Qt6::Gui)
+    target_compile_options(kobalt-sleep-persistence-tests PRIVATE -Wall -Wextra -Werror)
+    if(APPLE)
+        target_compile_definitions(kobalt-sleep-persistence-tests PRIVATE fdatasync=fsync)
+    endif()
+    add_dependencies(kobalt-tests kobalt-sleep-persistence-tests)
+    add_test(NAME platform.sleep-persistence COMMAND "${CMAKE_COMMAND}"
+        "-DTEST_EXECUTABLE=$<TARGET_FILE:kobalt-sleep-persistence-tests>"
+        "-DTEST_TIMEOUT=30" "-DTEST_TMP_ROOT=${CMAKE_CURRENT_BINARY_DIR}/test-tmp"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/run-test.cmake")
+    set_tests_properties(platform.sleep-persistence PROPERTIES ENVIRONMENT "${headless_environment}"
+        LABELS "platform;integration" TIMEOUT 35)
+    add_executable(kobalt-scenario-sleep-tests "${KOBALT_ROOT}/tests/scenario_sleep.cpp"
+        "${source}/scenario/player.cpp")
+    target_include_directories(kobalt-scenario-sleep-tests PRIVATE "${source}")
+    target_link_libraries(kobalt-scenario-sleep-tests PRIVATE Qt6::Widgets Qt6::GuiPrivate Qt6::Network)
+    target_compile_options(kobalt-scenario-sleep-tests PRIVATE -Wall -Wextra -Werror)
+    add_dependencies(kobalt-tests kobalt-scenario-sleep-tests)
+    add_test(NAME platform.scenario-sleep COMMAND "${CMAKE_COMMAND}"
+        "-DTEST_EXECUTABLE=$<TARGET_FILE:kobalt-scenario-sleep-tests>"
+        "-DTEST_TIMEOUT=30" "-DTEST_TMP_ROOT=${CMAKE_CURRENT_BINARY_DIR}/test-tmp"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/run-test.cmake")
+    set_tests_properties(platform.scenario-sleep PROPERTIES ENVIRONMENT "${headless_environment}"
+        LABELS "platform;integration" TIMEOUT 35)
     add_executable(kobalt-power-screen-tests "${KOBALT_ROOT}/tests/kobo_power_screen.cpp"
         "${KOBALT_ROOT}/platforms/kobo/common/home_sleep_screen.cpp"
-        "${KOBALT_ROOT}/platforms/kobo/common/window_presentation.cpp")
+        "${KOBALT_ROOT}/platforms/kobo/common/window_presentation.cpp"
+        "${KOBALT_ROOT}/platforms/kobo/common/native_font_scale.cpp")
     set_target_properties(kobalt-power-screen-tests PROPERTIES ENABLE_EXPORTS ON)
     target_compile_definitions(kobalt-power-screen-tests PRIVATE KOBALT_TEST_ASSET_ROOT="${KOBALT_ASSETS}")
     target_link_libraries(kobalt-power-screen-tests PRIVATE kobalt-desktop kobalt-core Qt6::Test)
@@ -405,6 +499,7 @@ if(BUILD_TESTING)
                 target_sources(kobalt-${name}-tests PRIVATE "${KOBALT_ROOT}/platforms/kobo/common/native_sync_network.cpp"
                     "${KOBALT_ROOT}/platforms/kobo/common/native_sync_network.h"
                     "${KOBALT_ROOT}/platforms/kobo/common/window_presentation.cpp"
+                    "${KOBALT_ROOT}/platforms/kobo/common/native_font_scale.cpp"
                     "${KOBALT_ROOT}/platforms/kobo/common/native_wifi.cpp")
                 target_include_directories(kobalt-${name}-tests PRIVATE "${KOBALT_ROOT}" "${source}")
                 target_link_libraries(kobalt-${name}-tests PRIVATE kobalt-regression-runtime Qt6::Widgets Qt6::Network)
@@ -418,6 +513,8 @@ if(BUILD_TESTING)
                 set_target_properties(kobalt-${name}-tests PROPERTIES AUTOMOC ON ENABLE_EXPORTS ON)
             elseif(check STREQUAL "native_lifecycle")
                 target_sources(kobalt-${name}-tests PRIVATE "${KOBALT_ROOT}/platforms/kobo/common/native_lifecycle.cpp"
+                    "${KOBALT_ROOT}/platforms/kobo/common/startup_recovery.c"
+                    "${KOBALT_ROOT}/platforms/kobo/common/screensaver_compatibility.cpp"
                     "${KOBALT_ROOT}/platforms/kobo/common/native_lifecycle.h")
                 target_link_libraries(kobalt-${name}-tests PRIVATE kobalt-regression-runtime Qt6::Widgets Qt6::Sql)
                 target_include_directories(kobalt-${name}-tests PRIVATE "${KOBALT_ROOT}")
@@ -429,6 +526,10 @@ if(BUILD_TESTING)
                 target_link_libraries(kobalt-${name}-tests PRIVATE kobalt-regression-runtime Qt6::Widgets Qt6::Sql)
                 target_include_directories(kobalt-${name}-tests PRIVATE "${KOBALT_ROOT}")
                 set_target_properties(kobalt-${name}-tests PROPERTIES ENABLE_EXPORTS ON)
+            elseif(check STREQUAL "nickel_font_scale")
+                target_sources(kobalt-${name}-tests PRIVATE "${KOBALT_ROOT}/platforms/kobo/common/native_font_scale.cpp")
+                target_link_libraries(kobalt-${name}-tests PRIVATE Qt6::Widgets)
+                target_include_directories(kobalt-${name}-tests PRIVATE "${KOBALT_ROOT}" "${source}")
             elseif(check STREQUAL "touch_rotation")
                 target_link_libraries(kobalt-${name}-tests PRIVATE Qt6::Gui)
                 target_include_directories(kobalt-${name}-tests PRIVATE "${KOBALT_ROOT}")
@@ -461,6 +562,12 @@ if(BUILD_TESTING)
             endif()
             if(check STREQUAL "touch_rotation")
                 target_sources(kobalt-${name}-tests PRIVATE "${KOBALT_ROOT}/platforms/kobo/qt5/touch_rotation.cpp")
+            endif()
+            if(check STREQUAL "crash_reports")
+                target_sources(kobalt-${name}-tests PRIVATE "${KOBALT_ROOT}/platforms/kobo/common/crash_reports.cpp")
+                target_include_directories(kobalt-${name}-tests PRIVATE "${KOBALT_ROOT}")
+                # dladdr names the crashing test function only when it is exported.
+                set_target_properties(kobalt-${name}-tests PROPERTIES ENABLE_EXPORTS ON)
             endif()
             if(check STREQUAL "reader")
                 target_sources(kobalt-${name}-tests PRIVATE "${KOBALT_ROOT}/platforms/kobo/common/engine_positions.cpp")
@@ -502,15 +609,15 @@ if(BUILD_TESTING)
                 ENVIRONMENT "${headless_environment}" LABELS "${group};${lane}" TIMEOUT ${ctest_timeout})
         endforeach()
     endfunction()
-    kobalt_regressions(model storage_assets android_assets profile_storage record_writer reading_history bookmark_store highlight_store annotation_database appearance_settings header_footer
+    kobalt_regressions(model storage_assets android_assets profile_storage record_writer main_thread reading_history bookmark_store highlight_store annotation_database appearance_settings header_footer
         layout_cache resource_cache layout_compatibility reading_pace reading_speed engine_activity
-        local_resources zip_resource diagnostics dictionary_store image_damage page_pixels
+        local_resources zip_resource diagnostics crash_reports dictionary_store image_damage page_pixels
         logical_word_counter brightness_gesture qt_compat page_refresh_regions screen_refresh plain_archive reading_progress
         library kosync)
     kobalt_regressions(model font_axes touch_rotation)
     kobalt_regressions(platform reader_orientation font_sources system_fonts nickel_dictionary_selection
-        nickel_reading_pace_cache nickel_session_calls nickel_book_menu native_progress native_sync_network native_lifecycle usb_removal page_transition_native)
-    kobalt_regressions(engine vertical_spacing source_index columns advanced_text alignment indentation page_layout vertical_writing mathml line_breaking
+        nickel_reading_pace_cache nickel_reading_save nickel_session_calls nickel_book_menu nickel_font_scale native_progress native_sync_network native_lifecycle usb_removal page_transition_native)
+    kobalt_regressions(engine vertical_spacing source_index columns advanced_text paragraph_spacing beautifier alignment indentation page_layout vertical_writing mathml line_breaking
         fallback_styles svg_limits image_proportions whitespace links search word_selection reader publisher_markup local_reader document_word_count document_cache)
     kobalt_regressions(component ui acknowledgments kosync_ui)
     target_link_libraries(kobalt-kosync-ui-tests PRIVATE Qt6::Test)
@@ -526,33 +633,39 @@ if(BUILD_TESTING)
             "-DREFERENCES=${KOBALT_ROOT}/tests/fixtures/screenshot-books.json"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/prepare-screenshot-books.cmake"
         COMMAND "${CMAKE_COMMAND}" "-DTEST_EXECUTABLE=$<TARGET_FILE:kobalt-desktop-tests>"
-            "-DTEST_ARGUMENTS=--screenshots;${KOBALT_ROOT}/build/screenshots/mac"
+            "-DTEST_ARGUMENTS=--screenshots;${KOBALT_ROOT}/build/screenshots/${KOBALT_DESKTOP_PLATFORM}"
             "-DTEST_TMP_ROOT=${CMAKE_CURRENT_BINARY_DIR}/test-tmp" "-DTEST_TIMEOUT=600"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/run-test.cmake"
         DEPENDS kobalt-desktop-tests USES_TERMINAL VERBATIM)
     # Timings come from one process at a time; KOBALT_PERF_FILTER and
     # KOBALT_PERF_REPETITIONS narrow or lengthen a run. taskpolicy keeps the
     # process on one kind of core, so repeated runs agree.
-    find_program(KOBALT_TASKPOLICY taskpolicy REQUIRED)
+    set(perf_executable "$<TARGET_FILE:kobalt-desktop-tests>")
+    set(perf_arguments "--perf;${CMAKE_BINARY_DIR}/perf/perf.json")
+    if(APPLE)
+        find_program(KOBALT_TASKPOLICY taskpolicy REQUIRED)
+        set(perf_executable "${KOBALT_TASKPOLICY}")
+        list(PREPEND perf_arguments -t 0 -l 0 "$<TARGET_FILE:kobalt-desktop-tests>")
+    endif()
     # The large-book scenario opens a pinned Gutenberg edition, fetched once.
     add_custom_target(perf
         COMMAND "${CMAKE_COMMAND}" "-DOUTPUT=${KOBALT_ROOT}/build/screenshot-books"
             "-DREFERENCES=${KOBALT_ROOT}/tests/fixtures/screenshot-books.json" -DNAMES=war-and-peace
             -P "${CMAKE_CURRENT_SOURCE_DIR}/prepare-screenshot-books.cmake"
-        COMMAND "${CMAKE_COMMAND}" "-DTEST_EXECUTABLE=${KOBALT_TASKPOLICY}"
-            "-DTEST_ARGUMENTS=-t;0;-l;0;$<TARGET_FILE:kobalt-desktop-tests>;--perf;${CMAKE_BINARY_DIR}/perf/perf.json"
+        COMMAND "${CMAKE_COMMAND}" "-DTEST_EXECUTABLE=${perf_executable}"
+            "-DTEST_ARGUMENTS=${perf_arguments}"
             "-DTEST_TMP_ROOT=${CMAKE_CURRENT_BINARY_DIR}/test-tmp" "-DTEST_TIMEOUT=600"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/run-test.cmake"
         DEPENDS kobalt-desktop-tests USES_TERMINAL VERBATIM)
     add_custom_target(screenshots-light
         COMMAND "${CMAKE_COMMAND}" "-DTEST_EXECUTABLE=$<TARGET_FILE:kobalt-desktop-tests>"
-            "-DTEST_ARGUMENTS=--screenshots;${KOBALT_ROOT}/build/screenshots/mac-light;--light"
+            "-DTEST_ARGUMENTS=--screenshots;${KOBALT_ROOT}/build/screenshots/${KOBALT_DESKTOP_PLATFORM}-light;--light"
             "-DTEST_TMP_ROOT=${CMAKE_CURRENT_BINARY_DIR}/test-tmp" "-DTEST_TIMEOUT=120"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/run-test.cmake"
         DEPENDS kobalt-desktop-tests USES_TERMINAL VERBATIM)
     add_custom_target(screenshot-gallery
         COMMAND "${CMAKE_COMMAND}" "-DTEST_EXECUTABLE=$<TARGET_FILE:kobalt-desktop-tests>"
-            "-DTEST_ARGUMENTS=--gallery;${KOBALT_ROOT}/build/screenshots/mac"
+            "-DTEST_ARGUMENTS=--gallery;${KOBALT_ROOT}/build/screenshots/${KOBALT_DESKTOP_PLATFORM}"
             "-DTEST_TMP_ROOT=${CMAKE_CURRENT_BINARY_DIR}/test-tmp" "-DTEST_TIMEOUT=30"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/run-test.cmake"
         DEPENDS kobalt-desktop-tests USES_TERMINAL VERBATIM)

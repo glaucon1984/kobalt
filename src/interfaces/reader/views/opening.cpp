@@ -27,13 +27,11 @@ namespace {
 class OpeningDialog final : public QDialog {
 public:
     OpeningDialog(QWidget *background, bool dark, PresentationFactory makePresentation, bool embedded = false)
-        : QDialog(background, embedded ? Qt::Widget : Qt::Dialog | Qt::FramelessWindowHint),
+        : QDialog(background, embedded ? Qt::SubWindow : Qt::Dialog | Qt::FramelessWindowHint),
           presentation(makePresentation(this)), embedded(embedded) {
         Q_ASSERT(presentation);
-        // QDialog promotes Qt::Widget to a dialog during construction. Embed
-        // it afterward so hiding the Android host also hides this view.
-        if (embedded)
-            setWindowFlags(Qt::Widget);
+        // Start as a child. Creating a dialog under an embedded reader first
+        // leaves a separate graphics proxy even after clearing its window flag.
         setObjectName("rrOpening");
         setWindowModality(embedded ? Qt::NonModal : Qt::ApplicationModal);
         setProperty("reader_dark", dark);
@@ -86,7 +84,8 @@ public:
     }
     void showFallback(OpeningFallback state) {
         fallback = true;
-        automatic = state != OpeningFallback::Failure;
+        automatic = state == OpeningFallback::Protected || state == OpeningFallback::Remembered;
+        storageFailure = state == OpeningFallback::Storage;
         const bool protectedBook = state == OpeningFallback::Protected;
         protectedIcon = protectedBook;
         hintTimer.stop();
@@ -245,7 +244,11 @@ private:
         if (failureDialog)
             return failureDialog;
         failureDialog =
-            new ui::ChoiceModal(this, {strings::get("opening.failed_detail"), strings::get("opening.failed"), {}},
+            new ui::ChoiceModal(this,
+                                {storageFailure ? strings::get("opening.storage_failed_detail")
+                                                : strings::get("opening.failed_detail"),
+                                 storageFailure ? strings::get("opening.storage_failed") : strings::get("opening.failed"),
+                                 {}},
                                 {strings::get("opening.go_back"), "rrOpeningBack"},
                                 {strings::get("opening.try_native"), "rrOpeningNative"});
         failureDialog->setObjectName("rrOpeningFailure");
@@ -272,6 +275,7 @@ private:
     }
     QLabel *brand, *label, *hint, *detail;
     ui::ChoiceModal *failureDialog = nullptr;
+    bool storageFailure = false;
     bool fallback = false, automatic = false, protectedIcon = false;
     std::unique_ptr<WindowPresentation> presentation;
     const bool embedded;
@@ -348,5 +352,38 @@ std::unique_ptr<ReaderOpeningView> createEmbeddedOpening(QWidget *parent, Presen
     QJsonObject preferences;
     preferences["dark_mode"] = ui::darkTheme(parent);
     return std::make_unique<OpeningView>(parent, preferences, std::move(presentation), true);
+}
+SaveErrorView::SaveErrorView(QWidget *parent, const QString &error, bool retried)
+    : ui::ChoiceModal(parent,
+          {strings::get("closing.failed_detail") +
+               (error.isEmpty() ? QString() : "\n\n" + error) +
+               (retried ? "\n\n" + strings::get("closing.quit_warning") : QString()),
+           strings::get("closing.failed"), {}},
+          {strings::get("closing.return"), "rrCloseSaveReturn"},
+          {strings::get("closing.retry"), "rrCloseSaveRetry"}) {
+    setObjectName("rrCloseSaveError");
+    if (retried) {
+        quit = ui::makeModalButton(card(), {strings::get("closing.quit"), "rrCloseSaveQuit"}, false);
+        quit->ensurePolished();
+        quit->setFixedHeight(ui::metrics::chrome::actionHeight);
+        card()->rows()->addWidget(quit);
+    }
+    fitCard();
+}
+SavingView::SavingView(QWidget *parent) : ui::ModalOverlay(parent) {
+    setObjectName("rrSaving");
+    setProperty("reader_standard_modal", true);
+    card()->title(strings::get("closing.saving"), "rrSavingTitle");
+    card()->message(strings::get("closing.may_take_a_while"), "rrSavingHint");
+    progress = new ui::ProgressBar(card());
+    progress->setObjectName("rrSavingProgress");
+    card()->rows()->addWidget(progress);
+    fitCard();
+    for (auto *widget : findChildren<QWidget *>())
+        platform::textRefresh(widget);
+    platform::textRefresh(this);
+}
+void SavingView::setProgress(int percent) {
+    progress->setValue(qBound(0, percent, 100));
 }
 }

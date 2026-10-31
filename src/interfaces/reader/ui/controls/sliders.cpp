@@ -62,10 +62,16 @@ void SettingSlider::paintEvent(QPaintEvent *) {
     const int center = (height() + labelHeight) / 2;
     painter.setFont(interfaceFont(m::control::captionValueText));
     painter.setPen(palette().color(QPalette::WindowText));
+    int labelRight = -int(m::control::captionGap);
     for (int index = 0; index < markers.size() && index < markerLabels.size(); ++index) {
         const int labelWidth = interfaceTextWidth(markerLabels[index], painter.font());
         const int left = qBound(0, positionForValue(markers[index]) - labelWidth / 2, qMax(0, width() - labelWidth));
+        // Keep the first label, including Publisher, when a narrow panel cannot
+        // fit every label. The ticks and current value remain available.
+        if (left < labelRight + int(m::control::captionGap))
+            continue;
         drawInterfaceText(painter, QRect(left, 0, labelWidth, labelHeight), markerLabels[index], Qt::AlignCenter);
+        labelRight = left + labelWidth;
     }
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setPen(QPen(palette().color(QPalette::WindowText), m::control::sliderMarkerWidth));
@@ -350,7 +356,8 @@ void RangeOverview::hideEvent(QHideEvent *) {
 
 SettingSlider *sliderRow(QWidget *parent, QVBoxLayout *rows, const char *name, const char *labelName,
                          const QString &label, const char *lessName, const char *moreName, int minimum, int maximum,
-                         int step, std::function<void(int)> apply, const QString &prefix, const QString &suffix) {
+                         int step, std::function<void(int)> apply, const QString &prefix, const QString &suffix,
+                         const QStringList &markerLabels) {
     auto *row = new QWidget(parent);
     row->setMinimumHeight(m::control::stepSize);
     rows->addWidget(row);
@@ -361,7 +368,8 @@ SettingSlider *sliderRow(QWidget *parent, QVBoxLayout *rows, const char *name, c
     caption->setFixedWidth(m::control::captionWidth);
     line->addWidget(caption);
     auto *captionRows = new QVBoxLayout(caption);
-    captionRows->setContentsMargins(0, 0, m::control::captionRight, 0);
+    const int labelHeight = markerLabels.isEmpty() ? 0 : int(m::control::sliderLabelHeight);
+    captionRows->setContentsMargins(0, labelHeight, m::control::captionRight, 0);
     captionRows->setSpacing(px(2));
     auto *title = new ui::InterfaceLabel(label.section(':', 0, 0), caption);
     title->setObjectName(QString::fromLatin1(name) + "Caption");
@@ -373,6 +381,7 @@ SettingSlider *sliderRow(QWidget *parent, QVBoxLayout *rows, const char *name, c
     current->setSpacing(px(6));
     captionRows->addLayout(current);
     auto *prefixLabel = new ui::InterfaceLabel(strings::get("controls.currently"), caption);
+    prefixLabel->setObjectName(QString::fromLatin1(name) + "CurrentPrefix");
     auto *value = new ui::InterfaceLabel(caption);
     value->setObjectName(labelName);
     const auto secondary = styles::font(m::control::captionValueText) + "color:palette(placeholder-text);";
@@ -386,12 +395,28 @@ SettingSlider *sliderRow(QWidget *parent, QVBoxLayout *rows, const char *name, c
     less->setAccessibleName(strings::get("controls.decrease").arg(label.section(':', 0, 0).toLower()));
     auto *slider = new SettingSlider(parent, minimum, maximum, step);
     slider->setObjectName(name);
+    if (!markerLabels.isEmpty())
+        slider->setMarkerLabels(markerLabels);
     auto *more = new StepButton(ControlIcon::Plus, parent);
     more->setObjectName(moreName);
     more->setAccessibleName(strings::get("controls.increase").arg(label.section(':', 0, 0).toLower()));
-    line->addWidget(less, 0, Qt::AlignVCenter);
+    // Labels sit above the rail. Offset adjacent buttons by the same height,
+    // as the labeled header/footer sliders do, to keep their centers aligned.
+    const auto addStep = [line, labelHeight](QWidget *button) {
+        if (!labelHeight) {
+            line->addWidget(button, 0, Qt::AlignVCenter);
+            return;
+        }
+        auto *column = new QVBoxLayout;
+        column->setContentsMargins(0, 0, 0, 0);
+        column->setSpacing(0);
+        column->addSpacing(labelHeight);
+        column->addWidget(button, 0, Qt::AlignVCenter);
+        line->addLayout(column);
+    };
+    addStep(less);
     line->addWidget(slider, 1);
-    line->addWidget(more, 0, Qt::AlignVCenter);
+    addStep(more);
     slider->setAccessibleName(label.section(':', 0, 0));
     QObject::connect(slider, &QSlider::valueChanged, value, [value, prefix, suffix](int v) {
         value->setText(prefix + QString::number(v) + suffix);

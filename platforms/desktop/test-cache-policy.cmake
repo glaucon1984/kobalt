@@ -1,3 +1,7 @@
+# A launcher run owns this root so cancellation can remove only its scratch state.
+if(NOT "$ENV{KOBALT_TEST_TMP_ROOT}" STREQUAL "")
+    set(TEST_ROOT "$ENV{KOBALT_TEST_TMP_ROOT}/cache-policy")
+endif()
 file(REMOVE_RECURSE "${TEST_ROOT}")
 file(MAKE_DIRECTORY "${TEST_ROOT}/source/dependencies/patches")
 file(WRITE "${TEST_ROOT}/source/dependencies/manifest.json" "engine-one")

@@ -180,7 +180,7 @@ kobalt_source(lunasvg PATCHES "${svg_patches}/cmake_tweaks.patch" "${svg_patches
     "${svg_patches}/pkgconfig.patch" "${CMAKE_CURRENT_SOURCE_DIR}/patches/lunasvg-resource-limits.patch")
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/crengine-patches.txt" engine_patches)
 list(TRANSFORM engine_patches PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/patches/")
-if(APPLE)
+if(APPLE OR (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CROSSCOMPILING AND NOT ANDROID))
     set(engine_options NATIVE_ENGINE)
 endif()
 kobalt_source(crengine ${engine_options} PATCHES ${engine_patches})

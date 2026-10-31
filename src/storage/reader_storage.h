@@ -1,6 +1,9 @@
 #pragma once
 #include <QJsonObject>
 #include <QString>
+#include <QStringList>
+#include <functional>
+class QSqlDatabase;
 
 namespace kobalt::storage {
 // Hosts choose the directories. Filenames and identity hashing are shared so
@@ -44,10 +47,29 @@ bool writeRecord(const QString &directory, const QString &name, const QString &l
                  const QJsonObject &value, qint64 maxBytes = maxJsonBytes);
 JsonRead readBookState(const Paths &, const QString &identity, const QString &legacy = {});
 bool writeBookState(const Paths &, const QString &identity, const QJsonObject &, const QString &legacy = {});
+// Commit one immutable reading snapshot. Roll back all members and legacy
+// imports together if any member fails.
+bool writeReadingActivity(const Paths &, const QString &identity, const QJsonObject &book,
+                          const QJsonObject &speed, const std::function<bool(QSqlDatabase &)> &history,
+                          const QString &legacy = {});
 JsonRead readPreferences(const QString &path);
 bool writePreferences(const QString &path, const QJsonObject &);
-// Imports recognized durable files and tidies known transient files. Unknown
-// files and failed imports are kept. Safe to retry after an interruption.
-bool prepareProfile(const Paths &);
+// What profile preparation did with saved data it could not use.
+struct ProfileRecovery {
+    // Moved into backups/ and replaced: settings by the defaults, the sync
+    // account and the database by none.
+    bool settings = false, syncAccount = false, database = false;
+    // The backups, relative to the profile directory.
+    QStringList backups;
+    // A file could not be read, or a damaged file could not be moved aside.
+    // Kobalt cannot use this profile until the storage works again.
+    bool storageFailed = false;
+    bool recovered() const { return settings || syncAccount || database; }
+};
+// Moves damaged saved data, and saved data from a newer version, into
+// backups/ and starts again from defaults. Then imports recognized durable
+// files and tidies known transient files. Unknown files and failed imports
+// are kept. Safe to retry after an interruption.
+bool prepareProfile(const Paths &, ProfileRecovery *recovery = nullptr);
 void archiveImportedSource(const QString &directory, const QString &source);
 }

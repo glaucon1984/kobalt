@@ -2,6 +2,7 @@
 #include "runtime.h"
 #include "light.h"
 #include "interfaces/reader/ui/style/fonts.h"
+#include <QCoreApplication>
 #include <QGuiApplication>
 #include <QDesktopServices>
 #include <QKeyEvent>
@@ -110,6 +111,14 @@ ReaderHostServices readerServices() {
     };
     result.lightAvailable = [] {
         return lightAvailable();
+    };
+    result.textScale = [] {
+        // The system font size from Settings, read when the Library shows and when each book opens.
+        const QJniObject context = QNativeInterface::QAndroidApplication::context();
+        const auto configuration =
+            context.callObjectMethod("getResources", "()Landroid/content/res/Resources;")
+                .callObjectMethod("getConfiguration", "()Landroid/content/res/Configuration;");
+        return configuration.isValid() ? qreal(configuration.getField<jfloat>("fontScale")) : qreal(1);
     };
     result.animationsAvailable = [] {
         return false;

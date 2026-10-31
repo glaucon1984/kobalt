@@ -385,6 +385,7 @@ int main(int argc, char **argv) {
     app.exec();
     worker.join();
     diagnostic("session", {{"status", "closed"}});
+    flushDiagnostics();
     QFile log(logs.path() + "/events.jsonl");
     require(log.open(QIODevice::ReadOnly), "Cannot read diagnostics");
     const auto records = log.readAll();

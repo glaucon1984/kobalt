@@ -48,6 +48,8 @@ struct StyleSample {
     QVector<QVector<QImage>> spreads;
     // One crop per option when the request asked for crops.
     QVector<QImage> crops;
+    // Extra paragraph gaps within each crop, excluding ordinary line leading.
+    QVector<QVector<QRect>> cropGaps;
     // The reading area on a scaled page of the spread.
     QRectF readingArea;
     // One bottom-edge view per option when the request asked for one, with

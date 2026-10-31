@@ -137,6 +137,18 @@ protected:
     }
 };
 int main(int argc, char **argv) {
+#ifdef Q_OS_LINUX
+    // Noto Sans Math may be installed system-wide. This fixture must begin
+    // without it in Qt, then prove the private face is registered on demand.
+    QTemporaryDir fontEnvironment;
+    require(fontEnvironment.isValid(), "Cannot isolate the component font environment");
+    const auto fontConfig = fontEnvironment.filePath("fonts.conf");
+    QFile config(fontConfig);
+    require(config.open(QIODevice::WriteOnly), "Cannot create the component font configuration");
+    require(config.write("<fontconfig></fontconfig>\n") > 0, "Cannot write the component font configuration");
+    config.close();
+    qputenv("FONTCONFIG_FILE", fontConfig.toUtf8());
+#endif
     QApplication app(argc, argv);
     {
         // The loading view is built before the whole bundle is verified. A
@@ -2045,6 +2057,81 @@ int main(int argc, char **argv) {
                 }
         require(firstInk >= 4 && lastInk >= 0 && lastInk < reference.height() - 4,
                 "Setting description does not fit its requested height");
+    }
+    {
+        // Standard text keeps the description at its design offset below the
+        // title; only large text makes the title line taller.
+        namespace m = kobalt::ui::metrics;
+        const auto look = option.presentation();
+        QFont description = option.font();
+        description.setPixelSize(look.descriptionPixels);
+        description.setWeight(QFont::Normal);
+        description.setItalic(false);
+        const int width = 900, textWidth = width - 2 * look.horizontalInset - m::settings::labelLeft -
+                                           look.indicatorSize.width() - m::settings::toggleGap;
+        require(option.heightForWidth(width) ==
+                    qMax(look.minimumRowHeight, m::settings::descriptionTop + m::settings::descriptionBottom +
+                         kobalt::ui::wrappedInterfaceTextHeight(option.accessibleDescription(), description, textWidth)),
+                "Standard text moved the setting description");
+    }
+    {
+        // A radio label's capitals center on its circle at every text size.
+        // A word without descenders shows where the capitals sit.
+        namespace m = kobalt::ui::metrics;
+        const auto capitalsBelowCircle = [&optionsHost, &app](qreal scale) {
+            kobalt::ui::setLargeText(scale);
+            kobalt::ui::RadioList list(&optionsHost);
+            list.add("radioCentering", "HIDE");
+            list.resize(700, list.heightForWidth(700));
+            list.show();
+            app.processEvents();
+            const auto image = list.grab().toImage();
+            const auto inkRows = [&image](int left, int right) {
+                int first = -1, last = -1;
+                for (int y = 0; y < image.height() - 2; ++y)
+                    for (int x = left; x < right; ++x)
+                        if (qGray(image.pixel(x, y)) < 128) {
+                            if (first < 0)
+                                first = y;
+                            last = y;
+                            break;
+                        }
+                return (first + last) / 2.0;
+            };
+            const int circleRight = m::chrome::inset + m::chrome::checkSize;
+            return inkRows(circleRight + m::settings::toggleGap, image.width()) -
+                   inkRows(m::chrome::inset, circleRight);
+        };
+        const qreal standard = capitalsBelowCircle(1), large = capitalsBelowCircle(1.5);
+        kobalt::ui::setLargeText(1);
+        require(qAbs(standard) <= 1, "A radio label is not centered on its circle");
+        require(qAbs(large) <= 1, "Large text moved a radio label away from its circle");
+        // A value on the label's line keeps its place while the label is
+        // raised, so values line up whatever their labels' descenders.
+        const auto valueBelowCircle = [&optionsHost, &app](const QString &label) {
+            kobalt::ui::RadioList list(&optionsHost);
+            list.add("radioValue", label)->setValue("VALUE");
+            list.resize(700, list.heightForWidth(700));
+            list.show();
+            app.processEvents();
+            const auto row = list.grab().toImage();
+            const auto inkMiddle = [&row](int left, int right) {
+                int first = -1, last = -1;
+                for (int y = 0; y < row.height() - 2; ++y)
+                    for (int x = left; x < right; ++x)
+                        if (qGray(row.pixel(x, y)) < 128) {
+                            if (first < 0)
+                                first = y;
+                            last = y;
+                            break;
+                        }
+                return (first + last) / 2.0;
+            };
+            const int circleRight = m::chrome::inset + m::chrome::checkSize;
+            return inkMiddle(row.width() / 2, row.width()) - inkMiddle(m::chrome::inset, circleRight);
+        };
+        require(qAbs(valueBelowCircle("Title") - valueBelowCircle("Jumpy")) < 1,
+                "A radio row's value moved with its raised label");
     }
     kobalt::ui::DescribedOption compactOption("Automatic warmth", {}, &optionsHost);
     compactOption.resize(700, compactOption.heightForWidth(700));

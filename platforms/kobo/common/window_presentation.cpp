@@ -1,5 +1,6 @@
 #include "window_presentation.h"
 #include "native_dialog_overlay.h"
+#include "native_font_scale.h"
 #include "support/qt_compat.h"
 #include <QApplication>
 #include <QDialog>
@@ -176,6 +177,12 @@ public:
 
 private:
     bool eventFilter(QObject *object, QEvent *event) override {
+        if (reader && reader->isVisible() && (event->type() == QEvent::Polish || event->type() == QEvent::Show)) {
+            // Nickel's dialogs keep Nickel's Large Print scale over the reader.
+            auto *widget = qobject_cast<QWidget *>(object);
+            if (widget && widget->isWindow() && nativeDialog(widget) && !ownedByReader(widget))
+                allowNativeFontScale(widget, event->type() == QEvent::Polish);
+        }
         if (reader && reader->isVisible() && event->type() == QEvent::Show) {
             auto *widget = qobject_cast<QWidget *>(object);
             if (widget && nativeDialog(widget)) {
@@ -183,6 +190,12 @@ private:
                 qt::later(0, this, [this, candidate] { if (candidate) presentDialog(candidate); });
             }
         }
+        return false;
+    }
+    bool ownedByReader(const QWidget *widget) const {
+        for (auto *parent = widget; parent; parent = parent->parentWidget())
+            if (parent == reader)
+                return true;
         return false;
     }
     void presentDialog(QWidget *widget) {

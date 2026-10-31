@@ -30,6 +30,7 @@
 namespace kobalt::library {
 namespace c = ui::metrics::chrome;
 using ui::Px;
+using ui::TextPx;
 namespace metrics {
 // Library sizes in pixels of a 300 ppi screen, like the reader's.
 inline constexpr Px toolbarHeight{88}, modeWidth{104};
@@ -41,7 +42,9 @@ inline constexpr Px gridGap{28}, gridTop{28}, gridBarGap{10};
 inline constexpr Px thumbWidth{120}, thumbHeight{180}, thumbPadding{20}, progressWidth{150}, barWidth{88},
     barHeight{14};
 // Keep onboarding readable in a wide library and scrollable on short screens.
-inline constexpr Px emptyMargin{54}, emptyWidth{800}, message{56}, body{30}, buttonHeight{108};
+// Its text grows with large text; the buttons keep their height.
+inline constexpr Px emptyMargin{54}, emptyWidth{800}, buttonHeight{108};
+inline constexpr TextPx message{56}, body{30};
 // A held finger may drift this far, about 4 mm, before the hold becomes a drag.
 inline constexpr Px holdSlop{48};
 inline constexpr int longPressMilliseconds = 550, coverCacheEntries = 64, throttleMilliseconds = 1000;
@@ -489,14 +492,20 @@ public:
     }
     // Busy shows scan progress; plain names the view, with no choices to open.
     bool open = false, busy = false, plain = false;
+    // The scan progress beside the caption, or zero when it is hidden.
     int progressWidth = 0;
+    // Whether the caption fits beside scan progress this wide.
+    bool fitsBeside(int progress) const {
+        return ui::interfaceTextWidth(text().toUpper(), ui::captionFont()) <=
+               width() - 2 * c::inset - progress - ui::px(24);
+    }
 
 protected:
     void paintEvent(QPaintEvent *) override {
         QPainter painter(this);
         const auto paper = palette().color(QPalette::Window), ink = palette().color(QPalette::WindowText);
         painter.fillRect(rect(), isDown() ? palette().color(QPalette::Midlight) : paper);
-        const int left = busy ? c::inset + progressWidth + ui::px(24) : int(c::inset);
+        const int left = busy && progressWidth ? c::inset + progressWidth + ui::px(24) : int(c::inset);
         auto font = ui::captionFont();
         painter.setFont(font);
         const int chevron = ui::px(18), gap = ui::px(12);
@@ -1101,7 +1110,6 @@ void LibraryView::rebuild(bool keepPage) {
                         : home   ? strings::get("library.now_reading")
                                  : strings::get(sortNames[int(settings.sort)]));
     sortButton->setEnabled(!scanning && !home);
-    progress->setVisible(scanning);
     if (scanning && !progress->isRunning())
         progress->start(0);
     else if (!scanning)
@@ -1146,7 +1154,12 @@ void LibraryView::arrange() {
     sort->setGeometry(0, toolbarTop, qMax(1, width() - modes.size() * lm::modeWidth),
                       lm::toolbarHeight - ui::metrics::control::border);
     const auto hint = progress->sizeHint();
-    static_cast<SortButton *>(sort)->progressWidth = hint.width();
+    auto *sortButton = static_cast<SortButton *>(sort);
+    // As the reader's tabs drop labels that do not fit, scan progress gives
+    // way to a caption that large text makes too wide to sit beside it.
+    const bool squares = sortButton->busy && sortButton->fitsBeside(hint.width());
+    sortButton->progressWidth = squares ? hint.width() : 0;
+    progress->setVisible(squares);
     progress->setGeometry(c::inset, toolbarTop + (lm::toolbarHeight - hint.height()) / 2, hint.width(), hint.height());
     const int top = toolbarTop + lm::toolbarHeight;
     const int bottom = !pager->isHidden() ? height() - c::actionHeight : height();

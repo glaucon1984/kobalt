@@ -60,6 +60,15 @@ int main(int argc, char **argv) {
             }
         }
     }
+    // A plain EPUB without IDs: firmware 4 stores Nickel's DOM point as is, and
+    // the shared reader must see the same point, not a percent-encoded ID.
+    const QString point = "OEBPS/text/chapter1.xhtml#point(/1/4/24/1:0)";
+    require(nickel4::stored(point) == point && nickel4::shared(point) == point,
+            "Firmware 4 changed a plain EPUB DOM point");
+    require(nickel4::stored("OEBPS/c.xhtml#kobo.8.1:7") == "OEBPS/c.xhtml#kobo.8.1" &&
+                nickel4::shared("OEBPS/c.xhtml#kobo.8.1") == "OEBPS/c.xhtml#kobo.8.1",
+            "Firmware 4 element positions changed form");
+    require(nickel4::stored("OEBPS/c.xhtml#point(/1/4/x)").isEmpty(), "A malformed DOM point was stored");
     require(nickel4::localBookPath("12345678-1234-1234-1234-123456789abc").isEmpty() &&
                 nickel4::localBookPath("https://example.org/book.epub").isEmpty(),
             "Nonlocal book identity became a sideloaded path");

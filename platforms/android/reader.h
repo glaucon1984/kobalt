@@ -61,6 +61,11 @@ private:
     QPointer<ReaderWindow> window_;
     std::shared_ptr<SourceLease> lease;
     void begin(const QString &path, QSize pixels);
+    // Moves unusable saved data aside. Until the storage works, books do not open.
+    void prepareProfile();
+    bool storageFailed = false;
+    // Shown by the next reader after saved data was reset.
+    ReaderNotice recoveryNotice;
     bool retirementNotified = false;
     // When the current opening began, and the stages of the current close.
     QElapsedTimer openingStarted;

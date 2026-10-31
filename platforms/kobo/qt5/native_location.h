@@ -1,12 +1,19 @@
 #pragma once
 #include <QString>
+#include <QRegularExpression>
 #include <QUrl>
 
 // Firmware 4 stores a reading position as a chapter path and an optional
 // element ID, for example "OEBPS/chapter1.xhtml#kobo.9.3". It has no text
 // offset. The shared reader uses the same parts with percent-encoding and an
-// optional ":offset".
+// optional ":offset". In a plain EPUB without IDs, Nickel stores a DOM point
+// with its own offset instead, for example
+// "OEBPS/chapter1.xhtml#point(/1/4/24/1:0)". Both sides keep that form as is.
 namespace kobalt::nickel4 {
+inline bool domPoint(const QString &fragment) {
+    static const QRegularExpression format(QStringLiteral("^point\\(/1(?:/[1-9][0-9]*)*(?::[0-9]+)?\\)$"));
+    return format.match(fragment).hasMatch();
+}
 // Nickel's sideloaded IDs contain literal paths, not percent-encoded URLs.
 inline QString localBookPath(const QString &book) {
     return book.startsWith("file:///") ? book.mid(7) : QString();
@@ -28,7 +35,10 @@ inline QString chapter(const QString &book, const QString &raw) {
 inline QString shared(const QString &raw) {
     const int hash = raw.indexOf('#');
     const auto path = QString::fromLatin1(QUrl::toPercentEncoding(raw.left(hash < 0 ? raw.size() : hash), "/"));
-    return hash < 0 ? path : path + '#' + QString::fromLatin1(QUrl::toPercentEncoding(raw.mid(hash + 1)));
+    if (hash < 0)
+        return path;
+    const auto fragment = raw.mid(hash + 1);
+    return path + '#' + (domPoint(fragment) ? fragment : QString::fromLatin1(QUrl::toPercentEncoding(fragment)));
 }
 // Nickel receives the element that contains the position. The exact offset
 // stays in Kobalt's local checkpoint. Returns an empty string if unsupported.
@@ -40,6 +50,10 @@ inline QString stored(const QString &position) {
     if (hash < 0)
         return path;
     auto id = position.mid(hash + 1);
+    if (domPoint(id))
+        return path + '#' + id;
+    if (id.startsWith(QLatin1String("point(")))
+        return {};
     const int colon = id.lastIndexOf(':');
     if (colon >= 0) {
         bool ok = false;

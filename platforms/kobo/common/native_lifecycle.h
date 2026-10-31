@@ -26,12 +26,19 @@ public:
     static bool suspended();
     static bool sleepSaveAllowed();
     static bool usbSaveAllowed();
+    // Thread-safe gate for queued session writes. Closed before storage is
+    // handed to USB or Nickel begins its final shutdown.
+    static bool nativeSessionSaveAllowed();
+    // GUI-thread permission for progress writes, including a held shutdown
+    // while Nickel's sleep or PIN screen is still visible.
+    static bool nativeProgressSaveAllowed();
     bool connected() const {
         return connected_;
     }
     bool blocked() const {
         return asleep || usbPending || exported || poweringOff || removalPending;
     }
+    bool batteryLowShutdown() const { return poweringOff && batteryLow_; }
     bool shuttingDown() const {
         return poweringOff;
     }
@@ -70,8 +77,14 @@ private slots:
     void unplugging();
 
 private:
+    bool eventFilter(QObject *object, QEvent *event) override;
+    void checkSleepView(const char *source);
+    void queueSleepViewCheck();
+    bool sleepHandoffPending = false;
+    QTimer sleepViewCheck;
     bool expectingUsbPrompt = false;
     bool savingBeforeSleep = false;
+    bool batteryLow_ = false;
     bool connected_ = false, asleep = false, usbPending = false, exported = false, poweringOff = false;
     bool storageReady = false, remounting = false;
     QPointer<QObject> pendingGadget, pendingWorkflow;

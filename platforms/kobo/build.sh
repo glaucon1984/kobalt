@@ -14,7 +14,25 @@ sdk_id=$("$engine" image inspect "$image" --format '{{.Id}}')
 info=$(cmake -P "$root/platforms/source-info.cmake")
 read -r commit modified KOBALT_RELEASE_VERSION <<< "$info"
 export KOBALT_RELEASE_VERSION
-"$engine" run --rm --pull=never --user "$(id -u):$(id -g)" -e HOME=/tmp -e KOBALT_RELEASE_VERSION \
+# Own exactly this container, including when the foreground client is interrupted.
+mkdir -p "$root/build"
+run_dir=$(mktemp -d "$root/build/kobo-run.XXXXXX")
+cleanup() {
+    result=$?
+    trap - EXIT INT TERM
+    if [[ -s "$run_dir/container.cid" ]]; then
+        if ! "$engine" rm -f "$(cat "$run_dir/container.cid")" > /dev/null 2>&1; then
+            echo "Cannot remove the build container; its ID is retained in $run_dir/container.cid" >&2
+            exit 1
+        fi
+    fi
+    rm -rf "$run_dir"
+    exit "$result"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+"$engine" run --cidfile "$run_dir/container.cid" --pull=never --user "$(id -u):$(id -g)" -e HOME=/tmp -e KOBALT_RELEASE_VERSION \
     --volume "$root:/work" \
     --workdir /work/platforms/kobo "$image" bash -euc '
         started=$SECONDS

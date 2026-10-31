@@ -6,58 +6,71 @@
 #include "support/qt_compat.h"
 #include <QCoreApplication>
 #include <QPointer>
+#include <QPainter>
+#include <QFile>
+#include <QXmlStreamReader>
+#include <QXmlStreamWriter>
 #include <atomic>
 #include <memory>
 
 namespace kobalt {
 namespace {
-// Short paragraphs of different lengths. The heading keeps with the next
-// paragraph, which leaves an ordinary gap at the bottom of some pages.
-const char *const sampleBlocks[] = {
-    "<p>The foundry kept hours of its own, and the clocks along the east wall had long since stopped agreeing "
-    "with the town. Nobody minded very much. Work began when the first proof was dry and ended when the last one "
-    "was.</p>",
-    "<p>Ada sorted the returned specimens into three piles: those the printers loved, those they would tolerate, "
-    "and those that had come back with angry notes pencilled in the margin.</p>",
-    "<p>The third pile was the interesting one. A complaint about a lowercase g could easily run to four pages.</p>",
-    "<p>“This one again,” said Tom, holding up an envelope with a familiar postmark.</p>",
-    "<p>“Open it,” said Ada. “It cannot be worse than the last one.”</p>",
-    "<p>It was. The customer had mailed back an entire alphabet, every single letter circled twice in red ink, "
-    "with no further comment of any kind.</p>",
-    "<p>Ada pinned it above her desk. It was, she said, the most honest review the foundry had ever had.</p>",
-    "<p>The machines had opinions too. They jammed on italics, sulked through long runs of capitals, and ran "
-    "best late at night when nobody was there to watch them work.</p>",
-    "<p>“They like the dark,” Tom said. “So do I, most days.”</p>",
-    "<p>By spring the red alphabet had faded to pink, and the new specimen was ready for the printers to "
-    "judge.</p>",
-    "<h2>II</h2>",
-    "<p>The new specimen went out in April. It was printed on heavier paper than usual, so that the printers "
-    "would take it seriously.</p>",
-    "<p>It carried a short note from Ada explaining what had changed and what had not. The lowercase g was "
-    "rounder. The capitals were a little lighter.</p>",
-    "<p>Three weeks passed before the first reply. It came from the same customer, in the same envelope.</p>",
-    "<p>“Well?” said Tom.</p>",
-    "<p>This time only one letter was circled, and only once. Beside it, in very small writing, someone had "
-    "added a single word.</p>",
-    "<p>Ada read it several times before she was sure of it, then pinned the sheet next to the first one.</p>",
-    "<p>“Good,” Tom read aloud. “Just that?”</p>",
-    "<p>“Just that,” said Ada, and went back to work at the long table under the windows.</p>",
-    "<p>The clocks along the east wall went on disagreeing with the town, and with each other, for many years "
-    "after that.</p>",
-    "<p>Nobody minded very much. The foundry kept hours of its own, and the work was good.</p>",
+// The two XHTML files are the editable source for all Styling previews.
+// Keep their top-level paragraphs and headings as blocks so page-break
+// previews can try another starting paragraph when the first break is unchanged.
+struct SampleBlock {
+    QByteArray html;
+    QString text;
+    bool paragraph = false;
 };
-constexpr int sampleBlockCount = int(sizeof(sampleBlocks) / sizeof(sampleBlocks[0]));
-// Pages after these rarely show anything the first spreads do not.
+struct SampleDocument {
+    QByteArray prefix;
+    QVector<SampleBlock> blocks;
+};
+SampleDocument sampleDocument(bool words) {
+    QFile file(words ? ":/kobalt/samples/words-and-letters.html" : ":/kobalt/samples/layout.html");
+    if (!file.open(QIODevice::ReadOnly)) return {};
+    const auto html = file.readAll();
+    const int body = html.indexOf("<body>");
+    if (body < 0) return {};
+    SampleDocument document;
+    document.prefix = html.left(body + 6);
+    QXmlStreamReader reader(html);
+    while (!reader.atEnd()) {
+        reader.readNext();
+        if (!reader.isStartElement() || reader.name() != QLatin1String("body")) continue;
+        while (reader.readNextStartElement()) {
+            SampleBlock block;
+            block.paragraph = reader.name() == QLatin1String("p");
+            QXmlStreamWriter writer(&block.html);
+            writer.writeCurrentToken(reader);
+            int depth = 1;
+            while (depth && !reader.atEnd()) {
+                reader.readNext();
+                writer.writeCurrentToken(reader);
+                if (reader.isStartElement()) ++depth;
+                if (reader.isEndElement()) --depth;
+                if (reader.isCharacters()) block.text += reader.text().toString();
+            }
+            block.text = block.text.simplified();
+            document.blocks.append(block);
+        }
+    }
+    return reader.hasError() ? SampleDocument{} : document;
+}
 constexpr int searchedPages = 10;
-// Whether a page break falls inside a paragraph depends on the text size. When
-// the options lay out the sample the same way, it starts at a later paragraph
-// instead, which moves every break.
 constexpr int sampleVariants = 6;
+constexpr int paragraphSampleCount = 3;
 
-std::shared_ptr<ResourceCache> sampleBook(int variant, QMap<QString, qint64> *sizes) {
+std::shared_ptr<ResourceCache> sampleBook(const SampleDocument &document, int variant,
+                                          QMap<QString, qint64> *sizes, bool paragraphs) {
     QByteArray body;
-    for (int index = 0; index < sampleBlockCount; ++index)
-        body += sampleBlocks[(index + variant * 3) % sampleBlockCount];
+    int count = 0;
+    for (int index = 0; index < document.blocks.size(); ++index) {
+        const auto &block = document.blocks[(index + variant) % document.blocks.size()];
+        body += block.html;
+        if (paragraphs && block.paragraph && ++count == paragraphSampleCount) break;
+    }
     const QMap<QString, QByteArray> files{
         {"mimetype", "application/epub+zip"},
         {"META-INF/container.xml",
@@ -68,11 +81,7 @@ std::shared_ptr<ResourceCache> sampleBook(int variant, QMap<QString, qint64> *si
          "<language xmlns='http://purl.org/dc/elements/1.1/'>en</language></metadata><manifest>"
          "<item id='c' href='c.xhtml' media-type='application/xhtml+xml'/></manifest>"
          "<spine><itemref idref='c'/></spine></package>"},
-        {"c.xhtml", "<html xmlns='http://www.w3.org/1999/xhtml'><head><style>"
-                    "p{margin:0;text-indent:1.2em}h2{margin:1em 0;text-align:center;"
-                    "font-size:1em;font-weight:normal;letter-spacing:.2em}"
-                    "</style></head><body>" +
-                        body + "</body></html>"}};
+        {"c.xhtml", document.prefix + body + "</body></html>"}};
     for (auto it = files.cbegin(); it != files.cend(); ++it)
         (*sizes)[it.key()] = it.value().size();
     return std::make_shared<ResourceCache>(
@@ -105,7 +114,10 @@ QStringList pageStarts(ReaderModel &model) {
 // The first page whose start differs between options, so the spread before it
 // shows the changed break. Returns -1 when every option breaks the same way.
 int firstChangedBreak(const QVector<QStringList> &starts) {
-    for (int page = 1; page < starts.first().size(); ++page)
+    int limit = starts.first().size() - 1;
+    for (const auto &option : starts) limit = qMin(limit, option.size() - 1);
+    // Leave a following page beyond the spread so its second page is full.
+    for (int page = 1; page < limit; ++page)
         for (const auto &option : starts)
             if (option.value(page) != starts.first().value(page))
                 return page;
@@ -113,8 +125,8 @@ int firstChangedBreak(const QVector<QStringList> &starts) {
 }
 // The first page that the options draw differently, or -1. Page spacing moves
 // lines within a page without changing where pages start.
-int firstChangedPage(ReaderModel &model, const StyleSampleRequest &request) {
-    for (int page = 0; page < qMin(model.pages(), searchedPages); ++page) {
+int firstChangedPage(ReaderModel &model, const StyleSampleRequest &request, int completeSpreads) {
+    for (int page = 0; page < qMin(completeSpreads, searchedPages); ++page) {
         QImage first;
         for (const auto &value : request.values) {
             if (!apply(model, request, value))
@@ -191,10 +203,38 @@ QVector<QRect> spareSpace(const QVector<QPair<int, int>> &bands, const QVector<Q
         spare.append(band(end, area.bottom() + 1));
     return spare;
 }
+QVector<QRect> paragraphGaps(ReaderModel &model, const QRect &area, const QStringList &paragraphs) {
+    const auto line = [&model](const QString &query, bool last) {
+        const auto hits = model.searchPage(query, 0).hits;
+        if (hits.isEmpty()) return QRect();
+        const auto rects = model.rangeRects(hits.first().start, hits.first().end);
+        QRect result;
+        for (const auto &rect : rects)
+            if (result.isEmpty() || (last ? rect.top() > result.top() : rect.top() < result.top())) result = rect;
+        return result;
+    };
+    QVector<QRect> gaps;
+    QRect previous;
+    for (const auto &text : paragraphs) {
+        const auto first = line(text.left(24), false);
+        if (first.isEmpty()) break;
+        if (!previous.isEmpty())
+            gaps.append(QRect(area.left(), previous.bottom() + 1, area.width(),
+                              qMax(0, first.top() - previous.bottom() - 1)));
+        previous = line(text.right(24), true);
+        if (previous.isEmpty()) break;
+    }
+    return gaps;
+}
 StyleSample render(const EngineFontInputs &fonts, const StyleSampleRequest &request) {
     StyleSample result;
     if (request.values.isEmpty() || request.page.isEmpty())
         return result;
+    const auto document = sampleDocument(request.key == "word_spacing" || request.key == "justification_tracking");
+    if (document.blocks.isEmpty()) return result;
+    QStringList paragraphTexts;
+    for (const auto &block : document.blocks)
+        if (block.paragraph && paragraphTexts.size() < paragraphSampleCount) paragraphTexts.append(block.text);
     auto settings = request.settings;
     settings[request.key] = request.values.first();
     const bool pages = request.crop.isEmpty();
@@ -207,7 +247,7 @@ StyleSample render(const EngineFontInputs &fonts, const StyleSampleRequest &requ
         model = std::make_unique<ReaderModel>(fonts);
         QMap<QString, qint64> sizes;
         QString error;
-        if (!model->openResources(sampleBook(variant, &sizes), sizes, request.page, settings, &error) ||
+        if (!model->openResources(sampleBook(document, variant, &sizes, request.key == "paragraph_spacing"), sizes, request.page, settings, &error) ||
             model->pages() < 1)
             return {};
         if (!pages) {
@@ -221,11 +261,13 @@ StyleSample render(const EngineFontInputs &fonts, const StyleSampleRequest &requ
             starts.append(pageStarts(*model));
         }
         const int changedBreak = firstChangedBreak(starts);
-        const int changedPage = changedBreak < 0 ? firstChangedPage(*model, request) : -1;
+        int completeSpreads = model->pages() - 2;
+        for (const auto &option : starts) completeSpreads = qMin(completeSpreads, option.size() - 2);
+        const int changedPage = changedBreak < 0 ? firstChangedPage(*model, request, completeSpreads) : -1;
         result.differs = changedBreak > 0 || changedPage >= 0;
         page = changedBreak > 0 ? changedBreak - 1 : qMax(0, changedPage);
     }
-    // Keep two pages on screen even when the change is on the last page.
+    // Keep the selected spread within the sample.
     result.page = qMax(0, qMin(page, model->pages() - 2));
     const QRect area = request.readingArea.intersected(QRect(QPoint(), request.page));
     const bool detail = !request.detail.isEmpty() && !area.isEmpty();
@@ -239,14 +281,38 @@ StyleSample render(const EngineFontInputs &fonts, const StyleSampleRequest &requ
         result.readingArea = QRectF(area.topLeft() * scale, area.size() * scale);
     }
     QVector<QPair<int, int>> baseline;
+    QVector<QRect> paragraphBaseline;
+    const bool paragraphs = request.key == "paragraph_spacing";
+    const QRect cropArea(request.cropOrigin, request.crop);
+    const int paragraphMargin = settings.value("margin_pixels").toInt();
+    const QRect paragraphArea(paragraphMargin, 0, request.page.width() - 2 * paragraphMargin, request.page.height());
+    if (paragraphs) {
+        if (!apply(*model, request, 0)) return {};
+        model->image(0);
+        paragraphBaseline = paragraphGaps(*model, paragraphArea, paragraphTexts);
+    }
     for (const auto &value : request.values) {
         if (!apply(*model, request, value))
             return {};
         QVector<QImage> spread;
         for (int index = result.page; index < qMin(result.page + 2, model->pages()); ++index) {
             const auto image = model->image(index);
-            if (index == 0 && !pages)
+            if (index == 0 && !pages) {
                 result.crops.append(image.copy(QRect(request.cropOrigin, request.crop)));
+                if (paragraphs) {
+                    const auto gaps = paragraphGaps(*model, paragraphArea, paragraphTexts);
+                    QVector<QRect> extra;
+                    if (gaps.size() == paragraphBaseline.size())
+                        for (int gap = 0; gap < gaps.size(); ++gap) {
+                            const int height = gaps[gap].height() - paragraphBaseline[gap].height();
+                            const QRect added(gaps[gap].left(), gaps[gap].bottom() + 1 - height,
+                                              gaps[gap].width(), height);
+                            if (height > 0 && added.intersects(cropArea))
+                                extra.append(added.intersected(cropArea).translated(-request.cropOrigin));
+                        }
+                    result.cropGaps.append(extra);
+                }
+            }
             if (detail && index == page) {
                 const auto bands = lineBands(image, area);
                 if (baseline.isEmpty()) {
@@ -272,10 +338,28 @@ StyleSample render(const EngineFontInputs &fonts, const StyleSampleRequest &requ
     }
     if (!pages) {
         // One height for every option keeps the preview steady while choosing.
-        const int height = wholeLineHeight(result.crops.first());
-        for (auto &crop : result.crops)
-            crop = crop.copy(0, 0, crop.width(), height);
-        result.differs = false;
+        if (paragraphs) {
+            // Keep the canvas steady while changing the sliders, but clear a
+            // partial bottom line instead of showing fragments of its glyphs.
+            for (int index = 0; index < result.crops.size(); ++index) {
+                auto &crop = result.crops[index];
+                const int visible = wholeLineHeight(crop);
+                QPainter painter(&crop);
+                painter.fillRect(QRect(0, visible, crop.width(), crop.height() - visible),
+                                 QColor::fromRgb(crop.pixel(0, 0)));
+                QVector<QRect> gaps;
+                for (const auto &gap : result.cropGaps[index]) {
+                    const auto clipped = gap.intersected(QRect(0, 0, crop.width(), visible));
+                    if (!clipped.isEmpty()) gaps.append(clipped);
+                }
+                result.cropGaps[index] = gaps;
+            }
+        } else {
+            const int height = wholeLineHeight(result.crops.first());
+            for (auto &crop : result.crops)
+                crop = crop.copy(0, 0, crop.width(), height);
+        }
+        result.differs = request.key == "paragraph_spacing";
         for (const auto &crop : result.crops)
             result.differs = result.differs || crop != result.crops.first();
     }

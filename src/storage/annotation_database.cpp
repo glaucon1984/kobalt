@@ -59,10 +59,27 @@ void run(QSqlDatabase &db, const QString &statement) {
     QSqlQuery q(db);
     check(q.exec(statement), "database-write");
 }
+// SQLite reports a damaged file as CORRUPT or NOTADB. A lock or an I/O error
+// says nothing about the file's content, so it gets its own code.
+const char *failureCode(const QSqlError &error) {
+    if (!error.isValid())
+        return "invalid-database";
+#if QT_VERSION >= QT_VERSION_CHECK(5, 3, 0)
+    const int code = error.nativeErrorCode().toInt() & 0xff;
+#else
+    const int code = error.number() & 0xff;
+#endif
+    if (code == 11 || code == 26)
+        return "invalid-database";
+    if (code == 5 || code == 6)
+        return "database-busy";
+    return "database-io";
+}
 QVariant scalar(QSqlDatabase &db, const QString &statement) {
     QSqlQuery q(db);
     q.setForwardOnly(true);
-    check(q.exec(statement) && q.next(), "invalid-database");
+    if (!q.exec(statement) || !q.next())
+        throw Failure{QString::fromLatin1(failureCode(q.lastError()))};
     return q.value(0);
 }
 void validateSchema(QSqlDatabase &db, bool sessions = false) {
@@ -261,7 +278,7 @@ public:
             profileCheckpointFailed = monotonicMilliseconds();
         }
         diagnostic("profile-checkpoint", {{"truncate", truncate}, {"ok", done}, {"elapsed_ms", double(timer.elapsed())}},
-                   !done);
+                   done ? DiagnosticSeverity::Activity : DiagnosticSeverity::Warning);
         return done;
     }
     void close() {
@@ -284,7 +301,8 @@ public:
         release();
         // A close that leaves the log is kept in the durable log: the file then
         // needs its -wal next to it, for example on an exported partition.
-        diagnostic("profile-close", {{"rollback_journal", journal}, {"elapsed_ms", double(timer.elapsed())}}, !journal);
+        diagnostic("profile-close", {{"rollback_journal", journal}, {"elapsed_ms", double(timer.elapsed())}},
+                   journal ? DiagnosticSeverity::Activity : DiagnosticSeverity::Error);
     }
     static thread_local bool routineWrite;
 
@@ -329,7 +347,7 @@ private:
             // empty, foreign, future or damaged existing file is never initialized.
             check(scalar(db, "PRAGMA application_id").toInt() == applicationId, "unsupported-database-format");
             const int version = scalar(db, "PRAGMA user_version").toInt();
-            check(version == 2 || version == schemaVersion, "unsupported-database-format");
+            check(version == 2 || version == schemaVersion, "unsupported-database-version");
             check(scalar(db, "PRAGMA encoding").toString() == QStringLiteral("UTF-8"), "unsupported-database-encoding");
             const qint64 pageSize = scalar(db, "PRAGMA page_size").toLongLong();
             check(pageSize >= 512 && pageSize <= 65536 && (pageSize & (pageSize - 1)) == 0, "invalid-database");
@@ -349,7 +367,7 @@ private:
                 run(db, "PRAGMA fullfsync=ON");
                 run(db, "BEGIN IMMEDIATE");
                 const int lockedVersion = scalar(db, "PRAGMA user_version").toInt();
-                check(lockedVersion == 2 || lockedVersion == schemaVersion, "unsupported-database-format");
+                check(lockedVersion == 2 || lockedVersion == schemaVersion, "unsupported-database-version");
                 validateSchema(db, lockedVersion == schemaVersion);
                 if (lockedVersion == 2) {
                     sessionSchema(db);
@@ -1036,6 +1054,34 @@ void closeProfile(bool keepClosed) {
 void reopenProfile() {
     profileBlocked = false;
 }
+ProfileDatabaseState inspectProfileDatabase(const QString &directory, QString *error) {
+    const auto path = Paths{directory}.database();
+    if (error)
+        error->clear();
+    if (!QFileInfo(path).exists() && !QFileInfo(path).isSymLink())
+        return ProfileDatabaseState::Missing;
+    QString code;
+    if (guarded(&code, [&] {
+            Connection connection;
+            connection.open(directory, path);
+        }))
+        return ProfileDatabaseState::Ready;
+    if (error)
+        *error = code;
+    // Our application ID with a version this build does not know.
+    if (code == QLatin1String("unsupported-database-version"))
+        return ProfileDatabaseState::Incompatible;
+    // A foreign, empty or damaged file, or one with another text encoding.
+    if (code == QLatin1String("invalid-database") || code == QLatin1String("unsupported-database-format") ||
+        code == QLatin1String("unsupported-database-encoding"))
+        return ProfileDatabaseState::Corrupt;
+    // Another process holds the file, or storage is exported. The file may be
+    // fine; leave it to the normal opening.
+    if (code == QLatin1String("database-busy") || code == QLatin1String("database-lock") ||
+        code == QLatin1String("storage-unavailable"))
+        return ProfileDatabaseState::InUse;
+    return ProfileDatabaseState::Unavailable;
+}
 void checkpointProfile() {
     runOnWriterThread([] {
         Profile::instance().checkpoint(false);
@@ -1044,10 +1090,10 @@ void checkpointProfile() {
 bool profileHasUnsyncedWrites() {
     return profileUnsynced;
 }
-bool profileCheckpointDue() {
+bool profileCheckpointDue(bool urgent) {
     const auto now = monotonicMilliseconds();
     const qint64 failed = profileCheckpointFailed;
-    return profileUnsynced && now - profileSynced >= checkpointInterval && (failed < 0 || now - failed >= checkpointRetry);
+    return profileUnsynced && (urgent || now - profileSynced >= checkpointInterval) && (failed < 0 || now - failed >= checkpointRetry);
 }
 void requestProfileCheckpoint() {
     if (profileCheckpointRunning.exchange(true))

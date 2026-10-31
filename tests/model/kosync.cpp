@@ -488,6 +488,10 @@ int main(int argc, char **argv) {
     require(!client.lastSync().isValid(), "login alone does not count as a progress sync");
     require(client.recordSyncSuccess(), "successful progress exchange records a timestamp");
     const auto synced = client.lastSync();
+    require(!kosync::Client(path).lastSync().isValid(), "sync time stays in memory while reading");
+    require(client.persistSyncTime(), "closing persists the informational timestamp");
+    require(kosync::Client(path).customDeviceName() == "Manual reader" && !kosync::Client(path).manualExplanation(),
+            "timestamp persistence preserves settings written by another client");
     kosync::Client syncedReload(path);
     require(synced.isValid() && syncedReload.lastSync().toSecsSinceEpoch() == synced.toSecsSinceEpoch(),
             "last successful sync survives restart");
@@ -502,6 +506,19 @@ int main(int argc, char **argv) {
             renamed.lastSync().toSecsSinceEpoch() == synced.toSecsSinceEpoch(), "renaming persists without changing identity or last sync");
     require(!client.setDeviceName(QString(129, 'x')) && !client.setDeviceName("bad\nname") &&
             client.deviceName() == QString::fromUtf8("Nico’s Kobo"), "invalid names do not replace the saved name");
+    {
+        const auto separate = directory.path() + "/deferred-timestamp.json";
+        QFile source(path);
+        require(source.open(QIODevice::ReadOnly), "read deferred account fixture");
+        save(separate, source.readAll());
+        kosync::Client stale(separate), current(separate);
+        require(stale.recordSyncSuccess() && current.setFilenameMatching(true), "change matching before deferred save");
+        require(!stale.persistSyncTime() && !kosync::Client(separate).lastSync().isValid(),
+                "a stale timestamp cannot restore a date cleared by a matching change");
+        current.logout();
+        require(!stale.persistSyncTime() && !kosync::Client(separate).signedIn(),
+                "a deferred date cannot recreate a removed account");
+    }
     const auto digest = QByteArray("900150983cd24fb0d6963f7d28e17f72");
     kosync::Progress received;
     auto pulled = [&](kosync::Progress value, QString failure) { received = value; error = failure; ++completed; };

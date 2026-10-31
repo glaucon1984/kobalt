@@ -118,8 +118,10 @@ private:
             result.append({content.title, title, ink, 3});
         if (!content.detail.isEmpty())
             result.append({content.detail, interfaceFont(m::chrome::descriptionText), noteColor(this), 2});
+        // A caption that does not fit, such as with large text, wraps once
+        // rather than lose its end.
         if (!content.caption.isEmpty())
-            result.append({content.caption.toUpper(), captionFont(), noteColor(this), 1});
+            result.append({content.caption.toUpper(), captionFont(), noteColor(this), 2});
         return result;
     }
     // Draws or, without a painter, measures one part in up to `lines` lines,

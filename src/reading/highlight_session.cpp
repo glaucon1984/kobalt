@@ -1,6 +1,8 @@
 #include "highlight_session.h"
 #include "reader_session.h"
 #include "support/diagnostics.h"
+#include "storage/profile_database.h"
+#include "support/main_thread.h"
 #include "support/qt_compat.h"
 
 #include <QCoreApplication>
@@ -21,7 +23,7 @@ HighlightSession::HighlightSession(ReaderSession &model, std::function<QString()
     }
     loadFailed_ = !store_->loadCompact(&error_);
     if (loadFailed_) {
-        diagnostic("highlights-load", {{"error", error_}}, false);
+        diagnostic("highlights-load", {{"error", error_}}, DiagnosticSeverity::Error);
     }
     saved_ = store_->highlights();
 }
@@ -40,6 +42,9 @@ const QVector<Highlight> &HighlightSession::highlights() const {
     return store_ ? store_->highlights() : none;
 }
 bool HighlightSession::excerpts(const QStringList &ids, QVector<HighlightExcerpt> *rows) {
+    // Known exception: annotation lists, the editor and export read saved
+    // rows on the main thread when the user opens them.
+    mainthread::AllowBlocking allow("annotation read");
     if (!store_ || loadFailed_)
         return false;
     QStringList missing;
@@ -76,6 +81,9 @@ bool HighlightSession::excerpts(const QStringList &ids, QVector<HighlightExcerpt
     return true;
 }
 bool HighlightSession::detail(const QString &id, Highlight *row) {
+    // Known exception: annotation lists, the editor and export read saved
+    // rows on the main thread when the user opens them.
+    mainthread::AllowBlocking allow("annotation read");
     if (!store_ || loadFailed_)
         return false;
     for (const auto &h : highlights()) {
@@ -95,6 +103,9 @@ bool HighlightSession::detail(const QString &id, Highlight *row) {
     return true;
 }
 bool HighlightSession::exportDetails(QVector<Highlight> *rows) {
+    // Known exception: annotation lists, the editor and export read saved
+    // rows on the main thread when the user opens them.
+    mainthread::AllowBlocking allow("annotation read");
     if (!store_ || loadFailed_ || !resolved())
         return false;
     QStringList ids;
@@ -198,7 +209,7 @@ bool HighlightSession::persist(QVector<Highlight> highlights) {
     if (highlights.size() > HighlightStore::maxHighlights) {
         error_ = QStringLiteral("storage-limit");
         ++errors_;
-        diagnostic("highlights-save", {{"error", error_}}, false);
+        diagnostic("highlights-save", {{"error", error_}}, DiagnosticSeverity::Error);
         if (failed)
             failed();
         return false;
@@ -213,6 +224,7 @@ bool HighlightSession::persist(QVector<Highlight> highlights) {
     auto error = std::make_shared<QString>();
     writer_->post(
         [copy, highlights, error] {
+            storage::RoutineWrites routine;
             copy->setHighlights(highlights);
             return copy->save(error.get());
         },
@@ -234,7 +246,7 @@ void HighlightSession::finishSave(quint64 id, bool ok, const QString &error, qui
     if (ok)
         saved_ = highlights;
     else
-        diagnostic("highlights-save", {{"error", error}}, false);
+        diagnostic("highlights-save", {{"error", error}}, DiagnosticSeverity::Error);
     // A newer save writes the whole list again, so only its result counts.
     if (id != posted_)
         return;
@@ -245,8 +257,12 @@ void HighlightSession::finishSave(quint64 id, bool ok, const QString &error, qui
         // The list on screen is the saved one. Edited passages are cached in
         // `known_`; their full payload returns to storage, as after loading.
         store_->dropDetails();
+        retryPending_ = false;
+        retryHighlights_.clear();
         return;
     }
+    retryHighlights_ = highlights;
+    retryPending_ = true;
     error_ = error;
     ++errors_;
     known_.clear();
@@ -267,6 +283,9 @@ void HighlightSession::adoptSaved() {
 void HighlightSession::flush() {
     if (writer_)
         writer_->flush();
+}
+bool HighlightSession::retryFailedSave() {
+    return !retryPending_ || persist(retryHighlights_);
 }
 void HighlightSession::remember(const QVector<Highlight> &highlights) {
     QHash<QString, HighlightExcerpt> kept;

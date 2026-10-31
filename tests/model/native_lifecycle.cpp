@@ -5,6 +5,7 @@
 #include "storage/record_writer.h"
 #include "check.h"
 #include <QCoreApplication>
+#include <QEvent>
 #include <QTemporaryDir>
 #include <QSqlQuery>
 #include <QVector>
@@ -14,6 +15,7 @@
 class N3PowerWorkflowManager : public QObject {
     Q_OBJECT
 public:
+    bool asleep = false, visible = false, pin = false;
     static N3PowerWorkflowManager *sharedInstance();
     bool sleeping() const;
     bool sleepViewVisible() const;
@@ -27,9 +29,15 @@ N3PowerWorkflowManager *N3PowerWorkflowManager::sharedInstance() {
     static N3PowerWorkflowManager manager;
     return &manager;
 }
-bool N3PowerWorkflowManager::sleeping() const { return false; }
-bool N3PowerWorkflowManager::sleepViewVisible() const { return false; }
-bool N3PowerWorkflowManager::pinCodeInputDialogVisible() const { return false; }
+bool N3PowerWorkflowManager::sleeping() const { return asleep; }
+bool N3PowerWorkflowManager::sleepViewVisible() const { return visible; }
+bool N3PowerWorkflowManager::pinCodeInputDialogVisible() const { return pin; }
+
+class AbstractPowerView : public QObject {
+    Q_OBJECT
+};
+
+extern "C" void kobalt_show_sleep_view(void *);
 
 class PlugWorkflowManager : public QObject {
     Q_OBJECT
@@ -56,6 +64,7 @@ bool available() {
 void unused(void *) {}
 void handoff(void *) {
     require(!available(), "USB handoff left the profile writable");
+    require(!kobalt::NativeLifecycle::nativeSessionSaveAllowed(), "USB handoff allowed a late native session write");
     ++handoffs;
 }
 void workflow(void *manager) {
@@ -81,8 +90,65 @@ int main(int argc, char **argv) {
     N3PowerWorkflowManager::sharedInstance();
     kobalt::NativeLifecycle lifecycle(nullptr);
     require(lifecycle.connected(), "Mock Nickel managers did not connect");
+    auto *power = N3PowerWorkflowManager::sharedInstance();
+    int sleepHandoffs = 0;
+    lifecycle.sleepViewReady = [&] { ++sleepHandoffs; };
+    const auto wake = [&] {
+        power->asleep = power->visible = power->pin = false;
+        emit power->resumingFromSleep();
+        QCoreApplication::processEvents();
+        require(!lifecycle.blocked(), "Wake did not release sleep state");
+    };
+    // An old NickelHook user can overwrite our showSleepView hook. Both
+    // paths must hand off exactly once after the native sleep view is ready.
+    for (bool bypassHook : {true, false}) {
+        const int before = sleepHandoffs;
+        power->asleep = true;
+        emit power->aboutToSleep();
+        power->visible = true;
+        if (!bypassHook)
+            kobalt_show_sleep_view(power);
+        QCoreApplication::processEvents();
+        require(sleepHandoffs == before + 1, "Missing or duplicate sleep handoff");
+        kobalt_show_sleep_view(power);
+        require(sleepHandoffs == before + 1, "Repeated hook duplicated sleep handoff");
+        wake();
+    }
+    // A late view can appear after the first queued check. Do not expose the
+    // library or a PIN prompt while waiting, or keep suspend blocked forever.
+    power->asleep = true;
+    emit power->aboutToSleep();
+    require(!kobalt::NativeLifecycle::canSuspend(), "Suspend raced the queued handoff check");
+    QCoreApplication::processEvents();
+    require(sleepHandoffs == 2, "Handed off before a native sleep view existed");
+    require(kobalt::NativeLifecycle::canSuspend(), "Missing sleep view blocked suspend indefinitely");
+    power->visible = power->pin = true;
+    kobalt_show_sleep_view(power);
+    require(sleepHandoffs == 2, "Handed off over the PIN prompt");
+    power->pin = false;
+    AbstractPowerView view;
+    QEvent shown(QEvent::Show);
+    QCoreApplication::sendEvent(&view, &shown);
+    QCoreApplication::processEvents();
+    require(sleepHandoffs == 3, "Late native view did not recover the bypassed hook");
+    wake();
+    power->asleep = true;
+    emit power->aboutToSleep();
+    power->visible = true;
+    wake();
+    require(sleepHandoffs == 3, "Cancelled sleep ran a stale handoff");
     QVector<std::function<void()>> drains;
     lifecycle.prepareUsb = [&](std::function<void()> ready) { drains.append(std::move(ready)); };
+    power->asleep = true;
+    emit power->aboutToSleep();
+    power->visible = true;
+    kobalt::NativeLifecycle::interceptUsbWorkflow(usb);
+    QCoreApplication::processEvents();
+    require(sleepHandoffs == 3, "A queued sleep handoff crossed USB preparation");
+    const auto cancelledSleepUsb = drains.takeLast();
+    kobalt::NativeLifecycle::disconnected();
+    cancelledSleepUsb();
+    wake();
     const auto remount = [&] {
         kobalt::NativeLifecycle::disconnected();
         require(!available(), "Disconnect reopened exported storage");
@@ -91,6 +157,7 @@ int main(int argc, char **argv) {
         emit usb->aboutToUnplug();
         emit usb->doneProcessing();
         require(available() && !lifecycle.blocked(), "Remount did not reopen the profile");
+        require(kobalt::NativeLifecycle::nativeSessionSaveAllowed(), "Remount left native session saves blocked");
     };
     // Both native USB entry points must release the connection before handoff.
     for (bool fullWorkflow : {false, true}) {
@@ -99,6 +166,7 @@ int main(int argc, char **argv) {
         else
             kobalt::NativeLifecycle::interceptUsb(usb);
         require(available(), "Pending USB preparation blocked storage before its final save");
+        require(kobalt::NativeLifecycle::nativeSessionSaveAllowed(), "Pending USB blocked its native final save");
         const auto finish = drains.takeLast();
         finish();
         require(!available(), "USB preparation did not keep the profile closed");
@@ -121,6 +189,7 @@ int main(int argc, char **argv) {
         cancelled();
         require(available() && !lifecycle.blocked() && handoffs == before,
                 "Cancelled USB cleanup blocked the profile or exported storage");
+        require(kobalt::NativeLifecycle::nativeSessionSaveAllowed(), "Cancelled USB blocked native session retry");
         kobalt::NativeLifecycle::interceptUsbWorkflow(usb);
         const auto current = drains.takeLast();
         cancelled();
@@ -154,11 +223,17 @@ int main(int argc, char **argv) {
         kobalt::storage::closeProfile(true);
         ready();
     };
+    power->asleep = true;
+    emit power->aboutToSleep();
+    power->visible = true;
     require(kobalt::NativeLifecycle::interceptShutdown(usb, kobalt::NativeLifecycle::Shutdown::PowerOff),
             "Power-off was not intercepted");
     kobalt::NativeLifecycle::disconnected();
     abandoned();
+    QCoreApplication::processEvents();
+    require(sleepHandoffs == 3, "A queued sleep handoff crossed power-off");
     require(shutdowns == 1 && !available(), "USB cancellation reopened storage during shutdown");
+    require(!kobalt::NativeLifecycle::nativeSessionSaveAllowed(), "USB cancellation reopened native saves during shutdown");
     kobalt::storage::reopenProfile();
     kobalt::storage::closeProfile();
 }

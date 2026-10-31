@@ -68,6 +68,13 @@ private:
     QSize previewSize;
     int leadingIcon = -1;
     int iconSpace() const;
+    // Large text makes the title line taller by what it adds to the line
+    // height; the description moves down with it.
+    int labelHeight() const;
+    // How far a label that stands alone beside its indicator is raised, so
+    // its capitals center on the indicator.
+    int labelRaise(const QFont &labelFont) const;
+    int descriptionTop() const;
 };
 
 // A pick-one list: a row per choice with a radio on the left, its label and

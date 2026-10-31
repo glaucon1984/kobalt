@@ -53,9 +53,12 @@ public:
 
 protected:
     void paintEvent(QPaintEvent *) override {
+        const auto *button = qobject_cast<QPushButton *>(parentWidget());
+        // A large interface scale can leave the button only the arrow's cell.
+        if (button && button->width() <= int(m::chrome::cellWidth))
+            return;
         QPainter painter(this);
         painter.setFont(font());
-        const auto *button = qobject_cast<QPushButton *>(parentWidget());
         const bool pressed = button && button->isEnabled() && button->isDown();
         const auto colors = button ? button->palette() : palette();
         painter.setPen(colors.color(!isEnabled() ? QPalette::Mid : pressed ? QPalette::Window
@@ -177,7 +180,7 @@ Reader::Reader(std::unique_ptr<kobalt::ReadingBook> openedBook, kobalt::ReaderOr
         appearance::rememberTextLayout(global, model->state());
         appearance::rememberPageMargins(global, model->state());
         if (global != savedSettings.object && !kobalt::storage::writePreferences(book->paths().preferences(), global)) {
-            kobalt::diagnostic("last-appearance-unsaved", {}, false);
+            kobalt::diagnostic("last-appearance-unsaved", {}, kobalt::DiagnosticSeverity::Error);
         }
     }
     bookmarks = std::make_unique<kobalt::BookmarkSession>(
@@ -206,13 +209,13 @@ Reader::Reader(std::unique_ptr<kobalt::ReadingBook> openedBook, kobalt::ReaderOr
     // A highlight save on the writer thread failed and the saved list is back.
     highlights->saveFailed = [this] {
         kobalt::qt::later(0, this, [this] {
+            if (exitPending) {
+                failExit(closeRequest, strings::get("annotations.change_not_saved"));
+                return;
+            }
             showHighlightError();
         });
     };
-    book->onCheckpointFailed([this] {
-        page->notice = strings::get("reader.could_not_save_reading_position");
-        page->refreshContent();
-    });
     bookmarks->changed = [this] {
         if (bookmarkList && bookmarkList->isVisible() && !bookmarkList->annotationsShown()) {
             bookmarkList->showBookmarks(bookmarkRows());
@@ -232,6 +235,10 @@ Reader::Reader(std::unique_ptr<kobalt::ReadingBook> openedBook, kobalt::ReaderOr
     };
     bookmarks->failed = [this] {
         kobalt::qt::later(0, this, [this] {
+            if (exitPending) {
+                failExit(closeRequest, bookmarks->error());
+                return;
+            }
             showBookmarkError();
         });
     };
@@ -330,26 +337,21 @@ Reader::Reader(std::unique_ptr<kobalt::ReadingBook> openedBook, kobalt::ReaderOr
     });
     resize(QGuiApplication::primaryScreen()->size());
     prepareSleepCover();
-    if (services.observeBattery && presentation->supportsSleepScreen()) {
+    const auto battery = services.battery();
+    lowBattery = !battery.charging && !battery.fullyCharged && battery.percent >= 0 && battery.percent <= 5;
+    if (services.observeBattery) {
         services.observeBattery(this, [this] {
+            const auto battery = services.battery();
+            lowBattery = !battery.charging && !battery.fullyCharged && battery.percent >= 0 && battery.percent <= 5;
             updateSleepBattery();
         });
     }
+    book->onCheckpointFailed([this] { localSaveDue = true; });
     connectPageInput();
-    if (book->tracksReadingHistory()) {
-        auto *historyTimer = new QTimer(this);
-        historyTimer->setObjectName("rrReadingHistoryTimer");
-        historyTimer->setInterval(60000);
-        connect(historyTimer, &QTimer::timeout, this, [this] {
-            if (!closing && !lifecycleHidden && isVisible() && !services.suspended())
-                book->checkpointReadingHistory(true);
-        });
-        historyTimer->start();
-    }
     // Android can suspend the app without hiding the embedded reader widget.
     connect(qApp, &QGuiApplication::applicationStateChanged, this, [this] {
         observeReading();
-        book->checkpointReadingHistory(!services.suspended());
+        if (services.suspended()) book->checkpointReadingHistory();
     });
     openingStages["build_ms"] = building.nsecsElapsed() / 1e6;
 }
@@ -774,7 +776,7 @@ void Reader::buildOverlays() {
     });
     chapterGraph = new kobalt::ChapterGraph(this);
     chapterGraph->changed = [this] {
-        save();
+        saveSoon();
     };
     chapterGraph->setDense(preferences.value("dense_stats_chart").toBool(false));
     choices = new ChoiceScreen(this);
@@ -842,7 +844,7 @@ void Reader::buildOverlays() {
     choices->changed = [this] {
         if (choosingTypography && choices->isVisible())
             syncNavigation();
-        save();
+        saveSoon();
     };
     choices->back = [this] {
         choices->hide();
@@ -1199,6 +1201,7 @@ void Reader::buildSettings() {
     denseGraphOption = settings->denseGraphOption;
     sleepScreenButton = settings->sleepScreenButton;
     sleepTileButton = settings->sleepTileButton;
+    sessionTimeoutButton = settings->sessionTimeoutButton;
     pageNavigationButton = settings->pageNavigationButton;
     tapZonesButton = settings->tapZonesButton;
     tappableLinksButton = settings->tappableLinksButton;
@@ -1225,6 +1228,20 @@ void Reader::buildSettings() {
             settingsWordSpacing = 80 + index * 20;
             showAdvancedText(int(SettingsPanel::AdvancedText::WordSpacing));
         });
+    });
+    connect(settings->beautifierButton, &QPushButton::clicked, this, [this, settings] {
+        settings->showBeautifier(settingsBeautifier, [this](QJsonObject value) {
+            settingsBeautifier = std::move(value);
+            showAdvancedText();
+        });
+    });
+    connect(settings->paragraphSpacingButton, &QPushButton::clicked, this, [this, settings] {
+        settings->showParagraphAdjustments(settingsParagraphSpacing, settingsParagraphIndent,
+            [this](int percent, int indent) {
+                settingsParagraphSpacing = percent;
+                settingsParagraphIndent = indent;
+                showAdvancedText();
+            });
     });
     connect(settings->trackingButton, &QPushButton::clicked, this, [this, settings] {
         settings->showAdvancedTextChoices(SettingsPanel::AdvancedText::Tracking,
@@ -1311,6 +1328,7 @@ void Reader::buildSettings() {
     connect(sleepScreenButton, &QPushButton::clicked, this, [this] {
         openSleepScreen();
     });
+    connect(sessionTimeoutButton, &QPushButton::clicked, this, [this] { openSessionTimeout(); });
     connect(sleepTileButton, &QPushButton::clicked, this, [this] {
         openSleepTile();
     });
@@ -1356,6 +1374,9 @@ void Reader::buildSettings() {
         bionicOption->setChecked(false);
         settingsVerticalSpacing = "off";
         settingsVerticalSpacingScope = "all";
+        settingsParagraphSpacing = -1;
+        settingsParagraphIndent = -1;
+        settingsBeautifier = appearance::beautifierSettings({});
         showAdvancedText();
         screenRefreshMode = kobalt::ScreenRefresh::Smart;
         showScreenRefresh();

@@ -7,8 +7,10 @@
 #include <QWidget>
 
 namespace kobalt {
-// Image-quality turns replace the sweep with one whole-screen cleanup.
-// Both pages contribute regions, so leaving an illustration clears it too.
+// Turns with large pictures or colour skip the sweep and refresh the whole
+// screen once with the ordinary full-mode policy, as Nickel turns, without a
+// flash. Both pages contribute regions, so leaving an illustration redraws it
+// too. Only a failed sweep falls back to the `repair` cleanup.
 template <class Submit>
 bool submitPageTransition(QBackingStore *store, QWidget *reader, int direction, bool dark, quint64 ordinary,
                           quint64 repair, Submit submit) {
@@ -19,7 +21,7 @@ bool submitPageTransition(QBackingStore *store, QWidget *reader, int direction, 
     const QRegion regions =
         reader->property(colour ? "reader_image_repairs" : "reader_mono_repairs").value<QRegion>() & screen;
     if (!regions.isEmpty() || (colour && reader->property("reader_colour_regions").toBool())) {
-        submit(QRegion(screen), repair);
+        submit(QRegion(screen), ordinary);
         return true;
     }
     auto *device = store->paintDevice();

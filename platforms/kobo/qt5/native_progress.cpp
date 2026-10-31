@@ -4,7 +4,9 @@
 #include "native_location.h"
 #include "platforms/kobo/common/native_progress.h"
 #include "support/strings.h"
+#include "support/main_thread.h"
 #include "platforms/kobo/common/native_database_wait.h"
+#include "platforms/kobo/common/native_lifecycle.h"
 #include <QDateTime>
 #include <QMetaType>
 #include <QPointer>
@@ -141,13 +143,37 @@ ReadingProgress NativeProgress::read(QString *error) const {
         *error = strings::get("error.nickel_reading_position_could_not_be_decoded");
     return value;
 }
+bool NativeProgress::markReading() {
+    mainthread::BlockingOperation operation("nickel-opening-status");
+    if (!available() || !NativeLifecycle::nativeProgressSaveAllowed() || deviceTransition())
+        return false;
+    const auto &native = api();
+    const auto db = native.dbName(native.device());
+    NativeDatabaseWait wait(native.connection(db, true), true);
+    if (!wait.ready() || !native.begin(db)) return false;
+    // Firmware 4.46 and 6.0 updateReadingStatus sets these fields, without DateLastRead.
+    // Keep positions, percentages and estimates untouched. No Volume crosses threads.
+    const QVariantMap fields{{"ReadStatus", 1}, {"FirstTimeReading", false},
+                             {"ReadStateSynced", false}, {"HideFromHomePage", false}};
+    const bool saved = native.update(book, fields, {{"ContentID", book}}, db);
+    if (!saved || !native.end(db, true)) {
+        native.end(db, false);
+        return false;
+    }
+    native.refresh(db);
+    return true;
+}
 bool NativeProgress::write(const ReadingProgress &expected, const QString &position, double percent, bool finished,
                            ReadingProgress *verified, QString *error, const ReadingEstimates *estimates, const ReadingActivity *) {
+    // Nickel's Volume API runs on the GUI thread at lifecycle boundaries.
+    kobalt::mainthread::BlockingOperation blockingOperation("nickel-progress-write");
     const auto fail = [error](const QString &message) {
         if (error)
             *error = message;
         return false;
     };
+    if (!NativeLifecycle::nativeProgressSaveAllowed() || deviceTransition())
+        return fail(strings::get("error.nickel_save_deferred_while_progress_or_device_state_is_unresolved"));
     const auto &native = api();
     if (!available() || native.tolino(native.device()))
         return fail(strings::get("error.native_progress_writeback_is_unsupported_on_this_firmware_mode"));

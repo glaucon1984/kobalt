@@ -1,6 +1,8 @@
 #pragma once
 #include "interfaces/reader_interface.h"
+#include "platform/api/keyboard_controller.h"
 #include <QStackedWidget>
+#include <functional>
 
 namespace kobalt::library {
 class LibraryView;
@@ -14,7 +16,10 @@ class WidgetCanvas;
 class StartScreen final : public QStackedWidget {
     Q_OBJECT
 public:
-    StartScreen(PresentationFactory presentation, library::Store &store, QWidget *parent = nullptr);
+    // `textScale` reports the platform's text size setting, where 1 is
+    // standard. The library takes it when it is built and whenever it is shown.
+    StartScreen(PresentationFactory presentation, library::Store &store, std::function<qreal()> textScale = {},
+                QWidget *parent = nullptr);
     ~StartScreen() override;
     void showOpening();
     void setProgress(int percent);
@@ -22,6 +27,11 @@ public:
     bool dismissModal();
     void showLibrary();
     bool libraryShown() const;
+    // Applies the platform's text size to the interface. A library built at
+    // another size is built again, because views read sizes when they are
+    // built. The rebuilt library starts on its first page, outside search.
+    void applyTextSize();
+    void setKeyboardFactory(KeyboardFactory factory);
     // Follows the reader's dark mode setting.
     void setDark(bool dark);
     library::LibraryView *library();
@@ -58,6 +68,10 @@ private:
     library::Store &store;
     WidgetCanvas *canvas = nullptr, *openingSurface = nullptr;
     library::LibraryView *view = nullptr;
+    std::function<qreal()> textScale;
+    KeyboardFactory keyboard;
+    // The text scale the library was built with.
+    qreal builtTextScale = 1;
     bool dark = false, hostScaled = false, singleBooksAreCopies = false;
     struct Scale {
         QSize pixels;

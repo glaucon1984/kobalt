@@ -58,10 +58,10 @@ private:
     DeviceFrame *deviceFrame;
     android::StartScreen *start;
     android::WidgetCanvas *canvas;
-    QComboBox *screenPicker, *resolutionPicker;
-    QActionGroup *screenActions, *resolutionActions;
+    QComboBox *screenPicker, *resolutionPicker, *textSizePicker;
+    QActionGroup *screenActions, *resolutionActions, *textSizeActions;
     QAction *rotateAction;
-    int screenPreset = 1, renderingDpi = 0;
+    int screenPreset = 1, renderingDpi = 300, textSize = 100;
     bool touchCursorVisible = false, touchCursorPressed = false;
     void setTouchCursor(bool visible, bool pressed = false);
     QTimer resizeTimer;

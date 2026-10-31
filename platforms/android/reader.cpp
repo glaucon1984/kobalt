@@ -1,5 +1,7 @@
 #include "reading/appearance_settings.h"
 #include "support/strings.h"
+#include "support/main_thread.h"
+#include "support/diagnostics.h"
 #include "reader.h"
 #ifdef KOBALT_POCKETBOOK
 #include "orientation_sensor.h"
@@ -9,6 +11,7 @@
 #endif
 #include "interfaces/reader_interface.h"
 #include "interfaces/opening_message.h"
+#include "interfaces/recovery_message.h"
 #include "reading/reading_book.h"
 #include "storage/annotation_database.h"
 #include "publication/native_resources.h"
@@ -64,7 +67,14 @@ ReaderController::ReaderController(storage::Paths paths, EngineFontInputs fonts,
                                    std::function<void(Qt::ScreenOrientation)> rotate, QObject *parent)
     : QObject(parent), paths(std::move(paths)), fonts(std::move(fonts)), placeholder(std::move(placeholder)),
       services(std::move(services)), orientation(platformOrientationSensor(this), std::move(rotate)) {
-    storage::prepareProfile(this->paths);
+    prepareProfile();
+}
+void ReaderController::prepareProfile() {
+    storage::ProfileRecovery recovery;
+    storage::prepareProfile(paths, &recovery);
+    storageFailed = recovery.storageFailed;
+    if (recovery.recovered())
+        recoveryNotice = profileRecoveryNotice(recovery, paths.directory + "/backups");
 }
 ReaderController::~ReaderController() {
     Q_ASSERT(idle());
@@ -80,6 +90,8 @@ bool ReaderController::forgetLastBook() {
     return storage::writeRecord(paths.directory, "last-book", paths.directory + "/last-book.json", {}, 256 * 1024);
 }
 QJsonObject ReaderController::savedState(const QString &path) const {
+    // Known exception: the library reads a book's progress on the main thread.
+    mainthread::AllowBlocking allow("library progress");
     const auto identity = QUrl::fromLocalFile(QFileInfo(path).absoluteFilePath()).toString();
     const auto saved = storage::readBookState(paths, identity).object;
     return saved.value("book").toString() == identity ? saved : QJsonObject();
@@ -109,9 +121,20 @@ void ReaderController::open(const QString &path, QSize pixels, QString sourceKey
     begin(path, pixels);
 }
 void ReaderController::begin(const QString &path, QSize pixels) {
+    // Known exception: opening from the library prepares the profile on the
+    // main thread, also while another book is still open.
+    mainthread::AllowBlocking allow("library opening");
     phase = Phase::Opening;
     openingStarted.start();
+    markMemoryBase();
     retirementNotified = false;
+    if (storageFailed)
+        prepareProfile();
+    if (storageFailed) {
+        emit failed(strings::get("error.profile_storage_failed"));
+        retire();
+        return;
+    }
     if (!historyProfile && annotationDatabaseEnabled()) {
         QString error;
         historyProfile = ReadingHistory::openProfile(paths.directory, &error);
@@ -202,6 +225,7 @@ void ReaderController::begin(const QString &path, QSize pixels) {
         [guard, identity, statePath, pixels, baseline, diskBaseline](const OpeningResult &result) {
             if (!guard || guard->phase != Phase::Opening)
                 return;
+            mainthread::AllowBlocking allow("library opening");
             if (!result.ready()) {
                 emit guard->failed(openingMessage(result));
                 guard->retire();
@@ -222,8 +246,11 @@ void ReaderController::begin(const QString &path, QSize pixels) {
                                                       hash, platformLibraryBridge(identity, guard->current, guard->paths),
                                                       baseline, diskBaseline, guard->currentSourceKey);
             auto services = guard->services();
+            services.startupNotice = std::exchange(guard->recoveryNotice, ReaderNotice{});
             if (services.backButtonLabel.isEmpty())
                 services.backButtonLabel = strings::get("library.exit_to_library");
+            // Read the setting again: it can change while the Library is shown.
+            readerInterface().setLargeText(services.textScale ? services.textScale() : 1);
             const double engine = guard->openingStarted.nsecsElapsed() / 1e6;
             QElapsedTimer creating;
             creating.start();

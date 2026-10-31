@@ -94,6 +94,35 @@ void DescribedOption::setLeadingIcon(ControlIcon icon) {
 int DescribedOption::iconSpace() const {
     return leadingIcon < 0 ? 0 : int(m::chrome::cellIcon) + px(20);
 }
+int DescribedOption::labelHeight() const {
+    // The line grows only by what large text adds, so standard text keeps
+    // the checkbox's line.
+    if (textScale() == 1)
+        return m::settings::checkboxSize;
+    QFont labelFont = font(), standard = font();
+    labelFont.setPixelSize(appearance.labelPixels);
+    standard.setPixelSize(qRound(appearance.labelPixels / textScale()));
+    return m::settings::checkboxSize + qMax(0, interfaceLineHeight(labelFont) - interfaceLineHeight(standard));
+}
+int DescribedOption::labelRaise(const QFont &labelFont) const {
+    // Interface text is centered by its ink, which includes descenders, so
+    // the capitals of a label sit below the middle of its line, most of all
+    // in a word without descenders. A label that stands alone beside its
+    // indicator is raised by that distance, so its capitals center on the
+    // indicator at every text size. A label with a description moves with
+    // its block.
+    if (!description.isEmpty() || appearance.opticalLabel || text().isEmpty())
+        return 0;
+    const auto ink = interfaceInkBounds(text(), labelFont);
+    const int top = qMin(ink.top(), -labelFont.pixelSize()), bottom = qMax(ink.bottom() + 1, 0);
+    // The ink of a capital H is the cap height; Qt 5.2 has no capHeight().
+    const int capital = interfaceInkBounds(QStringLiteral("H"), labelFont).height();
+    const qreal capitalsBelowMiddle = -top - (bottom - top) / 2.0 - capital / 2.0;
+    return qMax(0, qRound(capitalsBelowMiddle));
+}
+int DescribedOption::descriptionTop() const {
+    return m::settings::descriptionTop + labelHeight() - m::settings::checkboxSize;
+}
 int DescribedOption::heightForWidth(int width) const {
     if (description.isEmpty() && !preview)
         return m::control::stepSize;
@@ -104,7 +133,7 @@ int DescribedOption::heightForWidth(int width) const {
     const int textWidth = qMax(1, width - 2 * appearance.horizontalInset - m::settings::labelLeft -
                                       appearance.indicatorSize.width() - m::settings::toggleGap - iconSpace() -
                                       (preview ? previewSize.width() + m::settings::toggleGap : 0));
-    const int textHeight = description.isEmpty() ? int(m::control::stepSize) : m::settings::descriptionTop +
+    const int textHeight = description.isEmpty() ? int(m::control::stepSize) : descriptionTop() +
                                                  wrappedInterfaceTextHeight(description, descriptionFont, textWidth) +
                                                  m::settings::descriptionBottom;
     return qMax(qMax(appearance.minimumRowHeight, textHeight), preview ? previewSize.height() + px(24) : 0);
@@ -132,8 +161,8 @@ void DescribedOption::paintEvent(QPaintEvent *) {
                                       (preview ? previewSize.width() + m::settings::toggleGap : 0));
     const int textBottom =
         description.isEmpty()
-            ? m::settings::checkboxTop + m::settings::checkboxSize
-            : m::settings::descriptionTop + wrappedInterfaceTextHeight(description, descriptionFont, textWidth);
+            ? m::settings::checkboxTop + labelHeight()
+            : descriptionTop() + wrappedInterfaceTextHeight(description, descriptionFont, textWidth);
     const int textOffset = (height() - (textBottom - m::settings::checkboxTop)) / 2 - m::settings::checkboxTop;
     const int boxTop = (height() - appearance.indicatorSize.height()) / 2;
     const int boxLeft = appearance.leadingIndicator
@@ -200,8 +229,9 @@ void DescribedOption::paintEvent(QPaintEvent *) {
     labelFont.setWeight(QFont::Normal);
     labelFont.setItalic(false);
     painter.setFont(labelFont);
-    const QRect labelLine(textLeft, m::settings::checkboxTop + textOffset, textWidth, m::settings::checkboxSize);
-    QRect labelBounds = labelLine;
+    // Only the label is raised; a value on the same line keeps its place.
+    const QRect labelLine(textLeft, m::settings::checkboxTop + textOffset, textWidth, labelHeight());
+    QRect labelBounds = labelLine.translated(0, -labelRaise(labelFont));
     if (!value.isEmpty() || valueStyle.battery) {
         // The value keeps the right of the line; the label keeps at least three fifths.
         const int labelWidth = qMin(interfaceTextWidth(text(), labelFont), labelLine.width() * 3 / 5);
@@ -255,8 +285,8 @@ void DescribedOption::paintEvent(QPaintEvent *) {
     painter.setFont(labelFont);
     painter.setPen(themeColors(this).secondaryInk);
     drawWrappedInterfaceText(painter,
-                             QRect(textLeft, m::settings::descriptionTop + textOffset, textWidth,
-                                   height() - m::settings::descriptionTop - textOffset),
+                             QRect(textLeft, descriptionTop() + textOffset, textWidth,
+                                   height() - descriptionTop() - textOffset),
                              description);
 }
 

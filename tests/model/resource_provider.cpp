@@ -267,6 +267,7 @@ int main(int argc, char **argv) {
     require(!server->open(path, factory), "reject malformed publication");
     require(counts.opened == 0, "inspect before invoking provider factory");
     auto inspectionError = [&] {
+        flushDiagnostics();
         QFile log(logPath);
         require(log.open(QIODevice::ReadOnly), "read archive inspection log");
         const auto bytes = log.readAll();

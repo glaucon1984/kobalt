@@ -1,4 +1,5 @@
 #include "manager.h"
+#include "support/main_thread.h"
 #include "stardict.h"
 #include "dictionary_catalog.h"
 #include "publication/zip_resource.h"
@@ -437,6 +438,7 @@ bool DictionaryManager::installArchive(const QString &directory, const DownloadD
                 continue;
             return fail(error, "Dictionary archive is missing required files.");
         }
+        mainthread::BlockingOperation blockingOperation("dictionary-install-write");
         QFile output(folder(stage.path(), name));
         if (!output.open(QIODevice::WriteOnly))
             return fail(error, "Cannot save dictionary files.");

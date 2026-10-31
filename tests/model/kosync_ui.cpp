@@ -56,8 +56,10 @@ void checkKeyboardInputStaysInEditor() {
                 auto *panel = dialog->findChild<QWidget *>("widgetKeyboard");
                 auto *first = panel->findChild<QPushButton *>("widgetKey1_0");
                 auto *second = panel->findChild<QPushButton *>("widgetKey1_1");
+                // The server field starts with its required scheme.
+                const QString prefix = QString(field) == "rrKosyncServer" ? "https://" : "";
                 for (int i = 0; i < 3; ++i) QTest::mouseClick(first, Qt::LeftButton);
-                require(input->text() == "qqq", "real keyboard enters the account draft");
+                require(input->text() == prefix + "qqq", "real keyboard enters the account draft");
 
                 const auto left = first->mapTo(panel, QPoint(first->width(), first->height() / 2));
                 const auto right = second->mapTo(panel, QPoint(0, second->height() / 2));
@@ -66,27 +68,27 @@ void checkKeyboardInputStaysInEditor() {
                 auto *gapTarget = panel->childAt(gap);
                 if (!gapTarget) gapTarget = panel;
                 QTest::mouseClick(gapTarget, Qt::LeftButton, Qt::NoModifier, gapTarget->mapFrom(panel, gap));
-                require(page.editorDialog && input->text() == "qqq", "a key gap does not dismiss the account draft");
+                require(page.editorDialog && input->text() == prefix + "qqq", "a key gap does not dismiss the account draft");
                 QTest::mouseClick(panel, Qt::LeftButton, Qt::NoModifier, QPoint(1, 1));
                 require(page.editorDialog, "keyboard padding does not dismiss the editor");
 
                 QTest::mousePress(first, Qt::LeftButton);
                 QTest::mouseRelease(first, Qt::LeftButton, Qt::NoModifier, QPoint(-1, -1));
-                require(page.editorDialog && input->text() == "qqq", "releasing outside a key keeps the draft open");
+                require(page.editorDialog && input->text() == prefix + "qqq", "releasing outside a key keeps the draft open");
                 QTest::mousePress(first, Qt::LeftButton);
                 QEvent cancel(QEvent::TouchCancel);
                 QApplication::sendEvent(first, &cancel);
                 QTest::mouseRelease(first, Qt::LeftButton, Qt::NoModifier, QPoint(-1, -1));
-                require(page.editorDialog && input->text() == "qqq", "a cancelled key release keeps the draft open");
+                require(page.editorDialog && input->text() == prefix + "qqq", "a cancelled key release keeps the draft open");
 
                 QTest::mousePress(first, Qt::LeftButton);
                 QTest::mousePress(second, Qt::LeftButton);
                 QTest::mouseRelease(first, Qt::LeftButton);
                 require(page.editorDialog, "overlapping key presses do not dismiss the editor");
                 QTest::mouseRelease(second, Qt::LeftButton);
-                require(input->text() == "qqqw", "the remaining pressed key still enters its character");
+                require(input->text() == prefix + "qqqw", "the remaining pressed key still enters its character");
                 for (int i = 0; i < 100; ++i) QTest::mouseClick(first, Qt::LeftButton);
-                require(page.editorDialog && input->text() == "qqqw" + QString(100, QChar('q')),
+                require(page.editorDialog && input->text() == prefix + "qqqw" + QString(100, QChar('q')),
                         "rapid key clicks continue editing after gaps and cancelled presses");
                 dialog->findChild<QPushButton *>("rrKosyncEditCancel")->click();
                 require(!page.editorDialog, "Cancel still closes the account editor");
@@ -252,6 +254,8 @@ int main(int argc, char **argv) {
     require(keyboard->submitText == "OK", "account editor labels native submission as OK rather than Search");
     auto *editor = page->editorDialog->findChild<QLineEdit *>("rrKosyncInput");
     require(editor, "server editor is accessible");
+    require(editor->text() == "https://" && editor->cursorPosition() == editor->text().size(),
+            "empty server field starts with the required scheme and the cursor after it");
     // Native keys fall back to their nearest ancestor with click focus.
     page->editorDialog->setFocus(Qt::MouseFocusReason);
     QApplication::processEvents();
@@ -491,5 +495,14 @@ int main(int argc, char **argv) {
     require(page->editorDialog, "signed-out password editor opens");
     panel.settingsPages->setCurrentIndex(reader::DisplaySettings);
     require(!page->editorDialog && page->takePassword().isEmpty(), "leaving Sync dismisses keyboard and clears secrets");
+    tab->click();
+    server->click();
+    editor = page->editorDialog->findChild<QLineEdit *>("rrKosyncInput");
+    require(editor->text() == "https://", "a cleared account prefills the server scheme again");
+    keyboard->submitted();
+    QApplication::processEvents();
+    require(page->server().isEmpty() &&
+            dynamic_cast<ui::CaptionButton *>(server)->caption() == strings::get("kosync.not_set"),
+            "saving only the prefilled scheme leaves the server unset");
     return 0;
 }

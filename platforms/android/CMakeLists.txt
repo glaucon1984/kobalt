@@ -95,7 +95,8 @@ set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/asset-manifest.json" PR
 qt_add_resources(kobalt_android android_manifest PREFIX "/android-assets" FILES "${CMAKE_CURRENT_BINARY_DIR}/asset-manifest.json")
 set(resources "${KOBALT_ROOT}/assets")
 file(GLOB notices CONFIGURE_DEPENDS "${resources}/notices/*")
-qt_add_resources(kobalt_android notices PREFIX "/kobalt" BASE "${resources}" FILES "${resources}/acknowledgments.json" ${notices})
+qt_add_resources(kobalt_android notices PREFIX "/kobalt" BASE "${resources}" FILES "${resources}/acknowledgments.json" ${notices}
+    "${resources}/samples/words-and-letters.html" "${resources}/samples/layout.html")
 
 if(KOBALT_ANDROID_RELEASE)
     set(KOBALT_ANDROID_PACKAGE com.nicoverbruggen.kobalt)

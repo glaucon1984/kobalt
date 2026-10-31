@@ -464,7 +464,14 @@ void Reader::showKosyncChoice() {
         if (!model->goToSyncedPosition(remote.position, [this](const QString &error) {
             if (error.isEmpty()) {
                 kosyncProgress.acceptRemote(model->state().value("position").toString());
-                save(true);
+                // Both writes are queued on the profile writer thread, which
+                // runs them in queue order, so the position lands before the
+                // sync time. Only an earlier sync time still waiting in the
+                // queue could land first. The position is a routine write
+                // that the next sync puts on storage, so a power loss can keep
+                // the new sync time and lose the position; the next sync then
+                // asks again.
+                save(true, true);
                 if (!kosyncClient->recordSyncSuccess()) {
                     kosyncStatus(strings::get("kosync.storage_error"));
                     refresh();

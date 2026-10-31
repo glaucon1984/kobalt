@@ -1,4 +1,5 @@
 #pragma once
+#include <QString>
 
 namespace kobalt::storage {
 // The profile database stays open on the writer thread while Kobalt runs. See
@@ -10,21 +11,28 @@ namespace kobalt::storage {
 // the device powers off.
 void closeProfile(bool keepClosed = false);
 void reopenProfile();
+// Whether the profile database in `directory` opens. Incompatible is a Kobalt
+// database of a version this build does not know. Corrupt is a damaged, empty
+// or foreign file. Unavailable means the storage failed. InUse means another
+// process holds the file or storage is exported; the file may be fine. A
+// database that opens stays open on the writer thread.
+enum class ProfileDatabaseState { Missing, Ready, Incompatible, Corrupt, InUse, Unavailable };
+ProfileDatabaseState inspectProfileDatabase(const QString &directory, QString *error = nullptr);
 // Syncs recent commits and folds them into the main file, for example before
 // sleep.
 void checkpointProfile();
-// True when routine commits are not yet on storage and the last sync is a
-// minute old or more. Standby then runs a checkpoint first. After a failed
-// checkpoint it stays false for five minutes.
-bool profileCheckpointDue();
+// True when routine commits need durability and the last sync is at least
+// a minute old. Urgent low-battery standby skips that age check. A failed
+// checkpoint suppresses maintenance retries for five minutes.
+bool profileCheckpointDue(bool urgent = false);
 // True while routine commits wait for a sync.
 bool profileHasUnsyncedWrites();
 // Starts a checkpoint on the writer thread without waiting for it.
 void requestProfileCheckpoint();
 bool profileCheckpointPending();
-// Commits that this thread starts while it exists do not sync storage. A
-// later synced commit or a checkpoint syncs them. Use only for records that
-// are written again soon, such as the reading position.
+// Use WAL NORMAL for transactions started in this scope. There is no extra
+// per-commit sync; automatic checkpoints and the rollback-journal fallback
+// can still sync. A lifecycle checkpoint makes prior commits durable.
 class RoutineWrites {
 public:
     RoutineWrites();

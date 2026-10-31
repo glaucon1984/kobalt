@@ -91,13 +91,19 @@ inline bool screenshotJobs(const QString &executable, const QString &root, const
                 return false;
             }
             QFile record(worker.directory + "/part.json");
-            if (!record.open(QIODevice::ReadOnly)) return false;
-            const auto images = QJsonDocument::fromJson(record.readAll()).array();
-            if (images.isEmpty()) return false;
+            const auto images = record.open(QIODevice::ReadOnly) ? QJsonDocument::fromJson(record.readAll()).array() : QJsonArray{};
+            if (images.isEmpty()) {
+                qCritical().noquote() << "Screenshot worker recorded no captures:" << worker.selectors.join(',');
+                return false;
+            }
             for (const auto &image : images) {
                 const auto name = image.toObject()["file"].toString();
                 if (QFileInfo(name).fileName() != name || !name.endsWith(".png") ||
-                    !QFile::rename(worker.directory + '/' + name, destination + '/' + name)) return false;
+                    !QFile::rename(worker.directory + '/' + name, destination + '/' + name)) {
+                    // Another case may already have written this file name.
+                    qCritical().noquote() << "Cannot collect screenshot" << name << "from" << worker.selectors.join(',');
+                    return false;
+                }
                 captures.append(image);
             }
             ++completed;

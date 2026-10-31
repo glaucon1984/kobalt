@@ -55,7 +55,7 @@ public:
     explicit BottomNavigation(QWidget *parent);
     std::function<void(NavigationDestination)> activated;
     void select(int destination, bool enabled, bool lightAvailable);
-    static constexpr ui::Px barHeight = ui::metrics::chrome::actionHeight;
+    static int barHeight();
     void setPanelOpen(bool open);
     void setTextFace(const QString &face);
     void setReturnLabel(const QString &label, const QString &note);
@@ -68,9 +68,13 @@ public:
 
 protected:
     void paintEvent(QPaintEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
 
 private:
+    // Shows the labels unless the option hides them or one does not fit.
+    void updateLabels();
     bool panelOpen = false;
+    bool labelsHidden = false;
     QVector<QPushButton *> tabs;
     ui::CaptionButton *returnButton;
     QWidget *returnRow;
@@ -113,7 +117,7 @@ public:
         return bar->y();
     }
     int contentBottom(QSize size) const {
-        return size.height() - BottomNavigation::barHeight;
+        return size.height() - BottomNavigation::barHeight();
     }
     bool contains(QPoint global) const;
 

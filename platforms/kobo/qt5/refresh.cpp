@@ -174,8 +174,16 @@ static void flushReaderUsing(QBackingStore *store, const QRegion &region, QWindo
     const QRegion annotationRepairs = annotationRepairRegions(readerWindow);
     if (pageAnimationPanel() == AnimationPanel::Colour && !(region & annotationRepairs).isEmpty()) {
         keyboardPixels.clear();
-        submit(region, {{region.boundingRect(), repairPolicy(dark, wide)}});
-        consumeAnnotationRepairs(readerWindow, region);
+        if (wide && (pageTurn || direction)) {
+            // Nickel turns onto and away from coloured highlights with its
+            // full-mode reading refresh, without a flash. Edits keep the cleanup.
+            const QRect screen = readerWindow->rect();
+            submit(QRegion(screen), {{screen, ordinaryPolicy(dark, wide) | bit(128)}});
+            consumeAnnotationRepairs(readerWindow, QRegion(screen));
+        } else {
+            submit(region, {{region.boundingRect(), repairPolicy(dark, wide)}});
+            consumeAnnotationRepairs(readerWindow, region);
+        }
         return;
     }
     // Firmware 4 does not take the page widget's attributes into the rectangle
@@ -283,9 +291,12 @@ static void flushReaderUsing(QBackingStore *store, const QRegion &region, QWindo
             const QRegion images =
                 readerWindow->property(colour ? "reader_image_repairs" : "reader_mono_repairs").value<QRegion>() &
                 readerWindow->rect();
+            // Large pictures and colour turn like Nickel: the reading waveform
+            // over the whole screen in full mode, which drives every non-white
+            // pixel without the GC16 flash. Other turns stay partial.
             if (!images.isEmpty() || (colour && readerWindow->property("reader_colour_regions").toBool())) {
                 const QRect screen = readerWindow->rect();
-                submit(QRegion(screen), {{screen, repairPolicy(dark, wide) | bit(128)}});
+                submit(QRegion(screen), {{screen, ordinaryPolicy(dark, wide) | bit(128)}});
                 return;
             }
         }

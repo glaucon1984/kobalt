@@ -1,4 +1,5 @@
 #include "support/qt_compat.h"
+#include "support/main_thread.h"
 #include "layout_cache.h"
 #include <QDir>
 #include <QFile>
@@ -89,6 +90,7 @@ bool LayoutCache::store(const QByteArray &digest, const LayoutCompatibility &res
     return save();
 }
 bool LayoutCache::save() {
+    mainthread::BlockingOperation blockingOperation("layout-cache-write");
     if (path_.isEmpty() || policy_.isEmpty() || !QDir().mkpath(QFileInfo(path_).absolutePath()))
         return false;
     const auto bytes =

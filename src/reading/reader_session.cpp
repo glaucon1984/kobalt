@@ -486,6 +486,8 @@ void ReaderSession::open(OpenRequest request, std::function<void(OpeningResult)>
                 const auto landscapeColumns = saved.value("two_columns_landscape");
                 const auto columnSpacing = saved.value("column_spacing_percent");
                 const auto wordSpacing = saved.value("word_spacing");
+                const auto paragraphSpacing = saved.value("paragraph_spacing");
+                const auto paragraphIndent = saved.value("paragraph_indent");
                 const auto tracking = saved.value("justification_tracking");
                 const auto widowsOrphans = saved.value("widows_orphans");
                 if (!savedMatches)
@@ -497,6 +499,8 @@ void ReaderSession::open(OpenRequest request, std::function<void(OpeningResult)>
                 saved["two_columns_landscape"] = landscapeColumns;
                 saved["column_spacing_percent"] = columnSpacing;
                 saved["word_spacing"] = wordSpacing;
+                saved["paragraph_spacing"] = paragraphSpacing;
+                saved["paragraph_indent"] = paragraphIndent;
                 saved["justification_tracking"] = tracking;
                 saved["widows_orphans"] = widowsOrphans;
                 appearance::migrateLineSpacing(saved);
@@ -914,6 +918,12 @@ bool ReaderSession::setOpticalSize(double points) {
     }
     return true;
 }
+bool ReaderSession::setBookBeautifier(bool enabled) {
+    if (temporaryTypography()) return false;
+    for (const auto *key : appearance::beautifierKeys) desired[key] = enabled;
+    request(true);
+    return true;
+}
 bool ReaderSession::setHyphenation(const QString &mode) {
     if (temporaryTypography())
         return false;
@@ -1091,6 +1101,9 @@ void ReaderSession::compareNativePosition(const QString &location, std::function
         Qt::QueuedConnection);
 }
 void ReaderSession::coverImage(QSize maximumSize, std::function<void(QImage)> finished, QString preferredPath) {
+    coverImage(maximumSize, [finished](QImage image, QFileInfo) { finished(std::move(image)); }, preferredPath);
+}
+void ReaderSession::coverImage(QSize maximumSize, std::function<void(QImage, QFileInfo)> finished, QString preferredPath) {
     auto engine = model;
     const auto lease = lease_;
     QPointer<ReaderSession> guard(this);
@@ -1098,19 +1111,26 @@ void ReaderSession::coverImage(QSize maximumSize, std::function<void(QImage)> fi
         engineWorker(),
         [engine, guard, lease, maximumSize, preferredPath, finished] {
             EngineJob activity;
-            auto image = lease && !lease->revoked() ? engine->coverImage(maximumSize, preferredPath) : QImage();
+            QFileInfo before(preferredPath);
+            const auto bytes = before.size();
+            const auto modified = before.lastModified();
+            QString usedPath;
+            auto image = lease && !lease->revoked() ? engine->coverImage(maximumSize, preferredPath, &usedPath) : QImage();
+            const QFileInfo after(usedPath);
+            const auto source = !usedPath.isEmpty() && before.isAbsolute() && before.isFile() &&
+                bytes == after.size() && modified == after.lastModified() ? before : QFileInfo();
             kobalt::qt::invoke(
                 qApp,
-                [guard, lease, image = std::move(image), finished]() mutable {
+                [guard, lease, image = std::move(image), source, finished]() mutable {
                     if (!guard) {
                         diagnostic("cover-decode-dropped", {{"reason", "session gone"}});
                         return;
                     }
-                    const bool current = guard->lease_ == lease && lease && !lease->revoked();
-                    if (!current)
+                    const bool valid = guard->lease_ == lease && lease && !lease->revoked();
+                    if (!valid)
                         diagnostic("cover-decode-dropped", {{"reason", !lease ? "no lease" : lease->revoked() ? "revoked" : "lease replaced"},
                                                             {"decoded", !image.isNull()}});
-                    finished(current ? std::move(image) : QImage());
+                    finished(valid ? std::move(image) : QImage(), valid ? source : QFileInfo());
                 },
                 Qt::QueuedConnection);
         },
@@ -1836,12 +1856,13 @@ void ReaderSession::loadImages() {
             ReaderFrame result;
             bool loaded = false;
             if (latest->load() == job) {
+                const bool timing = diagnosticsActive();
                 QElapsedTimer timer;
-                timer.start();
+                if (timing) timer.start();
                 loaded = engine->loadNextImage();
                 if (loaded && latest->load() == job)
                     result = capture(*engine, positions, false, markup, markupGeneration);
-                if (loaded)
+                if (loaded && timing)
                     diagnostic("image-load-end",
                                {{"elapsed_ms", double(timer.elapsed())},
                                 {"current", latest->load() == job},
@@ -1909,12 +1930,13 @@ void ReaderSession::resumeIdleWork(int direction, quint64 job) {
         engineWorker(),
         [engine, latest, direction, job, guard, lease, neighbours] {
             EngineJob activity;
+            const bool timing = diagnosticsActive();
             QElapsedTimer timer;
-            timer.start();
+            if (timing) timer.start();
             prepareNeighbours(*engine, direction, [latest, job] {
                 return latest->load() == job;
             });
-            diagnostic("neighbours-end",
+            if (timing) diagnostic("neighbours-end",
                        {{"elapsed_ms", double(timer.elapsed())}, {"completed", latest->load() == job}}, false);
             // Drawing a neighbour can discover deferred images. Publish them now
             // so they load before that page is requested.
@@ -2030,9 +2052,10 @@ void ReaderSession::dispatch(bool pageTurn) {
         [guard, engine, requested, size, anchor, delta, target, job, lease, progress, positions, markup,
          markupGeneration] {
             EngineJob activity;
+            const bool timing = diagnosticsActive();
             QElapsedTimer timer;
-            timer.start();
-            diagnostic("render-start", {{"page_turn", delta != 0}, {"jump", !anchor.isEmpty() || target >= 0}},
+            if (timing) timer.start();
+            if (timing) diagnostic("render-start", {{"page_turn", delta != 0}, {"jump", !anchor.isEmpty() || target >= 0}},
                        delta == 0);
             const auto before = engine->state();
             const auto oldSize = engine->viewport();
@@ -2069,8 +2092,12 @@ void ReaderSession::dispatch(bool pageTurn) {
             if (result.turnDirection && oldImage &&
                 engine->preparedDamage(oldImage, result.image.cacheKey(), &result.damage))
                 result.damageFrom = oldImage;
-            diagnostic("render-end", {{"elapsed_ms", double(timer.elapsed())}, {"failed", !result.error.isEmpty()}},
-                       false);
+            if (timing)
+                diagnostic("render-end", {{"elapsed_ms", double(timer.elapsed())}, {"failed", !result.error.isEmpty()}},
+                           result.error.isEmpty() ? DiagnosticSeverity::Activity : DiagnosticSeverity::Error);
+            else
+                diagnostic("render-end", {{"failed", !result.error.isEmpty()}},
+                           result.error.isEmpty() ? DiagnosticSeverity::Activity : DiagnosticSeverity::Error);
             const bool failed = !result.error.isEmpty();
             kobalt::qt::invoke(
                 qApp,

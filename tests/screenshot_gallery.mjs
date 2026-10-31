@@ -43,11 +43,15 @@ for (const shot of manifest.images) {
     assert.deepEqual(density, [11811, 11811]);
 }
 for (const variants of scenes.values()) {
-    assert.deepEqual([...variants.keys()].sort(), ['seven-inch/dark', 'seven-inch/light', 'six-inch/dark', 'six-inch/light']);
+    assert.deepEqual([...variants.keys()].sort(), ['seven-inch/dark', 'seven-inch/large', 'seven-inch/light',
+        'six-inch/dark', 'six-inch/large', 'six-inch/light']);
     for (const device of ['six-inch', 'seven-inch']) {
         const pages = [...variants.get(device + '/light')].sort((a, b) => a - b);
         assert.deepEqual([...variants.get(device + '/dark')].sort((a, b) => a - b), pages);
         assert.deepEqual(pages, Array.from({ length: pages.length }, (_, index) => index + 1));
+        // Larger text can add pages; they must still be complete.
+        const large = [...variants.get(device + '/large')].sort((a, b) => a - b);
+        assert.deepEqual(large, Array.from({ length: large.length }, (_, index) => index + 1));
     }
 }
 const browser = await chromium.launch({ headless: true, ...(process.env.KOBALT_CHROMIUM ? { executablePath: process.env.KOBALT_CHROMIUM } : {}) });
@@ -158,6 +162,16 @@ try {
     assert.equal(await page.locator('#theme').getAttribute('aria-pressed'), 'false');
     assert.equal(await card.locator('.capture').evaluate(element => element === document.activeElement), true);
     assert.equal(await page.locator('figure').count(), scenes.size);
+    // 150% text is a light variant; the theme waits until it is off again.
+    const regular = await card.locator('img').getAttribute('src');
+    await page.locator('#text-size').click();
+    assert.equal(await page.locator('#text-size').getAttribute('aria-pressed'), 'true');
+    assert.equal(await page.locator('#theme').isDisabled(), true);
+    assert.notEqual(await card.locator('img').getAttribute('src'), regular);
+    assert.match(await card.locator('.tag').textContent(), /150%/);
+    await page.locator('#text-size').click();
+    assert.equal(await page.locator('#theme').isDisabled(), false);
+    assert.equal(await card.locator('img').getAttribute('src'), regular);
     await page.locator('#query').fill('no matching screenshot xyzzy');
     assert.equal(await page.locator('figure:not([hidden])').count(), 0);
     assert.equal(await page.locator('#empty').isVisible(), true);

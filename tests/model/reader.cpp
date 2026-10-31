@@ -1524,6 +1524,38 @@ int main(int argc, char **argv) {
             }
         }
     }
+    {
+        // A plain EPUB without element IDs. Nickel stores its position as a DOM
+        // point that counts every child from <html>, text nodes included, with
+        // a UTF-8 byte offset, as firmware 4.46 and 6.0 do for this layout.
+        const auto plain = storedEpub(
+            {{"mimetype", "application/epub+zip"},
+             {"META-INF/container.xml",
+              "<container xmlns='urn:oasis:names:tc:opendocument:xmlns:container' version='1.0'><rootfiles><rootfile full-path='book.opf' media-type='application/oebps-package+xml'/></rootfiles></container>"},
+             {"book.opf",
+              "<package xmlns='http://www.idpf.org/2007/opf' version='2.0'><metadata/><manifest><item id='c' href='text/c.xhtml' media-type='application/xhtml+xml'/></manifest><spine><itemref idref='c'/></spine></package>"},
+             {"text/c.xhtml",
+              "<?xml version='1.0' encoding='utf-8'?>\n<html xmlns='http://www.w3.org/1999/xhtml'>\n<head>\n<title>Plain</title>\n</head>\n"
+              "<body>\n<h1>Kapitel</h1>\n<p>Erste Zeile.</p>\n<p>Zweite <em>Gr\xc3\xb6\xc3\x9f" "e</em> Zeile.</p>\n</body>\n</html>"}});
+        kobalt::ReaderModel model(kobalt::test::readerFonts());
+        require(model.open(plain, QSize(1072, 1328), {}, &error), qPrintable(error));
+        // Paragraph start, inside the inline element after a two-byte letter,
+        // and inside the text after it.
+        for (const auto &point : {"point(/1/4/6/1:0)", "point(/1/4/6/2/1:4)", "point(/1/4/6/3:1)"}) {
+            const auto location = QStringLiteral("text/c.xhtml#") + point;
+            require(model.goToPlatform(positions, location, &error), qPrintable(location + ": " + error));
+            require(model.platformPosition(positions, &error) == location && error.isEmpty(),
+                    qPrintable("Plain EPUB position did not round-trip: " + location + " -> " +
+                               model.platformPosition(positions, &error)));
+        }
+        require(model.goToPlatform(positions, "text/c.xhtml#point(/1/4/4/1:6)", &error) &&
+                    model.position().endsWith(".6"),
+                "Plain EPUB point mapped to the wrong text offset");
+        require(!model.goToPlatform(positions, "text/c.xhtml#point(/1/4/6/2/1:3)", &error),
+                "A byte offset inside a UTF-8 character was accepted");
+        require(!model.goToPlatform(positions, "text/c.xhtml#point(/1/4/99/1:0)", &error),
+                "An out-of-range plain EPUB point was accepted");
+    }
     kobalt::ReaderModel native(kobalt::test::readerFonts());
     require(native.open(bytes, QSize(1072, 1328), legacySettings, &error), qPrintable(error));
     require(native.goToPlatform(positions, chapter2 + "#kobo.8.1:7", &error), qPrintable(error));

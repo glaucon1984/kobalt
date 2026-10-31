@@ -23,6 +23,7 @@ public:
 
 protected:
     void paintEvent(QPaintEvent *event) override;
+    bool event(QEvent *event) override;
 };
 int wrappedInterfaceTextHeight(const QString &text, const QFont &font, int width, int maximumLines = 0);
 void drawWrappedInterfaceText(QPainter &painter, const QRect &bounds, const QString &text,

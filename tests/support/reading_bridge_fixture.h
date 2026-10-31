@@ -12,7 +12,18 @@ struct HostProgress {
     bool hasEstimates = false;
     std::function<void()> notifyEstimates;
     bool changed = false, failWrite = false, writeBlocked = false;
-    int writes = 0, writeAttempts = 0;
+    int writes = 0, writeAttempts = 0, openingAttempts = 0;
+    bool holdFinish = false, failFinish = false, finishPending = false;
+    bool rejectWriteWhileFinishing = false;
+    int finishAttempts = 0;
+    int stopAttempts = 0, destroyed = 0;
+    std::function<void(bool)> finishDone;
+    void completeFinish(bool saved) {
+        finishPending = false;
+        auto done = std::move(finishDone);
+        finishDone = {};
+        if (done) done(saved);
+    }
     double percent = 0;
     void publish(ReadingProgress progress) {
         current = std::move(progress);
@@ -29,7 +40,9 @@ public:
         };
     }
     ~HostReadingBridge() override {
+        ++progress->destroyed;
         progress->notifyEstimates = {};
+        progress->finishDone = {};
     }
     bool estimates(const ReadingActivity &, ReadingEstimates *result) override {
         if (!progress->hasEstimates) {
@@ -53,7 +66,7 @@ public:
     bool write(const ReadingProgress &expected, const QString &location, double percent, bool finished,
                const ReadingActivity &, ReadingProgress *verified, QString *error) override {
         ++progress->writeAttempts;
-        if (progress->failWrite) {
+        if (progress->failWrite || (progress->rejectWriteWhileFinishing && progress->finishPending)) {
             if (error) {
                 *error = "The database is busy.";
             }
@@ -75,8 +88,26 @@ public:
             *verified = progress->current;
         return true;
     }
+    bool markReading() override {
+        ++progress->openingAttempts;
+        if (progress->failWrite) return false;
+        progress->current.status = 1;
+        return true;
+    }
     void observeReading(const ReadingActivity &) override {}
-    void stopReading() override {}
+    void stopReading() override {
+        ++progress->stopAttempts;
+        if (progress->rejectWriteWhileFinishing && progress->holdFinish)
+            progress->finishPending = true;
+    }
+    void finishReading(std::function<void(bool)> done) override {
+        ++progress->finishAttempts;
+        progress->finishPending = true;
+        progress->finishDone = std::move(done);
+        if (!progress->holdFinish)
+            progress->completeFinish(!progress->failFinish);
+    }
+    bool readingSavePending() const override { return progress->finishPending; }
 
 private:
     std::shared_ptr<HostProgress> progress;

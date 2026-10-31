@@ -61,7 +61,8 @@ public:
         setAutoFillBackground(true);
         layout = new QStackedLayout(this);
         layout->setContentsMargins(0, 0, 0, 0);
-        start = new android::StartScreen(android::readerServices().presentation, store);
+        const auto services = android::readerServices();
+        start = new android::StartScreen(services.presentation, store, services.textScale);
         start->setLibrarySystemBarBorders(true);
         // A book picked while the library is shown joins it; see openBook.
         connect(start, &android::StartScreen::libraryOpenRequested, this, [] {
@@ -177,6 +178,9 @@ public:
             android::setPageButtonsAvailable(false);
         });
         connect(qApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState state) {
+            // The system font size can change in Settings while Kobalt is in the background.
+            if (state == Qt::ApplicationActive && layout->currentWidget() == start && start->libraryShown())
+                start->applyTextSize();
             syncPageButtons();
             if (state != Qt::ApplicationActive && controller.window())
                 controller.window()->checkpoint();

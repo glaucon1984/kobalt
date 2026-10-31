@@ -8,7 +8,8 @@
 namespace kobalt {
 // The controller owns publication access and loading. Each UI owns the widgets
 // used to show that work, and the viewport it reserves for the book.
-enum class OpeningFallback { Failure, Protected, Remembered };
+// Storage is a failure caused by saved data that cannot be read or moved aside.
+enum class OpeningFallback { Failure, Protected, Remembered, Storage };
 class ReaderOpeningView {
 public:
     virtual ~ReaderOpeningView() = default;
@@ -29,6 +30,9 @@ struct ReaderInterface {
     // Sizes the interface for a screen of this many pixels per inch. Call before
     // creating any view.
     void (*setDensity)(int ppi);
+    // Applies the platform's text size setting, where 1 is standard. Call
+    // before creating any view.
+    void (*setLargeText)(qreal requested);
 };
 const ReaderInterface &readerInterface();
 }

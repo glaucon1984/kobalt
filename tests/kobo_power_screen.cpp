@@ -80,6 +80,43 @@ protected:
 class PowerScreenTests : public QObject {
     Q_OBJECT
 private slots:
+    void saveReadsCommittedTokenOffTheGuiThread() {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const kobalt::storage::Paths paths{directory.path()};
+        const auto connection = Device::getCurrentDevice()->getDbName();
+        {
+            auto database = QSqlDatabase::addDatabase("QSQLITE", connection);
+            database.setDatabaseName(directory.path() + "/native.sqlite");
+            QVERIFY(database.open());
+            QSqlQuery query(database);
+            QVERIFY(query.exec("CREATE TABLE content (ContentID TEXT, ContentType INTEGER, DateLastRead TEXT)"));
+            QVERIFY(query.exec("INSERT INTO content VALUES ('book', 6, '2026-10-24T09:00:00Z')"));
+            kobalt::sleep::Snapshot snapshot;
+            snapshot.image = QImage(100, 200, QImage::Format_RGB32);
+            snapshot.image.fill(Qt::gray);
+            snapshot.orientation = Qt::PortraitOrientation;
+            snapshot.mode = kobalt::sleep::Mode::Page;
+            kobalt::nickel::HomeSleepScreen screen(paths, nullptr);
+            // A synchronous separate reader times out while this lock is held.
+            // Returning first lets the GUI commit before the worker's read.
+            QVERIFY(query.exec("BEGIN EXCLUSIVE"));
+            screen.remember(snapshot, "book");
+            QVERIFY(query.exec("COMMIT"));
+            screen.finishSave();
+            QVERIFY(QFile::exists(paths.sleepScreen()));
+            screen.remember(snapshot, "book");
+            screen.forget();
+            QVERIFY(!QFile::exists(paths.sleepScreen()));
+            {
+                kobalt::nickel::HomeSleepScreen retiring(paths, nullptr);
+                retiring.remember(snapshot, "book");
+            }
+            QVERIFY(QFile::exists(paths.sleepScreen()));
+            screen.forget();
+        }
+        QSqlDatabase::removeDatabase(connection);
+    }
     void init() { kobalt::battery = {67, true, false}; }
     void initTestCase() {
         QVERIFY(kobalt::ui::initializeInterfaceFonts(kobalt::AssetBundle(QStringLiteral(KOBALT_TEST_ASSET_ROOT), QStringLiteral(KOBALT_VERSION))));
@@ -163,6 +200,16 @@ private slots:
             QCOMPARE(frame->grab().toImage().convertToFormat(QImage::Format_RGB32),
                 kobalt::reader::sleepScreenImage(snapshot.image, snapshot.progress, {}, false, 67,
                     kobalt::reader::SleepStatus::PoweredOff, true));
+            screen.clear();
+            QVERIFY(QFile::remove(paths.sleepScreen()));
+            screen.prepare(true);
+            screen.present();
+            QVERIFY(power.findChild<QWidget *>("rrSleepFrame"));
+            QVERIFY(query.exec("INSERT INTO content VALUES ('later', 6, '2026-10-24T10:00:00Z')"));
+            screen.clear();
+            screen.prepare(true);
+            screen.present();
+            QVERIFY(!power.findChild<QWidget *>("rrSleepFrame"));
             database.close();
         }
         QSqlDatabase::removeDatabase(connection);

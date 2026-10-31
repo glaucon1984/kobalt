@@ -76,5 +76,5 @@ private:
 SettingSlider *sliderRow(QWidget *parent, QVBoxLayout *rows, const char *name, const char *labelName,
                          const QString &label, const char *lessName, const char *moreName, int minimum, int maximum,
                          int step, std::function<void(int)> apply, const QString &prefix = {},
-                         const QString &suffix = {});
+                         const QString &suffix = {}, const QStringList &markerLabels = {});
 }

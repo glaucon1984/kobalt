@@ -20,6 +20,7 @@ inline QString screenshotGroup(const QString &scene) {
     if (scene.startsWith("links-") || scene.startsWith("footnotes-") || scene.startsWith("tappable-links-")) return "Links and footnotes";
     if (scene.startsWith("search")) return "Search";
     if (scene.startsWith("kosync-")) return "Settings and About";
+    if (scene.startsWith("beautifier-")) return "Typography";
     if (scene.startsWith("settings") || scene == "about" || scene == "acknowledgments" || scene.startsWith("license")) return "Settings and About";
     if (scene.startsWith("annotation") || scene == "annotating" || scene.startsWith("bookmark")) return "Bookmarks and annotations";
     if (scene.startsWith("vertical-") || scene == "layout" || scene.startsWith("header-footer")) return "Layout";
@@ -83,6 +84,9 @@ inline QString screenshotTitle(const QString &scene, const QJsonObject &book) {
         {"header-footer-large", "Headers and footers: enlarged text"},
         {"header-footer-off", "Headers and footers: disabled"},
         {"layout", "Page layout"},
+        {"beautifier-off", "No book normalization rules selected"},
+        {"beautifier-rules", "Book normalization rules"},
+        {"beautifier-settings", "Book normalization in Settings"},
         {"library-book-menu", "Book actions"},
         {"library-empty", "Welcome to the library"},
         {"library-folders", "Book folders"},
@@ -115,6 +119,9 @@ inline QString screenshotTitle(const QString &scene, const QJsonObject &book) {
         {"menu", "Reading menu"},
         {"menu-return-pressed", "Return button pressed"},
         {"reading", "Reading"},
+        {"saving", "Saving reading progress"},
+        {"save-failed", "Saving failed"},
+        {"save-retry-failed", "Saving retry failed"},
         {"search", "Search results"},
         {"search-empty", "Search this book"},
         {"search-no-results", "No matching passages"},
@@ -134,6 +141,7 @@ inline QString screenshotTitle(const QString &scene, const QJsonObject &book) {
         {"styling-widows", "Widows and orphans preview"},
         {"styling-word-spacing", "Word spacing preview"},
         {"settings-system", "System settings"},
+        {"session-timeout", "New session after sleep"},
         {"stats", "Reading statistics"},
         {"stats-dense-graph", "Dense chapter graph"},
         {"stats-dense-reading", "Moby Dick"},
@@ -141,11 +149,18 @@ inline QString screenshotTitle(const QString &scene, const QJsonObject &book) {
         {"tappable-links-all", "Direct links and footnotes"},
         {"tappable-links-choices", "Direct link choices"},
         {"tappable-links-footnotes", "Direct footnotes only"},
-        {"tappable-links-off", "Direct links off"},
+        {"footnotes-tap-targets", "Footnote tap targets"},
+        {"footnotes-circle-pressed", "Pressed footnote circle"},
+        {"links-rectangle-pressed", "Pressed link rectangle"},
         {"tappable-links-settings", "Direct link settings"},
         {"text", "Text controls"},
         {"text-size-preview", "Text size preview"},
         {"text-spacing-preview", "Line spacing preview"},
+        {"styling-paragraph-publisher", "Publisher paragraph adjustments"},
+        {"styling-paragraph-row", "Paragraph adjustments in Settings"},
+        {"styling-paragraph-custom", "Custom paragraph spacing"},
+        {"styling-paragraph-indent", "Custom paragraph indentation"},
+        {"styling-paragraph-gaps", "Paragraph gaps with hatching"},
         {"text-weight-preview", "Text weight preview"},
         {"vertical-center", "Centered page text"},
         {"vertical-choices", "Page spacing choices"},
@@ -196,7 +211,7 @@ inline QByteArray screenshotGallery(const QString &directory, const QJsonArray &
         const auto device = shot["device"].toString();
         const auto theme = shot["theme"].toString();
         if (QFileInfo(file).fileName() != file || !file.endsWith(".png") || QFileInfo(directory + '/' + file).isSymLink() ||
-            (device != "six-inch" && device != "seven-inch") || (theme != "light" && theme != "dark") ||
+            (device != "six-inch" && device != "seven-inch") || (theme != "light" && theme != "dark" && theme != "large") ||
             shot["capture"] != "screen" || shot["ppi"].toInt() != 300 || screen.isEmpty() || capturePage < 1) { qCritical() << "Invalid screenshot metadata:" << file; return {}; }
         const auto variant = device + '/' + theme;
         if (variants[screen][variant].contains(capturePage)) { qCritical() << "Duplicate screenshot page:" << file; return {}; }
@@ -223,12 +238,17 @@ inline QByteArray screenshotGallery(const QString &directory, const QJsonArray &
     QMap<QString, QString> sections;
     for (auto it = scenes.cbegin(); it != scenes.cend(); ++it) {
         const auto &pages = variants[it.key()];
-        if (pages.size() != 4) { qCritical() << "Missing screenshot variants:" << it.key() << pages.keys(); return {}; }
+        // Light, dark and light with 150% text at both sizes. Larger text can
+        // add pages, so only the two themes must match page for page.
+        if (pages.size() != 6) { qCritical() << "Missing screenshot variants:" << it.key() << pages.keys(); return {}; }
         for (const auto &device : {QString("six-inch"), QString("seven-inch")}) {
             const auto light = pages.value(device + "/light");
             if (light != pages.value(device + "/dark")) { qCritical() << "Screenshot theme pages differ:" << it.key() << device << light << pages.value(device + "/dark"); return {}; }
-            for (int page = 1; page <= light.size(); ++page)
-                if (!light.contains(page)) { qCritical() << "Screenshot page missing:" << it.key() << device << page; return {}; }
+            for (const auto &theme : {QString("light"), QString("large")}) {
+                const auto captured = pages.value(device + '/' + theme);
+                for (int page = 1; page <= captured.size(); ++page)
+                    if (!captured.contains(page)) { qCritical() << "Screenshot page missing:" << it.key() << device << theme << page; return {}; }
+            }
         }
         const auto shot = it.value();
         const auto book = shot["book"].toObject();

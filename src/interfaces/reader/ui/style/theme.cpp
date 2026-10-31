@@ -144,7 +144,7 @@ QColor noteColor(const QWidget *widget) {
 void paintHeaderRules(QPainter &painter, const QWidget *view) {
     painter.fillRect(0, m::chrome::statusHeight - m::control::border, view->width(), m::control::border,
                      view->palette().color(QPalette::Mid));
-    painter.fillRect(0, m::chrome::headerHeight - m::chrome::heavyRule, view->width(), m::chrome::heavyRule,
+    painter.fillRect(0, m::chrome::headerHeight() - m::chrome::heavyRule, view->width(), m::chrome::heavyRule,
                      view->palette().color(QPalette::WindowText));
 }
 void readerStyle(QWidget *widget, const QString &source) {

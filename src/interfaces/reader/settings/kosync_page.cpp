@@ -197,13 +197,14 @@ void KosyncPage::edit(int field) {
     editorDialog->setFocusProxy(editor);
     editor->setMaxLength(field == 0 ? 2048 : field == 3 ? 128 : 256);
     editor->setText(field == 0 ? server_ : field == 1 ? username_ : field == 2 ? password_ : deviceName_);
+    // The server must use HTTPS, so an empty server field starts with its scheme.
+    if (field == 0 && server_.isEmpty()) editor->setText(QStringLiteral("https://"));
     editor->setAccessibleName(titleText);
     editor->setInputMethodHints(Qt::ImhNoPredictiveText | Qt::ImhNoAutoUppercase |
                                (field == 2 ? Qt::ImhSensitiveData : Qt::ImhNone));
     if (field == 2) editor->setEchoMode(QLineEdit::Password);
     ui::readerStyle(editor, "QLineEdit{border:none;border-radius:0;padding:0;background:palette(window);color:palette(window-text);" + ui::styles::font(m::chrome::labelText) + "}");
     editor->setTextMargins(m::notice::cardMargins.left(), 0, m::notice::cardMargins.right(), 0);
-    if (field == 0) editor->setPlaceholderText(QStringLiteral("https://"));
     if (field == 3) editor->setPlaceholderText(defaultDeviceName_);
     editor->setMinimumHeight(m::chrome::actionHeight);
     if (field == 2) {
@@ -236,7 +237,10 @@ void KosyncPage::edit(int field) {
     const auto submit = [this, field, editor] {
         if (submitting_) return;
         submitting_ = true;
-        (field == 0 ? server_ : field == 1 ? username_ : field == 2 ? password_ : deviceName_) = editor->text();
+        auto text = editor->text();
+        // The prefilled scheme alone is not a server.
+        if (field == 0 && text.trimmed() == QLatin1String("https://")) text.clear();
+        (field == 0 ? server_ : field == 1 ? username_ : field == 2 ? password_ : deviceName_) = text;
         updateCaptions();
         if (field == 3) {
             if (deviceNameChanged) deviceNameChanged(deviceName_);

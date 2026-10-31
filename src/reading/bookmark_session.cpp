@@ -2,6 +2,7 @@
 #include "reader_session.h"
 #include "appearance_settings.h"
 #include "support/diagnostics.h"
+#include "storage/profile_database.h"
 #include "support/qt_compat.h"
 #include "support/strings.h"
 #include <QCoreApplication>
@@ -31,7 +32,7 @@ BookmarkSession::BookmarkSession(ReaderSession &model, std::function<QString()> 
     if (!store->load(&error)) {
         loadFailed_ = true;
         error_ = strings::get("bookmarks.load_failed");
-        diagnostic("bookmarks-load", {{"error", error}}, false);
+        diagnostic("bookmarks-load", {{"error", error}}, DiagnosticSeverity::Error);
     }
     saved = store->bookmarks();
 }
@@ -196,7 +197,7 @@ bool BookmarkSession::save(QVector<Bookmark> bookmarks, QVector<int> pages, cons
         diagnostic("bookmarks-saved",
                    {{"reason", reason}, {"count", int(store->bookmarks().size())}, {"failed", true},
                     {"error", "bookmark-limit"}},
-                   false);
+                   DiagnosticSeverity::Warning);
         error_ = strings::get("bookmarks.save_failed");
         ++errors;
         if (failed)
@@ -227,6 +228,7 @@ bool BookmarkSession::save(QVector<Bookmark> bookmarks, QVector<int> pages, cons
     auto error = std::make_shared<QString>();
     writer->post(
         [copy, bookmarks, error] {
+            storage::RoutineWrites routine;
             copy->setBookmarks(bookmarks);
             return copy->save(error.get());
         },
@@ -245,7 +247,8 @@ void BookmarkSession::finishSave(quint64 id, bool ok, const QString &error, quin
                                  const QVector<Bookmark> &bookmarks, const char *reason) {
     reported = qMax(reported, id);
     diagnostic("bookmarks-saved",
-               {{"reason", reason}, {"count", int(bookmarks.size())}, {"failed", !ok}, {"error", error}}, false);
+               {{"reason", reason}, {"count", int(bookmarks.size())}, {"failed", !ok}, {"error", error}},
+               ok ? DiagnosticSeverity::Activity : DiagnosticSeverity::Error);
     if (ok)
         saved = bookmarks;
     // A newer save writes the whole list again, so only its result counts.
@@ -256,8 +259,12 @@ void BookmarkSession::finishSave(quint64 id, bool ok, const QString &error, quin
         if (errors == before)
             error_.clear();
         restore.clear();
+        retryPending = false;
+        retryBookmarks.clear();
         return;
     }
+    retryBookmarks = bookmarks;
+    retryPending = true;
     // Return to the saved list. Its pages are known when every saved
     // bookmark was on screen in this layout; otherwise look them up again.
     QVector<int> pages;
@@ -293,6 +300,13 @@ void BookmarkSession::finishSave(quint64 id, bool ok, const QString &error, quin
 void BookmarkSession::flush() {
     if (writer)
         writer->flush();
+}
+bool BookmarkSession::retryFailedSave() {
+    if (!retryPending)
+        return true;
+    // Resolve the retried list against the current layout after persistence.
+    layout_.clear();
+    return save(retryBookmarks, {}, "retry");
 }
 bool BookmarkSession::remove(const QString &position) {
     if (!store)

@@ -1064,7 +1064,10 @@ void Reader::syncMarkupRequest() {
 void Reader::preparePresentation(std::function<void(bool)> finished) {
     prepareKosyncPresentation([this, finished = std::move(finished)](bool ready) mutable {
         if (!ready) { finished(false); return; }
-        prepareAnnotationPresentation(std::move(finished));
+        prepareAnnotationPresentation([this, finished = std::move(finished)](bool ready) {
+            if (ready) book->markNativeReading();
+            finished(ready);
+        });
     });
 }
 

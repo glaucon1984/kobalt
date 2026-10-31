@@ -1,3 +1,7 @@
+# A launcher run owns this root so cancellation can remove only its scratch state.
+if(NOT "$ENV{KOBALT_TEST_TMP_ROOT}" STREQUAL "")
+    set(TEST_ROOT "$ENV{KOBALT_TEST_TMP_ROOT}/screenshot-books")
+endif()
 file(MAKE_DIRECTORY "${TEST_ROOT}/source")
 set(references "{}")
 foreach(name alice maths moby-dick)

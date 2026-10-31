@@ -19,6 +19,29 @@
       "displayName": "Mac performance measurements",
       "binaryDir": "${sourceDir}/../../build/desktop-mac-perf",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+    },
+    {
+      "name": "linux",
+      "displayName": "Linux development app",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/../../build/desktop-linux",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "linux-perf",
+      "inherits": "linux",
+      "displayName": "Linux performance measurements",
+      "binaryDir": "${sourceDir}/../../build/desktop-linux-perf",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
     }
   ],
   "buildPresets": [
@@ -29,7 +52,15 @@
     { "name": "mac-light-screenshots", "configurePreset": "mac", "targets": ["screenshots-light"], "jobs": 2 },
     { "name": "mac-screenshots", "configurePreset": "mac", "targets": ["screenshots"], "jobs": 2 },
     { "name": "mac-perf", "configurePreset": "mac-perf", "targets": ["perf"], "jobs": 2 },
-    { "name": "mac-eval", "configurePreset": "mac", "targets": ["kobalt-eval-compare"], "jobs": 2 }
+    { "name": "mac-eval", "configurePreset": "mac", "targets": ["kobalt-eval-compare"], "jobs": 2 },
+    { "name": "linux", "configurePreset": "linux", "targets": ["Kobalt"], "jobs": 2 },
+    { "name": "linux-tests", "configurePreset": "linux", "targets": ["kobalt-tests"], "jobs": 2 },
+    { "name": "linux-fast-tests", "configurePreset": "linux", "targets": ["kobalt-fast-tests"], "jobs": 2 },
+    { "name": "linux-light-tests", "configurePreset": "linux", "targets": ["kobalt-desktop-tests"], "jobs": 2 },
+    { "name": "linux-light-screenshots", "configurePreset": "linux", "targets": ["screenshots-light"], "jobs": 2 },
+    { "name": "linux-screenshots", "configurePreset": "linux", "targets": ["screenshots"], "jobs": 2 },
+    { "name": "linux-perf", "configurePreset": "linux-perf", "targets": ["perf"], "jobs": 2 },
+    { "name": "linux-eval", "configurePreset": "linux", "targets": ["kobalt-eval-compare"], "jobs": 2 }
   ],
   "testPresets": [
     {
@@ -40,6 +71,20 @@
     },
     { "name": "mac-light", "inherits": "mac", "filter": { "include": { "label": "light" } } },
     { "name": "mac-fast", "inherits": "mac", "filter": { "include": { "label": "fast" } } },
-    { "name": "mac-integration", "inherits": "mac", "filter": { "include": { "label": "integration" } } }
+    { "name": "mac-integration", "inherits": "mac", "filter": { "include": { "label": "integration" } } },
+    {
+      "name": "linux",
+      "configurePreset": "linux",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "jobs": 2,
+        "noTestsAction": "error"
+      }
+    },
+    { "name": "linux-light", "inherits": "linux", "filter": { "include": { "label": "light"}} },
+    { "name": "linux-fast", "inherits": "linux", "filter": { "include": { "label": "fast"}} },
+    { "name": "linux-integration", "inherits": "linux", "filter": { "include": { "label": "integration"}} }
   ]
 }

@@ -84,7 +84,7 @@ file(GLOB_RECURSE shared CONFIGURE_DEPENDS "${source}/*.cpp" "${source}/*.h")
 list(FILTER shared EXCLUDE REGEX "/src/scenario/")
 list(FILTER shared EXCLUDE REGEX "/(library|interfaces/library)/")
 file(GLOB adapters CONFIGURE_DEPENDS "common/*.cpp" "common/*.h" "qt${KOBALT_QT_MAJOR}/*.cpp" "qt${KOBALT_QT_MAJOR}/*.h" "display/*.cpp")
-add_library(kobalt MODULE ${shared} ${adapters} common/install.c "${hooks}/nh.c" "${hooks}/resources.c"
+add_library(kobalt MODULE ${shared} ${adapters} common/install.c common/startup_recovery.c "${hooks}/nh.c" "${hooks}/resources.c"
     "${CMAKE_CURRENT_BINARY_DIR}/nhplugin.h")
 set_source_files_properties("${source}/reading/reading_timer.cpp" PROPERTIES
     COMPILE_DEFINITIONS KOBALT_READING_CLOCK_BOOTTIME=1)
@@ -140,7 +140,8 @@ target_link_options(kobalt PRIVATE -Wl,--no-undefined
 set(resources "${KOBALT_ROOT}/assets")
 file(GLOB notices CONFIGURE_DEPENDS "${resources}/notices/*")
 set(qrc "<RCC><qresource prefix=\"/kobalt\">")
-foreach(path "${resources}/acknowledgments.json" ${notices})
+foreach(path "${resources}/acknowledgments.json" ${notices}
+        "${resources}/samples/words-and-letters.html" "${resources}/samples/layout.html")
     file(RELATIVE_PATH alias "${resources}" "${path}")
     string(APPEND qrc "<file alias=\"${alias}\">${path}</file>")
 endforeach()

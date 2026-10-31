@@ -241,7 +241,7 @@ AppearancePanel::AppearancePanel(const AppearanceLayout &layout, const Appearanc
     QObject::connect(sizeSlider, &QSlider::valueChanged, sizeSlider, [slider = sizeSlider](int halfPoints) {
         slider->setSingleStep(halfPoints < 64 ? 1 : 2);
     });
-    sizeSlider->setMarkers({14, 16, 18, 20, 22, 24, 28, 32, 36, 40, 48, 56, 64, 80, 96},
+    sizeSlider->setMarkers({12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 40, 48, 56, 64, 80, 96},
                            ui::SettingSlider::MarkerMode::Stops);
     opticalSizeSlider =
         ui::sliderRow(typography, typeRows, "rrOpticalSize", "rrOpticalSizeValue", strings::get("reader.optical_size"),

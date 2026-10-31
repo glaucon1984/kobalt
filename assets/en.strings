@@ -1,4 +1,5 @@
 /* Kobalt UI strings. Edit values; keep keys and Arguments comments unchanged. */
+"reader.book_beautifier" = "Book normalization";
 
 /* acknowledgments */
 "acknowledgments.acknowledgments" = "Acknowledgments";
@@ -308,6 +309,7 @@
 "error.position_has_no_source_chapter" = "Position has no source chapter";
 "error.position_has_no_source_path" = "Position has no source path";
 "error.profile_already_in_use" = "This profile is open in another Kobalt app. Close it there and try again.";
+"error.profile_storage_failed" = "Kobalt couldn't read its saved data or move it to a backup. The storage may be failing. Repair the file system or reset the device.";
 "error.publication_declares_vertical_writing" = "This book uses an unsupported writing mode.";
 "error.publication_exceeds_the_memory_limit" = "Publication exceeds the memory limit";
 "error.publication_layout_inspection_is_incomplete" = "Publication layout inspection is incomplete";
@@ -447,6 +449,14 @@
 /* opening */
 "opening.loading" = "Opening your book";
 "opening.may_take_a_while" = "This may take a while";
+"closing.saving" = "Saving your progress…";
+"closing.may_take_a_while" = "This may take a few moments.";
+"closing.failed" = "Couldn't save your progress";
+"closing.failed_detail" = "Your progress couldn’t be saved, so the book is still open. Please try again. If this keeps happening, back up your data.";
+"closing.retry" = "Retry save and close";
+"closing.quit" = "Quit without saving";
+"closing.quit_warning" = "Quitting now may lose unsaved progress or annotations.";
+"closing.return" = "Keep reading";
 
 /* reader */
 "reader.align_left" = "Align left";
@@ -527,6 +537,15 @@
 "reader.landscape" = "Landscape";
 "reader.landscape_upside_down" = "Landscape, upside down";
 "reader.line_spacing" = "Line spacing: ";
+"reader.publisher_spacing" = "Publisher";
+"settings.section_paragraphs" = "Paragraphs";
+"settings.paragraph_spacing" = "Paragraph adjustments";
+"settings.paragraph_spacing_summary" = "Adjust spacing and first-line indents.";
+"settings.paragraph_spacing_description" = "Values are percentages of the text size: with 12 pt text, a 100% indent is 12 pt. Applies to all books. Headings and special blocks keep their formatting.";
+"settings.paragraph_choices_description" = "Each Publisher choice keeps that part of the book’s formatting. Diagonal lines mark extra space between paragraphs.";
+"settings.paragraph_gap" = "Spacing";
+"settings.paragraph_indent" = "First-line indent";
+"settings.paragraph_adjustments_value" = "Gap %1 · Indent %2";
 "reader.margins" = "Horizontal margins: ";
 "reader.vertical_margins" = "Vertical margins: ";
 /* Arguments: %1, %2 */
@@ -614,6 +633,15 @@
 "settings.automatic_book_opening" = "Open books automatically in Kobalt";
 "settings.automatic_book_opening_description" = "Use Kobalt when opening supported books from your library. This is the same setting as in Kobo's Reading settings.";
 "settings.sleep_screen" = "Sleep screen";
+"settings.session_timeout" = "New session after sleep";
+"settings.session_timeout_description" = "Waking your device after this amount of time starts a new reading session. You do not need to close and reopen your book, this is automatic.";
+"settings.session_timeout_15" = "15 minutes";
+"settings.session_timeout_60" = "1 hour";
+"settings.session_timeout_240" = "4 hours";
+"settings.session_timeout_360" = "6 hours";
+"settings.session_timeout_720" = "12 hours";
+"settings.session_timeout_0" = "Never";
+"settings.session_timeout_never_description" = "A session always continues when the device wakes, even after a longer period of inactivity.";
 "settings.page_navigation" = "Page navigation";
 "settings.section_navigation_bar" = "Navigate panel";
 "settings.navigation_bar_buttons" = "Button action";
@@ -803,10 +831,25 @@
 "opening.continuing" = "Continuing automatically";
 "opening.failed" = "Couldn't open this book";
 "opening.failed_detail" = "Kobalt couldn't read this EPUB. You can try opening it in Kobo's built-in reader.";
+"opening.storage_failed" = "Kobalt can't use its saved data";
+"opening.storage_failed_detail" = "Kobalt couldn't read its saved data or move it to a backup. The storage may be failing. Repair the file system or reset the device. Kobalt will close now.";
 "opening.try_native" = "Try built-in reader";
 "opening.go_back" = "Go back";
 
 "opening.remembered" = "This book uses the built-in reader.";
+"recovery.title" = "Saved data reset";
+"benchmark.finished" = "Benchmark finished";
+"benchmark.failed" = "Benchmark failed";
+"benchmark.counts" = "Completed: %1. Skipped: %2. Failed: %3.";
+"benchmark.first_failure" = "The first failure was %1.";
+"benchmark.first_failure_reason" = "The first failure was %1: %2.";
+"benchmark.not_saved" = "The results could not be saved.";
+"benchmark.no_scenarios" = "No scenarios ran. Check the scenario file and its filter.";
+"benchmark.connect" = "Connect the Kobo to a computer and open %1 to see the results.";
+"recovery.settings" = "Kobalt's settings could not be used, so the defaults are back in use.";
+"recovery.sync_account" = "The sync account could not be used. Sign in again to keep syncing.";
+"recovery.database" = "Kobalt's reading positions, bookmarks and annotations could not be used. Kobalt started again with empty saved data.";
+"recovery.backups" = "The original files are in %1.";
 
 "reader.supplemental_fonts" = "Supplemental Fonts";
 
@@ -987,9 +1030,9 @@
 "settings.hide_tab_labels" = "Hide labels in tabs";
 "settings.hide_tab_labels_description" = "Tabs at the bottom of the screen only display an icon when this is selected.";
 
-"settings.justification_tracking_summary" = "Reduce wide word gaps with letter spacing. Only affects justified text (Text > Alignment > Justify).";
+"settings.justification_tracking_summary" = "Adjust letter spacing in justified text.";
 
-"settings.widows_orphans_summary" = "Keep single paragraph lines from appearing alone at the top or bottom of a page.";
+"settings.widows_orphans_summary" = "Control single lines at page edges.";
 
 
 
@@ -1006,7 +1049,7 @@
 
 "settings.widows_orphans_allow_description" = "Allow single lines at page boundaries.";
 "settings.word_spacing" = "Word spacing";
-"settings.word_spacing_summary" = "Adjust the normal width of spaces between words.";
+"settings.word_spacing_summary" = "Adjust spacing between words.";
 "settings.word_spacing_description" = "Change space width relative to the font’s normal spacing. This can change line breaks and page count. Justified lines may still stretch spaces. Applies to all books.";
 "settings.word_spacing_narrow" = "Narrow";
 "settings.word_spacing_normal" = "Normal";
@@ -1051,16 +1094,16 @@
 
 "settings.tappable_links" = "Tappable links";
 "settings.tappable_links_description" = "Choose how to open footnotes and links while reading.";
-"settings.tappable_links_off" = "Off";
+"settings.tappable_links_off" = "Always require long press";
 "settings.tappable_links_footnotes" = "Footnotes only";
 "settings.tappable_links_all" = "Footnotes and links";
-"settings.tappable_links_off_description" = "Long press and choose Follow link. Off by default to avoid accidental opening.";
+"settings.tappable_links_off_description" = "Long press and choose Follow link to avoid accidental opening.";
 "settings.tappable_links_footnotes_description" = "Tap footnotes to open them. Long press other links, then choose Follow link.";
 "settings.tappable_links_all_description" = "Tap footnotes and links to open them.";
 "settings.vertical_spacing" = "Vertical page spacing";
 "settings.vertical_spacing_mode" = "Page spacing";
 "settings.vertical_spacing_apply_to" = "Pages to adjust";
-"settings.vertical_spacing_description" = "Keep spacing unchanged, spread lines, or center nearly full prose pages.";
+"settings.vertical_spacing_description" = "Adjust blank space on nearly full pages.";
 "settings.vertical_spacing_off" = "Normal";
 "settings.vertical_spacing_off_description" = "Keep the usual line spacing and top alignment.";
 "settings.vertical_spacing_expand" = "Expand line spacing";
@@ -1068,7 +1111,7 @@
 "settings.vertical_spacing_center" = "Center nearly full pages";
 "settings.vertical_spacing_center_description" = "Center prose that occupies at least 90% of the reading height. Keep line spacing unchanged.";
 "settings.vertical_spacing_scope" = "Pages to adjust";
-"settings.vertical_spacing_scope_description" = "Choose which page gaps receive the selected adjustment.";
+"settings.vertical_spacing_scope_description" = "Choose which page gaps to adjust.";
 "settings.vertical_spacing_scope_all" = "All suitable pages";
 "settings.vertical_spacing_scope_all_description" = "Also adjust ordinary pagination gaps on nearly full prose pages.";
 "settings.vertical_spacing_scope_protection" = "Only widow/orphan gaps";
@@ -1112,3 +1155,15 @@
 "keyboard.space" = "Space";
 "keyboard.backspace" = "Backspace";
 "keyboard.done" = "Done";
+
+"settings.beautifier_summary" = "Choose how text initials and ordinary paragraphs are normalized.";
+"settings.beautifier_description" = "Experimental. Checked rules apply to all books. Uncheck every rule to turn off. Your book files are never changed.";
+"settings.beautifier_initials" = "Normalize opening letters";
+"settings.beautifier_initials_description" = "Turn recognized text drop caps into ordinary letters, keeping every character.";
+"settings.beautifier_spacing" = "Remove paragraph gaps";
+"settings.beautifier_spacing_description" = "Remove extra space below ordinary prose. Keep recognized scene breaks and special passages.";
+"settings.beautifier_indent" = "Standardize first-line indents";
+"settings.beautifier_indent_description" = "Indent ordinary prose consistently. Your explicit paragraph adjustments take priority.";
+"settings.beautifier_active" = "On · %1 of 3 rules";
+
+"common.done" = "Done";

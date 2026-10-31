@@ -42,6 +42,7 @@
 
 extern const struct nh NickelHook;
 extern void nh_resources_uninstalled(void) __attribute__((weak, visibility("hidden")));
+extern bool nh_startup_failed(void) __attribute__((weak, visibility("hidden")));
 
 // nh_init is the main entry point for NickelHook which sets up the mod
 // according to the information in the external NickelHook struct and handles
@@ -108,6 +109,13 @@ void nh_init() {
     }
 
     nh_log("(NickelHook) checking config");
+
+    if (nh_startup_failed && nh_startup_failed()) {
+        nh_log("(NickelHook) repeated interrupted startup; uninstalling");
+        nh_failsafe_uninstall(fs);
+        if (nh->uninstall && !nh->uninstall()) nh_dump_log();
+        goto nh_init_return_no_fs;
+    }
 
     for (struct nh_dlsym *v = nh->dlsym; v && v->name; v++) {
         if (!v->out) {

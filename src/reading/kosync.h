@@ -75,6 +75,8 @@ public:
     bool logout();
     QDateTime lastSync() const { return lastSync_; }
     bool recordSyncSuccess();
+    // Closing checkpoints the informational timestamp without rewriting credentials.
+    bool persistSyncTime();
     void cancel();
     void pull(const QByteArray &document, std::function<void(Progress, QString)> done, bool retryTransient = true);
     void push(const QByteArray &document, const Progress &progress, Done done);
@@ -99,6 +101,7 @@ private:
     QString deviceName_, defaultDeviceName_ = QStringLiteral("Kobalt");
     QUrl server_;
     QDateTime lastSync_;
+    bool syncTimeDirty_ = false;
     QByteArray key_;
     bool automatic_ = true, writable_ = true;
     bool filenameMatching_ = false;

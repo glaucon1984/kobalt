@@ -11,8 +11,9 @@
 #include <QVBoxLayout>
 
 namespace kobalt::android {
-StartScreen::StartScreen(PresentationFactory presentation, library::Store &store, QWidget *parent)
-    : QStackedWidget(parent), presentation(std::move(presentation)), store(store) {
+StartScreen::StartScreen(PresentationFactory presentation, library::Store &store, std::function<qreal()> textScale,
+                         QWidget *parent)
+    : QStackedWidget(parent), presentation(std::move(presentation)), store(store), textScale(std::move(textScale)) {
     setObjectName("androidStart");
     showLibrary();
 }
@@ -24,18 +25,22 @@ void StartScreen::buildLibrary() {
         return;
     // The library uses the reader's controls, which are sized in device
     // pixels. Its canvas maps them onto this logical-pixel window.
-    canvas = new WidgetCanvas(this);
-    canvas->setObjectName("androidLibraryCanvas");
-    canvas->setStyleSheet("QGraphicsView{border:0;}");
+    if (!canvas) {
+        canvas = new WidgetCanvas(this);
+        canvas->setObjectName("androidLibraryCanvas");
+        canvas->setStyleSheet("QGraphicsView{border:0;}");
+        canvas->viewportResized = [this] {
+            fitLibrary();
+        };
+        addWidget(canvas);
+    }
+    // Views read sizes while they are built; see applyTextSize.
+    builtTextScale = ui::textScale();
     view = new library::LibraryView(store.index(), [this](const QString &name) {
         return store.coverPath(name);
     });
     // Complete the subtree before embedding it; proxy resize can disable new children.
     canvas->setContent(view);
-    canvas->viewportResized = [this] {
-        fitLibrary();
-    };
-    addWidget(canvas);
     view->openBook = [this](const QString &key) {
         emit bookRequested(key);
     };
@@ -68,10 +73,35 @@ void StartScreen::buildLibrary() {
         view->refresh();
     };
     view->singleBooksAreCopies = singleBooksAreCopies;
+    view->setKeyboardFactory(keyboard);
     view->setDark(dark);
     view->show();
     if (hostScaled)
         setLibraryScale(scale.pixels, scale.scale, scale.nativePixels, scale.rasterScale);
+    else
+        fitLibrary();
+}
+void StartScreen::applyTextSize() {
+    ui::setLargeText(textScale ? textScale() : 1);
+    if (!view || ui::textScale() == builtTextScale)
+        return;
+    // The old view can be running one of its own callbacks, such as a menu
+    // action that reports an error, so it is deleted later. Hiding it first
+    // also hides its keyboard.
+    view->hide();
+    if (auto *proxy = view->graphicsProxyWidget()) {
+        canvas->scene()->removeItem(proxy);
+        proxy->deleteLater();
+    } else {
+        view->deleteLater();
+    }
+    view = nullptr;
+    buildLibrary();
+}
+void StartScreen::setKeyboardFactory(KeyboardFactory factory) {
+    keyboard = std::move(factory);
+    if (view)
+        view->setKeyboardFactory(keyboard);
 }
 library::LibraryView *StartScreen::library() {
     buildLibrary();
@@ -87,6 +117,9 @@ void StartScreen::setLibrarySystemBarBorders(bool visible) {
     ui::applyReaderPalette(canvas, view->palette());
 }
 void StartScreen::showLibrary() {
+    // The setting can change while a book is open or the app is in the
+    // background. The first library is built at the current setting too.
+    applyTextSize();
     buildLibrary();
     setCurrentWidget(canvas);
     fitLibrary();

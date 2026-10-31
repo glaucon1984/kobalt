@@ -37,6 +37,7 @@ int main(int argc, char **argv) {
         };
         QJsonObject retainedSettings;
         auto retainedHit = [&] {
+            flushDiagnostics();
             QFile log(directory.path() + "/diagnostics/events.jsonl");
             require(log.open(QIODevice::ReadOnly), "Cannot read opening diagnostics");
             QJsonObject last;

@@ -340,7 +340,7 @@ int NativeLight::setGestureLevel(int percent) {
         api().setBrightness(frontLight, next, 0);
     const int actual = brightness();
     if (actual != next && !reportedGestureFailure) {
-        diagnostic("brightness-gesture-device-failed", {{"requested", next}, {"actual", actual}});
+        diagnostic("brightness-gesture-device-failed", {{"requested", next}, {"actual", actual}}, kobalt::DiagnosticSeverity::Error);
         reportedGestureFailure = true;
     }
     return actual;

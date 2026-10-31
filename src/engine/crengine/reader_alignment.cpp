@@ -40,12 +40,14 @@ struct Frame {
     ldomNode *node;
     int child = 0;
     bool blocked = false, words = false, protectedChild = false, blockChild = false, block = false;
+    bool paragraphBlocked = false;
 };
 }
 void markBodyAlignment(ldomDocument *document) {
     if (!document || !document->getRootNode())
         return;
     const auto attribute = document->getAttrNameIndex("data-kobalt-prose");
+    const auto paragraphAttribute = document->getAttrNameIndex("data-kobalt-paragraph");
     static const QSet<QString> blocks{"p", "li", "dt", "dd", "blockquote", "div", "section", "article"};
     std::vector<Frame> stack{{document->getRootNode()}};
     while (!stack.empty()) {
@@ -55,12 +57,34 @@ void markBodyAlignment(ldomDocument *document) {
             const auto name = text(node->getNodeName());
             frame.block = blocks.contains(name);
             frame.blocked = frame.blocked || preserve(node, name);
+            // Paragraph gaps must not flatten verse, quotations, lists or notes.
+            // Alignment has a broader scope, so keep this safeguard separate.
+            static const QSet<QString> special{"blockquote", "ul", "ol", "dl", "aside", "address"};
+            static const QRegularExpression specialClass(
+                "(?:^|[\\s_-])(?:verse|poem|poetry|stanza|caption|epigraph|dedication|footnote|endnote)(?:$|[\\s_-])",
+                QRegularExpression::CaseInsensitiveOption);
+            const auto type = text(node->getAttributeValue(LXML_NS_ANY, document->getAttrNameIndex("type")));
+            frame.paragraphBlocked = frame.paragraphBlocked || frame.blocked || special.contains(name) ||
+                specialClass.match(text(node->getAttributeValue("class"))).hasMatch() ||
+                specialClass.match(type).hasMatch();
+            const auto style = node->getStyle();
+            if (!style.isNull())
+                frame.paragraphBlocked = frame.paragraphBlocked ||
+                    style->white_space == css_ws_pre || style->white_space == css_ws_pre_wrap ||
+                    style->float_ != css_f_none || style->border_style_top != css_border_none ||
+                    style->border_style_bottom != css_border_none || style->border_style_left != css_border_none ||
+                    style->border_style_right != css_border_none ||
+                    (name == "p" && lUInt32(style->background_color.value) != CSS_COLOR_TRANSPARENT);
             if (node->hasAttribute(attribute))
                 node->setAttributeValue(0, attribute, U"");
+            if (node->hasAttribute(paragraphAttribute))
+                node->setAttributeValue(0, paragraphAttribute, U"");
         }
         if (frame.child < node->getChildCount()) {
             auto *child = node->getChildNode(frame.child++);
-            stack.push_back({child, 0, frame.blocked});
+            Frame next{child, 0, frame.blocked};
+            next.paragraphBlocked = frame.paragraphBlocked;
+            stack.push_back(next);
             continue;
         }
         if (node->isText())
@@ -68,6 +92,9 @@ void markBodyAlignment(ldomDocument *document) {
         const bool block = frame.block;
         if (block && frame.words && !frame.blocked && !frame.protectedChild && !frame.blockChild)
             node->setAttributeValue(0, attribute, U"1");
+        if (node->isElement() && text(node->getNodeName()) == "p" && frame.words &&
+            !frame.paragraphBlocked && !frame.protectedChild && !frame.blockChild)
+            node->setAttributeValue(0, paragraphAttribute, U"1");
         const auto finished = frame;
         stack.pop_back();
         if (!stack.empty()) {

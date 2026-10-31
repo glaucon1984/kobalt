@@ -271,7 +271,7 @@ public:
     QString author() const;
     // Decodes the host cover first, then the publication cover, within the
     // requested size and 4 million pixels. Empty means neither is usable.
-    QImage coverImage(QSize maximumSize, const QString &preferredPath = {}) const;
+    QImage coverImage(QSize maximumSize, const QString &preferredPath = {}, QString *usedPath = nullptr) const;
     QVector<ChapterLink> chapters() const;
     void setChapters(QVector<ChapterLink> contents, QVector<ChapterLink> graph);
     QVector<ChapterLink> chapterGraph() const;
@@ -337,7 +337,7 @@ private:
     QString defaultFace_ = defaultFontFace;
     std::array<QString, 3> fallbackFaces_;
     QString alignment_ = "left";
-    int pixels_ = defaultFontPixels(), spacing_ = defaultLineSpacing;
+    int pixels_ = defaultFontPixels(), spacing_ = defaultLineSpacing, paragraphSpacing_ = -1, paragraphIndent_ = -1;
     int margin_ = defaultMarginPixels(), topMargin_ = defaultVerticalMarginPixels(margin_),
         bottomMargin_ = defaultVerticalMarginPixels(margin_);
     void activateFontParameters() const;
@@ -345,6 +345,7 @@ private:
     double opticalSize_ = 0;
     int weight_ = 0;
     QString bionic_ = "off";
+    bool beautifierInitials_ = false, beautifierSpacing_ = false, beautifierIndent_ = false;
     // The engine DOM version that parses this book and writes its positions.
     int domVersion_ = 0;
     QString hyphenation_ = "off";

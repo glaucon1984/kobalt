@@ -90,7 +90,7 @@ public:
     void installAnnotationFrame(const QVector<QRect> &draft, const QVector<HighlightGeometry> &saved,
                                 bool vertical = false, const AnnotationGeometry *geometry = nullptr);
     void mark(const QVector<QRect> &rectangles);
-    void revealLinks(const QVector<QRect> &rectangles);
+    void revealLinks(const QVector<QRect> &rectangles, const QVector<QRect> &footnotes = {});
     std::function<void(QPoint)> tapped;
     std::function<void(int)> swiped;
     std::function<void()> annotationRequested;
@@ -158,7 +158,11 @@ private:
     QVector<HighlightGeometry> annotationColorGroups;
     struct PaintedHighlight { HighlightGeometry mark; QRegion visible; };
     QVector<PaintedHighlight> annotationTints;
-    QVector<QRect> revealedOutlines;
+    QVector<QRect> revealedOutlines, revealedFootnotes;
+    QVector<QPainterPath> revealedCircles;
+    QPainterPath revealedPress;
+    void pressRevealedLink(QPoint point);
+    void clearRevealedPress();
     bool tracking = false, moved = false, consumed = false;
     QElapsedTimer touchClock;
     QHash<int, QPointF> touchOrigins;
