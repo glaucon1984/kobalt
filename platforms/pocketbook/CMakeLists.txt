@@ -79,11 +79,12 @@ target_compile_definitions(kobalt-pb PRIVATE KOBALT_READER_HARDWARE KOBALT_POCKE
 include("${KOBALT_ROOT}/platforms/cache-policy.cmake")
 target_compile_definitions(kobalt-pb PRIVATE KOBALT_LAYOUT_POLICY="${layout_policy}")
 
-# Notices and acknowledgments, as the Kobo build embeds them.
+# Notices, acknowledgments and the styling preview samples, as the Kobo build embeds them.
 set(resources "${KOBALT_ROOT}/assets")
 file(GLOB notices CONFIGURE_DEPENDS "${resources}/notices/*")
 set(qrc "<RCC><qresource prefix=\"/kobalt\">")
-foreach(path "${resources}/acknowledgments.json" ${notices})
+foreach(path "${resources}/acknowledgments.json" ${notices}
+        "${resources}/samples/words-and-letters.html" "${resources}/samples/layout.html")
     file(RELATIVE_PATH alias "${resources}" "${path}")
     string(APPEND qrc "<file alias=\"${alias}\">${path}</file>")
 endforeach()
