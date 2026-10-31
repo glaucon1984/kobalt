@@ -5,6 +5,7 @@
 #include <QPoint>
 #include <QVector>
 #include <QProcess>
+#include <QElapsedTimer>
 
 class PbInkScreen;
 
@@ -17,15 +18,17 @@ public:
     void start();
     // Last gravity code delivered by inkview, or -1 before the first event.
     int lastOrientation() const { return mLastOrientation; }
-    // Silent connection to a known network in the background: the firmware's own agent
-    // (/ebrmain/bin/netagent connect, what inkview runs inside NetConnectSilent) as a child
-    // process, so the GUI thread is not blocked while the firmware looks for the network, which
-    // takes a full 28 s when the network is absent (seen after a power cut: the reader froze
-    // that long at open and at wake). inkview's NetConnectAsync was tried first: it opens the
-    // firmware's network chooser over the task when no known network answers, and each cancel
-    // looked like a wake to the host, which asked again. `done(connected, context)` runs on the
-    // GUI thread once, when the agent exits, the link is up, or after a safety limit. Several
-    // callers share one attempt.
+    // Silent connection to a known network in the background, in two steps that never block
+    // the GUI thread and never open the firmware's network chooser: the firmware's scan process
+    // (WiFiScanProcessStart, polled) to see whether one of the configured networks
+    // (EnumWirelessNetworks) is in range, and only then the firmware's agent
+    // (/ebrmain/bin/netagent connect) as a child process. Both NetConnectAsync and a bare agent
+    // connect open the chooser over the task when nothing known answers, and each cancel
+    // reached the host as a background/foreground pair that looked like a wake, which asked
+    // again. NetConnectSilent does not open it but blocks the GUI thread for the firmware's 28 s
+    // search when the network is absent (seen after a power cut). `done(connected, context)`
+    // runs on the GUI thread once: no known network in range, the agent exited, the link is up,
+    // or the safety limit passed. Several callers share one attempt.
     typedef void (*NetworkDone)(int connected, void *context);
     void connectNetworkAsync(NetworkDone done, void *context);
 
@@ -45,7 +48,10 @@ private:
     void pump();
     static int mapKey(int ivKey);
     void networkDone(int status, const char *how);
-    bool mConnecting = false;
+    void pollNetwork();
+    bool knownNetworkInRange(bool *scanned);
+    bool mConnecting = false, mScanning = false;
+    QElapsedTimer mScanClock;
     QTimer mNetworkLimit, mNetworkPoll;
     QProcess *mNetAgent = nullptr;
     QVector<QPair<NetworkDone, void *>> mNetworkWaiters;

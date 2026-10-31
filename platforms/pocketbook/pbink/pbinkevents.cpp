@@ -5,6 +5,7 @@
 #include <QLoggingCategory>
 #include <qpa/qwindowsysteminterface.h>
 #include <stdlib.h>
+#include <string.h>
 #include <inkview.h> // has its own extern "C" guards
 
 Q_DECLARE_LOGGING_CATEGORY(lcPbInk)
@@ -22,10 +23,64 @@ PbInkEvents::PbInkEvents(PbInkScreen *screen, bool debug, QObject *parent)
     mNetworkLimit.setInterval(45000);
     connect(&mNetworkLimit, &QTimer::timeout, this, [this] { networkDone(-1, "safety limit"); });
     mNetworkPoll.setInterval(500);
-    connect(&mNetworkPoll, &QTimer::timeout, this, [this] {
-        if (QueryNetwork() & NET_CONNECTED)
-            networkDone(0, "link up");
-    });
+    connect(&mNetworkPoll, &QTimer::timeout, this, &PbInkEvents::pollNetwork);
+}
+
+// The scan's results against the configured networks. `scanned` tells whether the scan has
+// produced anything yet (an empty list means it is still running).
+bool PbInkEvents::knownNetworkInRange(bool *scanned)
+{
+    *scanned = false;
+    iv_wifi_ap_list *aps = WiFiScanProcessGetResults();
+    if (!aps)
+        return false;
+    *scanned = aps->ap_quantity > 0;
+    bool found = false;
+    int known = 0;
+    if (char **names = EnumWirelessNetworks()) {
+        for (char **name = names; *name && !found; ++name) {
+            ++known;
+            for (int i = 0; i < aps->ap_quantity && !found; ++i)
+                found = strcmp(aps->apinfo[i].ssid, *name) == 0;
+        }
+    }
+    if (*scanned)
+        qInfo("pbink: scan: %d network(s) in range, %d configured, known one %s", aps->ap_quantity, known,
+              found ? "in range" : "not in range");
+    free(aps);
+    return found;
+}
+
+void PbInkEvents::pollNetwork()
+{
+    if (!mConnecting)
+        return;
+    if (QueryNetwork() & NET_CONNECTED) {
+        networkDone(0, "link up");
+        return;
+    }
+    if (!mScanning)
+        return;
+    bool scanned = false;
+    const bool known = knownNetworkInRange(&scanned);
+    // The firmware's own chooser decides after about 9 s; a scan usually reports within 3-5 s.
+    if (!scanned && mScanClock.elapsed() < 10000)
+        return;
+    mScanning = false;
+    WiFiScanProcessStop();
+    if (!known) {
+        WiFiPower(0);
+        networkDone(-2, scanned ? "no known network in range" : "scan gave nothing");
+        return;
+    }
+    mNetAgent = new QProcess(this);
+    mNetAgent->setProcessChannelMode(QProcess::ForwardedChannels); // its own lines go to the log
+    connect(mNetAgent, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this](int code, QProcess::ExitStatus) { networkDone(code, "agent exited"); });
+    connect(mNetAgent, &QProcess::errorOccurred, this,
+            [this](QProcess::ProcessError error) { networkDone(-int(error) - 100, "agent failed to run"); });
+    mNetAgent->start(QStringLiteral("/ebrmain/bin/netagent"), {QStringLiteral("connect")});
+    qInfo("pbink: known network in range, agent connecting");
 }
 
 void PbInkEvents::connectNetworkAsync(NetworkDone done, void *context)
@@ -39,15 +94,15 @@ void PbInkEvents::connectNetworkAsync(NetworkDone done, void *context)
     if (mConnecting)
         return;
     mConnecting = true;
-    qInfo("pbink: network %d, connecting silently in the background", QueryNetwork());
+    qInfo("pbink: network %d, connecting silently in the background: scanning first", QueryNetwork());
     WiFiPower(1);
-    mNetAgent = new QProcess(this);
-    mNetAgent->setProcessChannelMode(QProcess::ForwardedChannels); // its own lines go to the log
-    connect(mNetAgent, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-            [this](int code, QProcess::ExitStatus) { networkDone(code, "agent exited"); });
-    connect(mNetAgent, &QProcess::errorOccurred, this,
-            [this](QProcess::ProcessError error) { networkDone(-int(error) - 100, "agent failed to run"); });
-    mNetAgent->start(QStringLiteral("/ebrmain/bin/netagent"), {QStringLiteral("connect")});
+    if (WiFiScanProcessStart() != 0) {
+        qInfo("pbink: the firmware's scan process did not start");
+        QTimer::singleShot(0, this, [this] { networkDone(-3, "scan did not start"); });
+        return;
+    }
+    mScanning = true;
+    mScanClock.start();
     mNetworkLimit.start();
     mNetworkPoll.start();
 }
@@ -59,6 +114,10 @@ void PbInkEvents::networkDone(int status, const char *how)
     mConnecting = false;
     mNetworkLimit.stop();
     mNetworkPoll.stop();
+    if (mScanning) {
+        mScanning = false;
+        WiFiScanProcessStop();
+    }
     if (mNetAgent) {
         auto *agent = mNetAgent;
         mNetAgent = nullptr;
