@@ -18,6 +18,57 @@ PbInkEvents::PbInkEvents(PbInkScreen *screen, bool debug, QObject *parent)
     mTimer.setInterval(20);
     mTimer.setTimerType(Qt::CoarseTimer);
     connect(&mTimer, &QTimer::timeout, this, &PbInkEvents::pump);
+    mNetworkLimit.setSingleShot(true);
+    mNetworkLimit.setInterval(45000);
+    connect(&mNetworkLimit, &QTimer::timeout, this, [this] { networkDone(-1, "safety limit"); });
+}
+
+void PbInkEvents::connectNetworkAsync(NetworkDone done, void *context)
+{
+    if (QueryNetwork() & NET_CONNECTED) {
+        // Already up: answer from the event loop, as the asynchronous path would.
+        QTimer::singleShot(0, this, [done, context] { done(1, context); });
+        return;
+    }
+    mNetworkWaiters.append({done, context});
+    if (mConnecting)
+        return;
+    mConnecting = true;
+    qInfo("pbink: network %d, connecting silently in the background", QueryNetwork());
+    WiFiPower(1);
+    const int started = NetConnectAsync(networkCallbackStatic);
+    if (started != 0) {
+        qInfo("pbink: NetConnectAsync refused: %d", started);
+        QTimer::singleShot(0, this, [this, started] { networkDone(started, "refused"); });
+        return;
+    }
+    mNetworkLimit.start();
+}
+
+// inkview's callback: thread unknown, so only a queued hop to the GUI thread happens here.
+int PbInkEvents::networkCallbackStatic(int status)
+{
+    if (sInstance)
+        QMetaObject::invokeMethod(sInstance, [status] {
+            if (sInstance)
+                sInstance->networkDone(status, "callback");
+        }, Qt::QueuedConnection);
+    return 0;
+}
+
+void PbInkEvents::networkDone(int status, const char *how)
+{
+    if (!mConnecting)
+        return;
+    mConnecting = false;
+    mNetworkLimit.stop();
+    const bool connected = (QueryNetwork() & NET_CONNECTED) != 0;
+    qInfo("pbink: background connection %s: status %d, network %d, %s", how, status, QueryNetwork(),
+          connected ? "connected" : "not connected");
+    const auto waiters = mNetworkWaiters;
+    mNetworkWaiters.clear();
+    for (const auto &waiter : waiters)
+        waiter.first(connected ? 1 : 0, waiter.second);
 }
 
 PbInkEvents::~PbInkEvents()

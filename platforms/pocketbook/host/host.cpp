@@ -156,7 +156,9 @@ Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
     connect(&syncPoll, &QTimer::timeout, this, [this] {
         auto *reader = controller.window();
         const bool pending = reader && !quitting && reader->pendingNetworkSync();
-        if (pending && syncClock.elapsed() < 3000)
+        // Up to 6 s: the connection itself now runs in the background and takes 2-3 s when the
+        // network is there, before the upload's own 2 s.
+        if (pending && syncClock.elapsed() < 6000)
             return;
         syncPoll.stop();
         qInfo("kobalt-pb: standby sync %s after %lld ms", pending ? "still pending, releasing" : "done",

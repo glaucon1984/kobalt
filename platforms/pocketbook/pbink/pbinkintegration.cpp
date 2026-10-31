@@ -93,6 +93,8 @@ QFunctionPointer PbInkIntegration::platformFunction(const QByteArray &function) 
         return QFunctionPointer(ensureNetworkStatic);
     if (function == "pbinkConnectNetwork")
         return QFunctionPointer(connectNetworkStatic);
+    if (function == "pbinkConnectNetworkAsync")
+        return QFunctionPointer(connectNetworkAsyncStatic);
     if (function == "pbinkSetRefresh")
         return QFunctionPointer(setRefreshStatic);
     if (function == "pbinkSetRotation")
@@ -126,6 +128,12 @@ void PbInkIntegration::setRotationStatic(int degrees)
 {
     auto self = static_cast<PbInkIntegration *>(QGuiApplicationPrivate::platformIntegration());
     self->m_screen->setRotation(degrees);
+}
+
+void PbInkIntegration::connectNetworkAsyncStatic(void (*done)(int, void *), void *context)
+{
+    auto self = static_cast<PbInkIntegration *>(QGuiApplicationPrivate::platformIntegration());
+    self->m_events->connectNetworkAsync(done, context);
 }
 
 int PbInkIntegration::rotationStatic()

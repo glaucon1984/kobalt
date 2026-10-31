@@ -4,6 +4,7 @@
 #include "interfaces/reader/ui/controls/keyboard.h"
 #include "interfaces/reader/ui/style/fonts.h"
 #include <QGuiApplication>
+#include <qpa/qplatformnativeinterface.h>
 #include <QScreen>
 #include <QFile>
 #include <QKeyEvent>
@@ -184,6 +185,10 @@ public:
     bool connected() const override {
         return (QueryNetwork() & NET_CONNECTED) != 0;
     }
+    // Interactive (Sync now, sign-in): the firmware's own connection dialog, blocking as the
+    // firmware wants it. Silent (sync at book open and wake): in the background, the reader
+    // stays usable while the firmware looks for a known network; a cancelled wait (the book
+    // closes, another request) just drops the answer.
     void prepare(bool interactive, std::function<void(bool)> finished) override {
         cancel();
         if (connected()) {
@@ -192,6 +197,24 @@ public:
         }
         auto token = std::make_shared<bool>(true);
         waiting = token;
+        if (!interactive) {
+            auto *native = QGuiApplication::platformNativeInterface();
+            if (auto fn = native ? native->platformFunction("pbinkConnectNetworkAsync") : nullptr) {
+                struct Pending {
+                    std::shared_ptr<bool> token;
+                    std::function<void(bool)> finished;
+                };
+                auto *pending = new Pending{token, std::move(finished)};
+                reinterpret_cast<void (*)(void (*)(int, void *), void *)>(fn)(
+                    [](int connected, void *context) {
+                        std::unique_ptr<Pending> pending(static_cast<Pending *>(context));
+                        if (*pending->token)
+                            pending->finished(connected == 1);
+                    },
+                    pending);
+                return;
+            }
+        }
         QTimer::singleShot(0, qApp, [token, interactive, finished = std::move(finished)] {
             if (!*token)
                 return;

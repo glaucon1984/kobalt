@@ -37,6 +37,7 @@ private:
     static void setRefreshStatic(int kind);
     static void setRotationStatic(int degrees);
     static int rotationStatic();
+    static void connectNetworkAsyncStatic(void (*done)(int, void *), void *context);
     static QImage panelImageStatic();
     static void setOrientationStatic(int orientation);
     static QObject *notifierStatic();

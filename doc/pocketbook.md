@@ -32,7 +32,9 @@ page covers installing and using it. [Building](building.md#pocketbook) covers t
   book at startup" setting is on.
 - Reading progress shared with the built-in reader: the home screen shows Kobalt's progress
   and the built-in reader opens where Kobalt left off, and vice versa.
-- KOsync progress sync (Settings → Sync), with Wi-Fi brought up automatically when needed.
+- KOsync progress sync (Settings → Sync), with Wi-Fi brought up automatically when needed. The
+  sync at book open and at wake connects in the background: when the home network is out of
+  reach (travel, a router down), the reader stays usable while the firmware gives up.
 - Dictionary downloads from Kobalt's catalogue inside the app, and user fonts from a folder.
 
 Not done: a proper PocketBook package format (installation is by copying files), landscape has
