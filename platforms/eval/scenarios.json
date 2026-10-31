@@ -238,6 +238,126 @@
       "sample": {"event": "panel-open", "panel": "styling", "field": "total_ms", "stages": true}
     },
     {
+      "id": "panel.styling.widows.entry",
+      "kind": "e2e",
+      "paths": ["src/interfaces/reader/settings/","src/interfaces/reader/window/reader_settings.cpp","src/reading/style_sample.cpp"],
+      "book": "benchmark",
+      "steps": [
+        {"press":"rrPage","unless":"rrSettings"},
+        {"visible":"rrSettings"},
+        {"press":"rrSettings"},
+        {"visible":"rrSettingsStyling"},
+        {"press":"rrSettingsDisplay"},
+        {"mark":true},
+        {"press":"rrSettingsStyling"},
+        {"press":"rrWidowsOrphans"},
+        {"event":"panel-open","panel":"styling"}
+      ],
+      "after": [
+        {"press":"rrWidowsOrphansClose"},
+        {"hidden":"rrWidowsOrphansPopup"},
+        {"press":"rrSettingsDisplay"},
+        {"press":"rrSettingsClose"},
+        {"hidden":"rrSettingsPages"},
+        {"settle":true}
+      ],
+      "sample": {"timer":true,"stages":{"panel_ms":{"event":"panel-open","panel":"styling","field":"total_ms"},"sample_ms":{"event":"panel-open","panel":"styling","field":"sample_ms"}}}
+    },
+    {
+      "id": "panel.styling.widows.prepared",
+      "kind": "e2e",
+      "paths": ["src/interfaces/reader/settings/","src/interfaces/reader/window/reader_settings.cpp","src/reading/style_sample.cpp"],
+      "book": "benchmark",
+      "setup": [
+        {"press":"rrPage","unless":"rrSettings"},
+        {"visible":"rrSettings"},
+        {"press":"rrSettings"},
+        {"visible":"rrSettingsStyling"},
+        {"press":"rrSettingsDisplay"},
+        {"press":"rrSettingsStyling"},
+        {"press":"rrWidowsOrphans"},
+        {"event":"panel-open","panel":"styling"},
+        {"press":"rrWidowsOrphansClose"},
+        {"hidden":"rrWidowsOrphansPopup"},
+        {"settle":true}
+      ],
+      "steps": [
+        {"press":"rrWidowsOrphans"},
+        {"event":"panel-open","panel":"styling"}
+      ],
+      "after": [
+        {"press":"rrWidowsOrphansClose"},
+        {"hidden":"rrWidowsOrphansPopup"}
+      ],
+      "teardown": [
+        {"press":"rrSettingsDisplay"},
+        {"press":"rrSettingsClose"},
+        {"hidden":"rrSettingsPages"},
+        {"settle":true}
+      ],
+      "sample": {"event":"panel-open","panel":"styling","field":"total_ms","stages":true}
+    },
+    {
+      "id": "panel.styling.page-spacing.entry",
+      "kind": "e2e",
+      "paths": ["src/interfaces/reader/settings/","src/interfaces/reader/window/reader_settings.cpp","src/reading/style_sample.cpp"],
+      "book": "benchmark",
+      "steps": [
+        {"press":"rrPage","unless":"rrSettings"},
+        {"visible":"rrSettings"},
+        {"press":"rrSettings"},
+        {"visible":"rrSettingsStyling"},
+        {"press":"rrSettingsDisplay"},
+        {"mark":true},
+        {"press":"rrSettingsStyling"},
+        {"press":"rrVerticalSpacing"},
+        {"event":"panel-open","panel":"styling"}
+      ],
+      "after": [
+        {"press":"rrVerticalSpacingClose"},
+        {"hidden":"rrVerticalSpacingPopup"},
+        {"press":"rrSettingsDisplay"},
+        {"press":"rrSettingsClose"},
+        {"hidden":"rrSettingsPages"},
+        {"settle":true}
+      ],
+      "sample": {"timer":true,"stages":{"panel_ms":{"event":"panel-open","panel":"styling","field":"total_ms"},"sample_ms":{"event":"panel-open","panel":"styling","field":"sample_ms"}}}
+    },
+    {
+      "id": "panel.styling.page-spacing.prepared",
+      "kind": "e2e",
+      "paths": ["src/interfaces/reader/settings/","src/interfaces/reader/window/reader_settings.cpp","src/reading/style_sample.cpp"],
+      "book": "benchmark",
+      "setup": [
+        {"press":"rrPage","unless":"rrSettings"},
+        {"visible":"rrSettings"},
+        {"press":"rrSettings"},
+        {"visible":"rrSettingsStyling"},
+        {"press":"rrSettingsDisplay"},
+        {"press":"rrSettingsStyling"},
+        {"press":"rrVerticalSpacing"},
+        {"event":"panel-open","panel":"styling"},
+        {"press":"rrVerticalSpacingClose"},
+        {"hidden":"rrVerticalSpacingPopup"},
+        {"settle":true}
+      ],
+      "steps": [
+        {"press":"rrVerticalSpacing"},
+        {"event":"panel-open","panel":"styling"}
+      ],
+      "after": [
+        {"press":"rrVerticalSpacingClose"},
+        {"hidden":"rrVerticalSpacingPopup"}
+      ],
+      "teardown": [
+        {"press":"rrSettingsDisplay"},
+        {"press":"rrSettingsClose"},
+        {"hidden":"rrSettingsPages"},
+        {"settle":true}
+      ],
+      "sample": {"event":"panel-open","panel":"styling","field":"total_ms","stages":true}
+    },
+    {
       "id": "panel.acknowledgments",
       "kind": "e2e",
       "paths": ["src/interfaces/reader/settings/acknowledgments.cpp", "src/interfaces/reader/ui/"],

@@ -23,6 +23,7 @@ enum class Field {
     ChapterPercent,
     BookPercent,
     BatteryWarning,
+    BatteryPercentOnly,
 };
 // Every field, for reading saved layouts.
 inline constexpr Field fields[] = {
@@ -30,14 +31,15 @@ inline constexpr Field fields[] = {
     Field::ChapterPage,     Field::BookPage,       Field::ChapterPagesLeft, Field::ChapterAndPage,
     Field::TitleAndPage,    Field::BatteryPercent, Field::Battery,          Field::Time,
     Field::ChapterTimeLeft, Field::BookTimeLeft,   Field::ChapterPercent,   Field::BookPercent,
-    Field::BatteryWarning,
+    Field::BatteryWarning,  Field::BatteryPercentOnly,
 };
 // The fields a slot offers, grouped: the book, the chapter, the whole book,
 // the device, then the fields that need a description to explain them.
 inline constexpr Field choosableFields[] = {
-    Field::Nothing,          Field::BookTitle,      Field::Author,         Field::Chapter,  Field::ChapterPage,
-    Field::ChapterPagesLeft, Field::ChapterPercent, Field::ChapterAndPage, Field::BookPage, Field::BookPercent,
-    Field::TitleAndPage,     Field::Time,           Field::BatteryPercent, Field::Battery,  Field::BatteryWarning,
+    Field::Nothing,          Field::BookTitle,          Field::Author,         Field::Chapter,
+    Field::ChapterPage,      Field::ChapterPagesLeft,   Field::ChapterPercent, Field::ChapterAndPage,
+    Field::BookPage,         Field::BookPercent,        Field::TitleAndPage,   Field::Time,
+    Field::BatteryPercent,   Field::BatteryPercentOnly, Field::Battery,        Field::BatteryWarning,
     Field::ChapterTimeLeft,  Field::BookTimeLeft,
 };
 // Battery warning shows the battery only below this percentage.

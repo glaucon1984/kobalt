@@ -1,1 +1,466 @@
-{"files":[{"path":"fonts/IBMPlexMono-Bold.ttf","sha256":"74e5eedcfa4596497d34e19023cabdabd3a8c852b903007a5654a59591a72ffb","size":175096},{"path":"fonts/IBMPlexMono-Regular.ttf","sha256":"7c6fbddca4b700be918f5f6183d9bd4464fa427fe435f0b480d77fe2bb8c5a43","size":173052},{"path":"fonts/IBMPlexSans-Bold.ttf","sha256":"9e6c74a889a700d707613d24548fe4ffa6bc59559a0689d2cf9e133bdcdafb2f","size":200872},{"path":"fonts/IBMPlexSans-Italic.ttf","sha256":"a9c6ef9942c49e49d11e11a6dacc0b3a087978757e9b22a06b8ac22a6400fb15","size":207920},{"path":"fonts/IBMPlexSans-Regular.ttf","sha256":"975dcda37d80f038dcd143c22e33ca2d97a0cc5a929aace1c749153b0fe1afa5","size":200500},{"path":"fonts/InstrumentSerif-Italic.ttf","sha256":"08939b8bdf534afec24ae0ef5e03f948940cd9a8fe08e7fecbad040e62327385","size":71592},{"path":"fonts/InstrumentSerif-Regular.ttf","sha256":"498efd461f6ddfcb7a111bf9a565709d2085d48201d501ead960d93e84ffbb88","size":70012},{"path":"fonts/NotoNaskhArabic-Bold.ttf","sha256":"04017b0ccdd1156dcde3bc386734c1b03165261762f16a025c8afc9088ae76e9","size":279468},{"path":"fonts/NotoNaskhArabic-Regular.ttf","sha256":"6f0a92031367b2f5a2078fe9d24f3433122b61a0bad57c423aad8f3c39aa2e6e","size":247336},{"path":"fonts/NotoSansMath-Regular.ttf","sha256":"d51afd5739c7ba6c44fcab35a88160e25dfb69a2d4ad0bd99533f8d894af1f96","size":990564},{"path":"fonts/NotoSerif-Bold.ttf","sha256":"96656aa5cec8f1d6fd0e804c1fad397e1a1cfa082e6642124e0bda68cd8363ce","size":747144},{"path":"fonts/NotoSerif-BoldItalic.ttf","sha256":"c710c5b9cf354ae46e7a10472a08019b28220fafeb5887a482a76856f8f6fc0b","size":779236},{"path":"fonts/NotoSerif-Italic.ttf","sha256":"749e80e313ef711f9373c6cce17c72297ef05490b3dcda7967d1d5d90bf1183f","size":756796},{"path":"fonts/NotoSerif-Regular.ttf","sha256":"19e72cd8d595fae5bd74a5206f5d938512e1183d4fed7abb1ec1be1d7efa5f88","size":712444},{"path":"fonts/NotoSerifArmenian-Bold.ttf","sha256":"79b6e9d36f8409444d16bb88e8c1f091aaf9548fb9ba7e5dba572aec325f905e","size":30260},{"path":"fonts/NotoSerifArmenian-Regular.ttf","sha256":"6dc71b17c55d398c7cc88edeec527292ba1e0573b033ac2136c636ab36c27d76","size":31040},{"path":"fonts/NotoSerifBengali-Bold.ttf","sha256":"7a5a625899a77187518b46a9c9c174671a8b740cdbd88cd2d01766598e8cf6f2","size":317612},{"path":"fonts/NotoSerifBengali-Regular.ttf","sha256":"c1743dce480147e4563e479ddc31d5ff6544372437428622a54c7c867c50f55b","size":324020},{"path":"fonts/NotoSerifCJK-Regular.ttc","sha256":"5d9c31a059600193c9d7968a998bde886ccdc77e934006ad243b41794c496a7d","size":26411360},{"path":"fonts/NotoSerifDevanagari-Bold.ttf","sha256":"0544878a7b09ea1dc16d9de1f7a1f8cf82beb255d66a287712bb05a24336bcc0","size":298840},{"path":"fonts/NotoSerifDevanagari-Regular.ttf","sha256":"e272d11d271c61a8d5d0f65764fd368ae53b9f9dabcce244a8941aa8f32ccc70","size":280180},{"path":"fonts/NotoSerifGeorgian-Bold.ttf","sha256":"6d30bd1fd83882002cab9da8e3fadb6bbe86fc710913a07305b3aea861de007a","size":64396},{"path":"fonts/NotoSerifGeorgian-Regular.ttf","sha256":"e222862f34ad05bdf950de1049abf6149d250b9e27c1cc482dd645412afb64ff","size":61956},{"path":"fonts/NotoSerifHebrew-Bold.ttf","sha256":"9dc92fcff313103397ec593cfda58e68f88ee71ff2d4a32aa9cff5a8b2725ea1","size":31024},{"path":"fonts/NotoSerifHebrew-Regular.ttf","sha256":"dfd5a6aefe97a99f68fe43388342913d50bb9fbf6d3afc4d2c7725661bc4a2b1","size":30288},{"path":"fonts/NotoSerifTamil-Bold.ttf","sha256":"0b3f994281fa5777e5a6fdefa51f0a98cf9b7ea3c25ccf7d448af5f1958fe0eb","size":78376},{"path":"fonts/NotoSerifTamil-BoldItalic.ttf","sha256":"85cda857a9fc90b8b779b94ce619598018b871e9c79f54f75064008c70a82eff","size":79740},{"path":"fonts/NotoSerifTamil-Italic.ttf","sha256":"c2601356d6fe1f7f22cbbb53bc20384a4707598a519ccba16b6d747c758837ca","size":78816},{"path":"fonts/NotoSerifTamil-Regular.ttf","sha256":"8a8cb015a3afec2998e01aabcb42fb365994132d95dbc2150208b4fefd8dc2e4","size":79476},{"path":"fonts/NotoSerifThai-Bold.ttf","sha256":"af3f64944248fe0dd9a37c0d2e8eed69930623d962eb5b2130fa81bb9e879dd1","size":46544},{"path":"fonts/NotoSerifThai-Regular.ttf","sha256":"747b5bb1fdd329850ddd3218d872a3d2a96ab0dd544f51e5300c6d1b12071b62","size":45424},{"path":"fonts/ebook-core.json","sha256":"91d66dd4be1ea82bc4199f2889c525f2a22a838f5cf0e5bc0fd7499250632db1","size":6196},{"path":"fonts/ebook-core/Libron-Bold.ttf","sha256":"da9348facda55d5c584b37fd24659dda3aa2ca0c6fc0c2a9316faa8babace29e","size":249408},{"path":"fonts/ebook-core/Libron-BoldItalic.ttf","sha256":"d64fd727f7e003e8d787385ebbd76c2986ac6d60c82715b73f59a871188d2ad2","size":259576},{"path":"fonts/ebook-core/Libron-Italic.ttf","sha256":"b017b66c5764aaa8abbcae83f0f27b6e7b72e6a416592cc70cbdc64fabd5f0e2","size":259036},{"path":"fonts/ebook-core/Libron-Regular.ttf","sha256":"f7924d25b01d3ef2aac6fc961048272d0ee4ce81bc18be0f6310594e5ef3a6a8","size":249372},{"path":"fonts/ebook-core/NV_Ancizar_Serif-Bold.ttf","sha256":"979fdbc84c23e0e44dd9727769147c71fcd212fa7bec2bb0ce74e2a05472306e","size":119824},{"path":"fonts/ebook-core/NV_Ancizar_Serif-BoldItalic.ttf","sha256":"f18f4ecd28e461aeb50e718df2aabb068255fb0f31e1fd8264afa4e1ee729199","size":123156},{"path":"fonts/ebook-core/NV_Ancizar_Serif-Italic.ttf","sha256":"06a42743682d1249ee5a1e0b7cc46e4ace4b6a7c38b8ac7e5639c9953d3e61e6","size":122928},{"path":"fonts/ebook-core/NV_Ancizar_Serif-Regular.ttf","sha256":"64131a74593045dc36297bc6b4801bae1bed4f87f78a4726de0cef05acbf39e4","size":119536},{"path":"fonts/ebook-core/NV_Bitter-Bold.ttf","sha256":"e61d0125eaf803af53aae899528d83adbc7961a0c4c7665ca9bb01322b9c435d","size":188800},{"path":"fonts/ebook-core/NV_Bitter-BoldItalic.ttf","sha256":"5930edd24a276d8de2bcb72b9e092402ccef65222b5a9a227aef35e2b430397b","size":187900},{"path":"fonts/ebook-core/NV_Bitter-Italic.ttf","sha256":"cd0d2d56145047443348ccf931fb292e583a9f6ad3a1048b89319c5bc3f33ac6","size":195924},{"path":"fonts/ebook-core/NV_Bitter-Regular.ttf","sha256":"baa77fd4b7216d1f244478f96d4e0fa46753acf8cb52123c8b5f7c5936666283","size":203156},{"path":"fonts/ebook-core/NV_Charis-Bold.ttf","sha256":"e7f778bd50af828bb5fb04e4b1afb7c5542a7c9a52fc2bda86cda7eb7fb01b43","size":870312},{"path":"fonts/ebook-core/NV_Charis-BoldItalic.ttf","sha256":"7616c5d41d6978389417aa9baed6dac10bf2e7aa1d7a7d9f9c05eb952b7f758a","size":890764},{"path":"fonts/ebook-core/NV_Charis-Italic.ttf","sha256":"c2d9b1ee33b7f4bdc6249378c57a5e7b1055de69daef796d0ed5f3b21cf5a644","size":887768},{"path":"fonts/ebook-core/NV_Charis-Regular.ttf","sha256":"0213f5da0747315e2708595b8eaa3378acd9436d6dbc7ff349552a08215eef39","size":873376},{"path":"fonts/ebook-core/NV_Garamond-Bold.ttf","sha256":"8d07562938138f4a1f0a7733d9b1281a390ccf890224f0b0ffbc35eb1665fd42","size":857156},{"path":"fonts/ebook-core/NV_Garamond-BoldItalic.ttf","sha256":"dee44aeb73073a0bb4f632b3760f2f669b7ff24c841c613eb45ab049aa874e2e","size":813392},{"path":"fonts/ebook-core/NV_Garamond-Italic.ttf","sha256":"7c33b5187e3b38651e098c24f431906eef09ce86cf1651b92a5c2a0f9624b7e8","size":787280},{"path":"fonts/ebook-core/NV_Garamond-Regular.ttf","sha256":"b4c8b9175a5e1100fd4f030ef0c32e6d85cbb60a05c7e7d8714d81404ea275a6","size":801940},{"path":"fonts/ebook-core/NV_Jost-Bold.ttf","sha256":"7b8702a26284943268b6793a2123927de659a61f9f87968752a5ac03627ba655","size":61892},{"path":"fonts/ebook-core/NV_Jost-BoldItalic.ttf","sha256":"617a171245cf77312d360de26f3238411d6e58696c0302d5df83bda364653fa7","size":66340},{"path":"fonts/ebook-core/NV_Jost-Italic.ttf","sha256":"7472bd587a47e18bc7917d7b44095807467fda9bf6e99c7652f2843381cf7885","size":66344},{"path":"fonts/ebook-core/NV_Jost-Regular.ttf","sha256":"8fbacf4728b4d71575091628f113cd40646e513ba86fde8e0a05ff05d16c807b","size":61728},{"path":"fonts/ebook-core/NV_Legible_Next-Bold.ttf","sha256":"32ef0a4ab388d3b8d5acd35ec237c0a85282694ade41f06c434a6c08d347a6c3","size":63388},{"path":"fonts/ebook-core/NV_Legible_Next-BoldItalic.ttf","sha256":"b05dc580f4ffbc6c26d7db0a65f1f54c314ec3d75887eb8fee8b7fe3c9c32be0","size":66824},{"path":"fonts/ebook-core/NV_Legible_Next-Italic.ttf","sha256":"640c97d0ef57ec2d0e2353f744f6abb35923704d778c231eeefa7e02825b1d22","size":65584},{"path":"fonts/ebook-core/NV_Legible_Next-Regular.ttf","sha256":"eca414faed6f3d893e5761fae9e0258818da130bf5b98d384eed3c970908600d","size":61460},{"path":"fonts/ebook-core/NV_Literata-Bold.ttf","sha256":"d2603ffe6225c4b146e99a459c81b9b47a41964c8dfaf1a848c06a23a9804247","size":263372},{"path":"fonts/ebook-core/NV_Literata-BoldItalic.ttf","sha256":"2e80f6445a0091cd9a18868786774571b17a9fa4a53d560d1dd864802ebc3930","size":256092},{"path":"fonts/ebook-core/NV_Literata-Italic.ttf","sha256":"ec7904899291e67fdd460f387d428818579d4e0ea29bd9f824dbe5e8b34c02e3","size":250268},{"path":"fonts/ebook-core/NV_Literata-Regular.ttf","sha256":"da53d3ab935685576670cb31d2dc882f79ce09d481b9553ff0935489a5cd047b","size":257504},{"path":"fonts/ebook-core/NV_Palatium-Bold.ttf","sha256":"f0cc7efd740ffcaf4191a350b2c80e1b77617d8b747dab026f1acdee2a1a7cbc","size":138292},{"path":"fonts/ebook-core/NV_Palatium-BoldItalic.ttf","sha256":"b6187348eee1fc57c88bafedb9c564e045e60a4af653e8060820c9d23e514092","size":146944},{"path":"fonts/ebook-core/NV_Palatium-Italic.ttf","sha256":"c21e6f96f950afabdad5e890158d3413fd1afce0bb2bbb20cb556e3e6b328bf4","size":145416},{"path":"fonts/ebook-core/NV_Palatium-Regular.ttf","sha256":"2c90dc57e4dbc282300cc10dab6b5e597a2c30e68743298a7e5a8af9941e1783","size":170192},{"path":"fonts/ebook-core/Sourcerer-Bold.ttf","sha256":"18dad943c32f1d25782fd432bafc92ee46b7ec3aa0bbca006f6da489ce8d1755","size":408668},{"path":"fonts/ebook-core/Sourcerer-BoldItalic.ttf","sha256":"c6e5483d16dbd9bac0478b0c7cd2abffca395a2eed57be54fb06b8e702b9a36a","size":265480},{"path":"fonts/ebook-core/Sourcerer-Italic.ttf","sha256":"fdfae4a83cb3b6669d8f1a8cd59bd34862928293d0e392a02ecd3196100de1f8","size":262952},{"path":"fonts/ebook-core/Sourcerer-Regular.ttf","sha256":"772f8e8db69bc820f205ba3d48961f514362540765aec886d854f9b03e96461e","size":407328},{"path":"hyph/Dutch.pattern","sha256":"940d83d1b468a6087aec28f8665962b35181945b7daf6835d72bcc47ebfa70d2","size":353931},{"path":"hyph/English_GB.pattern","sha256":"bc66e68eb8f24e1196f08c60a012df8e101dc4f793d15653c71aa8f122034cec","size":217146},{"path":"hyph/English_US.pattern","sha256":"99cf5425a170043eb3103df66d145a61af5cc9667d857d2a05276acae93760f7","size":198194},{"path":"hyph/Estonian.pattern","sha256":"84637050258445479f8070322d0bb4cdd2b07c35d0171f6efae595e631534084","size":101036},{"path":"hyph/Finnish.pattern","sha256":"54babbdc57d9e0867cb1bf4b84367661788c0dd26d8f0867e81f3f3bcf449b55","size":7209},{"path":"hyph/French.pattern","sha256":"b3383d973311aba617bf83d653f0aa00b78d8d54451f80fafd143d243df8fd39","size":51185},{"path":"hyph/Georgian.pattern","sha256":"927b862259d8f2d3d4c890a1f77f315343e6b91d5db6c3bd201b056096e33d89","size":70271},{"path":"hyph/German.pattern","sha256":"d5c9bef88d59776fe5e5d5476f95c92c824bed9060456ddd995ee796036b0f5e","size":970695},{"path":"hyph/Hungarian.pattern","sha256":"aa5f1ad662d7e7d23c823b2af0c6a95e7a35ab7ddc0209f7fc1ba2937ba872c6","size":1722495},{"path":"hyph/Italian.pattern","sha256":"38a933d1dcdfa947bd48867fb15ec7c2dd938992bfa29787610b9b48f9c4a132","size":7947},{"path":"hyph/Latvian.pattern","sha256":"b92618bcdd54c4dce8e53f702b57b4dbf503c1f8de90e81020d721041fdd6545","size":327827},{"path":"hyph/Lithuanian.pattern","sha256":"fe150c08500c0371a87c915598afb4d60c24b790291f6e27ea85875a9c4951fd","size":41142},{"path":"hyph/Polish.pattern","sha256":"c2739b58468227bdfac6d6046c5c1bb0223b19fbcd111f21861fed01d28d3ca9","size":137780},{"path":"hyph/Portuguese.pattern","sha256":"3aa820a6b65d9adce5c367866413d863453da467e10e2f1ce0d46efa892e14ad","size":7561},{"path":"hyph/Portuguese_BR.pattern","sha256":"77ca85f3becfd84f85e21332a34e6cd797b55da58cdd91505009b679f9be6280","size":37614},{"path":"hyph/Russian.pattern","sha256":"4ca198ade4c1925d13bcaa03c97d83315d58be5bd31b4e4baf4b44b751b06172","size":137239},{"path":"hyph/Slovak.pattern","sha256":"40b4eb760a5032fa3c144d98c032b381e2fa9bbc348bcf597415ed8499dce8e0","size":66719},{"path":"hyph/Slovenian.pattern","sha256":"baa82dae9e5f7a07e4893d7fd202b81a51af24cacc9fa2ef7475f60a7066680c","size":26592},{"path":"hyph/Spanish.pattern","sha256":"7dbd3ce6d8b81accc5925a08c6e6dd9f6d5d857569502392f39e0d4ba445ee1b","size":138899},{"path":"hyph/Ukrainian.pattern","sha256":"e938364f4fe61c469a4b84742441349a876d6705e68181695a00c66f184df279","size":58115}],"schema":1,"version":"v1.0-beta.5"}
+{
+  "files": [
+    {
+      "path": "fonts/IBMPlexMono-Bold.ttf",
+      "sha256": "74e5eedcfa4596497d34e19023cabdabd3a8c852b903007a5654a59591a72ffb",
+      "size": 175096
+    },
+    {
+      "path": "fonts/IBMPlexMono-Regular.ttf",
+      "sha256": "7c6fbddca4b700be918f5f6183d9bd4464fa427fe435f0b480d77fe2bb8c5a43",
+      "size": 173052
+    },
+    {
+      "path": "fonts/IBMPlexSans-Bold.ttf",
+      "sha256": "9e6c74a889a700d707613d24548fe4ffa6bc59559a0689d2cf9e133bdcdafb2f",
+      "size": 200872
+    },
+    {
+      "path": "fonts/IBMPlexSans-Italic.ttf",
+      "sha256": "a9c6ef9942c49e49d11e11a6dacc0b3a087978757e9b22a06b8ac22a6400fb15",
+      "size": 207920
+    },
+    {
+      "path": "fonts/IBMPlexSans-Regular.ttf",
+      "sha256": "975dcda37d80f038dcd143c22e33ca2d97a0cc5a929aace1c749153b0fe1afa5",
+      "size": 200500
+    },
+    {
+      "path": "fonts/InstrumentSerif-Italic.ttf",
+      "sha256": "08939b8bdf534afec24ae0ef5e03f948940cd9a8fe08e7fecbad040e62327385",
+      "size": 71592
+    },
+    {
+      "path": "fonts/InstrumentSerif-Regular.ttf",
+      "sha256": "498efd461f6ddfcb7a111bf9a565709d2085d48201d501ead960d93e84ffbb88",
+      "size": 70012
+    },
+    {
+      "path": "fonts/NotoNaskhArabic-Bold.ttf",
+      "sha256": "04017b0ccdd1156dcde3bc386734c1b03165261762f16a025c8afc9088ae76e9",
+      "size": 279468
+    },
+    {
+      "path": "fonts/NotoNaskhArabic-Regular.ttf",
+      "sha256": "6f0a92031367b2f5a2078fe9d24f3433122b61a0bad57c423aad8f3c39aa2e6e",
+      "size": 247336
+    },
+    {
+      "path": "fonts/NotoSansMath-Regular.ttf",
+      "sha256": "d51afd5739c7ba6c44fcab35a88160e25dfb69a2d4ad0bd99533f8d894af1f96",
+      "size": 990564
+    },
+    {
+      "path": "fonts/NotoSerif-Bold.ttf",
+      "sha256": "96656aa5cec8f1d6fd0e804c1fad397e1a1cfa082e6642124e0bda68cd8363ce",
+      "size": 747144
+    },
+    {
+      "path": "fonts/NotoSerif-BoldItalic.ttf",
+      "sha256": "c710c5b9cf354ae46e7a10472a08019b28220fafeb5887a482a76856f8f6fc0b",
+      "size": 779236
+    },
+    {
+      "path": "fonts/NotoSerif-Italic.ttf",
+      "sha256": "749e80e313ef711f9373c6cce17c72297ef05490b3dcda7967d1d5d90bf1183f",
+      "size": 756796
+    },
+    {
+      "path": "fonts/NotoSerif-Regular.ttf",
+      "sha256": "19e72cd8d595fae5bd74a5206f5d938512e1183d4fed7abb1ec1be1d7efa5f88",
+      "size": 712444
+    },
+    {
+      "path": "fonts/NotoSerifArmenian-Bold.ttf",
+      "sha256": "79b6e9d36f8409444d16bb88e8c1f091aaf9548fb9ba7e5dba572aec325f905e",
+      "size": 30260
+    },
+    {
+      "path": "fonts/NotoSerifArmenian-Regular.ttf",
+      "sha256": "6dc71b17c55d398c7cc88edeec527292ba1e0573b033ac2136c636ab36c27d76",
+      "size": 31040
+    },
+    {
+      "path": "fonts/NotoSerifBengali-Bold.ttf",
+      "sha256": "7a5a625899a77187518b46a9c9c174671a8b740cdbd88cd2d01766598e8cf6f2",
+      "size": 317612
+    },
+    {
+      "path": "fonts/NotoSerifBengali-Regular.ttf",
+      "sha256": "c1743dce480147e4563e479ddc31d5ff6544372437428622a54c7c867c50f55b",
+      "size": 324020
+    },
+    {
+      "path": "fonts/NotoSerifCJK-Regular.ttc",
+      "sha256": "5d9c31a059600193c9d7968a998bde886ccdc77e934006ad243b41794c496a7d",
+      "size": 26411360
+    },
+    {
+      "path": "fonts/NotoSerifDevanagari-Bold.ttf",
+      "sha256": "0544878a7b09ea1dc16d9de1f7a1f8cf82beb255d66a287712bb05a24336bcc0",
+      "size": 298840
+    },
+    {
+      "path": "fonts/NotoSerifDevanagari-Regular.ttf",
+      "sha256": "e272d11d271c61a8d5d0f65764fd368ae53b9f9dabcce244a8941aa8f32ccc70",
+      "size": 280180
+    },
+    {
+      "path": "fonts/NotoSerifGeorgian-Bold.ttf",
+      "sha256": "6d30bd1fd83882002cab9da8e3fadb6bbe86fc710913a07305b3aea861de007a",
+      "size": 64396
+    },
+    {
+      "path": "fonts/NotoSerifGeorgian-Regular.ttf",
+      "sha256": "e222862f34ad05bdf950de1049abf6149d250b9e27c1cc482dd645412afb64ff",
+      "size": 61956
+    },
+    {
+      "path": "fonts/NotoSerifHebrew-Bold.ttf",
+      "sha256": "9dc92fcff313103397ec593cfda58e68f88ee71ff2d4a32aa9cff5a8b2725ea1",
+      "size": 31024
+    },
+    {
+      "path": "fonts/NotoSerifHebrew-Regular.ttf",
+      "sha256": "dfd5a6aefe97a99f68fe43388342913d50bb9fbf6d3afc4d2c7725661bc4a2b1",
+      "size": 30288
+    },
+    {
+      "path": "fonts/NotoSerifTamil-Bold.ttf",
+      "sha256": "0b3f994281fa5777e5a6fdefa51f0a98cf9b7ea3c25ccf7d448af5f1958fe0eb",
+      "size": 78376
+    },
+    {
+      "path": "fonts/NotoSerifTamil-BoldItalic.ttf",
+      "sha256": "85cda857a9fc90b8b779b94ce619598018b871e9c79f54f75064008c70a82eff",
+      "size": 79740
+    },
+    {
+      "path": "fonts/NotoSerifTamil-Italic.ttf",
+      "sha256": "c2601356d6fe1f7f22cbbb53bc20384a4707598a519ccba16b6d747c758837ca",
+      "size": 78816
+    },
+    {
+      "path": "fonts/NotoSerifTamil-Regular.ttf",
+      "sha256": "8a8cb015a3afec2998e01aabcb42fb365994132d95dbc2150208b4fefd8dc2e4",
+      "size": 79476
+    },
+    {
+      "path": "fonts/NotoSerifThai-Bold.ttf",
+      "sha256": "af3f64944248fe0dd9a37c0d2e8eed69930623d962eb5b2130fa81bb9e879dd1",
+      "size": 46544
+    },
+    {
+      "path": "fonts/NotoSerifThai-Regular.ttf",
+      "sha256": "747b5bb1fdd329850ddd3218d872a3d2a96ab0dd544f51e5300c6d1b12071b62",
+      "size": 45424
+    },
+    {
+      "path": "fonts/ebook-core.json",
+      "sha256": "91d66dd4be1ea82bc4199f2889c525f2a22a838f5cf0e5bc0fd7499250632db1",
+      "size": 6196
+    },
+    {
+      "path": "fonts/ebook-core/Libron-Bold.ttf",
+      "sha256": "da9348facda55d5c584b37fd24659dda3aa2ca0c6fc0c2a9316faa8babace29e",
+      "size": 249408
+    },
+    {
+      "path": "fonts/ebook-core/Libron-BoldItalic.ttf",
+      "sha256": "d64fd727f7e003e8d787385ebbd76c2986ac6d60c82715b73f59a871188d2ad2",
+      "size": 259576
+    },
+    {
+      "path": "fonts/ebook-core/Libron-Italic.ttf",
+      "sha256": "b017b66c5764aaa8abbcae83f0f27b6e7b72e6a416592cc70cbdc64fabd5f0e2",
+      "size": 259036
+    },
+    {
+      "path": "fonts/ebook-core/Libron-Regular.ttf",
+      "sha256": "f7924d25b01d3ef2aac6fc961048272d0ee4ce81bc18be0f6310594e5ef3a6a8",
+      "size": 249372
+    },
+    {
+      "path": "fonts/ebook-core/NV_Ancizar_Serif-Bold.ttf",
+      "sha256": "979fdbc84c23e0e44dd9727769147c71fcd212fa7bec2bb0ce74e2a05472306e",
+      "size": 119824
+    },
+    {
+      "path": "fonts/ebook-core/NV_Ancizar_Serif-BoldItalic.ttf",
+      "sha256": "f18f4ecd28e461aeb50e718df2aabb068255fb0f31e1fd8264afa4e1ee729199",
+      "size": 123156
+    },
+    {
+      "path": "fonts/ebook-core/NV_Ancizar_Serif-Italic.ttf",
+      "sha256": "06a42743682d1249ee5a1e0b7cc46e4ace4b6a7c38b8ac7e5639c9953d3e61e6",
+      "size": 122928
+    },
+    {
+      "path": "fonts/ebook-core/NV_Ancizar_Serif-Regular.ttf",
+      "sha256": "64131a74593045dc36297bc6b4801bae1bed4f87f78a4726de0cef05acbf39e4",
+      "size": 119536
+    },
+    {
+      "path": "fonts/ebook-core/NV_Bitter-Bold.ttf",
+      "sha256": "e61d0125eaf803af53aae899528d83adbc7961a0c4c7665ca9bb01322b9c435d",
+      "size": 188800
+    },
+    {
+      "path": "fonts/ebook-core/NV_Bitter-BoldItalic.ttf",
+      "sha256": "5930edd24a276d8de2bcb72b9e092402ccef65222b5a9a227aef35e2b430397b",
+      "size": 187900
+    },
+    {
+      "path": "fonts/ebook-core/NV_Bitter-Italic.ttf",
+      "sha256": "cd0d2d56145047443348ccf931fb292e583a9f6ad3a1048b89319c5bc3f33ac6",
+      "size": 195924
+    },
+    {
+      "path": "fonts/ebook-core/NV_Bitter-Regular.ttf",
+      "sha256": "baa77fd4b7216d1f244478f96d4e0fa46753acf8cb52123c8b5f7c5936666283",
+      "size": 203156
+    },
+    {
+      "path": "fonts/ebook-core/NV_Charis-Bold.ttf",
+      "sha256": "e7f778bd50af828bb5fb04e4b1afb7c5542a7c9a52fc2bda86cda7eb7fb01b43",
+      "size": 870312
+    },
+    {
+      "path": "fonts/ebook-core/NV_Charis-BoldItalic.ttf",
+      "sha256": "7616c5d41d6978389417aa9baed6dac10bf2e7aa1d7a7d9f9c05eb952b7f758a",
+      "size": 890764
+    },
+    {
+      "path": "fonts/ebook-core/NV_Charis-Italic.ttf",
+      "sha256": "c2d9b1ee33b7f4bdc6249378c57a5e7b1055de69daef796d0ed5f3b21cf5a644",
+      "size": 887768
+    },
+    {
+      "path": "fonts/ebook-core/NV_Charis-Regular.ttf",
+      "sha256": "0213f5da0747315e2708595b8eaa3378acd9436d6dbc7ff349552a08215eef39",
+      "size": 873376
+    },
+    {
+      "path": "fonts/ebook-core/NV_Garamond-Bold.ttf",
+      "sha256": "8d07562938138f4a1f0a7733d9b1281a390ccf890224f0b0ffbc35eb1665fd42",
+      "size": 857156
+    },
+    {
+      "path": "fonts/ebook-core/NV_Garamond-BoldItalic.ttf",
+      "sha256": "dee44aeb73073a0bb4f632b3760f2f669b7ff24c841c613eb45ab049aa874e2e",
+      "size": 813392
+    },
+    {
+      "path": "fonts/ebook-core/NV_Garamond-Italic.ttf",
+      "sha256": "7c33b5187e3b38651e098c24f431906eef09ce86cf1651b92a5c2a0f9624b7e8",
+      "size": 787280
+    },
+    {
+      "path": "fonts/ebook-core/NV_Garamond-Regular.ttf",
+      "sha256": "b4c8b9175a5e1100fd4f030ef0c32e6d85cbb60a05c7e7d8714d81404ea275a6",
+      "size": 801940
+    },
+    {
+      "path": "fonts/ebook-core/NV_Jost-Bold.ttf",
+      "sha256": "7b8702a26284943268b6793a2123927de659a61f9f87968752a5ac03627ba655",
+      "size": 61892
+    },
+    {
+      "path": "fonts/ebook-core/NV_Jost-BoldItalic.ttf",
+      "sha256": "617a171245cf77312d360de26f3238411d6e58696c0302d5df83bda364653fa7",
+      "size": 66340
+    },
+    {
+      "path": "fonts/ebook-core/NV_Jost-Italic.ttf",
+      "sha256": "7472bd587a47e18bc7917d7b44095807467fda9bf6e99c7652f2843381cf7885",
+      "size": 66344
+    },
+    {
+      "path": "fonts/ebook-core/NV_Jost-Regular.ttf",
+      "sha256": "8fbacf4728b4d71575091628f113cd40646e513ba86fde8e0a05ff05d16c807b",
+      "size": 61728
+    },
+    {
+      "path": "fonts/ebook-core/NV_Legible_Next-Bold.ttf",
+      "sha256": "32ef0a4ab388d3b8d5acd35ec237c0a85282694ade41f06c434a6c08d347a6c3",
+      "size": 63388
+    },
+    {
+      "path": "fonts/ebook-core/NV_Legible_Next-BoldItalic.ttf",
+      "sha256": "b05dc580f4ffbc6c26d7db0a65f1f54c314ec3d75887eb8fee8b7fe3c9c32be0",
+      "size": 66824
+    },
+    {
+      "path": "fonts/ebook-core/NV_Legible_Next-Italic.ttf",
+      "sha256": "640c97d0ef57ec2d0e2353f744f6abb35923704d778c231eeefa7e02825b1d22",
+      "size": 65584
+    },
+    {
+      "path": "fonts/ebook-core/NV_Legible_Next-Regular.ttf",
+      "sha256": "eca414faed6f3d893e5761fae9e0258818da130bf5b98d384eed3c970908600d",
+      "size": 61460
+    },
+    {
+      "path": "fonts/ebook-core/NV_Literata-Bold.ttf",
+      "sha256": "d2603ffe6225c4b146e99a459c81b9b47a41964c8dfaf1a848c06a23a9804247",
+      "size": 263372
+    },
+    {
+      "path": "fonts/ebook-core/NV_Literata-BoldItalic.ttf",
+      "sha256": "2e80f6445a0091cd9a18868786774571b17a9fa4a53d560d1dd864802ebc3930",
+      "size": 256092
+    },
+    {
+      "path": "fonts/ebook-core/NV_Literata-Italic.ttf",
+      "sha256": "ec7904899291e67fdd460f387d428818579d4e0ea29bd9f824dbe5e8b34c02e3",
+      "size": 250268
+    },
+    {
+      "path": "fonts/ebook-core/NV_Literata-Regular.ttf",
+      "sha256": "da53d3ab935685576670cb31d2dc882f79ce09d481b9553ff0935489a5cd047b",
+      "size": 257504
+    },
+    {
+      "path": "fonts/ebook-core/NV_Palatium-Bold.ttf",
+      "sha256": "f0cc7efd740ffcaf4191a350b2c80e1b77617d8b747dab026f1acdee2a1a7cbc",
+      "size": 138292
+    },
+    {
+      "path": "fonts/ebook-core/NV_Palatium-BoldItalic.ttf",
+      "sha256": "b6187348eee1fc57c88bafedb9c564e045e60a4af653e8060820c9d23e514092",
+      "size": 146944
+    },
+    {
+      "path": "fonts/ebook-core/NV_Palatium-Italic.ttf",
+      "sha256": "c21e6f96f950afabdad5e890158d3413fd1afce0bb2bbb20cb556e3e6b328bf4",
+      "size": 145416
+    },
+    {
+      "path": "fonts/ebook-core/NV_Palatium-Regular.ttf",
+      "sha256": "2c90dc57e4dbc282300cc10dab6b5e597a2c30e68743298a7e5a8af9941e1783",
+      "size": 170192
+    },
+    {
+      "path": "fonts/ebook-core/Sourcerer-Bold.ttf",
+      "sha256": "18dad943c32f1d25782fd432bafc92ee46b7ec3aa0bbca006f6da489ce8d1755",
+      "size": 408668
+    },
+    {
+      "path": "fonts/ebook-core/Sourcerer-BoldItalic.ttf",
+      "sha256": "c6e5483d16dbd9bac0478b0c7cd2abffca395a2eed57be54fb06b8e702b9a36a",
+      "size": 265480
+    },
+    {
+      "path": "fonts/ebook-core/Sourcerer-Italic.ttf",
+      "sha256": "fdfae4a83cb3b6669d8f1a8cd59bd34862928293d0e392a02ecd3196100de1f8",
+      "size": 262952
+    },
+    {
+      "path": "fonts/ebook-core/Sourcerer-Regular.ttf",
+      "sha256": "772f8e8db69bc820f205ba3d48961f514362540765aec886d854f9b03e96461e",
+      "size": 407328
+    },
+    {
+      "path": "hyph/Dutch.pattern",
+      "sha256": "940d83d1b468a6087aec28f8665962b35181945b7daf6835d72bcc47ebfa70d2",
+      "size": 353931
+    },
+    {
+      "path": "hyph/English_GB.pattern",
+      "sha256": "bc66e68eb8f24e1196f08c60a012df8e101dc4f793d15653c71aa8f122034cec",
+      "size": 217146
+    },
+    {
+      "path": "hyph/English_US.pattern",
+      "sha256": "99cf5425a170043eb3103df66d145a61af5cc9667d857d2a05276acae93760f7",
+      "size": 198194
+    },
+    {
+      "path": "hyph/Estonian.pattern",
+      "sha256": "84637050258445479f8070322d0bb4cdd2b07c35d0171f6efae595e631534084",
+      "size": 101036
+    },
+    {
+      "path": "hyph/Finnish.pattern",
+      "sha256": "54babbdc57d9e0867cb1bf4b84367661788c0dd26d8f0867e81f3f3bcf449b55",
+      "size": 7209
+    },
+    {
+      "path": "hyph/French.pattern",
+      "sha256": "b3383d973311aba617bf83d653f0aa00b78d8d54451f80fafd143d243df8fd39",
+      "size": 51185
+    },
+    {
+      "path": "hyph/Georgian.pattern",
+      "sha256": "927b862259d8f2d3d4c890a1f77f315343e6b91d5db6c3bd201b056096e33d89",
+      "size": 70271
+    },
+    {
+      "path": "hyph/German.pattern",
+      "sha256": "d5c9bef88d59776fe5e5d5476f95c92c824bed9060456ddd995ee796036b0f5e",
+      "size": 970695
+    },
+    {
+      "path": "hyph/Hungarian.pattern",
+      "sha256": "aa5f1ad662d7e7d23c823b2af0c6a95e7a35ab7ddc0209f7fc1ba2937ba872c6",
+      "size": 1722495
+    },
+    {
+      "path": "hyph/Italian.pattern",
+      "sha256": "38a933d1dcdfa947bd48867fb15ec7c2dd938992bfa29787610b9b48f9c4a132",
+      "size": 7947
+    },
+    {
+      "path": "hyph/Latvian.pattern",
+      "sha256": "b92618bcdd54c4dce8e53f702b57b4dbf503c1f8de90e81020d721041fdd6545",
+      "size": 327827
+    },
+    {
+      "path": "hyph/Lithuanian.pattern",
+      "sha256": "fe150c08500c0371a87c915598afb4d60c24b790291f6e27ea85875a9c4951fd",
+      "size": 41142
+    },
+    {
+      "path": "hyph/Polish.pattern",
+      "sha256": "c2739b58468227bdfac6d6046c5c1bb0223b19fbcd111f21861fed01d28d3ca9",
+      "size": 137780
+    },
+    {
+      "path": "hyph/Portuguese.pattern",
+      "sha256": "3aa820a6b65d9adce5c367866413d863453da467e10e2f1ce0d46efa892e14ad",
+      "size": 7561
+    },
+    {
+      "path": "hyph/Portuguese_BR.pattern",
+      "sha256": "77ca85f3becfd84f85e21332a34e6cd797b55da58cdd91505009b679f9be6280",
+      "size": 37614
+    },
+    {
+      "path": "hyph/Russian.pattern",
+      "sha256": "4ca198ade4c1925d13bcaa03c97d83315d58be5bd31b4e4baf4b44b751b06172",
+      "size": 137239
+    },
+    {
+      "path": "hyph/Slovak.pattern",
+      "sha256": "40b4eb760a5032fa3c144d98c032b381e2fa9bbc348bcf597415ed8499dce8e0",
+      "size": 66719
+    },
+    {
+      "path": "hyph/Slovenian.pattern",
+      "sha256": "baa82dae9e5f7a07e4893d7fd202b81a51af24cacc9fa2ef7475f60a7066680c",
+      "size": 26592
+    },
+    {
+      "path": "hyph/Spanish.pattern",
+      "sha256": "7dbd3ce6d8b81accc5925a08c6e6dd9f6d5d857569502392f39e0d4ba445ee1b",
+      "size": 138899
+    },
+    {
+      "path": "hyph/Ukrainian.pattern",
+      "sha256": "e938364f4fe61c469a4b84742441349a876d6705e68181695a00c66f184df279",
+      "size": 58115
+    }
+  ],
+  "schema": 1,
+  "version": "v1.0-beta.6"
+}

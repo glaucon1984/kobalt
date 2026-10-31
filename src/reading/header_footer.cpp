@@ -139,6 +139,8 @@ QString fieldValue(Field field) {
         return QStringLiteral("chapter_and_page");
     case Field::TitleAndPage:
         return QStringLiteral("title_and_page");
+    case Field::BatteryPercentOnly:
+        return QStringLiteral("battery_percent_only");
     case Field::BatteryPercent:
         return QStringLiteral("battery_percent");
     case Field::Battery:
@@ -305,6 +307,7 @@ Content content(Field field, const Values &values, bool uppercase) {
     case Field::TitleAndPage:
         result.text = joined(values.title, pageOf(values.page, values.pages));
         break;
+    case Field::BatteryPercentOnly:
     case Field::BatteryPercent:
     case Field::Battery:
     case Field::BatteryWarning:
@@ -313,7 +316,7 @@ Content content(Field field, const Values &values, bool uppercase) {
         if (values.deviceStatus) {
             if (field != Field::Battery && values.battery >= 0)
                 result.text = strings::get("common.percent").arg(values.battery);
-            result.batteryIcon = true;
+            result.batteryIcon = field != Field::BatteryPercentOnly;
             result.battery = values.battery;
             result.charging = values.charging;
         }
@@ -367,6 +370,8 @@ QString fieldLabel(Field field) {
         return strings::get("header_footer.field.chapter_and_page");
     case Field::TitleAndPage:
         return strings::get("header_footer.field.title_and_page");
+    case Field::BatteryPercentOnly:
+        return strings::get("header_footer.field.battery_percent_only");
     case Field::BatteryPercent:
         return strings::get("header_footer.field.battery_percent");
     case Field::Battery:

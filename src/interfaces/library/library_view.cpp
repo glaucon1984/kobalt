@@ -119,6 +119,7 @@ public:
     BookPages(const Index &index, std::function<QString(const QString &)> coverPath, QWidget *parent)
         : QWidget(parent), index(index), coverPath(std::move(coverPath)) {
         setObjectName("libraryPages");
+        setProperty("reader_owns_swipes", true);
         setAttribute(Qt::WA_OpaquePaintEvent);
         covers.setMaxCost(lm::coverCacheEntries);
         hold.setSingleShot(true);

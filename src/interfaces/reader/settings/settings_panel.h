@@ -62,6 +62,8 @@ public:
     // sheet is open.
     void setStylingSample(AdvancedText feature, const StyleSample &sample);
     void clearStylingSamples();
+    void invalidateStylingSamples(int unchanged = -1);
+    std::function<void(AdvancedText)> stylingRequested;
     // Called when the panel hides, so pending sample renders can stop.
     std::function<void()> stylingHidden;
     // Sizes the sample is drawn at, in device pixels, for a reading page.

@@ -576,6 +576,17 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     wordmark->setAlignment(Qt::AlignCenter);
     readerStyle(wordmark, styles::brand(m::about::wordmarkText));
     aboutRows->addWidget(wordmark);
+    // A short rule above and below sets the build apart from the name and the description.
+    const auto buildRule = [&](const char *name) {
+        auto *rule = new QFrame(aboutPage);
+        rule->setObjectName(name);
+        rule->setFixedSize(m::about::ruleWidth, m::control::border);
+        readerStyle(rule, "border:none;background:palette(light);");
+        aboutRows->addWidget(rule, 0, Qt::AlignHCenter);
+    };
+    // The rules keep more room on their outer side than next to the build lines.
+    aboutRows->addSpacing(m::about::sectionGap);
+    buildRule("rrAboutBuildTop");
     auto *build = new QVBoxLayout;
     build->setSpacing(m::about::buildGap);
     aboutRows->addLayout(build);
@@ -584,14 +595,14 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     auto *version = new ui::InterfaceLabel(strings::get("about.version").arg(release).arg(inputs.qtMajor), aboutPage);
     version->setObjectName("rrAboutVersion");
     version->setAlignment(Qt::AlignCenter);
-    readerStyle(version, styles::font(m::text::secondary));
     build->addWidget(version);
     auto *commit = new ui::InterfaceLabel(inputs.commit, aboutPage);
     commit->setObjectName("rrAboutCommit");
     commit->setAlignment(Qt::AlignCenter);
-    readerStyle(commit, styles::font(m::about::commitText));
     build->addWidget(commit);
     commit->setVisible(inputs.commitVisible);
+    buildRule("rrAboutBuildBottom");
+    aboutRows->addSpacing(m::about::sectionGap);
     auto *description = new ui::InterfaceLabel(strings::get("about.description"), aboutPage);
     aboutDescription = description;
     description->setObjectName("rrAboutDescription");
@@ -603,24 +614,14 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     // Measure at the displayed width so Qt cannot clip wrapped lines.
     description->setFixedHeight(description->heightForWidth(m::about::textWidth));
     aboutRows->addWidget(description, 0, Qt::AlignHCenter);
-    aboutRows->addSpacing(m::about::actionGap / 2);
-    auto *aboutActions = new QGridLayout;
-    aboutActions->setSpacing(m::about::actionGap);
+    // The paragraph sits evenly between the rule and the button.
+    aboutRows->addSpacing(m::about::buttonGap);
+    auto *aboutActions = kobalt::ui::horizontalRow();
     aboutRows->addLayout(aboutActions);
-    aboutActions->setColumnStretch(0, 1);
-    aboutActions->setColumnStretch(2, 1);
-    int actionRow = 0;
-    auto textAction = [&](const char *name, const QString &label) {
-        auto *row = kobalt::ui::horizontalRow();
-        aboutActions->addLayout(row, actionRow++, 1);
-        row->addStretch(1);
-        auto *button = actionButton(aboutPage, row, name, label);
-        readerStyle(button, styles::textAction() + styles::font(m::text::body));
-        button->setFixedHeight(m::about::actionHeight);
-        row->addStretch(1);
-        return button;
-    };
-    openAcknowledgments = textAction("rrOpenAcknowledgments", strings::get("acknowledgments.acknowledgments"));
+    aboutActions->addStretch(1);
+    openAcknowledgments =
+        actionButton(aboutPage, aboutActions, "rrOpenAcknowledgments", strings::get("acknowledgments.acknowledgments"));
+    aboutActions->addStretch(1);
     if (inputs.debugProgressAvailable) {
         auto *debugRow = kobalt::ui::horizontalRow();
         aboutLayout->addLayout(debugRow, 0, 0, Qt::AlignRight | Qt::AlignBottom);
@@ -749,9 +750,10 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     }
     fitRail();
     ui::readerStyle(description, ui::styles::font(c::labelText));
-    ui::readerStyle(version, ui::styles::font(c::descriptionText));
-    ui::readerStyle(commit, ui::styles::font(ui::px(21)));
-    ui::readerStyle(openAcknowledgments, ui::styles::textAction() + ui::styles::font(c::labelText));
+    ui::readerStyle(version, ui::styles::font(c::labelText));
+    ui::readerStyle(commit, ui::styles::font(m::about::commitText));
+    // The same outlined button as the password field's Show and Hide.
+    ui::readerStyle(openAcknowledgments, ui::styles::outlined() + "QPushButton{" + ui::styles::font(c::labelText) + "}");
     hide();
 }
 int SettingsPanel::fitContent(QSize availableSize) {
@@ -1452,6 +1454,8 @@ void SettingsPanel::showStylingChoices(AdvancedText feature, int current, std::f
     fontDialog->raise();
     fontDialog->setFocus();
     showStylingPreview();
+    if (!stylingSamples.value(int(feature)).valid() && stylingRequested)
+        stylingRequested(feature);
 }
 void SettingsPanel::showStylingPreview() {
     auto *preview = static_cast<StylingPreview *>(stylingPreview.data());
@@ -1478,6 +1482,17 @@ void SettingsPanel::setStylingSample(AdvancedText feature, const StyleSample &sa
     stylingSamples[int(feature)] = sample;
     if (stylingPreview && stylingFeature == feature)
         showStylingPreview();
+}
+void SettingsPanel::invalidateStylingSamples(int unchanged) {
+    const auto kept = stylingSamples.value(unchanged);
+    stylingSamples.clear();
+    if (kept.valid())
+        stylingSamples.insert(unchanged, kept);
+    if (stylingPreview && int(stylingFeature) != unchanged) {
+        showStylingPreview();
+        if (stylingRequested)
+            stylingRequested(stylingFeature);
+    }
 }
 void SettingsPanel::clearStylingSamples() {
     stylingSamples.clear();

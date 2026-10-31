@@ -183,6 +183,27 @@ int main() {
     require(battery.batteryIcon && battery.text.isEmpty() && battery.battery == 80, "Battery is not an icon");
     require(content(Field::BatteryPercent, values, false).text == strings::get("common.percent").arg(80),
             "Battery percentage is missing");
+    require(content(Field::BatteryPercent, values, false).batteryIcon,
+            "Battery with percentage lost its icon");
+    for (const bool charging : {false, true}) {
+        auto status = values;
+        status.charging = charging;
+        for (const int percent : {-1, 0, 1, 80, 100}) {
+            status.battery = percent;
+            const auto shown = content(Field::BatteryPercentOnly, status, false);
+            require(!shown.batteryIcon && shown.text == (percent < 0 ? QString() : strings::get("common.percent").arg(percent)),
+                    "Percentage-only battery showed an icon or the wrong text");
+        }
+        status.deviceStatus = false;
+        require(content(Field::BatteryPercentOnly, status, false).empty(),
+                "Percentage-only battery showed without device status");
+    }
+    edited.slotFields[5] = Field::BatteryPercentOnly;
+    require(toJson(edited).value("bottom_right").toString() == QStringLiteral("battery_percent_only") &&
+                fromJson(toJson(edited), standard) == edited,
+            "Percentage-only battery layout did not round-trip");
+    require(field(QStringLiteral("battery_percent")) == Field::BatteryPercent,
+            "The existing battery percentage choice changed");
     // The first page is 0%; the last page is 100%, with nearest-integer rounding.
     require(content(Field::ChapterPercent, values, false).text == strings::get("common.percent").arg(26),
             "Percent of chapter is wrong");

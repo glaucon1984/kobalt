@@ -139,6 +139,8 @@ inline QString screenshotTitle(const QString &scene, const QJsonObject &book) {
         {"kosync-completed", "Sync complete"},
         {"settings-styling", "Styling settings"},
         {"styling-widows", "Widows and orphans preview"},
+        {"styling-widows-avoid", "Widows and orphans: avoid both"},
+        {"styling-widows-allow", "Widows and orphans: allow both"},
         {"styling-word-spacing", "Word spacing preview"},
         {"settings-system", "System settings"},
         {"session-timeout", "New session after sleep"},
@@ -164,12 +166,15 @@ inline QString screenshotTitle(const QString &scene, const QJsonObject &book) {
         {"text-weight-preview", "Text weight preview"},
         {"vertical-center", "Centered page text"},
         {"vertical-choices", "Page spacing choices"},
+        {"vertical-choices-center", "Page spacing: center illustration"},
+        {"vertical-choices-expand", "Page spacing: expand illustration"},
         {"vertical-columns-center", "Centered text in columns"},
         {"vertical-columns-expand", "Expanded text in columns"},
         {"vertical-columns-off", "Columns without page spacing"},
         {"vertical-expand", "Expanded page text"},
         {"vertical-off", "Page spacing off"},
         {"vertical-scope", "Page spacing scope"},
+        {"vertical-scope-protection", "Page spacing: protection gaps only"},
         {"vertical-settings", "Page spacing settings"},
         {"widget-keyboard", "Library search keyboard"},
         {"widget-keyboard-300ppi", "Keyboard at native resolution"},
@@ -285,7 +290,7 @@ inline QByteArray screenshotGallery(const QString &directory, const QJsonArray &
             if (url.startsWith("https://")) credits += "<p><a href=\"" + escape(url) + "\">" + escape(item["title"].toString()) + "</a></p>";
         }
     }
-    const QMap<QString, QString> values{{"SUITE", manifest["suite"] == "light" ? "Light" : "Full"}, {"GROUPS", groups}, {"OPTIONS", options}, {"IMAGES", images},
+    const QMap<QString, QString> values{{"SUITE", manifest["suite"] == "light" ? "Light" : manifest["suite"] == "scenes" ? "Selected scenes" : "Full"}, {"GROUPS", groups}, {"OPTIONS", options}, {"IMAGES", images},
         {"COUNT", QString::number(scenes.size())}, {"CAPTURES", QString::number(captures.size())}, {"BOOKS", credits},
         {"BUILD", escape("Source " + manifest["commit"].toString() + (manifest["modified"].toBool() ? " (modified)" : "") +
                          " · Qt " + manifest["qt"].toString() + " · " + manifest["version"].toString())}};

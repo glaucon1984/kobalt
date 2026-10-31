@@ -9,6 +9,9 @@ namespace kobalt::ui {
 bool turnVisiblePageControl(QWidget *scope, int direction);
 // A full-width bar with a cell at each end and the count between them.
 // It hides itself when there is only one page.
+// Horizontal swipes in the parent panel use its arrows. Controls with their
+// own gestures can opt out with the reader_owns_swipes property.
+// reader_swipe_hold preserves a row's 550 ms hold action instead of paging.
 class PagerBar : public QWidget {
 public:
     PagerBar(QWidget *parent, const QString &prefix);

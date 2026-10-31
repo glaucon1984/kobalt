@@ -31,6 +31,7 @@ namespace {
 class FontCell final : public ui::Button {
 public:
     explicit FontCell(QWidget *parent) : ui::Button(parent), detail(new ui::InterfaceLabel(this)) {
+        setProperty("reader_swipe_hold", true);
         detail->setAttribute(Qt::WA_TransparentForMouseEvents);
         detail->setAlignment(Qt::AlignCenter);
         detail->setWordWrap(true);

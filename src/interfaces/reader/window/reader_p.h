@@ -552,7 +552,7 @@ private:
     // SettingsPanel::AdvancedText value, or -1. Its samples already show
     // every option, so only the others are drawn again.
     void showAdvancedText(int changed = -1);
-    void renderStylingSamples(int unchanged = -1);
+    void renderStylingSamples(int requested);
     // The selected option of a SettingsPanel::AdvancedText setting, in sheet order.
     int stylingChoice(int feature) const;
     // The latest sample render of each setting. Setting one stops its render.

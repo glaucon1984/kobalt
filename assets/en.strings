@@ -405,6 +405,7 @@
 "header_footer.field.chapter_and_page" = "Chapter and page in chapter";
 "header_footer.field.title_and_page" = "Title and page in book";
 "header_footer.field.battery_percent" = "Battery, with percentage";
+"header_footer.field.battery_percent_only" = "Battery percentage only";
 "header_footer.field.battery" = "Battery";
 "header_footer.field.time" = "Time";
 "header_footer.field.chapter_time_left" = "Time left in chapter";

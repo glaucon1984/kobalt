@@ -11,6 +11,7 @@
 #include <QSet>
 #include <QJsonObject>
 #include <QFileInfo>
+#include <QMap>
 #include <algorithm>
 #include <memory>
 #include <vector>
@@ -18,8 +19,10 @@
 namespace kobalt::test {
 // Each worker owns a process because CREngine fonts and caches are process globals.
 // All worker output stays in the parent's temporary tree until validation passes.
+// A selection maps a case to the scenes to capture in it. Each selected case
+// gets its own worker, which stops after its last selected scene.
 inline bool screenshotJobs(const QString &executable, const QString &root, const QString &destination,
-                           bool light, QJsonArray &captures) {
+                           bool light, QJsonArray &captures, const QMap<QString, QStringList> &selection = {}) {
     bool valid = true;
     const auto setting = qEnvironmentVariable("KOBALT_GALLERY_JOBS");
     const int jobs = setting.isEmpty() ? qBound(1, QThread::idealThreadCount(), 8) : setting.toInt(&valid);
@@ -44,11 +47,21 @@ inline bool screenshotJobs(const QString &executable, const QString &root, const
         qCritical() << "Invalid screenshot case inventory";
         return false;
     }
-    // Keep workers alive for several cases so immutable font inputs and Qt font
-    // registration are prepared once per worker, rather than once per case.
     QList<QStringList> batches;
-    for (int i = 0; i < qMin(jobs, int(cases.size())); ++i) batches.append(QStringList{});
-    for (int i = 0; i < cases.size(); ++i) batches[i % batches.size()].append(cases.at(i));
+    if (!selection.isEmpty()) {
+        for (auto it = selection.cbegin(); it != selection.cend(); ++it) {
+            if (!cases.contains(it.key())) {
+                qCritical().noquote() << "Screenshot case no longer exists:" << it.key() << "- run the full gallery first";
+                return false;
+            }
+            batches.append(QStringList{it.key()});
+        }
+    } else {
+        // Keep workers alive for several cases so immutable font inputs and Qt font
+        // registration are prepared once per worker, rather than once per case.
+        for (int i = 0; i < qMin(jobs, int(cases.size())); ++i) batches.append(QStringList{});
+        for (int i = 0; i < cases.size(); ++i) batches[i % batches.size()].append(cases.at(i));
+    }
     struct Worker {
         QProcess process;
         QElapsedTimer timer;
@@ -71,6 +84,8 @@ inline bool screenshotJobs(const QString &executable, const QString &root, const
             if (!QDir().mkpath(worker->directory + "/tmp")) return false;
             auto environment = QProcessEnvironment::systemEnvironment();
             environment.insert("TMPDIR", worker->directory + "/tmp");
+            if (!selection.isEmpty())
+                environment.insert("KOBALT_GALLERY_CAPTURE", selection.value(worker->selectors.first()).join(','));
             worker->process.setProcessEnvironment(environment);
             worker->process.setProcessChannelMode(QProcess::MergedChannels);
             worker->timer.start();

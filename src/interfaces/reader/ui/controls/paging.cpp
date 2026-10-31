@@ -5,6 +5,14 @@
 #include "../style/fonts.h"
 #include "../style/private_text.h"
 #include "support/strings.h"
+#include "ui/input.h"
+#include "sliders.h"
+#include "page_scrubber.h"
+#include <QApplication>
+#include <QAbstractSlider>
+#include <QAbstractScrollArea>
+#include <QElapsedTimer>
+#include <QLineEdit>
 #include <QPainter>
 #include <QResizeEvent>
 
@@ -39,6 +47,99 @@ bool turnVisiblePageControl(QWidget *scope, int direction) {
     return selected;
 }
 namespace {
+// Observe descendant events too: a swipe normally starts on a row button,
+// not on the panel behind it. New rows need no separate registration.
+class PageSwipes final : public QObject {
+public:
+    explicit PageSwipes(QWidget *pager) : QObject(pager), pager(pager) {
+        qApp->installEventFilter(this);
+    }
+
+protected:
+    bool eventFilter(QObject *object, QEvent *event) override {
+        auto *widget = qobject_cast<QWidget *>(object);
+        if (!widget)
+            return false;
+        if ((event->type() == QEvent::TouchCancel || event->type() == QEvent::Hide ||
+             event->type() == QEvent::WindowDeactivate) &&
+            (widget == target || widget == pager->parentWidget())) {
+            target.clear();
+            return false;
+        }
+        if (event->type() != QEvent::MouseButtonPress && event->type() != QEvent::MouseMove &&
+            event->type() != QEvent::MouseButtonRelease)
+            return false;
+        auto *mouse = static_cast<QMouseEvent *>(event);
+        if (event->type() == QEvent::MouseButtonPress) {
+            if (mouse->button() != Qt::LeftButton) {
+                target.clear();
+                return false;
+            }
+            if (!eligible(widget))
+                return false;
+            target = widget;
+            start = mousePosition(mouse).toPoint();
+            timestamp = quint32(mouse->timestamp());
+            elapsed.start();
+            return false;
+        }
+        if (widget != target || !target)
+            return false;
+        const QPoint delta = mousePosition(mouse).toPoint() - start;
+        const bool swipe = qAbs(delta.x()) > 4 * QApplication::startDragDistance() &&
+                           qAbs(delta.x()) > 2 * qAbs(delta.y());
+        if (event->type() != QEvent::MouseButtonRelease)
+            return false;
+        auto *receiver = target.data();
+        target.clear();
+        // A hold may already have opened a menu. It must not also turn a page,
+        // including when queued input arrives before the hold timer fires.
+        const quint32 duration = quint32(mouse->timestamp()) - timestamp;
+        const bool held = receiver->property("reader_swipe_hold").toBool() &&
+                          (elapsed.elapsed() >= 550 || (timestamp && duration >= 550));
+        if (mouse->button() != Qt::LeftButton || !swipe || !eligible(receiver))
+            return false;
+        QPointer<QWidget> alive = pager;
+        if (auto *button = qobject_cast<QAbstractButton *>(receiver))
+            button->setDown(false);
+        QTouchEvent cancel(QEvent::TouchCancel);
+        QApplication::sendEvent(receiver, &cancel);
+        if (alive && !held)
+            turnVisiblePageControl(pager->parentWidget(), delta.x() < 0 ? 1 : -1);
+        mouse->accept();
+        return true;
+    }
+
+private:
+    bool eligible(QWidget *widget) const {
+        if (!pager->isVisible() || !pager->isEnabled())
+            return false;
+        auto *scope = pager->parentWidget();
+        if (!scope || (widget != scope && !scope->isAncestorOf(widget)))
+            return false;
+        for (auto *ancestor = widget; ancestor; ancestor = ancestor->parentWidget()) {
+            if (ancestor == pager || ancestor->property("reader_owns_swipes").toBool() ||
+                qobject_cast<QAbstractSlider *>(ancestor) || qobject_cast<QLineEdit *>(ancestor) ||
+                qobject_cast<QAbstractScrollArea *>(ancestor) || dynamic_cast<RangeOverview *>(ancestor) ||
+                dynamic_cast<PageScrubber *>(ancestor))
+                return false;
+            // The innermost paginated panel owns the gesture.
+            for (auto *child : ancestor->findChildren<QWidget *>(QString(), Qt::FindDirectChildrenOnly))
+                if (child != pager && child->isVisible() &&
+                    (dynamic_cast<PagerBar *>(child) || dynamic_cast<PageControls *>(child)))
+                    return false;
+            if (ancestor == scope)
+                return true;
+        }
+        return false;
+    }
+    QWidget *pager;
+    QPointer<QWidget> target;
+    QPoint start;
+    quint32 timestamp = 0;
+    QElapsedTimer elapsed;
+};
+
 class ContinuationHint final : public InterfaceLabel {
 public:
     using InterfaceLabel::InterfaceLabel;
@@ -61,6 +162,7 @@ protected:
 };
 }
 PagerBar::PagerBar(QWidget *parent, const QString &prefix) : QWidget(parent) {
+    new PageSwipes(this);
     setAttribute(Qt::WA_OpaquePaintEvent);
     counter = new ui::InterfaceLabel(this);
     counter->setObjectName(prefix + "Page");
@@ -141,6 +243,7 @@ int PagerBar::turnTarget(int direction) const {
     return qBound(0, target, count - 1);
 }
 PageControls::PageControls(QWidget *parent, const QString &prefix, bool compact) : QWidget(parent), compact(compact) {
+    new PageSwipes(this);
     // The enclosing panel owns the background and perimeter. A full-width
     // pager must not paint over its dropdown's left and right borders.
     setProperty("reader_paging", true);

@@ -107,10 +107,13 @@ namespace about {
 inline constexpr PxMargins margins{16, 16, 16, 16};
 inline constexpr Px logoSize{112}, wordmarkText{72};
 inline constexpr TextPx exitText{40};
-inline constexpr Px gap{20}, textWidth{760}, actionHeight{48}, actionGap{20};
-// Version, Qt build and commit form one block with tighter lines.
-inline constexpr Px buildGap{4};
-inline constexpr TextPx commitText{24};
+inline constexpr Px gap{20}, textWidth{760}, actionHeight{48};
+// Version, Qt build and commit form one block with tighter lines, between two rules.
+// sectionGap is the extra room outside the rules. The description's line box
+// keeps 5 px more above its capitals than below its descenders, so the button
+// needs 5 px more for the drawn gaps around the description to match.
+inline constexpr Px buildGap{6}, ruleWidth{420}, sectionGap{16}, buttonGap{21};
+inline constexpr TextPx commitText{26};
 }
 namespace navigation {
 inline constexpr Px headingTop{20}, headingSide{224}, height{control::stepSize};

@@ -1318,6 +1318,7 @@ void Reader::buildSettings() {
             openSettingsFont(appearance::fallbackFontKeys[index]);
         });
     }
+    settings->stylingRequested = [this](SettingsPanel::AdvancedText feature) { renderStylingSamples(int(feature)); };
     settings->stylingHidden = [this] { cancelStylingSamples(); };
     connect(darkOption, &QCheckBox::clicked, this, [this](bool enabled) {
         applyDarkMode(enabled);
@@ -1389,10 +1390,8 @@ void Reader::buildSettings() {
         showProgressDebug();
     });
 #endif
-    connect(settingsPages, &QStackedWidget::currentChanged, this, [this](int index) {
+    connect(settingsPages, &QStackedWidget::currentChanged, this, [this](int) {
         fitSettings();
-        if (index == StylingSettings)
-            renderStylingSamples();
         refresh();
     });
 }

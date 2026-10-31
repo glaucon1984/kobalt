@@ -28,7 +28,10 @@ Highlight detail(HighlightSession &session, const QString &id) {
     return result;
 }
 bool samePassage(const Highlight &a, const Highlight &b) {
-    return a.id == b.id && a.created == b.created && a.start == b.start && a.end == b.end && a.text == b.text &&
+    // Both stores persist UTC ISO dates at second precision. Completing a
+    // queued save can replace in-memory details with that stored timestamp.
+    return a.id == b.id && a.created.toUTC().toString(Qt::ISODate) == b.created.toUTC().toString(Qt::ISODate) &&
+           a.start == b.start && a.end == b.end && a.text == b.text &&
            a.chapter == b.chapter && a.note == b.note && a.chosenStart == b.chosenStart && a.chosenEnd == b.chosenEnd &&
            a.sentenceStartPolicy == b.sentenceStartPolicy && a.sentenceEndPolicy == b.sentenceEndPolicy;
 }
@@ -327,11 +330,20 @@ int main(int argc, char **argv) {
         require(saved && session.highlights().size() == 3, "Touching endpoints were treated as an overlap");
         require(session.remove(session.highlights().last().id), "Cannot remove adjacent-range fixture");
         const auto beforeOverlap = passages(session);
-        completed = false;
-        session.save(first.start, last.end, passage.id, [&](bool ok) { saved = ok; completed = true; });
-        waitUntil([&] { return completed; });
-        require(!saved && samePassage(beforeOverlap[0], detail(session, beforeOverlap[0].id)) &&
-                    samePassage(beforeOverlap[1], detail(session, beforeOverlap[1].id)), "Overlapping edit changed a saved passage");
+        for (const bool finishWrites : {false, true}) {
+            if (finishWrites) {
+                // Exercise a later UI interaction after the queued write and
+                // its detail-cache update have completed, without a sleep.
+                session.flush();
+                QCoreApplication::processEvents();
+            }
+            completed = false;
+            session.save(first.start, last.end, passage.id, [&](bool ok) { saved = ok; completed = true; });
+            waitUntil([&] { return completed; });
+            require(!saved && samePassage(beforeOverlap[0], detail(session, beforeOverlap[0].id)) &&
+                        samePassage(beforeOverlap[1], detail(session, beforeOverlap[1].id)),
+                    "Overlapping edit changed a saved passage");
+        }
         bool reflowDiscarded = false;
         const auto beforeReflow = model.layoutRevision();
         model.bookmarkLocations({first.start, first.end}, [&](BookmarkLocations result) {

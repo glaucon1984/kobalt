@@ -119,6 +119,163 @@ void variants() {
 class ReaderUiTests final : public QObject {
     Q_OBJECT
 private slots:
+    void pagedListSwipes_data() { variants(); }
+    void pagedListSwipes() {
+        QFETCH(bool, dark);
+        QFETCH(int, ppi);
+        ui::setDensity(ppi);
+        auto *chapters = new ChapterContents(nullptr);
+        chapters->setProperty("reader_dark", dark);
+        Canvas canvas(chapters, QSize(ui::px(1072), ui::px(1448)));
+        canvas.resize(536, 724);
+        canvas.show();
+        QVector<Choice> choices;
+        for (int i = 0; i < 60; ++i)
+            choices.append({QString("Chapter %1").arg(i), QString::number(i), QString("chapter%1").arg(i)});
+        int selected = 0;
+        chapters->selected = [&](const QString &) { ++selected; };
+        chapters->showChapters("Test book", choices, {});
+        QCoreApplication::processEvents();
+        auto *counter = chapters->findChild<QLabel *>("rrContentsPage");
+        auto *next = chapters->findChild<QPushButton *>("rrContentsNext");
+        auto *previous = chapters->findChild<QPushButton *>("rrContentsPrevious");
+        QVERIFY(counter && next && previous);
+        const auto first = counter->text();
+        auto *row = chapters->findChild<QPushButton *>("chapter0");
+        QVERIFY(row && row->isVisible());
+        auto swipe = [&](bool forward) {
+            const QPoint center = row->mapTo(chapters, row->rect().center());
+            const QPoint travel(ui::px(160), 0);
+            const auto from = canvas.mapFromScene(center + (forward ? travel : -travel));
+            const auto to = canvas.mapFromScene(center + (forward ? -travel : travel));
+            QTest::mousePress(canvas.viewport(), Qt::LeftButton, Qt::NoModifier, from);
+            QTest::mouseMove(canvas.viewport(), to);
+            QTest::mouseRelease(canvas.viewport(), Qt::LeftButton, Qt::NoModifier, to);
+            QCoreApplication::processEvents();
+        };
+        swipe(true);
+        const auto second = counter->text();
+        QVERIFY(second != first);
+        QCOMPARE(selected, 0);
+        swipe(false);
+        QCOMPARE(counter->text(), first);
+        QCOMPARE(selected, 0);
+        QVERIFY(click(canvas, previous));
+        const auto last = counter->text();
+        QVERIFY(last != first && last != second);
+        swipe(true);
+        QCOMPARE(counter->text(), first);
+        QVERIFY(click(canvas, next));
+        QCOMPARE(counter->text(), second);
+        swipe(false);
+        QCOMPARE(counter->text(), first);
+        QVERIFY(click(canvas, row));
+        QCOMPARE(selected, 1);
+    }
+    void pagedSwipesRespectControls() {
+        ui::setDensity(300);
+        QWidget host;
+        host.resize(1000, 1000);
+        ui::PagerBar outer(&host, "outer");
+        outer.setGeometry(0, 900, 1000, 100);
+        outer.setPage(0, 3);
+        QWidget nested(&host);
+        nested.setGeometry(0, 0, 1000, 800);
+        ui::PageControls inner(&nested, "inner");
+        inner.setGeometry(0, 700, 1000, 100);
+        inner.setPage(0, 2);
+        ui::ListRow row(&nested);
+        row.setGeometry(0, 0, 1000, 120);
+        ui::SettingSlider slider(&nested, 0, 100, 1);
+        slider.setGeometry(0, 150, 1000, 100);
+        QLineEdit entry(&nested);
+        entry.setGeometry(0, 300, 1000, 100);
+        host.show();
+        QCoreApplication::processEvents();
+        QSignalSpy outerTurns(outer.next, &QPushButton::clicked);
+        QSignalSpy innerTurns(inner.next, &QPushButton::clicked);
+        QSignalSpy clicks(&row, &QPushButton::clicked);
+        auto drag = [&](QWidget *widget, QPoint delta, ulong duration = 100) {
+            const QPoint start(700, 50);
+            pointerEvent(widget, QEvent::MouseButtonPress, 1000, start);
+            pointerEvent(widget, QEvent::MouseMove, 1050, start + delta);
+            pointerEvent(widget, QEvent::MouseButtonRelease, 1000 + duration, start + delta);
+        };
+        drag(&row, {-300, 0});
+        QCOMPARE(innerTurns.count(), 1);
+        QCOMPARE(outerTurns.count(), 0);
+        QCOMPARE(clicks.count(), 0);
+        QVERIFY(!row.isDown());
+        // Disabled arrows consume the swipe without activating a list entry.
+        inner.next->setEnabled(false);
+        drag(&row, {-300, 0});
+        QCOMPARE(innerTurns.count(), 1);
+        QCOMPARE(clicks.count(), 0);
+        inner.next->setEnabled(true);
+        drag(&row, {-5, 0});
+        drag(&row, {-100, 200});
+        row.setProperty("reader_swipe_hold", true);
+        drag(&row, {-300, 0}, 700);
+        row.setProperty("reader_swipe_hold", false);
+        drag(&slider, {-300, 0});
+        QVERIFY(slider.value() > 0);
+        drag(&entry, {-300, 0});
+        QCOMPARE(innerTurns.count(), 1);
+        row.setProperty("reader_owns_swipes", true);
+        drag(&row, {-300, 0});
+        QCOMPARE(innerTurns.count(), 1);
+        row.setProperty("reader_owns_swipes", false);
+        pointerEvent(&row, QEvent::MouseButtonPress, 1000, {700, 50});
+        QEvent cancel(QEvent::TouchCancel);
+        QApplication::sendEvent(&row, &cancel);
+        pointerEvent(&row, QEvent::MouseButtonRelease, 1100, {400, 50});
+        QCOMPARE(innerTurns.count(), 1);
+        inner.hide();
+        drag(&row, {-300, 0});
+        QCOMPARE(outerTurns.count(), 1);
+    }
+    void pagedFontSwipesKeepHolds() {
+        ui::setDensity(300);
+        QWidget host;
+        host.resize(1072, 1448);
+        ChoiceScreen picker(&host);
+        picker.setFontGeometry(QRect(0, 0, host.width(), picker.fontPanelHeight()));
+        QVector<Choice> choices;
+        for (int i = 0; i < 40; ++i)
+            choices.append({QString("Font %1").arg(i), "Libron", QString("font%1").arg(i)});
+        int selections = 0, defaults = 0;
+        picker.selected = [&](const QString &) { ++selections; };
+        picker.defaultRequested = [&](const QString &, bool) { ++defaults; };
+        host.show();
+        picker.showChoices("Fonts", choices, {}, ChoiceScreen::Mode::Fonts);
+        QCoreApplication::processEvents();
+        auto *counter = picker.findChild<QLabel *>("rrFontPagerPage");
+        auto *cell = picker.findChild<QPushButton *>("font0");
+        auto *previous = picker.findChild<QPushButton *>("rrFontPagerPrevious");
+        QVERIFY(counter && counter->isVisible() && cell && cell->isVisible() && previous);
+        const auto first = counter->text();
+        const auto center = cell->rect().center();
+        const QPoint travel(80, 0);
+        pointerEvent(cell, QEvent::MouseButtonPress, 1000, center + travel);
+        pointerEvent(cell, QEvent::MouseMove, 1050, center - travel);
+        pointerEvent(cell, QEvent::MouseButtonRelease, 1100, center - travel);
+        QVERIFY(counter->text() != first);
+        QCOMPARE(selections, 0);
+        QCOMPARE(defaults, 0);
+        previous->click();
+        QCOMPARE(counter->text(), first);
+        pointerEvent(cell, QEvent::MouseButtonPress, 2000, center);
+        pointerEvent(cell, QEvent::MouseButtonRelease, 2700, center);
+        QCOMPARE(defaults, 1);
+        QCOMPARE(selections, 0);
+        QCOMPARE(counter->text(), first);
+        // A held drag is consumed even when the event queue delayed the hold.
+        pointerEvent(cell, QEvent::MouseButtonPress, 3000, center + travel);
+        pointerEvent(cell, QEvent::MouseButtonRelease, 3700, center - travel);
+        QCOMPARE(defaults, 1);
+        QCOMPARE(selections, 0);
+        QCOMPARE(counter->text(), first);
+    }
     void holdSourceTime_data() {
         QTest::addColumn<quint32>("pressed");
         QTest::addColumn<quint32>("released");
