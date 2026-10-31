@@ -7,6 +7,7 @@
 #include "reader_source.h"
 #include "publication/image_policy.h"
 #include "publication/resource_cache.h"
+#include "support/diagnostics.h"
 #include "reader_render_callback.h"
 #include "engine_activity.h"
 #include "reader_styles.h"
@@ -554,29 +555,38 @@ QString ReaderModel::author() const {
 }
 QImage ReaderModel::coverImage(QSize maximumSize, const QString &preferredPath) const {
     if (!engine_ || maximumSize.isEmpty() || qint64(maximumSize.width()) * maximumSize.height() > 4 * 1024 * 1024) {
+        diagnostic("cover-decode", {{"reason", !engine_ ? "no engine" : "request size"}}, false);
         return {};
     }
     const auto decode = [maximumSize](LVStreamRef stream) -> QImage {
+        const auto why = [](const char *reason, qint64 detail = 0) {
+            diagnostic("cover-decode", {{"reason", reason}, {"detail", detail}}, false);
+        };
         if (stream.isNull()) {
+            why("no stream");
             return {};
         }
         const auto length = stream->GetSize();
         if (!length || length > ResourceCache::budgetBytes) {
+            why("stream size", qint64(length));
             return {};
         }
         // A resource stream can decode a placeholder while its image is deferred.
         // Copy the cover bytes before rendering an image that must outlive the book.
         auto bytes = LVCreateMemoryStream(stream);
         if (bytes.isNull()) {
+            why("memory copy", qint64(length));
             return {};
         }
         auto cover = LVCreateStreamImageSource(bytes);
         // Unrecognised formats produce a dummy image with no source stream.
         // It must not prevent the next cover source from being tried.
         if (cover.isNull() || !cover->GetSourceStream() || cover->GetWidth() <= 0 || cover->GetHeight() <= 0) {
+            why("unrecognised image", qint64(length));
             return {};
         }
         if (quint64(cover->GetWidth()) * quint64(cover->GetHeight()) > imagePixelLimit) {
+            why("pixel limit", qint64(cover->GetWidth()) * cover->GetHeight());
             return {};
         }
         auto size = QSize(cover->GetWidth(), cover->GetHeight());
@@ -584,10 +594,12 @@ QImage ReaderModel::coverImage(QSize maximumSize, const QString &preferredPath) 
             size.scale(maximumSize, Qt::KeepAspectRatio);
         }
         if (size.isEmpty()) {
+            why("empty size");
             return {};
         }
         QImage image(size, QImage::Format_RGB32);
         if (image.isNull()) {
+            why("image allocation", qint64(size.width()) * size.height());
             return {};
         }
         image.fill(Qt::white);
@@ -601,6 +613,7 @@ QImage ReaderModel::coverImage(QSize maximumSize, const QString &preferredPath) 
                 pixels[x] |= 0xff000000U;
             }
         }
+        diagnostic("cover-decode", {{"reason", "ok"}, {"detail", qint64(width) * height}}, false);
         return image;
     };
     if (!preferredPath.isEmpty()) {

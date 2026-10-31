@@ -163,6 +163,8 @@ void Reader::prepareSleepCover() {
     const auto request = ++sleepCoverRequest;
     sleepCover = {};
     if (!presentation->supportsSleepScreen() || sleep::mode(preferences) != sleep::Mode::Cover) {
+        diagnostic("sleep-cover-skipped", {{"supported", presentation->supportsSleepScreen()},
+                                           {"mode", sleep::value(sleep::mode(preferences))}});
         return;
     }
     // Decode off the GUI thread while the book is available. Keep at most
@@ -171,6 +173,10 @@ void Reader::prepareSleepCover() {
     model->coverImage(
         {2048, 2048},
         [guard, request](QImage image) {
+            diagnostic("sleep-cover", {{"ok", !image.isNull()},
+                                       {"width", image.width()},
+                                       {"height", image.height()},
+                                       {"current", guard && guard->sleepCoverRequest == request}});
             if (guard && guard->sleepCoverRequest == request) {
                 guard->sleepCover = std::move(image);
             }

@@ -1102,9 +1102,15 @@ void ReaderSession::coverImage(QSize maximumSize, std::function<void(QImage)> fi
             kobalt::qt::invoke(
                 qApp,
                 [guard, lease, image = std::move(image), finished]() mutable {
-                    if (!guard)
+                    if (!guard) {
+                        diagnostic("cover-decode-dropped", {{"reason", "session gone"}});
                         return;
-                    finished(guard->lease_ == lease && lease && !lease->revoked() ? std::move(image) : QImage());
+                    }
+                    const bool current = guard->lease_ == lease && lease && !lease->revoked();
+                    if (!current)
+                        diagnostic("cover-decode-dropped", {{"reason", !lease ? "no lease" : lease->revoked() ? "revoked" : "lease replaced"},
+                                                            {"decoded", !image.isNull()}});
+                    finished(current ? std::move(image) : QImage());
                 },
                 Qt::QueuedConnection);
         },
