@@ -4,6 +4,7 @@
 #include <QTimer>
 #include <QPoint>
 #include <QVector>
+#include <QProcess>
 
 class PbInkScreen;
 
@@ -16,11 +17,15 @@ public:
     void start();
     // Last gravity code delivered by inkview, or -1 before the first event.
     int lastOrientation() const { return mLastOrientation; }
-    // Silent connection to a known network in the background (inkview's NetConnectAsync): the
-    // GUI thread is not blocked while the firmware looks for the network, which takes a full
-    // 28 s when the network is absent (seen after a power cut: the reader froze that long at
-    // open and at wake). `done(connected, context)` runs on the GUI thread once, when the
-    // firmware reports back, or after a safety limit. Several callers share one attempt.
+    // Silent connection to a known network in the background: the firmware's own agent
+    // (/ebrmain/bin/netagent connect, what inkview runs inside NetConnectSilent) as a child
+    // process, so the GUI thread is not blocked while the firmware looks for the network, which
+    // takes a full 28 s when the network is absent (seen after a power cut: the reader froze
+    // that long at open and at wake). inkview's NetConnectAsync was tried first: it opens the
+    // firmware's network chooser over the task when no known network answers, and each cancel
+    // looked like a wake to the host, which asked again. `done(connected, context)` runs on the
+    // GUI thread once, when the agent exits, the link is up, or after a safety limit. Several
+    // callers share one attempt.
     typedef void (*NetworkDone)(int connected, void *context);
     void connectNetworkAsync(NetworkDone done, void *context);
 
@@ -39,10 +44,10 @@ private:
     int handle(int type, int par1, int par2);
     void pump();
     static int mapKey(int ivKey);
-    static int networkCallbackStatic(int status);
     void networkDone(int status, const char *how);
     bool mConnecting = false;
-    QTimer mNetworkLimit;
+    QTimer mNetworkLimit, mNetworkPoll;
+    QProcess *mNetAgent = nullptr;
     QVector<QPair<NetworkDone, void *>> mNetworkWaiters;
 
     PbInkScreen *mScreen;

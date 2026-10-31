@@ -21,6 +21,11 @@ PbInkEvents::PbInkEvents(PbInkScreen *screen, bool debug, QObject *parent)
     mNetworkLimit.setSingleShot(true);
     mNetworkLimit.setInterval(45000);
     connect(&mNetworkLimit, &QTimer::timeout, this, [this] { networkDone(-1, "safety limit"); });
+    mNetworkPoll.setInterval(500);
+    connect(&mNetworkPoll, &QTimer::timeout, this, [this] {
+        if (QueryNetwork() & NET_CONNECTED)
+            networkDone(0, "link up");
+    });
 }
 
 void PbInkEvents::connectNetworkAsync(NetworkDone done, void *context)
@@ -36,24 +41,15 @@ void PbInkEvents::connectNetworkAsync(NetworkDone done, void *context)
     mConnecting = true;
     qInfo("pbink: network %d, connecting silently in the background", QueryNetwork());
     WiFiPower(1);
-    const int started = NetConnectAsync(networkCallbackStatic);
-    if (started != 0) {
-        qInfo("pbink: NetConnectAsync refused: %d", started);
-        QTimer::singleShot(0, this, [this, started] { networkDone(started, "refused"); });
-        return;
-    }
+    mNetAgent = new QProcess(this);
+    mNetAgent->setProcessChannelMode(QProcess::ForwardedChannels); // its own lines go to the log
+    connect(mNetAgent, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this](int code, QProcess::ExitStatus) { networkDone(code, "agent exited"); });
+    connect(mNetAgent, &QProcess::errorOccurred, this,
+            [this](QProcess::ProcessError error) { networkDone(-int(error) - 100, "agent failed to run"); });
+    mNetAgent->start(QStringLiteral("/ebrmain/bin/netagent"), {QStringLiteral("connect")});
     mNetworkLimit.start();
-}
-
-// inkview's callback: thread unknown, so only a queued hop to the GUI thread happens here.
-int PbInkEvents::networkCallbackStatic(int status)
-{
-    if (sInstance)
-        QMetaObject::invokeMethod(sInstance, [status] {
-            if (sInstance)
-                sInstance->networkDone(status, "callback");
-        }, Qt::QueuedConnection);
-    return 0;
+    mNetworkPoll.start();
 }
 
 void PbInkEvents::networkDone(int status, const char *how)
@@ -62,6 +58,23 @@ void PbInkEvents::networkDone(int status, const char *how)
         return;
     mConnecting = false;
     mNetworkLimit.stop();
+    mNetworkPoll.stop();
+    if (mNetAgent) {
+        auto *agent = mNetAgent;
+        mNetAgent = nullptr;
+        agent->disconnect(this);
+        if (agent->state() != QProcess::NotRunning) {
+            // Link up before the agent returned, or the safety limit: let it finish on its own
+            // for a moment, then stop it.
+            QTimer::singleShot(5000, agent, [agent] {
+                if (agent->state() != QProcess::NotRunning)
+                    agent->kill();
+                agent->deleteLater();
+            });
+        } else {
+            agent->deleteLater();
+        }
+    }
     const bool connected = (QueryNetwork() & NET_CONNECTED) != 0;
     qInfo("pbink: background connection %s: status %d, network %d, %s", how, status, QueryNetwork(),
           connected ? "connected" : "not connected");
