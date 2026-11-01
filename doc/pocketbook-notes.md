@@ -332,7 +332,8 @@ FullUpdate, event pump from a Qt timer, pointer → mouse, IV keys → Qt keys);
 pinned to portrait at start/show/foreground, logical rotation with touch mapping, Qt orientation
 reporting; first frame after EVT_FOREGROUND; a Qt Sensors backend on EVT_ORIENTATION;
 keep-awake (`iv_sleepmode(0)`) while opening a book or downloading; strip-wipe page animation
-instead of the Kobo hwtcon sweep; startup `WaitForUpdateComplete`; a frame that follows the
+instead of the Kobo hwtcon sweep; startup `WaitForUpdateComplete`; (the pacing and burst rule
+that follow were replaced on 2026-11-01, see "Page-turn tuning from KOReader" below) a frame that follows the
 previous update by less than 350 ms (450 until 2026-10-29) is held back until then (`PBINK_MIN_FRAME_MS`; since 2026-10-30 only when it covers at least a quarter of the screen, the light pop-up's frames used to be paced too and trailed the finger;
 `WaitForUpdateComplete()` returns at once on this firmware, 0 ms in every log line) and from the
 fifth frame in a row within 0.7 s of the previous one the wipe is dropped (`PBINK_ANIM_BURST`,
@@ -460,6 +461,50 @@ returned ...`), the Wi-Fi indicator in the menu, the lock bitmap with the band/b
 the library progress and PBReader position after a standby (unchanged code, new upstream save path on a
 writer thread), dictionary lookup editing, annotation export. The reading-history profile lock is a
 kernel `flock`, released when the process dies (PC Link kills Kobalt), so no stale-lock case.
+
+### Page-turn tuning from KOReader (2026-11-01)
+
+`swipeanimation.koplugin` v5.4.1 was tuned on this Era Lite after disassembling the device's
+`libinkview.so` and `libhwconfig.so` (firmware U710.6.11.2124; the SDK's 6.5 library differs a lot).
+The findings replace the two old pacing rules, which only treated the symptom:
+
+- An update that lands on one the panel is still drawing tears. `GetWaveformTimes` gives GC16
+  388 ms, so no spot may be redrawn within about 430 ms (350 and 400 tore in KOReader, 430 did not).
+- That rule does not explain the 2026-10-29 result here (450 ms pacing, the fourth quick wipe tore):
+  each spot was redrawn over 600 ms apart. That run used `PartialUpdate` and 10 strips; KOReader's
+  clean bursts use `DynamicUpdate` and 8. `hw_update` queues in a 16-entry ring, so a wipe of 10 may
+  matter more than one of 8. Unproven. If long bursts tear, look there first.
+- `DynamicUpdate` is not A2 on this firmware. `PartialUpdate` is `UpdateEx` flags 2 (GC16),
+  `DynamicUpdate` 0x40002, the same waveform with a flag that was not traced, yet it looks cleaner
+  and quicker on the panel. Why is open.
+- `WaitForUpdateComplete()` cannot pace anything: `hw_wait_luts_complete` only stores a flag.
+- Tried in KOReader, do not retry: GL16 (`PartialUpdateTextPage`) is no faster and leaves a dirty
+  trail, DU (`PartialUpdateBW`) is fast but leaves the page grainy.
+
+`PbInkScreen::doRedraw()` now has one rule. A large frame waits `PBINK_MIN_FRAME_MS` (300) when it
+is a wipe in the same direction as the wipe before it, and `PBINK_LONG_GAP_MS` (475) otherwise:
+after a full refresh, on a change of direction, and for any plain large frame. `mLastSweep` is
+cleared by every large frame that is not a wipe, so a wipe after a full refresh takes the long gap
+without a separate timestamp. The burst rule (`PBINK_ANIM_BURST`) is gone: its plain fallback landed
+on the strips still being drawn and tore in KOReader. Strips default to `DynamicUpdate`
+(`PBINK_ANIM_FAST=0` for `PartialUpdate`), 8 strips, 16 ms.
+
+Differences from KOReader's 250 and 430 ms: KOReader sleeps, draws for about 46 ms, then sends the
+first strip, while `QFbScreen::doRedraw()` composes first and the strip follows the sleep at once.
+The same-direction safety margin is gap + wipe time (+ draw time in KOReader) and must stay above
+388 ms, so fewer or faster strips shrink it.
+
+A full refresh with a small dirty rectangle counts as large here: the old log has such frames, and
+`FullUpdate()` redraws the panel whatever was touched, so a turn after one would land on it.
+
+A wipe logs `wipe <direction>: composed in N ms, strips took N ms` after its last strip. The line's
+time minus the strip time is the first strip, to compare with the `event 29` line of the tap.
+
+Judged on the device the same day with these defaults: page turns clean and much better than before,
+a book with images fine. From the log of that run, on turns that were not paced: page button press to
+first strip 162 ms median (81 turns), of which 20 ms is composing the frame; touch about 160 ms, on
+only two turns. KOReader's 80-85 ms was measured by the plugin from its own events, so the two are
+not directly comparable.
 
 ## Name and icon on the PocketBook home screen (manual firmware files)
 

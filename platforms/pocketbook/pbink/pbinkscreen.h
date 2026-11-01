@@ -54,8 +54,8 @@ private:
     int mAnimate = 0;
     int mPanelWidth = 0, mPanelHeight = 0, mDpi = 300;
     QTransform mToPanel, mToLogical;
-    // Time of the last update issued; a frame that follows another closely waits for the
-    // panel first and goes without the strip wipe.
+    // Time of the last update issued; a large frame that follows another closely waits for the
+    // panel first.
     QElapsedTimer mLastUpdate;
-    int mQuickTurns = 0; // consecutive frames within 0.7 s of the previous update
+    int mLastSweep = 0; // direction of the last large frame if it was a wipe, else 0
 };

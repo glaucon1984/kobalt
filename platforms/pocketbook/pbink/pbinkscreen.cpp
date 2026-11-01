@@ -139,9 +139,12 @@ void PbInkScreen::setOrientation(Qt::ScreenOrientation orientation)
 
 QRegion PbInkScreen::doRedraw()
 {
+    QElapsedTimer composing;
+    composing.start();
     const QRegion touched = QFbScreen::doRedraw();
     if (touched.isEmpty())
         return touched;
+    const qint64 composeMs = composing.elapsed();
     if (!mBlitter) {
         mBlitter = new QPainter(&mFbImage);
         mBlitter->setCompositionMode(QPainter::CompositionMode_Source);
@@ -151,57 +154,56 @@ QRegion PbInkScreen::doRedraw()
     mNext = mDefault;
     const int sweep = mAnimate;
     mAnimate = 0;
-    // The controller executes partial updates asynchronously, a strip wipe queues ten of them,
-    // and a page turned before they are done used to be blitted under them: strips of two pages
-    // on the panel. WaitForUpdateComplete() returns at once on this firmware, so the pacing is
-    // by time: a frame follows the previous update by at least PBINK_MIN_FRAME_MS (350 ms, a
-    // little under one partial update), and from the PBINK_ANIM_BURST-th frame within 700 ms of
-    // the previous one onwards the wipe is dropped.
+    const bool wipe = sweep && kind != FullRefresh;
+    // An update that lands on one the panel is still drawing tears, and GC16 takes 388 ms here,
+    // so no spot may be redrawn within about 430 ms. WaitForUpdateComplete() returns at once on
+    // this firmware, so the pacing is by time, from the last update issued. A wipe in the same
+    // direction as the wipe before it reaches each spot PBINK_MIN_FRAME_MS (300) plus the length
+    // of a wipe later: keep the sum above 388 ms when lowering the gap or shortening the wipe.
+    // Every other large frame reaches spots drawn moments ago and waits PBINK_LONG_GAP_MS (475):
+    // a wipe the other way starts where the last one ended, and a plain or full frame redraws
+    // everything at once. Both follow from swipeanimation.koplugin's 250 and 430 ms: it sleeps,
+    // then spends about 46 ms drawing before the first strip, while this frame is already composed.
     static const int minFrameMs = qEnvironmentVariableIsSet("PBINK_MIN_FRAME_MS")
-                                      ? qEnvironmentVariableIntValue("PBINK_MIN_FRAME_MS") : 350;
-    // The controller absorbs a few wipes in a row before its queue falls behind, so a burst keeps
-    // the wipe for its first PBINK_ANIM_BURST turns (default 4) and drops it from then on until
-    // the turns slow down. First measured at 450 ms pacing: three quick wipes were fine and the
-    // fourth tore; the defaults were then tightened to 350 ms and four turns (2026-10-29).
-    static const int burstWipes = qEnvironmentVariableIsSet("PBINK_ANIM_BURST")
-                                      ? qEnvironmentVariableIntValue("PBINK_ANIM_BURST") : 4;
+                                      ? qEnvironmentVariableIntValue("PBINK_MIN_FRAME_MS") : 300;
+    static const int longGapMs = qEnvironmentVariableIsSet("PBINK_LONG_GAP_MS")
+                                     ? qEnvironmentVariableIntValue("PBINK_LONG_GAP_MS") : 475;
     const qint64 sinceLast = mLastUpdate.isValid() ? mLastUpdate.elapsed() : 1000000;
-    // Only a frame that covers a good part of the screen (a page, a full-width panel) is paced
-    // and counted as a turn. A small region (the light pop-up while a finger slides along the
-    // edge, a button) is a quick update the controller absorbs; pacing it made this thread sleep
-    // up to minFrameMs per frame while the touch events kept arriving, so the pop-up trailed
-    // further behind the finger the longer the drag went on.
+    // Only a frame that covers a good part of the screen (a page, a full-width panel) is paced.
+    // A small region (the light pop-up while a finger slides along the edge, a button) is a
+    // quick update the controller absorbs; pacing it made this thread sleep up to the gap per
+    // frame while the touch events kept arriving, so the pop-up trailed further behind the
+    // finger the longer the drag went on. A full refresh redraws the panel whatever was touched.
     const QRect bounds = touched.boundingRect();
-    const bool large = qint64(bounds.width()) * bounds.height() * 4 >=
-                       qint64(mScreenImage.width()) * mScreenImage.height();
-    bool quickSuccession = false;
+    const bool large = kind == FullRefresh || qint64(bounds.width()) * bounds.height() * 4 >=
+                                                  qint64(mScreenImage.width()) * mScreenImage.height();
     if (large) {
-        if (sinceLast < 700)
-            ++mQuickTurns;
-        else
-            mQuickTurns = 0;
-        quickSuccession = mQuickTurns >= burstWipes;
-        if (sinceLast < minFrameMs) {
-            usleep(useconds_t(minFrameMs - sinceLast) * 1000);
+        const int gapMs = wipe && sweep == mLastSweep ? minFrameMs : longGapMs;
+        if (sinceLast < gapMs) {
+            usleep(useconds_t(gapMs - sinceLast) * 1000);
             if (mDebug)
-                qCDebug(lcPbInk, "paced the next frame by %lld ms", static_cast<long long>(minFrameMs - sinceLast));
+                qCDebug(lcPbInk, "paced the next frame by %lld ms", static_cast<long long>(gapMs - sinceLast));
         }
+        mLastSweep = wipe ? sweep : 0;
     }
-    if (sweep && kind != FullRefresh && !quickSuccession) {
+    if (wipe) {
         // Strip wipe as in swipeanimation.koplugin's e-ink engine: the whole new frame goes into
         // the framebuffer first (unrefreshed pixels keep showing the old page), then vertical
-        // strips are refreshed one after another with the ordinary partial waveform, a short
-        // pause apart. Forward turns reveal from the right edge to the left, backward turns the
-        // other way. PBINK_ANIM_BANDS (default 10), PBINK_ANIM_MS (default 20), PBINK_ANIM_FAST=1
-        // for the A2 waveform instead.
+        // strips are refreshed one after another, a short pause apart. Forward turns reveal from
+        // the right edge to the left, backward turns the other way. PBINK_ANIM_BANDS (default 8),
+        // PBINK_ANIM_MS (default 16). DynamicUpdate asks for GC16 as PartialUpdate does on
+        // firmware 6.11, it is not A2, yet looks cleaner on the panel: PBINK_ANIM_FAST=0 to compare.
         static const int bands = qBound(2, qEnvironmentVariableIntValue("PBINK_ANIM_BANDS") > 0
-                                               ? qEnvironmentVariableIntValue("PBINK_ANIM_BANDS") : 10, 32);
+                                               ? qEnvironmentVariableIntValue("PBINK_ANIM_BANDS") : 8, 32);
         static const int pauseMs = qEnvironmentVariableIsSet("PBINK_ANIM_MS")
-                                       ? qEnvironmentVariableIntValue("PBINK_ANIM_MS") : 20;
-        static const bool fast = qEnvironmentVariableIntValue("PBINK_ANIM_FAST") == 1;
+                                       ? qEnvironmentVariableIntValue("PBINK_ANIM_MS") : 16;
+        static const bool fast = !qEnvironmentVariableIsSet("PBINK_ANIM_FAST")
+                                 || qEnvironmentVariableIntValue("PBINK_ANIM_FAST") == 1;
         for (const QRect &rect : touched)
             mBlitter->drawImage(rect, mScreenImage, rect);
         const QRect area = touched.boundingRect();
+        QElapsedTimer striping;
+        striping.start();
         for (int i = 0; i < bands; ++i) {
             const int index = sweep > 0 ? bands - 1 - i : i;
             const int left = area.x() + area.width() * index / bands;
@@ -218,6 +220,11 @@ QRegion PbInkScreen::doRedraw()
                 usleep(useconds_t(pauseMs) * 1000);
         }
         mLastUpdate.start();
+        // Logged after the strips, not to delay them: the first strip left striping ms before
+        // this line, which is what to compare with the tap's event line.
+        if (mDebug)
+            qCDebug(lcPbInk, "wipe %d: composed in %lld ms, strips took %lld ms", sweep,
+                    static_cast<long long>(composeMs), static_cast<long long>(striping.elapsed()));
         return touched;
     }
     for (const QRect &rect : touched)

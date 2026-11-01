@@ -353,7 +353,7 @@ ReaderHostServices readerServices() {
     result.lightAvailable = [] {
         return true;
     };
-    // Page-turn animation: the pbink plugin sweeps the new page in with fast updates.
+    // Page-turn animation: the pbink plugin sweeps the new page in, strip by strip.
     result.animationsAvailable = [] {
         return true;
     };
