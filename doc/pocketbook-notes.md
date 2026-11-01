@@ -523,9 +523,11 @@ leaves the position, `position_ts` and `opentime` alone. The row is only touched
 The finish dialog still offers to mark the book finished again at close. Confirmed on the device the
 same day: the book that failed three times closed on the first try.
 
-Open: a library book with no `books_settings` row reads as invalid, and `mayWrite()` is false for an
-invalid progress, so its close would fail the same way. The library has 467 such books, but the log
-has no opening of one, and whether the firmware adds a row when it launches Kobalt was not checked.
+A library book with no `books_settings` row would read as invalid and fail the same way, since
+`mayWrite()` is false for an invalid progress, but opening one through the firmware does not get there.
+Book 441 had no row in the library backup taken before this fix was installed, read as `page 0/0, position none (ts 0)` at open, and saved at close with
+`native-save-start` and `verified`. That save needs a valid row from the opening on, so the firmware must
+add an empty row when it launches Kobalt. Inferred from the log, as the row was not read during launch.
 
 ## Name and icon on the PocketBook home screen (manual firmware files)
 
