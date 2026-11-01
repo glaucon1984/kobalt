@@ -1,5 +1,6 @@
 #include "explorer_progress.h"
 #include "reading/reading_speed.h"
+#include "support/main_thread.h"
 #include "support/strings.h"
 #include <inkview.h>
 #include <QDateTime>
@@ -262,6 +263,31 @@ public:
               static_cast<long long>(book), profile, activity.page + 1, activity.pages, finished ? ", completed" : "",
               withPosition ? ", position " : ", no position", withPosition ? qPrintable(location) : "",
               static_cast<long long>(clock.elapsed()));
+        return true;
+    }
+    // As on Kobo: a finished book opened again is being read. Only the flag changes, so the row
+    // stays the one the reader saw at open apart from the status ReadingBook now expects.
+    bool markReading() override {
+        mainthread::BlockingOperation operation("library-opening-status");
+        auto fail = [](const QString &message) {
+            qWarning("kobalt-pb: library status NOT reset: %s", qPrintable(message));
+            return false;
+        };
+        Connection connection;
+        if (!connection.ok())
+            return fail(connection.error());
+        QString failure;
+        Row row = readRow(connection.db, book, profile, &failure);
+        if (!failure.isEmpty())
+            return fail(failure);
+        if (!row.completed)
+            return true;
+        backupOnce(connection.db);
+        row.completed = 0;
+        if (!writeRow(connection.db, book, profile, row, false, &failure))
+            return fail(failure);
+        qInfo("kobalt-pb: library status reset: book %lld profile %d is no longer completed",
+              static_cast<long long>(book), profile);
         return true;
     }
     // Kobalt's local pace estimator, as the standalone reader keeps it, with this bridge's own

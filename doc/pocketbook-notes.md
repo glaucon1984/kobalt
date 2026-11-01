@@ -506,6 +506,27 @@ first strip 162 ms median (81 turns), of which 20 ms is composing the frame; tou
 only two turns. KOReader's 80-85 ms was measured by the plugin from its own events, so the two are
 not directly comparable.
 
+### Closing a book the library has as finished (2026-11-01)
+
+Since upstream de96c8a, in the port from v0.3.0, a book with `completed = 1` could not be saved to the
+library at close: `native-save` failed with "Nickel progress changed before exit" on every try, with no
+`native-save-start` and no "NOT written" line. KOSync and the local checkpoint were not affected. On
+2026-10-29, before that merge, the same kind of book closed fine.
+
+`ReadingBook::markNativeReading()` replaced the write at open. It calls `ReadingBridge::markReading()`
+and then expects status 1, but the bridge kept the default, which writes nothing and returns true. The
+row stayed at status 2, `observe()` ignored it because the time had not moved, so nothing was pending
+and yet `mayWrite()` was false.
+
+`LibraryBridge::markReading()` now clears `completed` at open, as Nickel's status update does, and
+leaves the position, `position_ts` and `opentime` alone. The row is only touched when it is completed.
+The finish dialog still offers to mark the book finished again at close. Confirmed on the device the
+same day: the book that failed three times closed on the first try.
+
+Open: a library book with no `books_settings` row reads as invalid, and `mayWrite()` is false for an
+invalid progress, so its close would fail the same way. The library has 467 such books, but the log
+has no opening of one, and whether the firmware adds a row when it launches Kobalt was not checked.
+
 ## Name and icon on the PocketBook home screen (manual firmware files)
 
 These live in the firmware's user config, not in the app package, so a plain copy of the zip
