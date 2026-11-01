@@ -555,3 +555,30 @@ firmware U710.6.11.2124):
    deleting `view.json` makes the firmware recreate the default one at the next boot.
 4. Safely eject and reboot; the name and icon appear in Apps. The same name shows in the
    "Open with" menu for EPUBs.
+
+## Warmth schedule (2026-11-01, firmware U710.6.11.2124)
+
+The firmware keeps its warmth curve in `system/config/frontlight/autocolor.cfg` (one `H:00 value`
+line per hour; `Custom.autocolor.cfg` beside it is identical here, and `frontlight_profile=Custom`
+in `global.cfg` names the profile), and a brightness curve in `autobrightness.cfg`. `libinkview.so`
+has no string naming these files and no `global.cfg` key is named for the on/off state, so another
+firmware process must apply the curve and keep the state. Kobalt does not read the curve.
+
+From the device's `libinkview.so`: the on/off state is `FL_MODE_AUTO_COLOR` (2) in `hw_frontlight.mode`
+of inkview's shared state (`inkinternal.h`), offset 0x4470. `hw_is_frontlight_color_auto()` returns
+that bit (0 or 2, not a boolean); `hw_set_frontlight_color_auto_enabled()` sets it and sends
+`MSG_SETFRONTLIGHT`, the same message `SetFrontlightColor` sends. `SetFrontlightColor` does not touch
+the bit, so the host clears it on a manual change. Brightness writes do not touch it either.
+
+Tested on the device: with the warmth at 80, ticking the option at 21:07 brought it to 65, the
+curve's value for 21:00, in under 4 s (the warmth read right after the call is still the old one).
+So the firmware applies the curve at once when the flag changes, with Kobalt in the foreground. A
+drag then turned the flag off and held its own value (83) for the remaining minute of the test.
+`hw_set_frontlight_color_auto_enabled` stayed under the 20 ms logging threshold. With the option on,
+the device and Kobalt were restarted and it looked right on the device; `kobalt.log` has no line for
+the state at start, so that rests on the panel. Not tested: the change at the top of the hour, and
+whether the curve steps or interpolates between hours.
+
+`SetFrontlightState` silently stores the value without applying it while automatic brightness is on
+(`hw_is_frontlight_auto()`) and the keylock is off, so Kobalt's brightness slider would do nothing
+in that mode. Not handled: the brightness schedule is not exposed in Kobalt.

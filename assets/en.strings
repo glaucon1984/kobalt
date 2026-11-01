@@ -425,6 +425,8 @@
 "light_panel.automatic_brightness_description" = "Uses the ambient light sensor. Manual adjustments turn this off.";
 "light_panel.automatic_warmth" = "Follow Kobo warmth schedule";
 "light_panel.automatic_warmth_description" = "Uses the bedtime set in Kobo settings. Manual warmth adjustments turn this off.";
+"light_panel.automatic_warmth_pocketbook" = "Follow PocketBook warmth schedule";
+"light_panel.automatic_warmth_pocketbook_description" = "Uses the schedule set in the PocketBook frontlight settings. Manual warmth adjustments turn this off.";
 "light_panel.brightness" = "Brightness";
 "light_panel.warmth" = "Warmth";
 "light_panel.swipe_hint" = "Swipe up or down along the edges for quick control.";

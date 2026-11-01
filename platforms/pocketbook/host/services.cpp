@@ -12,6 +12,7 @@
 #include <QTime>
 #include <QTimer>
 #include <QElapsedTimer>
+#include <dlfcn.h>
 #include <inkview.h>
 #include <memory>
 
@@ -23,6 +24,11 @@ namespace {
 // calls are not instant (they are timed below and logged when slow), so the hardware is
 // written at most every lightWriteIntervalMs with the latest value, and the notice on screen
 // follows the finger instead of a queue of light changes.
+// The warmth schedule (system/config/frontlight/autocolor.cfg) is run by the firmware, not by
+// Kobalt: libinkview's hw_*_frontlight_color_auto calls read and set its flag in the shared
+// state and tell the firmware. They are not in inkview.h, so they are looked up at run time
+// and a firmware without them loses only the option. SetFrontlightColor leaves the flag alone,
+// so a manual change clears it, or the firmware would overwrite the value.
 const int lightWriteIntervalMs = 120;
 template <typename Call>
 void timedLight(const char *what, int value, Call call) {
@@ -37,6 +43,8 @@ public:
     Light() {
         flush.setSingleShot(true);
         QObject::connect(&flush, &QTimer::timeout, [this] { writePending(); });
+        autoColor = reinterpret_cast<int (*)()>(dlsym(RTLD_DEFAULT, "hw_is_frontlight_color_auto"));
+        setAutoColor = reinterpret_cast<void (*)(int)>(dlsym(RTLD_DEFAULT, "hw_set_frontlight_color_auto_enabled"));
     }
     bool initialize() override {
         warm = GetFrontlightColor() >= 0;
@@ -58,11 +66,16 @@ public:
     int warmthStep() const override {
         return 1;
     }
+    bool hasAutomaticWarmth() const override {
+        return warm && autoColor && setAutoColor;
+    }
     bool automaticWarmth() const override {
-        return false;
+        return hasAutomaticWarmth() && autoColor() != 0;
     }
     int setWarmth(int value) override {
         value = qBound(0, value, 100);
+        if (automaticWarmth())
+            setAutomaticWarmth(false);
         pendingWarmth = value;
         schedule();
         return value;
@@ -70,8 +83,17 @@ public:
     bool saveWarmth() override {
         return true;
     }
-    bool setAutomaticWarmth(bool) override {
-        return false;
+    bool setAutomaticWarmth(bool enabled) override {
+        if (!hasAutomaticWarmth())
+            return false;
+        if (enabled)
+            pendingWarmth = -1; // from now on the warmth is the firmware's
+        timedLight("hw_set_frontlight_color_auto_enabled", enabled,
+                   [this, enabled] { setAutoColor(enabled ? 1 : 0); });
+        const bool applied = automaticWarmth() == enabled;
+        qInfo("kobalt-pb: warmth schedule %s%s, warmth %d", enabled ? "on" : "off", applied ? "" : " NOT applied",
+              warmth());
+        return applied;
     }
     bool beginGesture() override {
         original = brightness();
@@ -104,6 +126,8 @@ private:
     bool warm = false, active = false;
     int original = 0;
     int pendingBrightness = -1, pendingWarmth = -1;
+    int (*autoColor)() = nullptr;
+    void (*setAutoColor)(int) = nullptr;
     QTimer flush;
     QElapsedTimer lastWrite;
     void schedule() {

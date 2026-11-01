@@ -60,8 +60,13 @@ LightPanel::LightPanel(LightControls &light, QWidget *parent) : ui::Panel(parent
     automaticBrightness = new ui::DescribedOption(strings::get("light_panel.automatic_brightness"),
                                                   strings::get("light_panel.automatic_brightness_description"), this);
     automaticBrightness->setObjectName("rrAutomaticBrightness");
+#ifdef KOBALT_POCKETBOOK
+    automaticWarmth = new ui::DescribedOption(strings::get("light_panel.automatic_warmth_pocketbook"),
+                                              strings::get("light_panel.automatic_warmth_pocketbook_description"), this);
+#else
     automaticWarmth = new ui::DescribedOption(strings::get("light_panel.automatic_warmth"),
                                               strings::get("light_panel.automatic_warmth_description"), this);
+#endif
     automaticWarmth->setObjectName("rrAutomaticWarmth");
     for (auto *option : {automaticBrightness, automaticWarmth}) {
         auto presentation = option->presentation();
