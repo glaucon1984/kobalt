@@ -499,8 +499,15 @@ void Host::rotateScreen(Qt::ScreenOrientation orientation) {
     qInfo("kobalt-pb: rotate to Qt orientation %d", int(orientation));
     auto *native = QGuiApplication::platformNativeInterface();
     if (auto fn = native ? native->platformFunction("pbinkSetOrientation") : nullptr) {
+        const auto sideways = [](Qt::ScreenOrientation value) {
+            return value == Qt::LandscapeOrientation || value == Qt::InvertedLandscapeOrientation;
+        };
+        const auto before = QGuiApplication::primaryScreen()->orientation();
         reinterpret_cast<void (*)(int)>(fn)(int(orientation));
-        rotationClock.start();
+        // A half turn keeps the layout: the plugin's full refresh already drew the final page, and
+        // no reflow follows, so waiting for one flashed the next page turn instead.
+        if (before == orientation || sideways(before) != sideways(orientation))
+            rotationClock.start();
     } else {
         qWarning("kobalt-pb: no rotation support in the platform plugin");
     }
