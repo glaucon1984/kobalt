@@ -575,6 +575,18 @@ the standby adds a tile paint and a 0.1 s write, not another capture. A reader t
 power-off image (stock sleep screen) leaves the old copy of the lock bitmap. Logged as
 `power-off image written (standby)`; `(standby, pending)` is the fallback path.
 
+### The boot capture is tied to the boot (2026-11-02)
+
+Seen in the log: a PC plug at 12:45:53 was taken for a standby (`IsUSBconnected()` was still 0
+when EVT_BACKGROUND arrived, or the USB state had not changed since the last key), the capture
+stayed valid, and the book opened by hand after the eject showed the captured page instead of
+the loading screen; a plug at 13:14:59 was recognised. The USB check is a proxy, as the earlier
+three-minute uptime rule was; the fact wanted is whether the device was powered off since the
+capture. `bootlogo.book` now carries a third line, the kernel's `/proc/sys/kernel/random/boot_id`
+(new at every power-on, unchanged through standby), and `savedBootLogo()` returns nothing when
+it matches the current one, logging `boot capture is from this boot`. The USB check stays as an
+early forget. A two-line file from an older build is used as before.
+
 ## Name and icon on the PocketBook home screen (manual firmware files)
 
 These live in the firmware's user config, not in the app package, so a plain copy of the zip

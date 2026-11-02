@@ -48,6 +48,15 @@ QString bootLogoBookPath() {
     return QCoreApplication::applicationDirPath() + QStringLiteral("/bootlogo.book");
 }
 
+// The kernel's id for this boot: a new one at every power-on, the same through standby. Empty
+// when unreadable.
+QByteArray bootId() {
+    QFile file(QStringLiteral("/proc/sys/kernel/random/boot_id"));
+    if (!file.open(QIODevice::ReadOnly))
+        return {};
+    return file.readLine().trimmed();
+}
+
 bool writeBmp24(const QImage &image, const QString &path) {
     // What KOReader hands the firmware's logo tool; the 8-bit form is untested there.
     const QImage rgb = image.convertToFormat(QImage::Format_RGB888);
@@ -258,16 +267,20 @@ bool writeBootLogo(const QImage &panelImage, const QString &bookPath, const char
     const QString why = QString::fromLatin1(reason);
     // The capture is the panel as turned for the holder at the time; the firmware draws the boot
     // logo as it is, so that is the right file. The turn is kept beside it, so that the page can
-    // be shown again in whatever orientation the device is held at the next start.
+    // be shown again in whatever orientation the device is held at the next start, and the boot
+    // id with it, so that the capture is only ever shown after a power-off (savedBootLogo).
     const int rotation = panelRotation();
-    std::thread([panelImage, bookPath, rotation, why, done = std::move(done)] {
+    const QByteArray boot = bootId();
+    if (boot.isEmpty())
+        qWarning("kobalt-pb: boot id unreadable: the boot capture cannot be tied to this boot");
+    std::thread([panelImage, bookPath, rotation, boot, why, done = std::move(done)] {
         QElapsedTimer clock;
         clock.start();
         const bool ok = writeBmp24(panelImage, bootLogoPath());
         if (ok) {
             QSaveFile book(bootLogoBookPath());
             if (book.open(QIODevice::WriteOnly)) {
-                book.write(bookPath.toUtf8() + '\n' + QByteArray::number(rotation) + '\n');
+                book.write(bookPath.toUtf8() + '\n' + QByteArray::number(rotation) + '\n' + boot + '\n');
                 book.commit();
             }
         }
@@ -294,6 +307,16 @@ QImage savedBootLogo(const QString &bookPath) {
     const QList<QByteArray> lines = book.readAll().split('\n');
     if (lines.isEmpty() || QString::fromUtf8(lines[0]) != bookPath)
         return {};
+    // The capture stands for a session a power-off ended. Taken in this very boot, it is a
+    // session that ended some other way (PC Link took the storage, a crash), and the open is an
+    // ordinary one with the opening view. The boot id is the only sure sign of a power-off in
+    // between: the firmware's background event looks the same for a standby and for a PC plug,
+    // and its USB state can lag that event (a plug was taken for a standby once).
+    const QByteArray boot = lines.size() > 2 ? lines[2].trimmed() : QByteArray();
+    if (!boot.isEmpty() && boot == bootId()) {
+        qInfo("kobalt-pb: boot capture is from this boot (no power-off since): opening view");
+        return {};
+    }
     const int rotation = lines.size() > 1 ? lines[1].toInt() : 0;
     // Back to the page as logical content; the screen's current rotation turns it for the holder.
     const QImage panel(bootLogoPath());

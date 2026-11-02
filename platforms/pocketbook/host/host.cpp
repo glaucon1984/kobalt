@@ -196,7 +196,8 @@ void Host::open(const QString &path) {
     // the screen is already turned the way the device is held (the constructor read the gravity
     // sensor), so a page captured upside down and resumed upright reads right, and vice versa.
     // A book that was closed on purpose has no capture any more (markCurrentBook) and gets
-    // Kobalt's opening view as usual; a different book never matches the capture's path.
+    // Kobalt's opening view as usual; a different book never matches the capture's path, and a
+    // capture taken in this same boot (no power-off since) is not used either.
     const QImage saved = savedBootLogo(bookPath);
     if (!saved.isNull() && saved.size() == size()) {
         bootPage->setPixmap(QPixmap::fromImage(saved));

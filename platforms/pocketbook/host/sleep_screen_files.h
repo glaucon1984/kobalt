@@ -36,8 +36,9 @@ bool writePowerOffImage(const QImage &image = {});
 bool writeBootLogo(const QImage &panelImage, const QString &bookPath, const char *reason,
                    std::function<void()> done = {});
 bool bootLogoWriteInFlight();
-// The last boot logo image, when it was captured for this book and the book has not been closed
-// since (markCurrentBook with an empty path forgets it); null otherwise. Returned as logical
+// The last boot logo image, when it was captured for this book, the book has not been closed
+// since (markCurrentBook with an empty path forgets it) and the device has been powered off
+// since (the capture records the kernel's boot id); null otherwise. Returned as logical
 // content (the capture's own turn undone), to be painted on the screen as it is rotated now.
 // Shown while the book loads, so a reopen after a power-off goes boot logo -> same page -> live page.
 QImage savedBootLogo(const QString &bookPath);
