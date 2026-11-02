@@ -506,6 +506,38 @@ first strip 162 ms median (81 turns), of which 20 ms is composing the frame; tou
 only two turns. KOReader's 80-85 ms was measured by the plugin from its own events, so the two are
 not directly comparable.
 
+### The event pump's 20 ms wait (2026-11-01)
+
+The same evening the turns still felt slower than KOReader's. The wipe was not why: KOReader logged 130-150 ms and Kobalt 148 ms, and the rate limit of quick turns cannot move, since a spot needs about 430 ms between redraws either way (`PBINK_MIN_FRAME_MS` 300 plus the wipe, KOReader's 250 plus its draw plus the wipe). The gap was before the first strip: KOReader about 52 ms from the turn event, Kobalt 153 ms from the key event.
+
+Joining `kobalt.log` with `page-turn-painted` in `profile/diagnostics/events.jsonl` over 97 turns gave medians of 22 ms press to `turnPage()`, 25 ms for the engine's frame (of which the engine logs 5), 33 ms painting, 19 ms composing and 49 ms from there to the first strip. The 22 and the 25 hardly varied, which pointed at a wait and not at work.
+
+From the device's `libinkview.so`: `ProcessEventLoopQuick()` and `ProcessEventLoop()` are the same code on this firmware. Both call `iv_process_event_loop_ex`, which delivers the queued events, runs timers, task messages, the gravity check and auto-sleep, and then waits up to 20 ms on a condition that the input thread signals. The Qt timer called it back to back, so the GUI thread sat in that wait nearly all the time, and each step of a turn waited for it to end. The exported `iv_process_event_loop_quick` delivers the queue and reads one event from the firmware's message queue, which is non-blocking (`PrepareForLoop` drains it with the same call and `hw_nextevent` treats EAGAIN as empty), and it waits for nothing. It is not in the SDK, so it is looked up with `dlsym`.
+
+`PbInkEvents::pump()` calls it first, every 10 ms. For 250 ms after any key or touch event it is all that runs, apart from the firmware's step once a second. For 120 ms after a press, a key repeat or a touch release the firmware's step is skipped outright, since a press takes 70-90 ms to become a frame. Moves do not count towards that, so a long drag cannot starve the firmware. Idle, the step runs as before. If the symbol is missing it logs a warning and behaves as before. The quick call reads the message queue from the GUI thread while inkview's input thread also reads it. `IsAnyEvents()` does the same from an app's thread, so the firmware allows it, but if keys or touches ever arrive out of order or get lost, look here first. A wipe's debug line now also has `copied in N ms`, the conversion into the 8-bit framebuffer.
+
+The first version ran the quick call only inside the 250 ms window. Judged on the device the same night: "feels great", press to first strip 157 ms down to a 90 ms median over 83 turns. About one turn in six still lost 22 ms, mostly a press made while a wipe blocked the thread that then reached the handler through the firmware's step. Calling the quick loop first and adding the 120 ms rule took that to none in 119 turns.
+
+`PbInkScreen::blit()` replaces QPainter for the copy into an 8-bit framebuffer. QPainter stored through a per-pixel path, and a rotated frame was far worse. The result is the same pixel for pixel, with `qGray()`'s weights. Upright and upside down use NEON, which the whole build targets; upside down reverses each group of eight. Sideways frames are scalar, in 64-pixel tiles because each pixel moves a whole panel line. The other panel depths keep QPainter.
+
+| Rotation | Copy before | Copy now | Press to first strip before | Now |
+|---|---|---|---|---|
+| 0 | 22 ms | 16 ms | 157 ms | 88 ms |
+| 180 | 38 ms | 17 ms | 113 ms, before this copy | 90 ms |
+| 90 and 270 | 189 ms | 49-59 ms | 283 ms (270 only) | 122-132 ms |
+
+The upright copy only gained 6 ms, and NEON at 8 pixels a step still takes 16 ms for 8.5 MB, so memory is the likely limit there (composing the same bytes takes 20 ms). Sideways frames could use NEON too (8×8 transposed blocks) if they ever matter. The remaining upright stages are 2 ms press to `turnPage()`, 11 ms for the engine's frame, 35 ms painting, 21 ms composing and 16 ms copying, and the painting and composing are full-screen copies through Qt's backing store. Upright turns in the first 15 s after opening a book take 135-160 ms: composing and copying both rise by about half, which looks like startup work competing for the CPU, as seen in KOReader.
+
+From the logs of the final build and the one before it: all four rotations, standby and wake, closing a book. Keys stayed in pairs in every run (122 of each on the last). Three to six `refresh keep-awake released by timeout` lines a run are not new: the rate is the same as before this work, about one in fifty wipes.
+
+Reading the log: a press followed by `refresh 2` is a full refresh, not a wipe, so a script that pairs presses with wipes reports a false stall of about a second there.
+
+### One flash for a half turn (2026-11-02)
+
+`setRotation()` does a full refresh at once, and `rotateScreen()` also armed `flashAfterTurn()` for the reflowed page. A half turn (0 and 180, 90 and 270) keeps the layout, so no reflow came, and the flash landed on the next page paint, which was the reader's next turn: a second flash, and no wipe on that turn. Hands change sides by turning the device, so this happened about as often as the device was turned.
+
+`rotateScreen()` now leaves `rotationClock` alone for a half turn. It is still armed across portrait and landscape, where the second flash clears the old layout, and when the orientation does not change at all, which is the path a book's opening takes. The reader judged the panel on the device: no ghosting from the one flash. In that run's log the half turns (180 to 0, 270 to 90, 90 to 270) had no reflow flash and the next turn was a wipe, while 0 to 270 and 270 to 0 kept theirs.
+
 ### Closing a book the library has as finished (2026-11-01)
 
 Since upstream de96c8a, in the port from v0.3.0, a book with `completed = 1` could not be saved to the
