@@ -43,6 +43,8 @@ public:
     QPoint toLogical(const QPoint &panel) const { return mToLogical.map(panel); }
 
 private:
+    void blit(const QRegion &region);
+
     QStringList mArgs;
     icanvas_s *mFb = nullptr;
     QImage mFbImage;
