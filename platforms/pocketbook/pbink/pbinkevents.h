@@ -31,6 +31,12 @@ public:
     // or the safety limit passed. Several callers share one attempt.
     typedef void (*NetworkDone)(int connected, void *context);
     void connectNetworkAsync(NetworkDone done, void *context);
+    // Asked at every EVT_FOREGROUND before the panel is repainted; a nonzero answer keeps the
+    // panel as the firmware left it (the host keeps the task asleep through a wake the
+    // firmware's timed power-off caused, see Host::quietForeground). taskShown() is emitted
+    // either way.
+    typedef int (*ForegroundFilter)();
+    void setForegroundFilter(ForegroundFilter filter) { mForegroundFilter = filter; }
 
 signals:
     // inkview gravity sensor code: 0 upright, 2 clockwise, 3 upside down, 1 counter-clockwise.
@@ -57,6 +63,7 @@ private:
     QVector<QPair<NetworkDone, void *>> mNetworkWaiters;
 
     PbInkScreen *mScreen;
+    ForegroundFilter mForegroundFilter = nullptr;
     QTimer mTimer;
     int (*mQuickLoop)() = nullptr;
     QElapsedTimer mLastInput, mLastTurn, mFirmwareStep;

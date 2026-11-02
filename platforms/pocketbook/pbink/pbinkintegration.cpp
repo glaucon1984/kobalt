@@ -109,7 +109,15 @@ QFunctionPointer PbInkIntegration::platformFunction(const QByteArray &function) 
         return QFunctionPointer(notifierStatic);
     if (function == "pbinkLastDeviceOrientation")
         return QFunctionPointer(lastDeviceOrientationStatic);
+    if (function == "pbinkSetForegroundFilter")
+        return QFunctionPointer(setForegroundFilterStatic);
     return nullptr;
+}
+
+void PbInkIntegration::setForegroundFilterStatic(int (*filter)())
+{
+    auto self = static_cast<PbInkIntegration *>(QGuiApplicationPrivate::platformIntegration());
+    self->m_events->setForegroundFilter(filter);
 }
 
 void PbInkIntegration::fullRefreshStatic()

@@ -42,6 +42,7 @@ private:
     static void setOrientationStatic(int orientation);
     static QObject *notifierStatic();
     static int lastDeviceOrientationStatic();
+    static void setForegroundFilterStatic(int (*filter)());
 
     PbInkScreen *m_screen;
     PbInkEvents *m_events = nullptr;

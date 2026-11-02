@@ -587,6 +587,45 @@ capture. `bootlogo.book` now carries a third line, the kernel's `/proc/sys/kerne
 it matches the current one, logging `boot capture is from this boot`. The USB check stays as an
 early forget. A two-line file from an older build is used as before.
 
+### A quiet timed power-off (2026-11-02)
+
+Diego: the automatic power-off after a standby lit the screen for a few seconds instead of
+switching off silently. From `kobalt.log` (two cases, 13:56 and 15:45, 30 min after the
+standby): the firmware wakes the device, Kobalt gets EVT_UPDATE + EVT_FOREGROUND as for any
+wake (so it repainted the page with a flash and started the silent KOsync connection), then
+`(iv_poweroff_timer)` is printed by Kobalt's own process and EVT_BACKGROUND follows ~1.6 s
+after the wake; the app is then killed. From the device's `libinkview.so`: the timed power-off
+is a hard timer ("POWEROFF", `SetHardTimer`, an RTC alarm) that libinkview arms in the
+foreground app's process (`SetAutoPowerOff`, `iv_rise_poweroff_timer`, at every input) with
+`ivstate.powerofftm - (hw_boottime() - *(ivmpc)+0x16c)` (the last activity shared with the
+monitor); `iv_poweroff_timer` fires it unless a player is running, and calls `hw_say_poweroff`.
+`ivstate` and `ivmpc` are exported; the offsets (0x68 timeout in **milliseconds**, 0x90 enable
+byte, 0x16c last activity in seconds) are 6.11's. The frontlight is the monitor's: `hw_set_frontlight_enabled`
+flips the `FL_MODE_ENABLED` bit in the shared state and sends `MSG_SETFRONTLIGHT` (only when the
+bit changes); `hw_set_frontlight_state` stores the level and always sends it. Who lights the
+panel at resume is in the monitor binary, not read; the fix is empirical.
+
+Fix (`firmware_power.cpp`, `Host::quietForeground`): at the end of the standby sequence Kobalt
+switches the light off (`SetFrontlightEnabled(0)`), and the plugin asks the host before the
+foreground repaint; with the power-off timer due within 15 s the host keeps the task asleep
+(no repaint, no reader wake, light off again if the resume lit it), holds the device awake, and
+the power-off's EVT_BACKGROUND confirms it (`timed power-off follows the wake`); otherwise a
+press or a 4 s fallback does the normal wake with a full repaint. A press wakes with the light
+restored at once (`wake (press)`). KOReader does nothing here (its PocketBook powerd leaves the
+light alone at suspend), so it shows the same lit transition.
+
+First test build (17:20, 10-minute timeout): `wake with the timed power-off due in 599398 s`,
+so the wake was taken for a press: the timeout is 600000 **ms**, not seconds (I had read the
+×1000 in the timer code on the wrong operand), and the power-off's EVT_BACKGROUND then ran the
+standby sequence, which switched the light off right before the shutdown. The firmware keeps
+the flag across a power-off, and Kobalt's slider only set the level, so the light could not be
+switched on from Kobalt afterwards (the firmware's own panel could). Fixes: milliseconds; the
+slider goes through `applyFrontlight` (flag with the level, as KOReader) and reads zero while
+the flag is off; the standby darkening sets level 0 and the flag and records the level in
+`applications/kobalt/light.standby`, which a wake by a press or Kobalt's next start restores
+(`frontlight back on at N (start)`); the detected power-off wake sets level 0 again, since the
+flag's message only goes out on a change.
+
 ## Name and icon on the PocketBook home screen (manual firmware files)
 
 These live in the firmware's user config, not in the app package, so a plain copy of the zip

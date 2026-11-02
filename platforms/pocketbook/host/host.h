@@ -64,6 +64,17 @@ public:
     // USB state at the last touch or key: a USB connection that is new at EVT_BACKGROUND is a PC
     // plug (the firmware's PC Link / Charge prompt took the foreground), not a standby.
     bool usbAtLastInput = false;
+    // The frontlight was on at standby and Kobalt switched it off (the firmware's lock screen
+    // is drawn by then), so that the wake the firmware's timed power-off causes stays dark; a
+    // wake by a press switches it on again.
+    bool standbyLightOff = false;
+    // A wake the firmware's timed power-off is about to follow (quietForeground): the task
+    // stays asleep, the panel and the light untouched, until the power-off's EVT_BACKGROUND;
+    // a press or the fallback timer wakes it for real instead.
+    bool powerOffWakeExpected = false, powerOffWakeHold = false;
+    QTimer powerOffWakeFallback;
+    static int quietForeground();
+    void finishWake(const char *how);
     // Boot logo from a capture of the panel: once after the book's first lock image, then at
     // each standby. Awake until the firmware's tool has returned.
     bool bootLogoForBook = false;
@@ -88,6 +99,7 @@ private:
     bool closing = false;
     QTimer turnTimer;
     static bool quitting;
+    static Host *current;
     bool started = false;
     bool asleep = false;
     void primeSleepScreen();

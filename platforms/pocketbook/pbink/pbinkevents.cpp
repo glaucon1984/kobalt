@@ -238,9 +238,11 @@ int PbInkEvents::handle(int type, int par1, int par2)
         break;
     case EVT_FOREGROUND:
         // The firmware applies its own orientation to the task right before this event (also when
-        // coming back from sleep or another task): pin portrait again, then the first frame.
+        // coming back from sleep or another task): pin portrait again, then the first frame,
+        // unless the host wants the panel left alone (a wake the timed power-off caused).
         mScreen->lockPortrait();
-        mScreen->repaintAll();
+        if (!(mForegroundFilter && mForegroundFilter()))
+            mScreen->repaintAll();
         emit taskShown();
         break;
     case EVT_BACKGROUND:

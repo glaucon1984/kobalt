@@ -12,6 +12,7 @@
 #include <QTime>
 #include <QTimer>
 #include <QElapsedTimer>
+#include "firmware_power.h"
 #include <dlfcn.h>
 #include <inkview.h>
 #include <memory>
@@ -110,13 +111,16 @@ public:
         // Only a cancelled gesture restores; a stray finish (e.g. at close) must not touch the light.
         if (active && !save) {
             pendingBrightness = -1;
-            timedLight("SetFrontlightState", original, [this] { SetFrontlightState(original); });
+            timedLight("applyFrontlight", original, [this] { applyFrontlight(original); });
         }
         active = false;
         writePending(); // the last value of a saved gesture goes out now
     }
     int brightness() const override {
-        return qMax(0, GetFrontlightState());
+        // The firmware keeps a level beside an on/off flag (its panel, and a power-off while
+        // Kobalt had the light off for a standby, switch the flag): off reads as zero here, so
+        // that the slider shows the light as it is and dragging it up switches the light on.
+        return frontlightEnabled() ? frontlightLevel() : 0;
     }
     bool gesturing() const override {
         return active;
@@ -144,7 +148,7 @@ private:
         if (pendingBrightness >= 0) {
             const int value = pendingBrightness;
             pendingBrightness = -1;
-            timedLight("SetFrontlightState", value, [value] { SetFrontlightState(value); });
+            timedLight("applyFrontlight", value, [value] { applyFrontlight(value); });
             lastWrite.start();
         }
         if (pendingWarmth >= 0) {

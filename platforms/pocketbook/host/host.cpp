@@ -5,6 +5,7 @@
 #include "interfaces/reader/views/reading_page.h"
 #include "dictionaries/manager.h"
 #include "sleep_screen_files.h"
+#include "firmware_power.h"
 #include "storage/reader_storage.h"
 #include <QJsonObject>
 #include <qpa/qplatformnativeinterface.h>
@@ -33,6 +34,7 @@ void animateNextFrame(int direction);
 
 namespace kobalt::pocketbook {
 bool Host::quitting = false;
+Host *Host::current = nullptr;
 QElapsedTimer Host::rotationClock;
 
 Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
@@ -56,6 +58,15 @@ Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
             connect(notifier, SIGNAL(taskShown()), this, SLOT(taskForeground()));
             connect(notifier, SIGNAL(usbEvent(int)), this, SLOT(usbEvent(int)));
         }
+    current = this;
+    if (auto fn = native ? native->platformFunction("pbinkSetForegroundFilter") : nullptr)
+        reinterpret_cast<void (*)(int (*)())>(fn)(&Host::quietForeground);
+    powerOffWakeFallback.setSingleShot(true);
+    powerOffWakeFallback.setInterval(4000);
+    connect(&powerOffWakeFallback, &QTimer::timeout, this, [this] {
+        if (powerOffWakeHold)
+            finishWake("no power-off followed");
+    });
     message = new QLabel(this);
     message->setWordWrap(true);
     message->setAlignment(Qt::AlignCenter);
@@ -170,12 +181,17 @@ Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
 
 Host::~Host() {
     qApp->removeEventFilter(this);
+    if (current == this)
+        current = nullptr;
 }
 
 void Host::start() {
     if (started)
         return;
     started = true;
+    // A power-off (timed, or by hand from the lock screen) while Kobalt had the light off for
+    // the standby: the firmware keeps the light off across it, so switch it back on now.
+    restoreStandbyLight("start");
     showFullScreen();
     if (!startPath.isEmpty())
         open(startPath);
@@ -231,6 +247,15 @@ QImage Host::capturePanel() {
 // open, invisibly): it saves progress and composes the sleep image, which the presentation
 // writes as the firmware's lock bitmap for the next standby.
 void Host::taskBackground() {
+    if (powerOffWakeHold) {
+        // The timed power-off's own background event: the task never woke, the images written
+        // at the standby stand, and the firmware shows the power-off logo next.
+        powerOffWakeHold = false;
+        powerOffWakeFallback.stop();
+        updateKeepAwake();
+        qInfo("kobalt-pb: timed power-off follows the wake, as expected");
+        return;
+    }
     auto *reader = controller.window();
     if (!reader || quitting || asleep || currentWidget() != reader)
         return;
@@ -276,14 +301,66 @@ void Host::taskBackground() {
     // was seen to drop what the apps had written since the last sync(2) (a standby's suspend
     // syncs, fdatasync alone did not survive), so flush everything now; ~0.1-0.3 s.
     ::sync();
-    qInfo("kobalt-pb: sleep sequence done (standby)");
+    // The firmware lights the panel again at every resume, including the one its timed
+    // power-off causes from standby, which lit the screen for a few seconds on the way to off.
+    // The lock screen is drawn by now, so switch the light off here; a wake by a press switches
+    // it on again (finishWake), the power-off wake leaves it off (quietForeground). Not for a PC
+    // plug, which ends the app under the firmware's prompt.
+    standbyLightOff = !usbPlug && darkenForStandby() >= 0;
+    qInfo("kobalt-pb: sleep sequence done (standby)%s", standbyLightOff ? ", frontlight off" : "");
+}
+
+// Asked by the platform plugin at EVT_FOREGROUND, before it repaints the panel: a wake that
+// the firmware's timed power-off caused (its timer is due) is not shown at all. The timer then
+// fires in this process within about 1.5 s and the firmware takes over; should it not (a press
+// in the last seconds before it was due), the fallback timer or the press itself wakes the task.
+int Host::quietForeground() {
+    Host *self = current;
+    if (!self || quitting || !self->asleep || self->powerOffWakeHold)
+        return 0;
+    const int due = secondsToTimedPowerOff();
+    self->powerOffWakeExpected = due != INT_MIN && due <= 15;
+    if (due != INT_MIN)
+        qInfo("kobalt-pb: wake with the timed power-off due in %d s%s", due,
+              self->powerOffWakeExpected ? ": staying asleep" : "");
+    return self->powerOffWakeExpected ? 1 : 0;
 }
 
 void Host::taskForeground() {
     if (!asleep)
         return;
+    if (powerOffWakeExpected) {
+        powerOffWakeExpected = false;
+        powerOffWakeHold = true;
+        updateKeepAwake();
+        powerOffWakeFallback.start();
+        // The firmware may light the panel at the resume regardless of the flag and level it
+        // was left with: level zero again (its message always goes out), flag off.
+        qInfo("kobalt-pb: power-off wake: frontlight %s at %d, kept dark", frontlightEnabled() ? "on" : "off",
+              frontlightLevel());
+        applyFrontlight(0);
+        return;
+    }
+    finishWake("press");
+}
+
+void Host::finishWake(const char *how) {
+    const bool held = powerOffWakeHold;
+    powerOffWakeHold = false;
+    powerOffWakeFallback.stop();
     asleep = false;
-    qInfo("kobalt-pb: wake");
+    if (standbyLightOff) {
+        standbyLightOff = false;
+        restoreStandbyLight(how);
+    }
+    qInfo("kobalt-pb: wake (%s)", how);
+    if (held) {
+        // The plugin left the panel as the firmware had it: paint everything now.
+        updateKeepAwake();
+        auto *native = QGuiApplication::platformNativeInterface();
+        if (auto fn = native ? native->platformFunction("pbinkFullRefresh") : nullptr)
+            reinterpret_cast<void (*)()>(fn)();
+    }
     ::sync(); // cheap here, and what is written before a plug must be on the flash (see taskBackground)
     auto *reader = controller.window();
     if (reader && !quitting) {
@@ -416,7 +493,8 @@ void Host::usbEvent(int type) {
 }
 
 void Host::updateKeepAwake() {
-    keepAwake(openingBusy || downloadBusy || syncBusy || bootLogoBusy || inputBusy || sleepRefreshHolds > 0);
+    keepAwake(openingBusy || downloadBusy || syncBusy || bootLogoBusy || inputBusy || powerOffWakeHold ||
+              sleepRefreshHolds > 0);
 }
 
 void Host::updateBootLogo(const QImage &panel, const char *reason) {
@@ -612,6 +690,8 @@ bool Host::eventFilter(QObject *object, QEvent *event) {
         }
         return false;
     }
+    if (powerOffWakeHold && (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::KeyPress))
+        finishWake("input"); // a press after all, not the timed power-off
     if (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonRelease) {
         if (event->type() == QEvent::MouseButtonPress) {
             usbAtLastInput = IsUSBconnected() > 0;
