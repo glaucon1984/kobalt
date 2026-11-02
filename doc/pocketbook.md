@@ -23,8 +23,9 @@ page covers installing and using it. [Building](building.md#pocketbook) covers t
   within Kobalt's rotation setting (portrait only, landscape only, or both), also for the
   loading screen and the resumed page before the book is open.
 - Frontlight brightness and warmth in 1 % steps, from the light panel or the edge swipe. The
-  light panel can also follow the warmth schedule set in the PocketBook's frontlight settings;
-  a manual warmth change turns that off, as on Kobo.
+  light panel can also follow the brightness and warmth schedules set in the PocketBook's
+  frontlight settings, each with its own option; a manual change of that value turns its
+  schedule off, as on Kobo.
 - The sleep screen shows the current page or the cover with progress and battery, in the
   orientation the device is held in. The power-off screen shows the same page or cover marked
   "Powered off" (as on Kobo, so a switched-off device is told from a sleeping one at a glance),

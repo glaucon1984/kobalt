@@ -98,6 +98,46 @@ void applyFrontlight(int level) {
 }
 
 namespace {
+struct AutoBrightness {
+    int (*supported)() = nullptr;
+    int (*enabled)() = nullptr;
+    void (*setEnabled)(int) = nullptr;
+    bool looked = false;
+};
+AutoBrightness &autoBrightness() {
+    static AutoBrightness a;
+    if (!a.looked) {
+        a.looked = true;
+        a.supported = reinterpret_cast<int (*)()>(dlsym(RTLD_DEFAULT, "hw_is_frontlight_auto_supported"));
+        a.enabled = reinterpret_cast<int (*)()>(dlsym(RTLD_DEFAULT, "hw_is_frontlight_auto"));
+        a.setEnabled = reinterpret_cast<void (*)(int)>(dlsym(RTLD_DEFAULT, "hw_set_frontlight_auto_enabled"));
+    }
+    return a;
+}
+}
+
+bool hasAutomaticBrightness() {
+    const AutoBrightness &a = autoBrightness();
+    // 0 none, 1 a light sensor, 2 the schedule by time (support_fl_time in device.cfg).
+    return a.supported && a.enabled && a.setEnabled && a.supported() != 0;
+}
+
+bool automaticBrightness() {
+    return hasAutomaticBrightness() && autoBrightness().enabled() != 0;
+}
+
+bool setAutomaticBrightness(bool enabled) {
+    if (!hasAutomaticBrightness())
+        return false;
+    // The schedule drives the level of a light that is on; switched off (the slider at zero
+    // clears the firmware's flag), the schedule alone leaves it off.
+    if (enabled && !frontlightEnabled())
+        setFrontlightEnabled(true);
+    autoBrightness().setEnabled(enabled ? 1 : 0);
+    return automaticBrightness() == enabled;
+}
+
+namespace {
 QString standbyLightPath() {
     return QCoreApplication::applicationDirPath() + QStringLiteral("/light.standby");
 }
@@ -107,11 +147,14 @@ int darkenForStandby() {
     if (!frontlightEnabled())
         return -1;
     const int level = frontlightLevel();
+    const bool scheduled = automaticBrightness();
     QFile record(standbyLightPath());
     if (record.open(QIODevice::WriteOnly)) {
-        record.write(QByteArray::number(level));
+        record.write(QByteArray::number(level) + (scheduled ? " auto" : ""));
         record.close();
     }
+    if (scheduled)
+        setAutomaticBrightness(false);
     applyFrontlight(0);
     return level;
 }
@@ -120,9 +163,18 @@ bool restoreStandbyLight(const char *why) {
     QFile record(standbyLightPath());
     if (!record.open(QIODevice::ReadOnly))
         return false;
-    const int level = record.readAll().trimmed().toInt();
+    const QList<QByteArray> fields = record.readAll().trimmed().split(' ');
     record.close();
     QFile::remove(standbyLightPath());
+    const int level = fields.isEmpty() ? 0 : fields[0].toInt();
+    const bool scheduled = fields.size() > 1 && fields[1] == "auto";
+    if (scheduled) {
+        // Whatever the level was (the curve may have been at zero at the standby): the light on
+        // and the schedule with it, and the firmware applies its curve's value for now.
+        setAutomaticBrightness(true);
+        qInfo("kobalt-pb: frontlight back on with the schedule (%s)", why);
+        return true;
+    }
     if (level <= 0)
         return false;
     applyFrontlight(level);

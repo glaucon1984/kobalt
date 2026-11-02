@@ -626,6 +626,27 @@ the flag is off; the standby darkening sets level 0 and the flag and records the
 (`frontlight back on at N (start)`); the detected power-off wake sets level 0 again, since the
 flag's message only goes out on a change.
 
+### Brightness schedule (2026-11-02)
+
+The light panel's schedule option only followed the firmware's warmth curve; Diego asked for
+the brightness curve (`system/config/frontlight/autobrightness.cfg`, "Time Brightness") too.
+Kobalt's light panel already has an automatic-brightness option (Kobo's ambient light sensor,
+`LightControls::hasAutomaticBrightness` and friends), which the port now backs with the
+firmware's own flag, labelled "Follow PocketBook brightness schedule". From the device's
+`libinkview.so`: `hw_is_frontlight_auto_supported()` is 1 with a light sensor, else 2 when
+`support_fl_time` in `/ebrmain/config/device.cfg` is set (the by-time schedule), else 0;
+`hw_set_frontlight_auto_enabled()` flips `FL_MODE_AUTO_BRIGHTNESS` (bit 0 of the shared light
+mode, +0x288) and sends `MSG_SETFRONTLIGHT` on a change; `hw_is_frontlight_auto()` reads the
+bit. The three are looked up with `dlsym` like the colour ones (`firmware_power.cpp`). A manual
+level (slider or edge swipe) switches the schedule off first, because `SetFrontlightState`
+stores a level without applying it while the schedule is on; and switching the schedule on
+switches the light on first, since at the slider's zero the firmware's flag is off and the
+schedule alone left it off (seen by Diego). The standby darkening switches the
+schedule off as well and records it, so the level 0 applies; the restore (press, or the next
+start after a power-off) switches it back on, whatever the level was: the curve may stand at 0
+at the standby (a schedule may well have dark hours; `-1` in the file is the firmware's "off"),
+and the firmware applies its current value once the schedule is on again.
+
 ## Name and icon on the PocketBook home screen (manual firmware files)
 
 These live in the firmware's user config, not in the app package, so a plain copy of the zip

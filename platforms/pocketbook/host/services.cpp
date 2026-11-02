@@ -67,6 +67,24 @@ public:
     int warmthStep() const override {
         return 1;
     }
+    bool hasAutomaticBrightness() const override {
+        return pocketbook::hasAutomaticBrightness();
+    }
+    bool automaticBrightness() const override {
+        return pocketbook::automaticBrightness();
+    }
+    bool setAutomaticBrightness(bool enabled) override {
+        if (!hasAutomaticBrightness())
+            return false;
+        if (enabled)
+            pendingBrightness = -1; // from now on the level is the firmware's
+        bool applied = false;
+        timedLight("hw_set_frontlight_auto_enabled", enabled,
+                   [enabled, &applied] { applied = pocketbook::setAutomaticBrightness(enabled); });
+        qInfo("kobalt-pb: brightness schedule %s%s, level %d", enabled ? "on" : "off", applied ? "" : " NOT applied",
+              frontlightLevel());
+        return applied;
+    }
     bool hasAutomaticWarmth() const override {
         return warm && autoColor && setAutoColor;
     }
@@ -103,6 +121,9 @@ public:
     }
     int setGestureLevel(int percent) override {
         percent = qBound(0, percent, 100);
+        // The firmware keeps a level set while its schedule runs without applying it.
+        if (automaticBrightness())
+            setAutomaticBrightness(false);
         pendingBrightness = percent;
         schedule();
         return percent;

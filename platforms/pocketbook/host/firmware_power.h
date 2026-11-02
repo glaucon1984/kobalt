@@ -23,10 +23,22 @@ void setFrontlightLevel(int level);
 // The light as Kobalt wants it: a level above zero switches the light on at that level, zero
 // switches it off (the firmware's flag follows, so its own controls agree).
 void applyFrontlight(int level);
+// The firmware's automatic brightness: a light sensor, or the schedule in
+// system/config/frontlight/autobrightness.cfg (support_fl_time in /ebrmain/config/device.cfg),
+// run by the firmware itself from the FL_MODE_AUTO_BRIGHTNESS bit of the shared light state,
+// through libinkview's hw_*_frontlight_auto calls (inkinternal.h only, looked up at run time;
+// a firmware without them has no option). While it is on, the firmware stores a level set by
+// the app without applying it, so a manual level must switch it off first.
+bool hasAutomaticBrightness();
+bool automaticBrightness();
+// Returns whether the firmware reports the new state afterwards.
+bool setAutomaticBrightness(bool enabled);
 // Kobalt switched the light off for a standby at this level: both flag and level are set to
-// off/0, so that the resume the timed power-off causes finds nothing to light, and the level is
-// recorded on disk, because the firmware keeps the off state across a power-off and Kobalt's
-// next start has to switch the light back on (restoreStandbyLight). -1 when the light was off.
+// off/0 (the brightness schedule, which would hold the level, is switched off for the standby
+// too), so that the resume the timed power-off causes finds nothing to light, and the level and
+// the schedule are recorded on disk, because the firmware keeps the off state across a
+// power-off and Kobalt's next start has to switch the light back on (restoreStandbyLight).
+// -1 when the light was off.
 int darkenForStandby();
 // Switches the light back on at the recorded level and forgets the record. False when none.
 bool restoreStandbyLight(const char *why);

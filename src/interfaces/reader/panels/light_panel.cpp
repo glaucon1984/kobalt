@@ -57,8 +57,13 @@ LightPanel::LightPanel(LightControls &light, QWidget *parent) : ui::Panel(parent
     outer->addWidget(controls);
     rows->setContentsMargins(m::panel::contentMargins);
     rows->setSpacing(m::control::rowGap);
+#ifdef KOBALT_POCKETBOOK
+    automaticBrightness = new ui::DescribedOption(strings::get("light_panel.automatic_brightness_pocketbook"),
+                                                  strings::get("light_panel.automatic_brightness_pocketbook_description"), this);
+#else
     automaticBrightness = new ui::DescribedOption(strings::get("light_panel.automatic_brightness"),
                                                   strings::get("light_panel.automatic_brightness_description"), this);
+#endif
     automaticBrightness->setObjectName("rrAutomaticBrightness");
 #ifdef KOBALT_POCKETBOOK
     automaticWarmth = new ui::DescribedOption(strings::get("light_panel.automatic_warmth_pocketbook"),
