@@ -58,6 +58,8 @@ private:
 
     PbInkScreen *mScreen;
     QTimer mTimer;
+    int (*mQuickLoop)() = nullptr;
+    QElapsedTimer mLastInput, mLastTurn, mFirmwareStep;
     bool mDebug;
     bool mDown = false;
     int mLastOrientation = -1;

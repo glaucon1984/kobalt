@@ -4,6 +4,7 @@
 #include <QElapsedTimer>
 #include <QLoggingCategory>
 #include <qpa/qwindowsysteminterface.h>
+#include <dlfcn.h>
 #include <stdlib.h>
 #include <string.h>
 #include <inkview.h> // has its own extern "C" guards
@@ -16,9 +17,13 @@ PbInkEvents::PbInkEvents(PbInkScreen *screen, bool debug, QObject *parent)
     : QObject(parent), mScreen(screen), mDebug(debug)
 {
     sInstance = this;
-    mTimer.setInterval(20);
+    mTimer.setInterval(10);
     mTimer.setTimerType(Qt::CoarseTimer);
     connect(&mTimer, &QTimer::timeout, this, &PbInkEvents::pump);
+    // Exported by firmware 6.11 but missing from the SDK's header and library.
+    mQuickLoop = reinterpret_cast<int (*)()>(dlsym(RTLD_DEFAULT, "iv_process_event_loop_quick"));
+    if (!mQuickLoop)
+        qWarning("pbink: no iv_process_event_loop_quick, input waits for the firmware's loop");
     mNetworkLimit.setSingleShot(true);
     mNetworkLimit.setInterval(45000);
     connect(&mNetworkLimit, &QTimer::timeout, this, [this] { networkDone(-1, "safety limit"); });
@@ -155,20 +160,40 @@ void PbInkEvents::start()
     // Orientation events are only delivered with this set (KOReader does the same).
     setenv("SUPPORT_EVT_ORIENTATION", "YES", 1);
     PrepareForLoop(handlerStatic);
+    mFirmwareStep.start();
     mTimer.start();
 }
 
 void PbInkEvents::pump()
 {
-    // Delivers pending inkview events to handlerStatic() without waiting for new ones:
-    // ProcessEventLoop() was seen to block the GUI thread for over a minute once (a book stayed
-    // on its loading screen until standby produced an event). A slow call is logged either way.
+    // On firmware 6.11 ProcessEventLoopQuick() is the same call as ProcessEventLoop(): it delivers
+    // pending events to handlerStatic(), runs the firmware's timers, task messages, gravity sensor
+    // and auto-sleep, then waits up to 20 ms for input. Called back to back, it held the GUI thread
+    // three times in every page turn. iv_process_event_loop_quick() delivers pending events and
+    // never waits, so it goes first: a press made while a wipe blocked this thread must not reach
+    // the handler through the firmware's step. Around input it is all that runs, the firmware's
+    // step keeps running once a second, and not at all in the time a press takes to become a frame
+    // (70-90 ms), which only presses and taps start, so a long drag cannot starve the firmware.
+    static const qint64 inputHoldMs = 250, firmwareStepMs = 1000, turnMs = 120;
+    if (mQuickLoop) {
+        mQuickLoop();
+        const bool turning = mLastTurn.isValid() && !mLastTurn.hasExpired(turnMs);
+        const bool active = mLastInput.isValid() && !mLastInput.hasExpired(inputHoldMs);
+        if (turning || (active && !mFirmwareStep.hasExpired(firmwareStepMs)))
+            return;
+    }
+    // A slow call is logged: this one was seen to block the GUI thread for over a minute once (a
+    // book stayed on its loading screen until standby produced an event).
     QElapsedTimer clock;
     clock.start();
     ProcessEventLoopQuick();
     const qint64 ms = clock.elapsed();
     if (ms > 200)
         qWarning("pbink: inkview event pump took %lld ms", static_cast<long long>(ms));
+    mFirmwareStep.start();
+    // Input ends the wait above, but the event is only delivered by the next call.
+    if (mQuickLoop)
+        mQuickLoop();
 }
 
 int PbInkEvents::handlerStatic(int type, int par1, int par2)
@@ -232,6 +257,7 @@ int PbInkEvents::handle(int type, int par1, int par2)
         QCoreApplication::quit();
         break;
     case EVT_POINTERDOWN:
+        mLastInput.start();
         mDown = true;
         mLast = mScreen->toLogical(QPoint(par1, par2));
         QWindowSystemInterface::handleMouseEvent(nullptr, mLast, mLast, Qt::LeftButton, Qt::LeftButton,
@@ -240,6 +266,7 @@ int PbInkEvents::handle(int type, int par1, int par2)
     case EVT_POINTERMOVE:
     case EVT_POINTERDRAG:
         if (mDown) {
+            mLastInput.start();
             mLast = mScreen->toLogical(QPoint(par1, par2));
             QWindowSystemInterface::handleMouseEvent(nullptr, mLast, mLast, Qt::LeftButton, Qt::NoButton,
                                                      QEvent::MouseMove);
@@ -248,6 +275,8 @@ int PbInkEvents::handle(int type, int par1, int par2)
     case EVT_POINTERUP:
     case EVT_POINTERCANCEL:
         if (mDown) {
+            mLastInput.start();
+            mLastTurn.start();
             mDown = false;
             if (type == EVT_POINTERUP)
                 mLast = mScreen->toLogical(QPoint(par1, par2));
@@ -261,8 +290,11 @@ int PbInkEvents::handle(int type, int par1, int par2)
     case EVT_KEYPRESS_EXT:
     case EVT_KEYREPEAT_EXT:
     case EVT_KEYRELEASE_EXT: {
+        mLastInput.start();
         const bool release = type == EVT_KEYRELEASE || type == EVT_KEYRELEASE_EXT;
         const bool repeat = type == EVT_KEYREPEAT || type == EVT_KEYREPEAT_EXT;
+        if (!release)
+            mLastTurn.start();
         const int key = mapKey(par1);
         QWindowSystemInterface::handleKeyEvent(nullptr, release ? QEvent::KeyRelease : QEvent::KeyPress, key,
                                                Qt::NoModifier, QString(), repeat);
