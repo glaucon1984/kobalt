@@ -608,8 +608,12 @@ So the firmware applies the curve at once when the flag changes, with Kobalt in 
 drag then turned the flag off and held its own value (83) for the remaining minute of the test.
 `hw_set_frontlight_color_auto_enabled` stayed under the 20 ms logging threshold. With the option on,
 the device and Kobalt were restarted and it looked right on the device; `kobalt.log` has no line for
-the state at start, so that rests on the panel. Not tested: the change at the top of the hour, and
-whether the curve steps or interpolates between hours.
+the state at start, so that rests on the panel.
+
+Longer use on 0.3.3 (2026-11-02): the warmth kept following the curve across power off and on,
+standby and wake, and opening and closing books. Near noon the light was visibly colder and the
+firmware's frontlight sliders showed the same. That is what the user saw on the device, not read
+from the log. Not established: whether the curve steps or interpolates between hours.
 
 `SetFrontlightState` silently stores the value without applying it while automatic brightness is on
 (`hw_is_frontlight_auto()`) and the keylock is off, so Kobalt's brightness slider would do nothing
