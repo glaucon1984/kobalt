@@ -362,7 +362,7 @@ QImage Reader::cachedSleepCoverBackground(QSize size) {
     return background; // the composition paints on its own copy (implicit sharing)
 }
 
-QImage Reader::composeSleepImage() {
+QImage Reader::composeSleepImage(QImage *powerOff) {
     auto snapshot = captureSleepScreen();
     if (snapshot.image.isNull())
         return {};
@@ -370,8 +370,23 @@ QImage Reader::composeSleepImage() {
     const auto status = battery.fullyCharged ? SleepStatus::Charged
                         : battery.charging   ? SleepStatus::Charging
                                              : SleepStatus::Sleeping;
+    // The same backdrop under the powered-off status (the painter copies the shared frame once).
+    if (powerOff)
+        *powerOff = sleepScreenImage(snapshot.image, snapshot.progress, snapshot.remaining, darkTheme, -1,
+                                     SleepStatus::PoweredOff, snapshot.dimPage, snapshot.tile, snapshot.percent);
     return sleepScreenImage(std::move(snapshot.image), snapshot.progress, snapshot.remaining, darkTheme,
                             battery.percent, status, snapshot.dimPage, snapshot.tile, snapshot.percent);
+}
+
+// What the Kobo host paints at power-off: the sleep backdrop with the powered-off status. Asleep,
+// powerScreenSnapshot() is the presented sleep image (already dimmed; the status tile is painted
+// over the sleep tile, same area), so no new capture is needed.
+QImage Reader::composePowerOffImage() {
+    auto snapshot = powerScreenSnapshot();
+    if (snapshot.image.isNull())
+        return {};
+    return sleepScreenImage(std::move(snapshot.image), snapshot.progress, snapshot.remaining, snapshot.dark, -1,
+                            SleepStatus::PoweredOff, snapshot.dimPage, snapshot.tile, snapshot.percent);
 }
 
 void Reader::sleepReader() {

@@ -26,9 +26,10 @@ page covers installing and using it. [Building](building.md#pocketbook) covers t
   light panel can also follow the warmth schedule set in the PocketBook's frontlight settings;
   a manual warmth change turns that off, as on Kobo.
 - The sleep screen shows the current page or the cover with progress and battery, in the
-  orientation the device is held in. The power-off screen shows the same image, and the boot
-  screen shows the page as it was, when the PocketBook's Power-off logo and Boot logo settings
-  (Settings → Personalize → Logos) are the book cover.
+  orientation the device is held in. The power-off screen shows the same page or cover marked
+  "Powered off" (as on Kobo, so a switched-off device is told from a sleeping one at a glance),
+  and the boot screen shows the page as it was, when the PocketBook's Power-off logo and Boot
+  logo settings (Settings → Personalize → Logos) are the book cover.
 - A device that switched itself off (or was switched off from the lock screen) boots into the
   page that was being read and reopens the book in Kobalt, when the PocketBook's "Open last
   book at startup" setting is on.
@@ -123,7 +124,8 @@ would for the built-in reader; a copy from before Kobalt's first write is
   above.
 - **Standby**: the sleep screen is updated a moment after each page turn while the device is
   awake; the lock screen the firmware shows is therefore the page you were reading. The same
-  image is copied to the firmware's power-off cover file at every standby. A capture of the page
+  page or cover under a "Powered off" tile is written to the firmware's power-off cover file at
+  every standby (and at most every 30 s while reading, for a power-off straight from a page). A capture of the page
   is stored as the boot logo (through the firmware's own tool, which takes a few seconds in the
   background) after the book opens and at each standby. When the book is opened again after a
   power-off (by the firmware at boot, or by hand), Kobalt shows that capture while the book

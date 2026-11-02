@@ -260,9 +260,11 @@ void Host::taskBackground() {
         syncClock.start();
         syncPoll.start();
     }
-    // A power-off usually follows a standby (long press on the lock screen): make sure the
-    // power-off image is the sleep screen's bitmap, not an older copy, and the boot logo with it.
-    writePowerOffImage();
+    // A power-off usually follows a standby (long press on the lock screen): write the power-off
+    // image for the sleep screen just presented (its page or cover under the "Powered off"
+    // status, so the two screens tell apart as on Kobo), not an older one, and the boot logo
+    // with it. The reader reuses its sleep image for it, so this is a tile paint and a write.
+    writePowerOffImage(reader->composePowerOffImage());
     if (usbPlug) {
         forgetBootLogo();
         qInfo("kobalt-pb: USB connected: boot capture forgotten");
@@ -356,7 +358,8 @@ void Host::refreshSleepScreen(const char *reason) {
     composingSleepImage = true;
     QElapsedTimer composeClock;
     composeClock.start();
-    const QImage image = reader->composeSleepImage();
+    QImage powerOff;
+    const QImage image = reader->composeSleepImage(&powerOff);
     composingSleepImage = false;
     if (composeClock.elapsed() > 30)
         qInfo("kobalt-pb: sleep image composed in %lld ms", static_cast<long long>(composeClock.elapsed()));
@@ -373,7 +376,7 @@ void Host::refreshSleepScreen(const char *reason) {
     sleepRefreshRetries = 0;
     QPointer<Host> self(this);
     const QString why = QString::fromLatin1(reason);
-    const bool queued = writeLockImagesAsync(image, [self, why](bool ok) {
+    const bool queued = writeLockImagesAsync(image, powerOff, [self, why](bool ok) {
         if (!self || quitting)
             return;
         if (ok && !self->bootLogoForBook && !self->asleep) {

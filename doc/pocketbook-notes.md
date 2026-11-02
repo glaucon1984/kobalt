@@ -561,6 +561,20 @@ Book 441 had no row in the library backup taken before this fix was installed, r
 `native-save-start` and `verified`. That save needs a valid row from the opening on, so the firmware must
 add an empty row when it launches Kobalt. Inferred from the log, as the row was not read during launch.
 
+### A power-off screen of its own (2026-11-02)
+
+The power-off file (`system/logo/bookcover`) used to be a copy of the lock bitmap, so a device
+that had switched itself off looked exactly like one on standby. On Kobo the power-off screen is
+the same backdrop composed with the "Powered off" status (light paper, no battery), and the same
+now happens here: `composeSleepImage()` composes the power-off image from the page capture it
+already has (one copy of the frame, a tile paint), the lock-image writer keeps it as an 8-bit
+panel-sized image (2 MB) and writes it at the old pace (first lock image of the book, then at
+most every 30 s), and the standby sequence writes a fresh one through `composePowerOffImage()`,
+which reuses the sleep image just presented (`powerScreenSnapshot()`, as the Kobo host does), so
+the standby adds a tile paint and a 0.1 s write, not another capture. A reader that gives no
+power-off image (stock sleep screen) leaves the old copy of the lock bitmap. Logged as
+`power-off image written (standby)`; `(standby, pending)` is the fallback path.
+
 ## Name and icon on the PocketBook home screen (manual firmware files)
 
 These live in the firmware's user config, not in the app package, so a plain copy of the zip

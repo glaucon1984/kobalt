@@ -55,7 +55,16 @@ public:
     virtual void wakeReader() = 0;
     // The sleep image the reader would present now, or a null image when none applies. For
     // hosts whose sleep screen is a cached file that must be kept current while reading.
-    virtual QImage composeSleepImage() {
+    // With `powerOff`, the power-off image for the same backdrop is composed from the one page
+    // capture as well (the sleep screen's page or cover under the powered-off status), for hosts
+    // whose firmware shows a file at power-off too.
+    virtual QImage composeSleepImage(QImage *powerOff = nullptr) {
+        (void)powerOff;
+        return {};
+    }
+    // The power-off image for the current sleep backdrop: while the reader is asleep it reuses
+    // the sleep image it presented (cheap), otherwise it captures the page as above.
+    virtual QImage composePowerOffImage() {
         return {};
     }
     virtual void progressTick() = 0;

@@ -88,7 +88,8 @@ public:
     void cancelWake() override;
     void sleepViewReady() override;
     void wakeReader() override;
-    QImage composeSleepImage() override;
+    QImage composeSleepImage(QImage *powerOff = nullptr) override;
+    QImage composePowerOffImage() override;
     QImage cachedSleepCoverBackground(QSize size);
     void progressTick() override;
     void refreshHostPresentation() override;

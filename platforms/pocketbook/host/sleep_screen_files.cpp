@@ -30,7 +30,10 @@ const char *lockPortrait = "/mnt/ext1/system/resources/Line/taskmgr_lock_backgro
 // the book cover (offlogo=@cover_logo); read at shutdown, not cached. Same 8-bit BMP format.
 const char *powerOffCover = "/mnt/ext1/system/logo/bookcover";
 QElapsedTimer lastPowerOffCopy; // under writeMutex
-bool powerOffStale = false; // lock bitmap written since the last copy; under writeMutex
+bool powerOffStale = false; // a newer power-off picture than the file's; under writeMutex
+// The power-off composition for the lock bitmap on disk, turned to the panel, 8-bit (2 MB at
+// panel size); null when the reader gave none (the lock bitmap is copied then). Under writeMutex.
+QImage pendingPowerOff;
 const int powerOffCopyIntervalMs = 30000;
 bool bootLogoInFlight = false; // GUI thread only
 const int bootLogoTimeoutMs = 60000;
@@ -96,6 +99,20 @@ int panelRotation() {
     return 0;
 }
 
+// The sleep or power-off image, composed in the reader's logical orientation, as the panel
+// shows it: turned the way the plugin turns every frame (so the lock screen reads the way the
+// device is held) and fitted to the portrait panel.
+QImage toPanel(const QImage &image, int rotation) {
+    const QSize panel = panelSize();
+    QImage turned = rotation ? image.transformed(QTransform().rotate(rotation)) : image;
+    return turned.size() == panel ? turned : reader::sleepCoverBackground(turned, panel);
+}
+
+void powerOffWritten() {
+    lastPowerOffCopy.start();
+    powerOffStale = false;
+}
+
 // Copies the lock bitmap on disk to the power-off file (atomically: a shutdown in the middle
 // must not leave a torn file). Caller holds writeMutex.
 bool copyLockToPowerOffLocked() {
@@ -111,56 +128,71 @@ bool copyLockToPowerOffLocked() {
     if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size())
         return false;
     const bool ok = file.commit();
-    if (ok) {
-        lastPowerOffCopy.start();
-        powerOffStale = false;
-    }
+    if (ok)
+        powerOffWritten();
     return ok;
 }
 
-bool writeLockImagesNow(const QImage &image, int rotation) {
+// Writes the pending power-off composition, or without one a copy of the lock bitmap (the
+// sleep screen's picture, status and all). Caller holds writeMutex.
+bool flushPowerOffLocked() {
+    if (pendingPowerOff.isNull())
+        return copyLockToPowerOffLocked();
+    backupOnce(powerOffCover);
+    const bool ok = writeBmp8(pendingPowerOff, powerOffCover);
+    if (ok)
+        powerOffWritten();
+    return ok;
+}
+
+// `paced`: also write the power-off file when its pace allows (the page-turn path); the standby
+// path writes it right afterwards with a fresh composition (writePowerOffImage), so it skips this.
+bool writeLockImagesNow(const QImage &image, const QImage &powerOff, int rotation, bool paced) {
     std::lock_guard<std::mutex> guard(writeMutex);
     QElapsedTimer clock;
     clock.start();
     QDir().mkpath(lineDir);
     backupOnce(lockPortrait);
-    const QSize panel = panelSize();
-    // The sleep image is composed in the reader's logical orientation; turn it the way the
-    // plugin turns every frame, so the lock screen reads the way the device is held.
-    QImage turned = rotation ? image.transformed(QTransform().rotate(rotation)) : image;
-    const QImage portrait = turned.size() == panel ? turned : reader::sleepCoverBackground(turned, panel);
-    const bool ok = writeBmp8(portrait, lockPortrait);
+    const bool ok = writeBmp8(toPanel(image, rotation), lockPortrait);
     qInfo("kobalt-pb: lock image %s (rotation %d) in %lld ms", ok ? "written" : "NOT written", rotation,
           static_cast<long long>(clock.elapsed()));
+    if (!ok)
+        return false;
     // The power-off file follows at a slower pace (the first write of the book, then at most
-    // every 30 s while reading); a standby copies whatever is still pending (writePowerOffImage).
-    if (ok)
-        powerOffStale = true;
-    if (ok && (!lastPowerOffCopy.isValid() || lastPowerOffCopy.elapsed() >= powerOffCopyIntervalMs)) {
-        const bool copied = copyLockToPowerOffLocked();
-        qInfo("kobalt-pb: power-off image %s", copied ? "written" : "NOT written");
+    // every 30 s while reading); a standby writes whatever is still pending (writePowerOffImage).
+    // Kept 8-bit: the bitmap's own form, a quarter of the composed image.
+    pendingPowerOff = powerOff.isNull() ? QImage() : toPanel(powerOff, rotation).convertToFormat(QImage::Format_Grayscale8);
+    powerOffStale = true;
+    if (paced && (!lastPowerOffCopy.isValid() || lastPowerOffCopy.elapsed() >= powerOffCopyIntervalMs)) {
+        const bool written = flushPowerOffLocked();
+        qInfo("kobalt-pb: power-off image %s", written ? "written" : "NOT written");
     }
-    return ok;
+    return true;
 }
 }
 
-bool writePowerOffImage() {
+bool writePowerOffImage(const QImage &image) {
+    const int rotation = image.isNull() ? 0 : panelRotation();
     std::lock_guard<std::mutex> guard(writeMutex);
-    if (!powerOffStale || !QFile::exists(lockPortrait))
+    if (!image.isNull()) {
+        pendingPowerOff = toPanel(image, rotation).convertToFormat(QImage::Format_Grayscale8);
+        powerOffStale = true;
+    }
+    if (!powerOffStale || (pendingPowerOff.isNull() && !QFile::exists(lockPortrait)))
         return false;
     QElapsedTimer clock;
     clock.start();
-    const bool ok = copyLockToPowerOffLocked();
-    qInfo("kobalt-pb: power-off image %s (standby) in %lld ms", ok ? "written" : "NOT written",
-          static_cast<long long>(clock.elapsed()));
+    const bool ok = flushPowerOffLocked();
+    qInfo("kobalt-pb: power-off image %s (standby%s) in %lld ms", ok ? "written" : "NOT written",
+          image.isNull() ? ", pending" : "", static_cast<long long>(clock.elapsed()));
     return ok;
 }
 
-bool writeLockImages(const QImage &image) {
+bool writeLockImages(const QImage &image, const QImage &powerOff) {
     if (image.isNull())
         return false;
     const int rotation = panelRotation();
-    const bool ok = writeLockImagesNow(image, rotation);
+    const bool ok = writeLockImagesNow(image, powerOff, rotation, false);
     if (ok) {
         lastWritten = image;
         lastRotation = rotation;
@@ -168,7 +200,7 @@ bool writeLockImages(const QImage &image) {
     return ok;
 }
 
-bool writeLockImagesAsync(const QImage &image, std::function<void(bool)> done) {
+bool writeLockImagesAsync(const QImage &image, const QImage &powerOff, std::function<void(bool)> done) {
     // Same image, same rotation: the bitmap on disk is current. The rotation is part of the
     // identity: a page reads the same upside down (same logical size), and the turn alone used
     // to be skipped, leaving the firmware the previous orientation's bitmap until the wake
@@ -178,8 +210,8 @@ bool writeLockImagesAsync(const QImage &image, std::function<void(bool)> done) {
         return false;
     lastWritten = image;
     lastRotation = rotation;
-    std::thread([image, rotation, done = std::move(done)] {
-        const bool ok = writeLockImagesNow(image, rotation);
+    std::thread([image, powerOff, rotation, done = std::move(done)] {
+        const bool ok = writeLockImagesNow(image, powerOff, rotation, true);
         QMetaObject::invokeMethod(QCoreApplication::instance(), [ok, done] { done(ok); }, Qt::QueuedConnection);
     }).detach();
     return true;
