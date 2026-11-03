@@ -170,8 +170,14 @@ bool restoreStandbyLight(const char *why) {
     const bool scheduled = fields.size() > 1 && fields[1] == "auto";
     if (scheduled) {
         // Whatever the level was (the curve may have been at zero at the standby): the light on
-        // and the schedule with it, and the firmware applies its curve's value for now.
-        setAutomaticBrightness(true);
+        // and the schedule with it. The schedule's flag may well be on already (the firmware
+        // keeps it across a power-off, and only the on/off flag was cleared), and a plain "on"
+        // then sends nothing; off and on again makes the firmware apply its curve's value now.
+        setFrontlightEnabled(true);
+        if (hasAutomaticBrightness()) {
+            autoBrightness().setEnabled(0);
+            autoBrightness().setEnabled(1);
+        }
         qInfo("kobalt-pb: frontlight back on with the schedule (%s)", why);
         return true;
     }

@@ -647,6 +647,39 @@ start after a power-off) switches it back on, whatever the level was: the curve 
 at the standby (a schedule may well have dark hours; `-1` in the file is the firmware's "off"),
 and the firmware applies its current value once the schedule is on again.
 
+### The lock switches the light off itself; the power-off wake is what needs the record (2026-11-03)
+
+Diego, twice: with the schedule on and the light on, standby → timed power-off → power on left
+the light at 0 % with the option still ticked. `kobalt.log` 23:40–00:16: the standby line has
+no `frontlight off` suffix, i.e. `GetFrontlightEnabled()` was already 0 when the standby
+sequence ran (the firmware's lock switches the light off itself, before EVT_BACKGROUND reaches
+the app), so nothing was recorded; at the power-off wake the firmware had lit the panel again
+(`frontlight on at 74`), Kobalt set level 0 and the flag off, the firmware persisted that, and
+with no record the next start restored nothing. So the standby darkening is normally a no-op
+and the power-off wake is where the light must be recorded: it now goes through
+`darkenForStandby()` too (record + dark), and `standbyLightOff` is set so the fallback wake
+restores as well. The restore with the schedule now switches the on/off flag on and the
+schedule off and on again: the schedule's flag survives the power-off, and a plain "on" would
+send no message, so the firmware would not apply its curve. The earlier manual test (17:20)
+had its suffix only because that EVT_BACKGROUND was the power-off's, with the task awake.
+
+### The PIN screen after a timed power-off (2026-11-03)
+
+Diego: the PIN screen came up dark after a timed power-off, the light only came on while
+entering the PIN. The firmware saves the light state at shutdown and brings it back at boot,
+before the PIN screen, and what it saves is what its monitor last applied: a test build wrote
+"on at 73 with the schedule" into the shared light state (`ivmpc->fl`, +0x446c: version, mode
+byte, colour, brightness; checked by `hw_set_frontlight_enabled`'s and
+`hw_set_frontlight_auto_enabled`'s offsets) right after the power-off's EVT_BACKGROUND, without
+the message, and the next boot's shared state read mode 0x02, brightness 0 all the same.
+`/mnt/secure/frontlight.dat` (the store path from `device_frontlight_store`) is unreadable to
+the app. So "saved on, panel dark" is not available to an app; the light in the PIN screen was
+Kobalt's own restore: the firmware launches the last book at about 7 s of uptime, behind the
+PIN screen, and `Host::start()` ran 9 s later, after the font setup. The restore now runs in
+`main()` right after the QApplication (inkview attached by the plugin, 0.2 s after launch),
+with the one in `start()` kept as a fallback. The silent write and the persistence log were
+removed again.
+
 ## Name and icon on the PocketBook home screen (manual firmware files)
 
 These live in the firmware's user config, not in the app package, so a plain copy of the zip

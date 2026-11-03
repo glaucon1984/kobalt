@@ -33,12 +33,13 @@ bool hasAutomaticBrightness();
 bool automaticBrightness();
 // Returns whether the firmware reports the new state afterwards.
 bool setAutomaticBrightness(bool enabled);
-// Kobalt switched the light off for a standby at this level: both flag and level are set to
-// off/0 (the brightness schedule, which would hold the level, is switched off for the standby
-// too), so that the resume the timed power-off causes finds nothing to light, and the level and
-// the schedule are recorded on disk, because the firmware keeps the off state across a
-// power-off and Kobalt's next start has to switch the light back on (restoreStandbyLight).
-// -1 when the light was off.
+// Kobalt switches the light off at this level: both flag and level are set to off/0 (the
+// brightness schedule, which would hold the level, is switched off too), and the level and the
+// schedule are recorded on disk, because the firmware keeps the off state across a power-off
+// and Kobalt's next start has to switch the light back on (restoreStandbyLight). -1 when the
+// light was off already. At a standby the firmware has usually switched the light off itself
+// by the time Kobalt runs (nothing to do then); at the wake its timed power-off causes it has
+// lit the panel again, and this is what keeps the power-off dark.
 int darkenForStandby();
 // Switches the light back on at the recorded level and forgets the record. False when none.
 bool restoreStandbyLight(const char *why);

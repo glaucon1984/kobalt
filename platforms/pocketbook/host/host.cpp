@@ -190,7 +190,8 @@ void Host::start() {
         return;
     started = true;
     // A power-off (timed, or by hand from the lock screen) while Kobalt had the light off for
-    // the standby: the firmware keeps the light off across it, so switch it back on now.
+    // the standby: the firmware keeps the light off across it. Normally switched back on at
+    // launch already (main); this catches a record that launch could not act on.
     restoreStandbyLight("start");
     showFullScreen();
     if (!startPath.isEmpty())
@@ -249,7 +250,10 @@ QImage Host::capturePanel() {
 void Host::taskBackground() {
     if (powerOffWakeHold) {
         // The timed power-off's own background event: the task never woke, the images written
-        // at the standby stand, and the firmware shows the power-off logo next.
+        // at the standby stand, and the firmware shows the power-off logo next. The light stays
+        // off, and so the firmware saves it (it saves what its monitor last applied; a write
+        // into the shared light state without the message was not saved): the next launch
+        // switches it on (main).
         powerOffWakeHold = false;
         powerOffWakeFallback.stop();
         updateKeepAwake();
@@ -303,9 +307,10 @@ void Host::taskBackground() {
     ::sync();
     // The firmware lights the panel again at every resume, including the one its timed
     // power-off causes from standby, which lit the screen for a few seconds on the way to off.
-    // The lock screen is drawn by now, so switch the light off here; a wake by a press switches
-    // it on again (finishWake), the power-off wake leaves it off (quietForeground). Not for a PC
-    // plug, which ends the app under the firmware's prompt.
+    // The lock itself switches the light off before this runs (seen: the flag reads off here),
+    // so this is usually nothing; when it is not, a wake by a press switches the light on again
+    // (finishWake) and the power-off wake leaves it off (quietForeground). Not for a PC plug,
+    // which ends the app under the firmware's prompt.
     standbyLightOff = !usbPlug && darkenForStandby() >= 0;
     qInfo("kobalt-pb: sleep sequence done (standby)%s", standbyLightOff ? ", frontlight off" : "");
 }
@@ -334,11 +339,13 @@ void Host::taskForeground() {
         powerOffWakeHold = true;
         updateKeepAwake();
         powerOffWakeFallback.start();
-        // The firmware may light the panel at the resume regardless of the flag and level it
-        // was left with: level zero again (its message always goes out), flag off.
+        // The firmware lights the panel at the resume (seen: on at the level it had before the
+        // standby, which the lock itself had switched off): off again, and recorded, since the
+        // firmware keeps this off state across the power-off and the next start restores it.
         qInfo("kobalt-pb: power-off wake: frontlight %s at %d, kept dark", frontlightEnabled() ? "on" : "off",
               frontlightLevel());
-        applyFrontlight(0);
+        if (darkenForStandby() >= 0)
+            standbyLightOff = true;
         return;
     }
     finishWake("press");

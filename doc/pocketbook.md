@@ -138,14 +138,13 @@ would for the built-in reader; a copy from before Kobalt's first write is
   at the next boot.
 - **Automatic power-off**: when the PocketBook switches itself off after a standby (its
   Power-off timeout), the firmware wakes the device for a moment to do it, which used to light
-  the screen and show the page for a few seconds on the way to the power-off screen. Kobalt now
-  switches the frontlight off itself once the device is behind the lock screen, and when a wake
-  arrives at the moment the firmware's power-off timer is due it keeps the page and the light
-  off and lets the firmware power off. Waking the device by hand switches the light back on,
-  and so does the next start of Kobalt after a power-off (the firmware keeps the light off
-  across it); a press in the last seconds before the timer was due shows the page after a
-  short delay. Kobalt's brightness slider switches the light on from zero, as the firmware's
-  own panel does.
+  the screen and show the page for a few seconds on the way to the power-off screen. When a
+  wake arrives at the moment the firmware's power-off timer is due, Kobalt now keeps the page
+  off, switches the light off again and lets the firmware power off. The firmware keeps the
+  light off across that power-off, so Kobalt switches it back on (with the brightness schedule,
+  if it was on) when it starts again. Waking the device by hand works as before; a press in the
+  last seconds before the timer was due shows the page after a short delay. Kobalt's brightness
+  slider switches the light on from zero, as the firmware's own panel does.
 - **Reopening at boot**: Kobalt registers the open book with the firmware the way KOReader
   does, so the firmware's "Open last book at startup" (on by default) launches Kobalt with it
   after a power-off. Closing the book in Kobalt clears that, and the device boots to its home

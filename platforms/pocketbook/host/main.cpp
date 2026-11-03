@@ -1,6 +1,7 @@
 // Kobalt on PocketBook (spike): opens the EPUB given on the command line with Kobalt's reader,
 // drawn through inkview by the statically linked pbink platform plugin.
 #include "host.h"
+#include "firmware_power.h"
 #include "assets/assets.h"
 #include "assets/bundled_fonts.h"
 #include "dictionaries/manager.h"
@@ -82,6 +83,11 @@ int main(int argc, char **argv) {
     app.setApplicationName("Kobalt");
     app.setOrganizationName("Kobalt");
     app.setStyle("Fusion");
+    // The firmware launches the last book a few seconds into the boot, behind its PIN screen,
+    // and keeps the light off across a power-off that Kobalt kept dark (the timed one): switch
+    // it on now that inkview is attached (the platform plugin's construction), before the fonts
+    // and the rest of the start, which take several seconds the PIN screen would spend dark.
+    pocketbook::restoreStandbyLight("launch");
 
     AssetBundle assets(base + "/assets", QStringLiteral(KOBALT_VERSION));
     if (!assets.available() || !ui::initializeInterfaceFonts(assets)) {
