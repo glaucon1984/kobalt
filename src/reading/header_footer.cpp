@@ -1,4 +1,5 @@
 #include "header_footer.h"
+#include "remaining_time.h"
 #include "reading_progress.h"
 #include "support/strings.h"
 
@@ -33,9 +34,13 @@ QString pageFraction(int page, int pages) {
     return pages > 0 ? strings::get("common.page_fraction").arg(page).arg(pages) : QString();
 }
 // A standalone estimate remains approximate while reading history accumulates.
-QString timeLeft(qint64 milliseconds, bool learningPace) {
+QString timeLeft(qint64 milliseconds, bool learningPace, bool approximate) {
     if (milliseconds < 0)
         return learningPace ? strings::get("header_footer.learning_pace") : QString();
+    if (approximate) {
+        const auto duration = remainingTime::approximateDuration(milliseconds);
+        return duration.isEmpty() ? QString() : strings::get("header_footer.time_left").arg(duration);
+    }
     const qint64 minutes = qMax<qint64>(1, (milliseconds + 30000) / 60000);
     const auto time = minutes < 60 ? strings::get("stats.duration_minutes").arg(minutes)
                                    : strings::get("stats.duration_hours").arg(minutes / 60).arg(minutes % 60);
@@ -84,6 +89,13 @@ Layout presetLayout(Preset preset) {
         layout.uppercase[1] = true;
         layout.progressBar = false;
         break;
+    case Preset::Phone:
+        layout.slotFields = {Field::Nothing, Field::Nothing, Field::Nothing,
+                             Field::ChapterPagesLeft, Field::Nothing, Field::BookPercent};
+        layout.headerEnabled = false;
+        layout.uppercase.fill(false);
+        layout.progressBar = false;
+        break;
     case Preset::AlternativeA:
         layout.slotFields = {Field::Time,    Field::ChapterAndPage, Field::Nothing,
                              Field::Nothing, Field::TitleAndPage,   Field::Nothing};
@@ -106,6 +118,8 @@ QString presetValue(Preset preset) {
         return QStringLiteral("alternative_a");
     case Preset::AlternativeB:
         return QStringLiteral("alternative_b");
+    case Preset::Phone:
+        return QStringLiteral("phone");
     case Preset::Custom:
         return QStringLiteral("custom");
     }
@@ -263,8 +277,16 @@ QJsonObject textSettings(const Layout &layout) {
     return result;
 }
 
-Selection select(const QJsonObject &preferences) {
+Selection select(const QJsonObject &preferences, bool phone) {
     auto selection = selectLayout(preferences);
+    bool explicitLayout = false;
+    for (const auto *key : {presetKey, customKey, textKey, "show_header", "show_footer", "show_clock",
+                            "show_progress_bar", "header_text_size", "footer_text_size"})
+        explicitLayout |= preferences.contains(key);
+    if (phone && !explicitLayout) {
+        selection.preset = Preset::Phone;
+        selection.layout = presetLayout(Preset::Phone);
+    }
     const auto text = preferences.value(textKey).toObject();
     readSize(text, "header_size", "header_font_size", selection.layout.headerSize, selection.layout.headerEnabled);
     readSize(text, "footer_size", "footer_font_size", selection.layout.footerSize, selection.layout.footerEnabled);
@@ -326,10 +348,10 @@ Content content(Field field, const Values &values, bool uppercase) {
         result.text = values.time;
         break;
     case Field::ChapterTimeLeft:
-        result.text = timeLeft(values.chapterMilliseconds, values.learningPace);
+        result.text = timeLeft(values.chapterMilliseconds, values.learningPace, values.approximateTime);
         break;
     case Field::BookTimeLeft:
-        result.text = timeLeft(values.bookMilliseconds, values.learningPace);
+        result.text = timeLeft(values.bookMilliseconds, values.learningPace, values.approximateTime);
         break;
     case Field::ChapterPercent:
         result.text = percentDone(values.chapterPage, values.chapterPages);
@@ -420,6 +442,8 @@ QString presetLabel(Preset preset) {
         return strings::get("header_footer.preset.alternative_a");
     case Preset::AlternativeB:
         return strings::get("header_footer.preset.alternative_b");
+    case Preset::Phone:
+        return strings::get("header_footer.preset.phone");
     case Preset::Custom:
         return strings::get("header_footer.preset.custom");
     }

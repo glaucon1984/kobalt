@@ -1,14 +1,17 @@
 #!/bin/bash
 set -euo pipefail
-if [[ $# -ne 1 || ! "$1" =~ ^qt[56](-eval)?$ ]]; then
-    echo "Usage: bash platforms/kobo/build.sh qt5|qt6|qt5-eval|qt6-eval" >&2
+if [[ $# -ne 1 || ! "$1" =~ ^qt[56](-eval|-diagnostic)?$ ]]; then
+    echo "Usage: bash platforms/kobo/build.sh qt5|qt6|qt5-eval|qt6-eval|qt5-diagnostic|qt6-diagnostic" >&2
     exit 2
 fi
 target=$1
+diagnostics=${KOBALT_VERBOSE_DIAGNOSTICS:-ON}
+[[ "$target" != *-diagnostic ]] || diagnostics=ON
+[[ "$diagnostics" == ON || "$diagnostics" == OFF ]] || { echo 'KOBALT_VERBOSE_DIAGNOSTICS must be ON or OFF' >&2; exit 2; }
 root=$(cd "$(dirname "$0")/../.." && pwd)
 jobs=${JOBS:-2}
 [[ "$jobs" =~ ^[1-9][0-9]*$ ]] || { echo "JOBS must be positive" >&2; exit 2; }
-image=$(sh "$root/platforms/sdk-image.sh" "${target%-eval}")
+image=$(sh "$root/platforms/sdk-image.sh" "${target%%-*}")
 engine=${CONTAINER_ENGINE:-docker}
 sdk_id=$("$engine" image inspect "$image" --format '{{.Id}}')
 info=$(cmake -P "$root/platforms/source-info.cmake")
@@ -37,10 +40,11 @@ trap 'exit 143' TERM
     --workdir /work/platforms/kobo "$image" bash -euc '
         started=$SECONDS
         cmake --preset "$1" \
-            -DKOBALT_SDK_ID="$5" -DKOBALT_DEPENDENCY_JOBS="$2" -DKOBALT_COMMIT="$3" -DKOBALT_COMMIT_MODIFIED="$4"
+            -DKOBALT_SDK_ID="$5" -DKOBALT_DEPENDENCY_JOBS="$2" -DKOBALT_COMMIT="$3" -DKOBALT_COMMIT_MODIFIED="$4" \
+            -DKOBALT_VERBOSE_DIAGNOSTICS="$6"
         echo "Configure: $((SECONDS - started)) seconds"
         started=$SECONDS
         cmake --build --preset "$1" --parallel "$2"
         cmake --build --preset "$1" --target check-package
         echo "Build and package: $((SECONDS - started)) seconds"
-    ' kobalt-build "$target" "$jobs" "$commit" "$modified" "$sdk_id"
+    ' kobalt-build "$target" "$jobs" "$commit" "$modified" "$sdk_id" "$diagnostics"

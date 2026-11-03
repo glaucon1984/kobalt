@@ -55,8 +55,10 @@ Qt::ScreenOrientation shownOrientation(const QScreen *screen) {
 }
 
 ReaderOrientation::ReaderOrientation(QOrientationSensor *sensor, std::function<void(Qt::ScreenOrientation)> turn,
-                                     std::function<void(bool)> rotationOwnership)
+                                     std::function<void(bool)> rotationOwnership,
+                                     std::function<bool()> nativeRotationAllowed)
     : rotationOwnership(std::move(rotationOwnership)),
+      nativeRotationAllowed(std::move(nativeRotationAllowed)),
 #ifndef KOBALT_NO_SENSORS
       sensor(sensor),
 #endif
@@ -87,8 +89,12 @@ void ReaderOrientation::configure(const QJsonObject &settings) {
 }
 void ReaderOrientation::start(Qt::ScreenOrientation orientation) {
     if (active) {
-        // Wake can arrive before the sleep view hides the reader.
-        frozen = false;
+        // Wake can arrive before the sleep view hides the reader. Native PIN
+        // rotation may still have changed the screen while we were frozen.
+        if (frozen) {
+            frozen = false;
+            apply(currentOrientation);
+        }
         return;
     }
     const bool waking = sleeping;
@@ -106,14 +112,17 @@ void ReaderOrientation::start(Qt::ScreenOrientation orientation) {
     if (rotationOwnership) {
         rotationOwnership(true);
     }
-    auto initial = waking ? currentOrientation : Qt::PrimaryOrientation;
+    // Quarter-turn sleep restores Nickel's geometry in currentOrientation.
+    // freeze() kept the reading orientation separately, so waking does not
+    // need another sensor sample to restore it.
+    auto initial = waking ? heldOrientation : Qt::PrimaryOrientation;
 #ifndef KOBALT_NO_SENSORS
     if (sensor) {
         if (!waking) {
             sensor->addFilter(this);
         }
         const auto *reading = sensor->isActive() ? sensor->reading() : nullptr;
-        // Sleep samples are discarded. The cache still predates sleep.
+        // Sleep and PIN samples must not replace the saved reading orientation.
         if (reading && !waking) {
             heldOrientation = readingOrientation(reading);
             latestReading = reading->orientation();
@@ -201,6 +210,8 @@ void ReaderOrientation::freeze() {
     heldOrientation = currentOrientation;
 }
 void ReaderOrientation::rotate() {
+    if (frozen)
+        return;
     setAutomatic(false);
     manualOrientation = currentOrientation == Qt::InvertedLandscapeOrientation
                             ? Qt::PortraitOrientation
@@ -243,7 +254,7 @@ void ReaderOrientation::setBlocked(bool value) {
 #ifndef KOBALT_NO_SENSORS
 bool ReaderOrientation::filter(QOrientationReading *reading) {
     if (sleeping || frozen) {
-        return false;
+        return nativeRotationAllowed && nativeRotationAllowed();
     }
     if (!active) {
         return true;

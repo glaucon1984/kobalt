@@ -2,6 +2,62 @@
 "reader.book_beautifier" = "Book normalization";
 
 /* acknowledgments */
+"common.save" = "Save";
+"bookmarks.pin" = "Pin bookmark";
+"bookmarks.modify" = "Modify pinned bookmark";
+"bookmarks.actions" = "Bookmark actions";
+"bookmarks.remove_this" = "Remove this bookmark";
+"bookmarks.edit_pin" = "Edit pinned bookmark";
+"bookmarks.pin_name" = "Bookmark name";
+"bookmarks.pin_limit" = "You can pin up to eight bookmarks in this book. Remove a pinned bookmark to add another.";
+"bookmarks.icon_map" = "Map";
+"bookmarks.icon_star" = "Star";
+"bookmarks.icon_bookmark" = "Bookmark";
+"bookmarks.icon_compass" = "Compass";
+"bookmarks.icon_dictionary" = "Dictionary";
+"bookmarks.icon_chapters" = "Chapters";
+"bookmarks.icon_home" = "Home";
+"bookmarks.icon_link" = "Link";
+"bookmarks.icon_flag" = "Flag";
+"bookmarks.icon_heart" = "Heart";
+"bookmarks.icon_note" = "Note";
+"bookmarks.icon_lightbulb" = "Lightbulb";
+"bookmarks.icon_globe" = "Globe";
+"bookmarks.icon_mountains" = "Mountains";
+"bookmarks.icon_tree" = "Tree";
+"bookmarks.icon_sun" = "Sun";
+"bookmarks.icon_moon" = "Moon";
+"bookmarks.icon_clock" = "Clock";
+"bookmarks.icon_calendar" = "Calendar";
+"bookmarks.icon_person" = "Person";
+"bookmarks.icon_people" = "People";
+"bookmarks.icon_crown" = "Crown";
+"bookmarks.icon_key" = "Key";
+"bookmarks.icon_sword" = "Sword";
+"bookmarks.icon_pencil" = "Pencil";
+"bookmarks.icon_quotes" = "Quotes";
+"bookmarks.icon_question" = "Question";
+"bookmarks.icon_check" = "Check";
+"bookmarks.icon_warning" = "Warning";
+"bookmarks.icon_chat" = "Chat";
+"bookmarks.icon_scroll" = "Scroll";
+"bookmarks.icon_image" = "Image";
+"bookmarks.icon_search" = "Search";
+"bookmarks.icon_eye" = "Eye";
+"bookmarks.icon_lock" = "Lock";
+"bookmarks.icon_books" = "Books";
+"bookmarks.icon_castle" = "Castle";
+"bookmarks.icon_anchor" = "Anchor";
+"bookmarks.icon_paw" = "Paw";
+"bookmarks.icon_flower" = "Flower";
+"bookmarks.icon_coffee" = "Coffee";
+"bookmarks.icon_music" = "Music";
+"bookmarks.icon_rocket" = "Rocket";
+"bookmarks.icon_planet" = "Planet";
+"bookmarks.icon_lightning" = "Lightning";
+"bookmarks.icon_flame" = "Flame";
+"bookmarks.icon_skull" = "Skull";
+"bookmarks.icon_diamond" = "Diamond";
 "acknowledgments.acknowledgments" = "Acknowledgments";
 "acknowledgments.kobalt_is_distributed_under_the_gnu_agpl_v3_without_any_warranty" = "Kobalt is distributed under the GNU AGPL v3, without any warranty.";
 "acknowledgments.group_author" = "Also by the author";
@@ -209,6 +265,7 @@
 "controls.publisher_default" = "Publisher default";
 
 /* dictionary_panel */
+"dictionary_panel.search_in_book" = "Search in book";
 "dictionary_panel.choose_dictionary" = "Choose dictionary";
 "dictionary_panel.close_definition" = "Close definition";
 "dictionary_panel.edit_lookup" = "Edit lookup";
@@ -378,6 +435,7 @@
 "header_footer.preset.default" = "Kobalt";
 "header_footer.preset.alternative_a" = "Bookish";
 "header_footer.preset.alternative_b" = "Ember";
+"header_footer.preset.phone" = "Phone";
 "header_footer.preset.custom" = "Custom";
 /* Arguments: %1, %2 */
 "header_footer.page_of" = "%1 of %2";
@@ -419,6 +477,14 @@
 
 /* image */
 "image.unavailable" = "Image could not be loaded";
+"image.title" = "Image Viewer";
+"image.loading" = "Loading image…";
+"image.close" = "Close image";
+"image.fit" = "Fit image";
+"image.zoom_suggestion" = "Zoom image";
+"image.dismiss_suggestion" = "Dismiss image suggestion";
+"image.zoom_in" = "Zoom in";
+"image.zoom_out" = "Zoom out";
 
 /* light_panel */
 "light_panel.automatic_brightness" = "Automatic brightness";
@@ -505,6 +571,8 @@
 "reader.debug_progress" = "Debug progress";
 "reader.defaults_selected" = "Defaults selected";
 "reader.duplicate_current_update" = "Duplicate current update";
+"settings.light_gesture_feedback" = "Show frontlight gesture pop-up";
+"settings.light_gesture_feedback_description" = "Show the level after a pause in swiping. Turn off to adjust the light without a pop-up or its cleanup refresh.";
 "reader.edge_light" = "Swipe along edges to adjust frontlight";
 "reader.enable_page_animations" = "Page turn animations";
 "reader.exit" = "Exit Kobalt";
@@ -620,7 +688,8 @@
 "search_panel.searching" = "Searching…";
 
 /* settings */
-"settings.animations_description" = "Animate page turns on supported devices. Images refresh after the sweep.";
+"settings.animations_uncertain_description" = "Page animations may not be supported on this device. Turn this off if they do not work correctly.";
+"settings.animations_description" = "Page animations are supported on this device.";
 "settings.unsupported_caption" = "Disabled: unsupported on this device.";
 "settings.unsupported_description" = "Disabled because this option is not supported on this device.";
 "settings.dark_description" = "Light text on a dark background.";
@@ -671,7 +740,6 @@
 "settings.section_book_content" = "Book content";
 "settings.section_words_letters" = "Words and letters";
 "settings.section_page_breaks" = "Page breaks";
-"settings.section_smart_styling" = "Smart styling";
 "settings.styling_preview_same" = "These sample pages look the same with every option.";
 "settings.justification_tracking" = "Justification tracking";
 "settings.justification_tracking_off" = "Normal";
@@ -720,6 +788,7 @@
 "settings.edge_brightness_description" = "Swipe up or down along the left edge for brightness.";
 
 /* finish */
+"finish.dont_ask_again" = "Don’t ask again for this book";
 "finish.prompt" = "Have you finished this book?";
 "finish.still_reading" = "Still reading";
 "finish.mark_finished" = "Mark as finished";
@@ -764,8 +833,13 @@
 "bookmarks.save_failed" = "Could not save bookmarks. Your bookmarks have not changed. Check the available storage and try again.";
 "bookmarks.previous" = "Previous bookmarks";
 "bookmarks.next" = "Next bookmarks";
-"bookmarks.remove" = "Remove";
-"bookmarks.remove_prompt" = "Remove this bookmark?";
+"bookmarks.remove" = "Remove bookmark";
+"bookmarks.remove_prompt" = "Remove bookmark?";
+"bookmarks.remove_pinned_prompt" = "Remove pinned bookmark?";
+"bookmarks.remove_description" = "The bookmark will be removed from this book.";
+"bookmarks.remove_pinned_description" = "The bookmark and its shortcut will be removed from this book.";
+"bookmarks.add_current" = "Bookmark current page";
+"bookmarks.remove_current" = "Remove bookmarked page";
 /* Arguments: %1, %2 */
 "bookmarks.remove_detail" = "Page %1 · %2";
 "settings.refresh_smart" = "Smart";
@@ -922,12 +996,6 @@
 "settings.inherit_header_footer" = "Inherit header and footer from the last book";
 "settings.inherit_header_footer_description" = "New books start with the last book's header and footer. Books with saved settings keep them.";
 
-"settings.avoid_wasteful_styling" = "Reduce publisher spacing";
-"settings.avoid_wasteful_styling_description" = "Use Kobalt's page margins and reduce blank space at chapter starts.";
-"settings.avoid_wasteful_styling_changes" = "What this changes:";
-"settings.avoid_wasteful_styling_margins" = "Ignores the book's own page margins and padding, so your Layout margins apply.";
-"settings.avoid_wasteful_styling_breaks" = "Removes the space a book adds above text that starts on a new page, such as a chapter opening.";
-"settings.avoid_wasteful_styling_illustrations" = "Preserves the book's space above illustrations at chapter starts.";
 
 "settings.minimal_annotation_mode" = "Minimal annotation mode";
 "settings.minimal_annotation_mode_description" = "Hide the annotation bar. Tap text or blank space, then choose Stop highlighting to exit.";
@@ -1112,14 +1180,18 @@
 "settings.vertical_spacing_off" = "Normal";
 "settings.vertical_spacing_off_description" = "Keep the usual line spacing and top alignment.";
 "settings.vertical_spacing_expand" = "Expand line spacing";
+"settings.vertical_spacing_expand_short" = "Expand";
 "settings.vertical_spacing_expand_description" = "Spread spare height between lines. Keep the first line in place.";
 "settings.vertical_spacing_center" = "Center nearly full pages";
+"settings.vertical_spacing_center_short" = "Center";
 "settings.vertical_spacing_center_description" = "Center prose that occupies at least 90% of the reading height. Keep line spacing unchanged.";
 "settings.vertical_spacing_scope" = "Pages to adjust";
 "settings.vertical_spacing_scope_description" = "Choose which page gaps to adjust.";
 "settings.vertical_spacing_scope_all" = "All suitable pages";
+"settings.vertical_spacing_scope_all_short" = "All pages";
 "settings.vertical_spacing_scope_all_description" = "Also adjust ordinary pagination gaps on nearly full prose pages.";
 "settings.vertical_spacing_scope_protection" = "Only widow/orphan gaps";
+"settings.vertical_spacing_scope_protection_short" = "Widows only";
 "settings.vertical_spacing_scope_protection_description" = "Adjust only when widow/orphan protection moves lines that would otherwise fit.";
 
 "kosync.last_synced" = "Last synced: %1";
@@ -1156,19 +1228,39 @@
 
 /* widget keyboard */
 "keyboard.shift" = "Shift";
+"keyboard.caps_lock" = "Caps Lock on";
 "keyboard.symbols" = "Symbols";
 "keyboard.space" = "Space";
 "keyboard.backspace" = "Backspace";
 "keyboard.done" = "Done";
 
-"settings.beautifier_summary" = "Choose how text initials and ordinary paragraphs are normalized.";
-"settings.beautifier_description" = "Experimental. Checked rules apply to all books. Uncheck every rule to turn off. Your book files are never changed.";
+"settings.beautifier_summary" = "Choose a preset or customize how publisher styling is adjusted.";
+"settings.beautifier_description" = "Experimental. Applies to all books. Uncheck all rules to turn off. Book files are never changed.";
 "settings.beautifier_initials" = "Normalize opening letters";
-"settings.beautifier_initials_description" = "Turn recognized text drop caps into ordinary letters, keeping every character.";
+"settings.beautifier_initials_description" = "Turn text drop caps into ordinary letters.";
 "settings.beautifier_spacing" = "Remove paragraph gaps";
-"settings.beautifier_spacing_description" = "Remove extra space below ordinary prose. Keep recognized scene breaks and special passages.";
+"settings.beautifier_spacing_description" = "Keep recognized scene breaks and special passages.";
 "settings.beautifier_indent" = "Standardize first-line indents";
-"settings.beautifier_indent_description" = "Indent ordinary prose consistently. Your explicit paragraph adjustments take priority.";
-"settings.beautifier_active" = "On · %1 of 3 rules";
+"settings.beautifier_indent_description" = "Your paragraph adjustments take priority.";
 
 "common.done" = "Done";
+
+"settings.normalization_recommended" = "Recommended";
+"settings.normalization_full" = "Full";
+"settings.normalization_custom" = "Custom";
+"settings.normalization_margins" = "Use Kobalt page margins";
+"settings.normalization_margins_description" = "Use the margins set in Layout.";
+"settings.normalization_chapters" = "Reduce chapter-start spacing";
+"settings.normalization_chapters_description" = "Keep space above chapter-opening illustrations.";
+
+"settings.time_remaining_format" = "Time remaining format";
+"settings.time_remaining_format_description" = "Applies to reading-time estimates in the header, footer and sleep screen.";
+"settings.time_remaining_detailed" = "Detailed";
+"settings.time_remaining_approximate" = "Approximate";
+"settings.time_remaining_detailed_description" = "Use detailed estimates, such as \"83 min to go\".";
+"settings.time_remaining_approximate_description" = "Use approximate estimates, such as \"~2 hours to go\".";
+/* Arguments: %1 */
+"time_remaining.about_minutes" = "about %1 minutes";
+"time_remaining.about_hour" = "about an hour";
+/* Arguments: %1 */
+"time_remaining.about_hours" = "about %1 hours";

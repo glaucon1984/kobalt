@@ -261,6 +261,15 @@ protected:
 class CellButton : public Button {
 public:
     CellButton(ControlIcon icon, QWidget *parent, int iconPixels = metrics::chrome::cellIcon);
+    void setDropdownIndicator(bool value) {
+        if (dropdownIndicator == value)
+            return;
+        dropdownIndicator = value;
+        updateGeometry();
+        update();
+    }
+    void setCircular(bool value) { circular = value; update(); }
+    void setGrayPress(bool value) { grayPress = value; update(); }
     void setInverted(bool value) {
         if (inverted == value) {
             return;
@@ -304,7 +313,10 @@ private:
     ControlIcon glyph;
     int iconPixels;
     Edges rule;
+    bool dropdownIndicator = false;
     bool inverted = false;
+    bool circular = false;
+    bool grayPress = false;
     int maximumLabelLines = 1;
     int trailingInset = metrics::chrome::inset;
 };

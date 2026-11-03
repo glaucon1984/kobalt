@@ -102,7 +102,9 @@ target_include_directories(kobalt SYSTEM PRIVATE "${CRENGINE_SOURCE}/crengine/in
     "${prefix}/include" "${prefix}/include/harfbuzz" "${prefix}/include/freetype2" "${prefix}/include/fribidi")
 target_compile_options(kobalt PRIVATE -Wall -Wextra -Werror -Wno-missing-field-initializers -fvisibility=hidden
     "-iquote${KOBALT_ROOT}" "-iquote${source}")
-target_compile_definitions(kobalt PRIVATE KOBALT_READER_HARDWARE KOBALT_PAGE_ANIMATIONS
+option(KOBALT_PAGE_ANIMATIONS "Enable page animations on compatible display backends" ON)
+target_compile_definitions(kobalt PRIVATE KOBALT_READER_HARDWARE
+    $<$<BOOL:${KOBALT_PAGE_ANIMATIONS}>:KOBALT_PAGE_ANIMATIONS>
     KOBALT_VERSION="${KOBALT_VERSION}" NH_VERSION="${KOBALT_VERSION}"
     KOBALT_CONFIG_DIR="/mnt/onboard/.adds/kobalt" KOBALT_SYSTEM_FONT_DIRECTORY="${KOBALT_SYSTEM_FONT_DIRECTORY}")
 # Keep parsed books across app updates when the rendering dependencies are compatible.
@@ -127,6 +129,12 @@ if(KOBALT_QT_MAJOR EQUAL 5)
 endif()
 # An evaluation package adds the scenario player, its scenario file, the test
 # books and the diagnostics switch. Release packages never contain them.
+option(KOBALT_VERBOSE_DIAGNOSTICS "Enable verbose diagnostics without a profile marker" ON)
+if(KOBALT_VERBOSE_DIAGNOSTICS)
+    set_property(SOURCE "${source}/support/diagnostics.cpp" APPEND PROPERTY
+        COMPILE_DEFINITIONS KOBALT_VERBOSE_DIAGNOSTICS=1)
+    set(package_suffix "-diagnostic")
+endif()
 option(KOBALT_EVAL_PACKAGE "Build the evaluation package" OFF)
 if(KOBALT_EVAL_PACKAGE)
     target_sources(kobalt PRIVATE "${source}/scenario/player.cpp")

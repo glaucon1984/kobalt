@@ -406,13 +406,27 @@ void Reader::showFinishChoice() {
     finishDialog->setGeometry(rect());
     auto *card = finishDialog->card();
     card->findChild<QLabel *>("rrModalTitle")->setObjectName("rrFinishBookPrompt");
-    auto choose = [this](bool finished) {
+    auto *suppress = new ui::DescribedOption(strings::get("finish.dont_ask_again"), {}, card);
+    suppress->setObjectName("rrSuppressFinishPrompt");
+    auto look = suppress->presentation();
+    look.indicator = ui::DescribedOption::Indicator::Square;
+    look.indicatorSize = QSize(m::chrome::checkSize, m::chrome::checkSize);
+    look.labelPixels = m::chrome::labelText;
+    look.minimumRowHeight = m::chrome::actionHeight;
+    look.dividers = Qt::TopEdge;
+    look.horizontalInset = m::chrome::inset;
+    suppress->setPresentation(look);
+    // Keep the checkbox above the connected confirmation footer.
+    card->rows()->insertWidget(card->rows()->count() - 1, suppress);
+    auto choose = [this, suppress](bool finished) {
         if (!finishDialog)
             return;
         if (services.suspended() || book->deviceTransition() || model->busy())
             return;
         if (finished)
             book->markFinished();
+        if (suppress->isChecked())
+            book->suppressFinishPrompt();
         finishDialog->hide();
         finishDialog->deleteLater();
         finishDialog.clear();
@@ -487,7 +501,12 @@ void Reader::askRemoveBookmark(const QString &position) {
         excerpt = excerpt.left(qMax(40, excerpt.lastIndexOf(' '))) + QString::fromUtf8("…");
     }
     const auto detail = number >= 0 ? strings::get("bookmarks.remove_detail").arg(number + 1).arg(excerpt) : excerpt;
-    auto *choice = new ui::ChoiceModal(this, {detail, strings::get("bookmarks.remove_prompt"), {}},
+    const bool pinned = list[index].pinned();
+    auto description = strings::get(pinned ? "bookmarks.remove_pinned_description" : "bookmarks.remove_description");
+    if (!list[index].name.isEmpty()) description += "\n\n" + list[index].name;
+    description += "\n\n" + detail;
+    auto *choice = new ui::ChoiceModal(this,
+                                       {description, strings::get(pinned ? "bookmarks.remove_pinned_prompt" : "bookmarks.remove_prompt"), {}},
                                        {strings::get("common.cancel"), "rrKeepBookmark"},
                                        {strings::get("bookmarks.remove"), "rrConfirmRemoveBookmark"});
     removeDialog = choice;
@@ -496,7 +515,6 @@ void Reader::askRemoveBookmark(const QString &position) {
     card->findChild<QLabel *>("rrModalTitle")->setObjectName("rrRemoveBookmarkPrompt");
     auto *text = choice->descriptionLabel();
     text->setObjectName("rrRemoveBookmarkDetail");
-    readerStyle(text, styles::font(m::chrome::descriptionText) + "color:palette(placeholder-text);");
     auto finish = [this, position](bool remove) {
         if (!removeDialog)
             return;
@@ -506,7 +524,8 @@ void Reader::askRemoveBookmark(const QString &position) {
         if (remove) {
             bookmarks->remove(position);
             page->bookmarked = bookmarks->marked(model->page());
-            bookmarkList->showBookmarks(bookmarkRows());
+            if (bookmarkList->isVisible() && !bookmarkList->annotationsShown())
+                bookmarkList->showBookmarks(bookmarkRows());
         }
         refresh();
     };
@@ -657,12 +676,76 @@ QVector<kobalt::BookmarkRow> Reader::bookmarkRows() const {
             if (link.page >= 0 && row.page >= 0 && link.page <= row.page)
                 row.chapter = link.title;
         row.excerpt = kobalt::excerptAfterChapter(row.excerpt, row.chapter);
+        row.pinName = list[i].name;
+        row.pinIcon = list[i].icon;
         rows.append(row);
     }
     std::stable_sort(rows.begin(), rows.end(), [](const kobalt::BookmarkRow &a, const kobalt::BookmarkRow &b) {
         return (a.page < 0 ? INT_MAX : a.page) < (b.page < 0 ? INT_MAX : b.page);
     });
     return rows;
+}
+
+void Reader::syncPinnedBookmarks() {
+    if (!pinnedBookmarks) return;
+    QVector<Bookmark> pins;
+    for (const auto &item : bookmarks->bookmarks())
+        if (item.pinned() && pins.size() < BookmarkStore::maxPins) pins.append(item);
+    std::stable_sort(pins.begin(), pins.end(), [this](const Bookmark &a, const Bookmark &b) {
+        const int aPage = bookmarks->pageOf(a.position), bPage = bookmarks->pageOf(b.position);
+        return (aPage < 0 ? INT_MAX : aPage) < (bPage < 0 ? INT_MAX : bPage);
+    });
+    const bool visible = !pins.isEmpty() && topControls->isVisible() && !model->busy() &&
+        !lifecycleHidden && !closing && !services.suspended() && !annotationMode && !seekOpen &&
+        !appearanceEdit.panelOpen() && !general->isVisible() && !menu->isVisible() && !choices->isVisible() &&
+        !chapterGraph->isVisible() && !lightPopup->isVisible() && !bookmarkList->isVisible() &&
+        !acknowledgments->isVisible() && !searchPanel->isVisible() && !dictionaryPanel->isVisible() &&
+        !linksActive() && !lookupPending && !syncDialog && !kosyncDialog && !finishDialog &&
+        !(fieldChooser && fieldChooser->isVisible()) && !(headerFooterView && headerFooterView->isVisible());
+    pinnedBookmarks->setVisible(visible);
+    if (!visible) return;
+    const int padding = ui::px(12), edgeGap = ui::px(20);
+    const int top = topControls->geometry().bottom() + 1;
+    const int bottom = navigation ? navigation->navigationTop()
+        : bottomControls->isVisible() ? bottomControls->y() : height();
+    const int room = qMax(1, bottom - top);
+    // A short screen, such as a phone in landscape, cannot stack every
+    // shortcut at a usable size. Add columns instead of shrinking below
+    // the buttons' minimum size, including with large interface text.
+    int minimumSide = 0;
+    for (auto *button : pinnedButtons) {
+        button->ensurePolished();
+        minimumSide = qMax(minimumSide, qMax(button->minimumWidth(), button->minimumHeight()));
+    }
+    const int cell = qMax<int>(m::chrome::actionHeight, minimumSide + 2 * padding);
+    const int capacity = qBound(1, (room - 2 * padding) / cell, BookmarkStore::maxPins);
+    const int used = (pins.size() + capacity - 1) / capacity;
+    const int columnRows = (pins.size() + used - 1) / used;
+    const int side = qMax(1, cell - 2 * padding);
+    const int gap = ui::px(16);
+    const int trayHeight = cell * columnRows + 2 * padding;
+    const int trayWidth = cell * used + gap * (used - 1);
+    pinnedBookmarks->setGeometry(width() - trayWidth - edgeGap, top + (room - trayHeight) / 2,
+                                 trayWidth, trayHeight);
+    for (int i = 0; i < pinnedButtons.size(); ++i) {
+        auto *button = pinnedButtons[i];
+        button->setVisible(i < pins.size());
+        if (i >= pins.size()) continue;
+        const auto &pin = pins[i];
+        const int column = i / columnRows;
+        const int rows = qMin(columnRows, int(pins.size()) - column * columnRows);
+        const int columnTop = (trayHeight - (cell * rows + 2 * padding)) / 2;
+        button->setGeometry(padding + column * (cell + gap),
+                            columnTop + padding + i % columnRows * cell + (cell - side) / 2, side, side);
+        button->setGlyph(ui::bookmarkIcon(pin.icon));
+        const auto name = pin.name.isEmpty() ? pin.chapter : pin.name;
+        button->setAccessibleName(name);
+        button->setToolTip(name);
+        button->setProperty("bookmark_position", pin.position);
+        button->setEnabled(bookmarks->pageOf(pin.position) >= 0);
+    }
+    pinnedBookmarks->update();
+    pinnedBookmarks->raise();
 }
 
 // Only the choices whose name does not say what they do get a description,
@@ -918,6 +1001,7 @@ void Reader::openSleepChoice(const QString &name, const QString &optionPrefix, c
     const int cardWidth = qMin<int>(m::notice::cardWidth, width() - 2 * m::notice::sideClearance);
     auto *choices = new ui::RadioList(card);
     choices->setObjectName(name + "Choices");
+    choices->setUniformRows(false);
     choices->setMinimumRowHeight(c::listActionHeight);
     choices->setTopDivider(true);
     for (const auto &option : options)
@@ -930,6 +1014,35 @@ void Reader::openSleepChoice(const QString &name, const QString &optionPrefix, c
     card->rows()->addWidget(choices);
     choices->setFixedHeight(choices->heightForWidth(cardWidth - 4));
     card->fitToWidth(cardWidth);
+    const int available = height() - 2 * m::notice::sideClearance;
+    if (card->height() > available) {
+        auto *pager = new ui::PagerBar(card, name);
+        card->rows()->addWidget(pager);
+        const int fixed = card->height() - choices->height();
+        const int room = qMax(1, available - fixed - int(c::actionHeight));
+        QVector<int> starts{0};
+        int used = 0;
+        for (int row = 0; row < choices->options().size(); ++row) {
+            const int rowHeight = choices->rowHeight(row, cardWidth - 4);
+            if (used && used + rowHeight > room) { starts.append(row); used = 0; }
+            used += rowHeight;
+        }
+        auto page = std::make_shared<int>(0);
+        for (int index = 0; index < starts.size(); ++index)
+            if (starts[index] <= current) *page = index;
+        const auto showPage = [this, choices, pager, card, cardWidth, starts, room, page] {
+            const int first = starts[*page];
+            const int last = *page + 1 < starts.size() ? starts[*page + 1] : int(choices->options().size());
+            choices->showRows(first, last - first);
+            choices->setFixedHeight(room);
+            pager->setPage(*page, starts.size());
+            card->fitToWidth(cardWidth);
+            sleepPopup->centerCard();
+        };
+        connect(pager->previous, &QPushButton::clicked, this, [page, pager, showPage] { *page = pager->turnTarget(-1); showPage(); });
+        connect(pager->next, &QPushButton::clicked, this, [page, pager, showPage] { *page = pager->turnTarget(1); showPage(); });
+        showPage();
+    }
     sleepPopup->centerCard();
     for (auto *widget : sleepPopup->findChildren<QWidget *>()) {
         textRefresh(widget);

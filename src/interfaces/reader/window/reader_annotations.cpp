@@ -47,17 +47,33 @@ void Reader::closeMarksActions() {
 void Reader::openMarksActions() {
     if (marksActions || removeDialog || annotationExportPicker || model->busy() ||
         closing || lifecycleHidden || services.suspended() || book->deviceTransition()) return;
-    const ui::ActionMenuHeader header{{}, strings::get("annotations.export"),
-                                      strings::get("annotations.export_compression"), {}};
-    auto *menu = new ui::ActionMenu(this, header,
-        {ui::actionItem(strings::get("annotations.export_markdown"), "rrAnnotationExportMarkdown", ui::ControlIcon::Export,
-                        [this] { askExportMarks(AnnotationExportFormat::Markdown); }),
-         ui::actionItem(strings::get("annotations.export_html"), "rrAnnotationExportHtml", ui::ControlIcon::Export,
-                        [this] { askExportMarks(AnnotationExportFormat::Html); })});
+    ui::ActionMenu *menu;
+    if (bookmarkList->annotationsShown()) {
+        const ui::ActionMenuHeader header{{}, strings::get("annotations.export"),
+                                          strings::get("annotations.export_compression"), {}};
+        menu = new ui::ActionMenu(this, header,
+            {ui::actionItem(strings::get("annotations.export_markdown"), "rrAnnotationExportMarkdown", ui::ControlIcon::Export,
+                            [this] { askExportMarks(AnnotationExportFormat::Markdown); }),
+             ui::actionItem(strings::get("annotations.export_html"), "rrAnnotationExportHtml", ui::ControlIcon::Export,
+                            [this] { askExportMarks(AnnotationExportFormat::Html); })});
+        menu->setObjectName("rrAnnotationActions");
+        const bool enabled = highlights->writable() && highlights->resolved() && !highlights->highlights().isEmpty();
+        for (auto *action : menu->actions()) action->setEnabled(enabled);
+    } else {
+        const int current = model->page();
+        const bool marked = bookmarks->marked(current);
+        menu = new ui::ActionMenu(this, {},
+            {ui::actionItem(strings::get(marked ? "bookmarks.remove_current" : "bookmarks.add_current"),
+                            marked ? "rrBookmarkRemoveCurrent" : "rrBookmarkAddCurrent",
+                            marked ? ui::ControlIcon::BookmarkRemove : ui::ControlIcon::BookmarkAdd,
+                            [this, current, marked] {
+                                if (model->page() == current && bookmarks->marked(current) == marked)
+                                    toggleBookmark();
+                            })});
+        menu->setObjectName("rrBookmarkActions");
+        menu->actions().first()->setEnabled(bookmarks->writable() && bookmarks->resolved() && model->pages() > 0);
+    }
     marksActions = menu;
-    menu->setObjectName("rrAnnotationActions");
-    const bool enabled = highlights->writable() && highlights->resolved() && !highlights->highlights().isEmpty();
-    for (auto *action : menu->actions()) action->setEnabled(enabled);
     menu->dismissed = [this] { closeMarksActions(); };
     menu->setDimmed(true);
     menu->setProperty("reader_standard_modal", true);
@@ -731,7 +747,7 @@ void Reader::requestAnnotationDrag() {
                         return;
                     if (!hits.isEmpty()) {
                         guard->annotationDragging = guard->annotationDragPending = false;
-                        guard->showSavedAnnotation(ids[hits.first()], token.rectangles.value(0).translated(0, guard->page->topHeight()));
+                        guard->showSavedAnnotation(ids[hits.first()], token.rectangles.value(0).translated(guard->page->mapTo(guard, QPoint(0, guard->page->topHeight()))));
                         return;
                     }
                     guard->annotationStartWord = guard->annotationEndWord = token;
@@ -827,7 +843,7 @@ void Reader::resolveAnnotationTokens(AnnotationToken start, AnnotationToken end,
                         guard->draftHighlightRects = geometry.rectangles;
                         guard->draftHighlightGeometry = geometry;
                         if (!geometry.rectangles.isEmpty())
-                            guard->annotationActionAnchor = geometry.rectangles.last().translated(0, guard->page->topHeight());
+                            guard->annotationActionAnchor = geometry.rectangles.last().translated(guard->page->mapTo(guard, QPoint(0, guard->page->topHeight())));
                         guard->paintAnnotationDraft();
                         if (after)
                             after();
@@ -891,7 +907,7 @@ void Reader::showAnnotationActions() {
         bounds = bounds.united(rect);
     if (!bounds.isEmpty())
         bounds.adjust(-ui::px(24), -ui::px(24), ui::px(24), ui::px(24));
-    bounds.translate(0, page->topHeight());
+    bounds.translate(page->mapTo(this, QPoint(0, page->topHeight())));
     if (bounds.isEmpty())
         bounds = topControls->geometry();
     if (!annotationMode) {
@@ -1339,7 +1355,7 @@ void Reader::showSavedAnnotation(const QString &id, QRect anchor, bool navigate)
             for (const auto &rect : geometry.rectangles)
                 bounds = bounds.united(rect);
             if (!bounds.isEmpty())
-                bounds.translate(0, guard->page->topHeight());
+                bounds.translate(guard->page->mapTo(guard, QPoint(0, guard->page->topHeight())));
             guard->showSavedAnnotationAt(id, bounds.isEmpty() ? anchor : bounds, navigate);
         });
         return;

@@ -21,6 +21,7 @@
 #include <QProgressBar>
 #include <QPainter>
 #include <QScreen>
+#include "reading/reading_density.h"
 
 namespace kobalt {
 namespace {
@@ -81,6 +82,13 @@ public:
         for (auto *widget : findChildren<QWidget *>())
             platform::textRefresh(widget);
         platform::textRefresh(this);
+    }
+    void setCover(QImage image) {
+        if (fallback)
+            return;
+        cover = std::move(image);
+        brand->setVisible(cover.isNull());
+        update();
     }
     void showFallback(OpeningFallback state) {
         fallback = true;
@@ -162,7 +170,7 @@ protected:
         namespace m = ui::metrics::opening;
         QPainter painter(this);
         // Nickel's Qt5 stylesheet paints dialogs white even with a dark palette.
-        // Own the whole splash background, including the area behind the logo.
+        // Own the whole splash background, including the area behind the cover.
         painter.fillRect(rect(), palette().color(QPalette::Window));
         if (!painted) {
             painted = true;
@@ -175,7 +183,14 @@ protected:
         painter.translate(origin());
         painter.scale(scale(), scale());
         const auto ink = palette().color(QPalette::WindowText);
-        ui::paintBrandIcon(painter, fallback && !automatic ? m::failureBrandIcon : m::icon, ink);
+        if (!fallback && !cover.isNull()) {
+            painter.setRenderHint(QPainter::SmoothPixmapTransform);
+            const auto size = QSizeF(cover.size()).scaled(m::cover.size(), Qt::KeepAspectRatio);
+            const QRectF bounds(m::cover.center() - QPointF(size.width() / 2, size.height() / 2), size);
+            painter.drawImage(bounds, cover);
+        } else {
+            ui::paintBrandIcon(painter, fallback && !automatic ? m::failureBrandIcon : m::icon, ink);
+        }
         if (fallback) {
             const QRectF bounds = automatic ? m::handoffIcon : m::failureIcon;
             ui::paintOpeningIcon(painter, protectedIcon ? ui::ControlIcon::Lock : ui::ControlIcon::FileWarning, bounds,
@@ -194,8 +209,8 @@ protected:
             widget->setGeometry(qRound(offset.x() + rect.x() * factor), qRound(offset.y() + rect.y() * factor),
                                 qRound(rect.width() * factor), qRound(rect.height() * factor));
         };
-        const auto textStyle = [this](QLabel *widget, qreal pixels, bool italic) {
-            const auto font = ui::brandFont(qMax(1, qRound(pixels * scale())), italic);
+        const auto textStyle = [this](QLabel *widget, qreal pixels, bool italic, int minimum = 1) {
+            const auto font = ui::brandFont(qMax(minimum, qRound(pixels * scale())), italic);
             widget->setFont(font);
             ui::readerStyle(
                 widget,
@@ -206,18 +221,29 @@ protected:
                     .arg(italic ? "italic" : "normal"));
         };
         textStyle(brand, m::brandText, false);
+        const bool phone = isPhoneScreen(size(), ui::density());
         textStyle(label,
                   !fallback   ? m::labelText
                   : automatic ? m::handoffText
                               : m::failureText,
-                  !fallback || automatic);
+                  !fallback || automatic, phone && !fallback ? int(ui::px(32)) : 1);
         // A caption in capitals, like the reader's other captions.
-        ui::captionLabel(hint, qMax(1, qRound(m::hintText * scale())));
+        ui::captionLabel(hint, qMax(phone ? int(ui::px(22)) : 1, qRound(m::hintText * scale())));
         place(hint, m::hint);
         progress->setFixedHeight(qMax(1, qRound(m::progress.height() * scale())));
         place(brand, fallback && !automatic ? m::failureBrand : m::brand);
         place(label, !fallback ? m::label : automatic ? m::handoffLabel : m::failureLabel);
         place(progress, m::progress);
+        if (phone) {
+            for (auto *text : {label, hint}) {
+                auto bounds = text->geometry();
+                const int height = qMax(bounds.height(), ui::interfaceLineHeight(text->font()));
+                bounds.setTop(bounds.center().y() - height / 2);
+                bounds.setHeight(height);
+                text->setGeometry(bounds);
+            }
+        }
+
         if (fallback) {
             const int pixels = qMax(1, qRound(m::detailText * scale()));
             detail->setFont(ui::interfaceFont(pixels));
@@ -273,6 +299,7 @@ private:
         return {(width() - ui::metrics::opening::referenceWidth * scale()) / 2,
                 (height() - ui::metrics::opening::referenceHeight * scale()) / 2};
     }
+    QImage cover;
     QLabel *brand, *label, *hint, *detail;
     ui::ChoiceModal *failureDialog = nullptr;
     bool storageFailure = false;
@@ -312,6 +339,10 @@ public:
     void showFallback(OpeningFallback state) override {
         if (dialog)
             dialog->showFallback(state);
+    }
+    void setCover(QImage cover) override {
+        if (dialog)
+            dialog->setCover(std::move(cover));
     }
     void setProgress(int percent) override {
         if (!dialog)

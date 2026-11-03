@@ -258,9 +258,16 @@ void Reader::hideKosyncOpening() {
     if (!kosyncOpening) return;
     kosyncOpening = false;
     if (kosyncDialog) {
+        const bool refreshPage = kosyncDialog->isVisible() && isVisible() && !lifecycleHidden && !closing &&
+                                 !exportRunning && !exitPending && !services.suspended();
         kosyncDialog->hide();
         kosyncDialog->deleteLater();
         kosyncDialog = nullptr;
+        if (refreshPage) {
+            // The unchanged book image does not include the notice's damage.
+            requestFlash("kosync-dismiss");
+            page->update();
+        }
     }
 }
 void Reader::showKosyncOpening() {
@@ -431,7 +438,8 @@ void Reader::showKosyncChoice() {
     if (!kosyncProgress.pending() || kosyncPositionFailed || kosyncPromptDeferred || kosyncDialog || closing || lifecycleHidden || !isVisible() || model->busy() ||
         services.suspended() || book->deviceTransition() || book->pendingProgress() || syncDialog || finishDialog ||
         topControls->isVisible() || general->isVisible() || annotationMode || searchPanel->isVisible() ||
-        dictionaryPanel->isVisible() || linksActive() || lookupPending || appearanceEdit.panelOpen()) return;
+        dictionaryPanel->isVisible() || (imageViewer && imageViewer->isVisible()) ||
+        linksActive() || lookupPending || appearanceEdit.panelOpen()) return;
     const auto remote = kosyncProgress.candidate();
     auto *dialog = new ui::ChoiceModal(this,
         {strings::get("kosync.comparing_positions"),

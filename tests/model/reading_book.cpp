@@ -7,6 +7,8 @@
 #include "reading/reader_session.h"
 #include "storage/reader_storage.h"
 #include "storage/annotation_database.h"
+#include "storage/bookmark_store.h"
+#include "storage/highlight_store.h"
 #include "storage/record_writer.h"
 #include "storage/profile_database.h"
 #include "support/diagnostics.h"
@@ -172,12 +174,15 @@ int main(int argc, char **argv) {
     require(temporary.isValid(), "Cannot create state directory");
     storage::Paths paths{temporary.path()};
     const auto open = [&](QSize size = QSize(758, 900), const QJsonObject &state = QJsonObject(),
-                          const QString &identity = QStringLiteral("test-book"), PositionCodec positions = {}) {
-        auto session = std::make_unique<ReaderSession>(test::readerFonts(), test::readerPlaceholder());
+                          const QString &identity = QStringLiteral("test-book"), PositionCodec positions = {},
+                          bool restart = false, std::unique_ptr<ReaderSession> session = {}) {
+        if (!session) session = std::make_unique<ReaderSession>(test::readerFonts(), test::readerPlaceholder());
         bool ready = false;
         auto lease = std::make_shared<SourceLease>();
         OpenRequest request{identity, path, size, state, {}, {}, lease, nativeResourceFactory(path, server.port(), lease)};
         request.positions = positions;
+        request.restartAtStart = restart;
+        if (restart) request.platformLocation = "invalid-finished-native-location";
         session->open(std::move(request),
                       [&](const OpeningResult &result) {
                           require(result.ready(), qPrintable(openingMessage(result)));
@@ -188,6 +193,160 @@ int main(int argc, char **argv) {
         });
         return session;
     };
+    // Optional book state must survive both supported backends without
+    // changing reading data or whether a book is finished.
+    for (const auto *backend : {"0", "1"}) {
+        qputenv("KOBALT_ANNOTATIONS_SQLITE", backend);
+        QTemporaryDir profile;
+        require(profile.isValid(), "Finish profile unavailable");
+        storage::Paths finishPaths{profile.path()};
+        {
+            const QString identity = "image-views", a(64, 'a'), b(64, 'b');
+            const QJsonObject first{{"id", a}, {"zoom", 2.0}, {"x", .25}, {"y", .75}, {"future", "keep"}};
+            const QJsonObject second{{"id", b}, {"zoom", 4.0}, {"x", .6}, {"y", .4}};
+            const QJsonObject original{{"schema", 1}, {"book", identity}, {"extra", "keep"},
+                {"image_views", QJsonArray{first, second,
+                    QJsonObject{{"id", QString(64, 'c')}, {"zoom", 99}, {"x", .5}, {"y", .5}}}}};
+            require(storage::writeBookState(finishPaths, identity, original), "Cannot seed image views");
+            {
+                auto session = open(QSize(758, 900), {}, identity);
+                const auto hash = session->sourceHash();
+                ReadingBook book(std::move(session), finishPaths.bookState(identity), finishPaths, identity, hash, nullptr, {}, {});
+                require(book.imageView(a) == first && book.imageView(b) == second &&
+                            book.imageView(QString(64, 'c')).isEmpty(), "Image views lost identity or accepted invalid zoom");
+                require(!book.rememberImageView("invalid", first) &&
+                            !book.rememberImageView(a, {{"zoom", 2}, {"x", -1}, {"y", .5}}) &&
+                            !book.rememberImageView(a, {{"zoom", true}, {"x", .5}, {"y", .5}}),
+                        "Malformed image views were accepted");
+                require(book.rememberImageView(a, {{"zoom", 3}, {"x", .2}, {"y", .7}}), "Cannot update image view");
+                require(book.imageView(a).value("future") == "keep" && book.imageView(b) == second,
+                        "Updating an image changed another image or removed optional fields");
+                require(!book.rememberImageView(a, book.imageView(a)), "An unchanged image view caused another save");
+                QJsonObject snapshot;
+                require(book.checkpoint(&snapshot, true), "Cannot queue image-view checkpoint");
+                waitUntil([&] { return !book.savesPending(); });
+                require(storage::readBookState(finishPaths, identity).object.value("image_views").toArray().size() == 2,
+                        "Background checkpoint lost image views");
+            }
+            auto saved = storage::readBookState(finishPaths, identity).object;
+            auto session = open(QSize(900, 758), saved, identity);
+            const auto hash = session->sourceHash();
+            ReadingBook reopened(std::move(session), finishPaths.bookState(identity), finishPaths, identity, hash, nullptr, {}, {});
+            require(reopened.imageView(a).value("zoom").toDouble() == 3 && reopened.imageView(b) == second,
+                    "Reopening the book lost its image views");
+            require(reopened.rememberImageView(a, {{"zoom", 1}, {"x", .5}, {"y", .5}}) && reopened.imageView(a).isEmpty(),
+                    "Fit did not clear the remembered image view");
+            require(reopened.rememberImageView(b, {{"zoom", 1}, {"x", .5}, {"y", .5}}), "Cannot reset second image");
+            QJsonObject snapshot;
+            require(reopened.checkpoint(&snapshot) &&
+                        !storage::readBookState(finishPaths, identity).object.contains("image_views"),
+                    "Fit restored stale views from the opening record");
+            for (int i = 0; i < 70; ++i)
+                require(reopened.rememberImageView(QString::number(i, 16).rightJustified(64, '0'),
+                            {{"zoom", 2}, {"x", .25}, {"y", .75}}), "Cannot remember bounded image views");
+            require(reopened.checkpointState().value("image_views").toArray().size() == 64 &&
+                        reopened.imageView(QString(64, '0')).isEmpty(), "Image-view history was not bounded");
+            require(reopened.checkpoint(&snapshot), "Cannot save bounded image views");
+            saved = storage::readBookState(finishPaths, identity).object;
+            saved["large_optional"] = QString(10000, 'x');
+            saved["book"] = "image-view-budget";
+            saved.remove("image_views");
+            require(storage::writeBookState(finishPaths, "image-view-budget", saved), "Cannot seed image-view byte budget");
+            auto budgetSession = open();
+            const auto budgetHash = budgetSession->sourceHash();
+            ReadingBook budget(std::move(budgetSession), finishPaths.bookState("image-view-budget"), finishPaths,
+                               "image-view-budget", budgetHash, nullptr, {}, {});
+            for (int i = 0; i < 64; ++i)
+                budget.rememberImageView(QString::number(i, 16).rightJustified(64, '0'), {{"zoom", 2}, {"x", .25}, {"y", .75}});
+            require(budget.checkpoint(&snapshot), "Image views prevented a reading-position checkpoint");
+            const auto bounded = storage::readBookState(finishPaths, "image-view-budget").object;
+            require(bounded.value("large_optional").toString().size() == 10000 &&
+                        bounded.value("image_views").toArray().size() < 64 &&
+                        QJsonDocument(bounded).toJson(QJsonDocument::Compact).size() <= storage::maxJsonBytes,
+                    "Image views did not respect the book byte budget or changed unrelated fields");
+        }
+        for (const auto &flag : {QJsonValue(), QJsonValue("invalid"), QJsonValue(true)}) {
+            const QString identity = "finish-book";
+            QJsonObject original{{"schema", 1}, {"book", identity}, {"extra", QJsonObject{{"keep", "value"}}},
+                                 {"suppress_finish_prompt", flag}, {"dictionary_id", "dictionary"}};
+            if (flag.isNull()) original.remove("suppress_finish_prompt");
+            require(storage::writeBookState(finishPaths, identity, original, finishPaths.bookState(identity)),
+                    "Cannot prepare finish state");
+            auto session = open();
+            require(session->style(32, 150), "Cannot set finish-book appearance");
+            waitUntil([&] { return !session->busy(); });
+            require(session->go(session->pages() - 1), "Cannot reach finish page");
+            waitUntil([&] { return !session->busy(); });
+            const auto hash = session->sourceHash();
+            ReadingBook book(std::move(session), finishPaths.bookState(identity), finishPaths, identity, hash, nullptr, {}, {});
+            require(book.offerFinish() == !flag.toBool(false), "Missing or invalid finish flag changed default");
+            const auto position = book.checkpointState().value("position");
+            BookmarkStore bookmarks(finishPaths.annotations(), identity, hash, "Finish test", finishPaths.database());
+            HighlightStore highlights(finishPaths.annotations(), identity, hash, "Finish test", finishPaths.database());
+            require(bookmarks.load() && highlights.load(), "Cannot load finish annotations");
+            const QVector<Bookmark> savedBookmarks{{position.toString(), "chapter", "excerpt", QDateTime::fromString("2026-11-01T09:00:00Z", Qt::ISODate)}};
+            auto annotation = Highlight{};
+            annotation.id = "finish-annotation";
+            annotation.start = position.toString();
+            annotation.end = position.toString() + ".1";
+            annotation.text = "Saved passage";
+            annotation.created = QDateTime::currentDateTimeUtc();
+            annotation.note = "Keep this note";
+            bookmarks.setBookmarks(savedBookmarks);
+            highlights.setHighlights({annotation});
+            require(bookmarks.save() && highlights.save(), "Cannot prepare finish annotations");
+            book.suppressFinishPrompt();
+            require(!book.offerFinish(), "Suppression still offers finish");
+            QJsonObject snapshot;
+            require(book.checkpoint(&snapshot), "Suppression checkpoint failed");
+            const auto stored = storage::readBookState(finishPaths, identity, finishPaths.bookState(identity)).object;
+            require(stored.value("suppress_finish_prompt").toBool() && stored.value("extra") == original.value("extra") &&
+                        stored.value("dictionary_id") == original.value("dictionary_id") && stored.value("position") == position &&
+                        stored.value("finished_position").toString().isEmpty(),
+                    "Suppression changed saved position, finish state or supported extra fields");
+            require(bookmarks.load() && bookmarks.bookmarks() == savedBookmarks && highlights.load() &&
+                        highlights.highlights().size() == 1 && highlights.highlights().first().note == annotation.note,
+                    "Suppression changed bookmarks or annotations");
+            book.markFinished();
+            require(!book.checkpointState().value("finished_position").toString().isEmpty(),
+                    "Suppressing the prompt disabled explicit finishing");
+            require(book.checkpoint(&snapshot), "Cannot save finished checkpoint");
+            const auto finished = storage::readBookState(finishPaths, identity).object;
+            // Reopening must reset progress without resetting book preferences or annotations.
+            auto reopened = open(QSize(758, 900), finished, identity);
+            require(reopened->page() == 0 && reopened->fontSize() == book.session()->fontSize(),
+                    "Finished book did not restart with its saved appearance");
+            auto retained = book.session()->retained();
+            require(bool(retained), "Cannot retain finished document");
+            retained = open(QSize(758, 900), finished, identity, {}, false, std::move(retained));
+            require(retained->page() == 0, "Retained finished book did not restart");
+            ReadingBook restarted(std::move(reopened), finishPaths.bookState(identity), finishPaths, identity, hash, nullptr, {}, {});
+            require(restarted.checkpoint(&snapshot), "Cannot save restarted checkpoint");
+            const auto started = storage::readBookState(finishPaths, identity).object;
+            require(started.value("finished_position").toString().isEmpty() &&
+                        started.value("dictionary_id") == original.value("dictionary_id") &&
+                        started.value("extra") == original.value("extra") &&
+                        started.value("suppress_finish_prompt").toBool(),
+                    "Restart changed book preferences or retained the finished marker");
+            require(bookmarks.load() && bookmarks.bookmarks() == savedBookmarks && highlights.load() &&
+                        highlights.highlights().first().note == annotation.note,
+                    "Restart changed annotations");
+            auto reading = finished;
+            reading.remove("finished_position");
+            auto continued = open(QSize(758, 900), reading, identity);
+            require(continued->page() == continued->pages() - 1, "Unfinished book lost its saved position");
+            auto hostFinished = open(QSize(758, 900), reading, identity, {}, true);
+            require(hostFinished->page() == 0, "Host-finished book did not restart");
+            auto hostFirstOpen = open(QSize(758, 900), {}, identity, {}, true);
+            require(hostFirstOpen->page() == 0, "First host-finished opening restored its native final location");
+            auto hostRetained = continued->retained();
+            require(bool(hostRetained), "Cannot retain host-finished document");
+            hostRetained = open(QSize(758, 900), reading, identity, {}, true, std::move(hostRetained));
+            require(hostRetained->page() == 0, "Retained host-finished book did not restart");
+        }
+        storage::closeProfile();
+    }
+    qunsetenv("KOBALT_ANNOTATIONS_SQLITE");
     const auto historyValue = [&](const QString &statement) {
         QVariant value;
         require(AnnotationDatabase::transaction(paths.directory, [&](QSqlDatabase &db) {

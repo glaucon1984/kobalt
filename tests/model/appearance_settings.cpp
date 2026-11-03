@@ -1,5 +1,6 @@
 #include "reading/appearance_settings.h"
 #include "reading/session_timeout.h"
+#include "reading/remaining_time.h"
 #include "support/qt_compat.h"
 #include "check.h"
 #include <QJsonArray>
@@ -9,6 +10,20 @@
 using namespace kobalt;
 
 int main() {
+    require(!remainingTime::approximate({}), "Older preferences did not retain detailed estimates");
+    for (const auto *format : {"detailed", "approximate"}) {
+        const auto preferences = appearance::cleanPreferences({{remainingTime::preferenceKey, format}, {"future_option", 42}});
+        require(preferences.value(remainingTime::preferenceKey).toString() == format &&
+                    preferences.value("future_option").toInt() == 42, "Time format cleanup lost saved preferences");
+        require(remainingTime::approximate(preferences) == (QString(format) == "approximate"), "Time format loaded incorrectly");
+        require(appearance::same({}, preferences), "Time format invalidated the book layout");
+    }
+    for (const auto &invalid : {QJsonValue("unknown"), QJsonValue(true), QJsonValue(1), QJsonValue()}) {
+        const auto preferences = appearance::cleanPreferences({{remainingTime::preferenceKey, invalid}});
+        require(!preferences.contains(remainingTime::preferenceKey) && !remainingTime::approximate(preferences),
+                "Invalid time format did not fall back to detailed estimates");
+    }
+
     require(sessionTimeout::minutes({}) == 15, "Older preferences lost the default session timeout");
     for (const auto minutes : sessionTimeout::choices) {
         const auto preferences = appearance::cleanPreferences({{sessionTimeout::preferenceKey, minutes}, {"optional", "keep"}});
@@ -37,6 +52,20 @@ int main() {
                 "Invalid direct-tap preference did not fall back to the default");
 
 
+    for (bool show : {false, true}) {
+        const auto cleaned = appearance::cleanPreferences({{"schema", 1}, {"show_light_gesture_feedback", show},
+            {"edge_light_gestures", true}, {"future_option", 42}});
+        require(cleaned.value("show_light_gesture_feedback").toBool() == show &&
+            cleaned.value("edge_light_gestures").toBool() && cleaned.value("future_option").toInt() == 42 &&
+            cleaned.value("schema").toInt() == 1, "Light feedback cleanup changed independent preferences or schema");
+        require(appearance::same({}, cleaned), "Light feedback invalidated the book layout");
+    }
+    require(appearance::cleanPreferences({}).value("show_light_gesture_feedback").toBool(true),
+        "Old preferences no longer default to visible feedback");
+    for (const auto &invalid : {QJsonValue(), QJsonValue(0), QJsonValue("false"), QJsonValue(QJsonArray{})})
+        require(appearance::cleanPreferences({{"show_light_gesture_feedback", invalid}})
+            .value("show_light_gesture_feedback").toBool(true), "Invalid feedback preference did not use visible feedback");
+
     const auto dictionary = appearance::cleanPreferences(qt::object({{"dictionary_font_face", "Libron"},
         {"dictionary_font_size", 120}, {"private_optional", "keep"}}));
     require(dictionary.value("dictionary_font_face").toString() == "Libron" &&
@@ -50,7 +79,7 @@ int main() {
     require(appearance::same({}, dictionary), "Dictionary UI preferences invalidated the book layout");
     // Appearance settings decide the layout. The list must stay complete, because a
     // missing key would let a retained layout survive a changed setting.
-    require(appearance::keys.size() == 34, "The appearance keys changed without this check");
+    require(appearance::keys.size() == 35, "The appearance keys changed without this check");
     require(appearance::bookDefaults({}).value("paragraph_indent").toInt() == -1,
             "Paragraph indentation no longer defaults to Publisher");
     for (int percent : {-1, 0, 100, 300}) {
@@ -115,14 +144,14 @@ int main() {
                                   {"font_face", "Libron"},
                                   {"dark_mode", true},
                                   {"hide_nonlinear_fragments", true},
-                                  {"avoid_wasteful_styling", false},
+                                  {"normalize_page_margins", false},
                                   {"show_header", false}});
     auto to =
         qt::object({{"font_pixels", 30}, {"margin_pixels", 12}, {"hyphenation", "on"}, {"page_animations", true}});
     appearance::copy(to, from);
     require(to.value("font_pixels").toInt() == 40 && to.value("font_face").toString() == "Libron" &&
                 to.value("dark_mode").toBool() && to.value("hide_nonlinear_fragments").toBool() &&
-                to.contains("avoid_wasteful_styling") && !to.value("avoid_wasteful_styling").toBool(),
+                to.contains("normalize_page_margins") && !to.value("normalize_page_margins").toBool(),
             "Copy lost an appearance value");
     // A null value stays null, and a key the source lacks is removed, so the
     // engine applies its own default instead of an old value.
@@ -151,6 +180,45 @@ int main() {
         {{"book_beautifier", "yes"}, {"beautifier_initials", "no"}}));
     require(!invalidBeautifier.value("book_beautifier").toBool() && !invalidBeautifier.value("beautifier_initials").toBool(),
         "Invalid beautifier settings did not use safe defaults");
+    const auto recommended = appearance::normalizationPresetSettings("recommended");
+    const auto full = appearance::normalizationPresetSettings("full");
+    require(appearance::normalizationPreset({}) == "recommended" &&
+        appearance::normalizationSettings({}) == appearance::normalizationSettings(recommended),
+        "Recommended changed the existing defaults");
+    for (const auto *key : appearance::normalizationKeys)
+        require(full.value(key).toBool(), "Full did not enable every rule");
+    for (bool enabled : {false, true}) {
+        const auto migrated = appearance::cleanPreferences({{"avoid_wasteful_styling", enabled},
+            {"beautifier_spacing", true}, {"unknown_preference", 17}});
+        require(!migrated.contains("avoid_wasteful_styling") &&
+            migrated.value("normalize_page_margins").toBool() == enabled &&
+            migrated.value("reduce_chapter_spacing").toBool() == enabled &&
+            migrated.value("beautifier_spacing").toBool() && migrated.value("unknown_preference").toInt() == 17 &&
+            appearance::normalizationPreset(migrated) == "custom", "Legacy styling choices were not preserved");
+        require(appearance::cleanPreferences(migrated) == migrated, "Normalization migration was not stable");
+    }
+    const auto split = appearance::cleanPreferences({{"avoid_wasteful_styling", false},
+        {"normalize_page_margins", true}});
+    require(split.value("normalize_page_margins").toBool() && !split.value("reduce_chapter_spacing").toBool(),
+        "An explicit margin rule was overwritten by the legacy switch");
+    auto normalizationCustom = recommended;
+    normalizationCustom[appearance::normalizationPresetKey] = "custom";
+    require(appearance::normalizationPreset(appearance::cleanPreferences(normalizationCustom)) == "custom",
+        "Explicit Custom was replaced by a matching preset");
+    auto empty = normalizationCustom;
+    for (const auto *key : appearance::normalizationKeys) empty[key] = false;
+    QJsonObject staleRules = full;
+    appearance::applyBookDefaults(staleRules, appearance::bookDefaults(empty));
+    for (const auto *key : appearance::normalizationKeys)
+        require(!staleRules.value(key).toBool(), "A stale book retained a global normalization rule");
+    for (const auto *key : appearance::normalizationKeys) {
+        auto changed = recommended;
+        changed[key] = !recommended.value(key).toBool();
+        require(!appearance::same(changed, recommended), "A normalization rule reused an old layout");
+        auto copied = recommended;
+        appearance::copy(copied, changed);
+        require(copied.value(key) == changed.value(key), "Preview lost a normalization rule");
+    }
     const auto advanced = qt::object({{"word_spacing", 80}, {"justification_tracking", 5}, {"widows_orphans", "avoid"}});
     auto advancedBook = qt::object({{"font_pixels", 40}, {"word_spacing", 120}, {"justification_tracking", 15}, {"widows_orphans", "allow"}});
     appearance::applyBookDefaults(advancedBook, appearance::bookDefaults(advanced));
@@ -178,7 +246,7 @@ int main() {
         require(copied.value(key).toInt() == 36, "Appearance copy lost a vertical margin");
     }
     auto publisher = from;
-    publisher["avoid_wasteful_styling"] = true;
+    publisher["normalize_page_margins"] = true;
     require(!appearance::same(publisher, from), "Publisher spacing reused an old layout");
     auto bionic = from;
     bionic["bold_reading"] = QStringLiteral("bold");

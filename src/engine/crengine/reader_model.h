@@ -20,6 +20,7 @@
 #include <memory>
 #include <functional>
 #include <utility>
+#include <tuple>
 
 namespace kobalt {
 class ColumnView;
@@ -119,7 +120,7 @@ public:
     bool open(QByteArray bytes, QSize size, const QJsonObject &saved, QString *error, OpeningProgress progress = {});
     bool openResources(std::shared_ptr<ResourceCache> resources, const QMap<QString, qint64> &sizes, QSize size,
                        const QJsonObject &saved, QString *error, OpeningProgress progress = {},
-                       OpeningResult *result = nullptr);
+                       OpeningResult *result = nullptr, std::function<void()> coverReady = {});
     bool rebindResources(const std::shared_ptr<ResourceCache> &resources, const QMap<QString, qint64> &sizes);
     // Set before opening. CREngine keeps parsed books and their pages in
     // `directory`, keyed by the publication fingerprint and by `policy`, which
@@ -177,6 +178,7 @@ public:
     QString pageStart(int page) const;
     QString pageExcerpt(int page) const;
     WordSelection wordAt(QPoint point);
+    QImage imageAt(QPoint point);
     AnnotationPageEdges annotationPageEdges();
     AnnotationToken annotationTokenAt(QPoint point);
     AnnotationToken annotationDragTokenAt(QPoint point, const QString &boundary, bool start);
@@ -217,7 +219,7 @@ public:
     void resize(QSize size);
     QImage image(int page);
     bool loadNextImage();
-    // The idle retained book keeps text and pagination, not cached pictures.
+    // The idle book keeps its active layout, not images or an alternate layout.
     void releaseImages();
     // Compares the cached images of two pages ahead of a turn between them.
     // Cache key of a page's cached image, or 0. Never draws.
@@ -263,6 +265,9 @@ public:
     QSize viewport() const {
         return size_;
     }
+    // One alternate viewport, released with an idle book or changed typography.
+    static constexpr size_t maxAlternateLayoutBytes = 4 * 1024 * 1024;
+    size_t alternateLayoutBytes() const;
     int cachedPages() const {
         return cache_.size();
     }
@@ -350,12 +355,16 @@ private:
     int domVersion_ = 0;
     QString hyphenation_ = "off";
     bool darkMode_ = false;
+    QMap<std::tuple<quintptr, int, int>, bool> imageInversion_;
     bool hideNonlinearFragments_ = false;
-    bool avoidWastefulStyling_ = true;
+    bool normalizePageMargins_ = true, reduceChapterSpacing_ = true;
     QString verticalSpacing_ = "off", verticalSpacingScope_ = "all";
     int wordSpacing_ = 100;
     int justificationTracking_ = 0;
     QString widowsOrphans_ = "publisher";
+    QSize alternateViewport_;
+    int alternateColumns_ = 1, alternateColumnSpacing_ = 0, layoutPpi_ = 0;
+    QByteArray layoutCss_;
     QMap<int, QImage> cache_;
     // One retired page, owned only by this model. Never retain client images.
     QImage spareImage_;
@@ -364,7 +373,7 @@ private:
     // Changed rectangle between two cached page images, by sorted cache keys.
     QMap<QPair<qint64, qint64>, QRect> damage_;
     bool openSource(std::shared_ptr<ReaderSource> source, QSize size, const QJsonObject &saved, QString *error,
-                    OpeningProgress progress = {}, OpeningResult *result = nullptr);
+                    OpeningProgress progress = {}, OpeningResult *result = nullptr, std::function<void()> coverReady = {});
     void trim();
     void applyPublisherFontFallbacks();
     void applyStyleSheet();

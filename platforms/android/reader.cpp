@@ -1,4 +1,5 @@
 #include "reading/appearance_settings.h"
+#include "reading/reading_density.h"
 #include "support/strings.h"
 #include "support/main_thread.h"
 #include "support/diagnostics.h"
@@ -107,16 +108,18 @@ bool ReaderController::resetBook(const QString &path) {
     // old settings or progress on the next opening.
     return storage::writeBookState(paths, identity, {{"book", identity}});
 }
-void ReaderController::open(const QString &path, QSize pixels, QString sourceKey) {
+void ReaderController::open(const QString &path, QSize pixels, QString sourceKey, bool restartAtStart) {
     if (phase == Phase::Reading && path == current)
         return;
     if (!idle()) {
         pending = path;
         pendingSourceKey = std::move(sourceKey);
         pendingSize = pixels;
+        pendingRestartAtStart = restartAtStart;
         retire();
         return;
     }
+    this->restartAtStart = restartAtStart;
     currentSourceKey = std::move(sourceKey);
     begin(path, pixels);
 }
@@ -203,7 +206,13 @@ void ReaderController::begin(const QString &path, QSize pixels) {
     saved["bold_reading"] = settings.value("bold_reading").toString("off");
     saved["avoid_wasteful_styling"] = settings.value("avoid_wasteful_styling").toBool(true);
     orientation.configure(settings);
-    const auto viewport = readerInterface().readingViewport(pixels, settings);
+    // The first layout leaves out the cutout bands, as the reader window does.
+    QSize body = pixels;
+    if (const auto safeArea = services().safeArea) {
+        const auto safe = safeArea(pixels);
+        body.rheight() -= safe.top + safe.bottom;
+    }
+    const auto viewport = readerInterface().readingViewport(body, settings);
     opening = std::make_unique<ReaderSession>(fonts, placeholder);
     QPointer<ReaderController> guard(this);
     OpenRequest request{identity, path, viewport, saved, nativeLocation, paths.layoutCache(), lease,
@@ -218,6 +227,7 @@ void ReaderController::begin(const QString &path, QSize pixels) {
     // An absent legacy name must not silently identify the internal hashed filename.
     if (request.syncFilename.isNull()) request.syncFilename = QStringLiteral("");
 #endif
+    request.restartAtStart = restartAtStart;
     request.userStyleSheetPath = paths.directory + "/userstyle.css";
     request.appearanceDefaults = appearance::bookDefaults(settings);
     opening->open(
@@ -246,6 +256,7 @@ void ReaderController::begin(const QString &path, QSize pixels) {
                                                       hash, platformLibraryBridge(identity, guard->current, guard->paths),
                                                       baseline, diskBaseline, guard->currentSourceKey);
             auto services = guard->services();
+            services.phoneLayout = isPhoneScreen(pixels, readingPpi.load());
             services.startupNotice = std::exchange(guard->recoveryNotice, ReaderNotice{});
             if (services.backButtonLabel.isEmpty())
                 services.backButtonLabel = strings::get("library.exit_to_library");
@@ -307,6 +318,10 @@ void ReaderController::begin(const QString &path, QSize pixels) {
             lastStage = stage;
             painted.start();
             emit guard->openingProgress((int(stage) * 100 + percent) / (int(OpeningStage::Ready) + 1));
+        },
+        [guard](QImage cover) {
+            if (guard && guard->phase == Phase::Opening)
+                emit guard->openingCover(std::move(cover));
         });
 }
 void ReaderController::close() {
@@ -357,6 +372,7 @@ void ReaderController::release() {
             guard->phase = Phase::Idle;
             reportBookClose(std::exchange(guard->closing, {}));
             if (!guard->pending.isEmpty()) {
+                guard->restartAtStart = std::exchange(guard->pendingRestartAtStart, false);
                 guard->currentSourceKey = std::exchange(guard->pendingSourceKey, {});
                 guard->begin(std::exchange(guard->pending, {}), guard->pendingSize);
             } else

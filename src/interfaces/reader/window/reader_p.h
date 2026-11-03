@@ -14,12 +14,14 @@
 #include "reading/reading_book.h"
 #include "reading/appearance_settings.h"
 #include "reading/reader_session.h"
+#include "reading/page_navigation.h"
 #include "reading/kosync.h"
 #include "interfaces/reader/settings/kosync_page.h"
 #include "reading/bookmark_session.h"
 #include "reading/highlight_session.h"
 #include "storage/annotation_export.h"
 #include "interfaces/reader/views/reading_page.h"
+#include "interfaces/reader/views/image_viewer.h"
 #include "interfaces/reader/panels/choice_screen.h"
 #include "interfaces/reader/panels/chapter_graph.h"
 #include "interfaces/reader/settings/acknowledgments.h"
@@ -39,6 +41,7 @@
 #include <array>
 #include <atomic>
 #include <QElapsedTimer>
+#include <QEvent>
 #include <QFile>
 #include <QFrame>
 #include <QImage>
@@ -94,6 +97,7 @@ public:
     void progressTick() override;
     void refreshHostPresentation() override;
     void pageButton(int direction) override;
+    void scriptedPageButton(int direction) override;
     bool busy() const override {
         return model->busy() || model->preparingNeighbours() || stylingSamplesPending > 0;
     }
@@ -129,6 +133,8 @@ private:
     QString savedNativeAnchor;
     int savedNativePage = -1, savedNativePages = -1;
     void buildReadingPage();
+    ImageViewer *imageViewer = nullptr;
+    quint64 imageRequest = 0;
     void buildAnnotations();
     void enterAnnotations();
     void leaveAnnotations();
@@ -252,6 +258,8 @@ private:
     void showFontDefaultDialog(const QString &face, bool instructions);
     void buildNotices();
     void connectLightGestures();
+    static QEvent::Type lightCommandEventType();
+    void dispatchLightGesture();
     void connectPageInput();
     // The phases of refresh(), in this order.
     bool publishPendingDarkMode();
@@ -297,13 +305,15 @@ private:
     AppearanceSheet *menu;
     QFrame *bottomControls;
     kobalt::ui::Panel *topControls = nullptr;
+    kobalt::ui::Panel *pinnedBookmarks = nullptr;
+    QVector<kobalt::ui::CellButton *> pinnedButtons;
     kobalt::ToolbarComposition toolbarComposition;
     std::unique_ptr<kobalt::reader::Navigation> navigation;
     QVector<QWidget *> topActions;
     kobalt::ui::Panel *general = nullptr;
     std::unique_ptr<kobalt::LightControls> light;
     kobalt::LightPanel *lightPopup = nullptr;
-    QCheckBox *darkOption, *inheritTextLayoutOption, *animationOption, *edgeLightOption, *denseGraphOption;
+    QCheckBox *darkOption, *inheritTextLayoutOption, *animationOption, *edgeLightOption, *lightGestureFeedbackOption, *denseGraphOption;
     QCheckBox *automaticOpeningOption = nullptr, *minimalAnnotationOption = nullptr, *hideTabLabelsOption = nullptr;
     QPushButton *autoRotateOption;
     bool hideNativeStatus() const;
@@ -317,6 +327,10 @@ private:
     bool raisingPopups = false;
     QPointer<kobalt::ui::ModalOverlay> debugDialog;
     QTimer brightnessHide;
+    QTimer lightFeedback;
+    double lightMovement = 0;
+    int lightFeedbackLevel = -1;
+    bool lightCommandPending = false, lightGestureActive = false;
     int brightnessInitial = 0, warmthInitial = 0;
     bool gestureWarmth = false, warmthAutomatic = false, warmthSupported = false;
     int pendingDarkMode = -1;
@@ -386,7 +400,7 @@ private:
     void updateOrientationBlock();
     bool rotationControlsBlocked() const;
     void closeSearch();
-    void openSearch();
+    void openSearch(const QString &query = {});
     kobalt::LinkPanel *linkPanel = nullptr;
     QPointer<kobalt::ui::ModalOverlay> linkDialog;
     QPointer<kobalt::ui::ModalOverlay> fontDefaultDialog, settingsFontPopup;
@@ -394,6 +408,7 @@ private:
     QString settingsDefaultFontFace;
     QString settingsUiFontFace, settingsUiMonoFontFace, settingsHeaderFooterFontFace;
     QString settingsDictionaryFontFace;
+    QString settingsTimeRemainingFormat;
     int settingsDictionaryFontSize = 100;
     int settingsHeaderFooterWeight = 2;
     void applyInterfaceFonts();
@@ -401,10 +416,13 @@ private:
     void openSettingsFont(const QString &key);
     QPushButton *linkReturn = nullptr;
     bool linkReturnAvailable = false;
+    QString imageSuggestionPosition;
+    bool imageSuggestionDismissed = false;
     struct LinkVisit {
         QString position;
         int page;
         QString chapter;
+        bool pinnedShortcut = false;
     };
     QVector<LinkVisit> linkHistory;
     LinkVisit pendingPassage{};
@@ -416,7 +434,7 @@ private:
     QLabel *linkDiscoveryIcon = nullptr, *linkDiscoveryHint = nullptr;
     QPushButton *linkDiscoveryToggle = nullptr;
     QLabel *linkDiscoveryExit = nullptr;
-    QCheckBox *linkIndicatorOption = nullptr, *hideNonlinearOption = nullptr, *avoidWastefulStylingOption = nullptr;
+    QCheckBox *linkIndicatorOption = nullptr, *hideNonlinearOption = nullptr;
     bool revealingLinks = false;
     QString revealedPosition;
     void syncLinkDiscovery();
@@ -427,7 +445,7 @@ private:
     void dismissLinks();
     void updateLinkReturn();
     bool openLink(QPoint point, bool direct = false);
-    void goToPassage(const QString &target);
+    void goToPassage(const QString &target, bool pinnedShortcut = false);
     kobalt::DictionaryPanel *dictionaryPanel = nullptr;
     std::unique_ptr<kobalt::DictionaryService> dictionary;
     QString lookupText;
@@ -439,6 +457,10 @@ private:
     void lookupWord(QPoint point);
     void lookupSelection();
     void resizeText();
+    // The host's cutout and corner bands for the current size.
+    kobalt::SafeArea safeArea() const;
+    // The book's text area: the window without the safe area, header and footer.
+    QSize bodySize() const;
     void applyTheme(bool dark);
     void registerPickerFonts(const QString &family = {});
     QString bookFace();
@@ -450,6 +472,7 @@ private:
     void activateNavigation(kobalt::NavigationDestination destination);
     QRect panelBounds(int panelHeight) const;
     void syncNavigation();
+    void syncPinnedBookmarks();
     void syncStatusBoundary();
     bool statusBoundaryPending = false;
     void showControls();
@@ -511,7 +534,11 @@ private:
     void dismissProgressChoice();
     void showProgressChoice();
     void buildProgressChoice(const kobalt::ReadingProgress &shown, int direction, bool located);
-    void turnPage(int direction);
+    void pageButton(int direction, quint32 sourceTime, bool userInput = true);
+    void turnPage(int direction, quint32 sourceTime = 0, bool userInput = true,
+                  pageNavigation::InputClock clock = pageNavigation::InputClock::Pointer);
+    pageNavigation::TapFilter pageTurnFilter;
+    QElapsedTimer pageTurnClock;
     bool pageList(int direction);
     // Runs from a tap or swipe until its page is painted; invalid otherwise.
     QElapsedTimer turnStarted;

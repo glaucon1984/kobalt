@@ -403,8 +403,8 @@ ReaderHostServices readerServices() {
         return true;
     };
     // Page-turn animation: the pbink plugin sweeps the new page in, strip by strip.
-    result.animationsAvailable = [] {
-        return true;
+    result.animationSupport = [] {
+        return PageAnimationSupport::Supported;
     };
     result.cancelAnimation = [] {};
     result.light = [](QWidget *) {

@@ -21,8 +21,8 @@ inline QString screenshotGroup(const QString &scene) {
     if (scene.startsWith("search")) return "Search";
     if (scene.startsWith("kosync-")) return "Settings and About";
     if (scene.startsWith("beautifier-")) return "Typography";
-    if (scene.startsWith("settings") || scene == "about" || scene == "acknowledgments" || scene.startsWith("license")) return "Settings and About";
-    if (scene.startsWith("annotation") || scene == "annotating" || scene.startsWith("bookmark")) return "Bookmarks and annotations";
+    if (scene.startsWith("page-turn-") || scene.startsWith("settings") || scene == "about" || scene == "acknowledgments" || scene.startsWith("license")) return "Settings and About";
+    if (scene.startsWith("annotation") || scene == "annotating" || scene.startsWith("bookmark") || scene.startsWith("pinned-bookmark")) return "Bookmarks and annotations";
     if (scene.startsWith("vertical-") || scene == "layout" || scene.startsWith("header-footer")) return "Layout";
     if (scene.startsWith("fonts") || scene.startsWith("text") || scene.startsWith("bionic") || scene.startsWith("embedded-")) return "Typography";
     if (scene.startsWith("maths")) return "Mathematics";
@@ -41,6 +41,22 @@ inline QString screenshotTitle(const QString &scene, const QJsonObject &book) {
     }
     static const QMap<QString, QString> titles{
         {"about", "About Kobalt"},
+        {"kosync-login-feedback", "Sync sign in: idle"},
+        {"kosync-login-feedback-pressed", "Sync sign in: pressed"},
+        {"kosync-login-feedback-released", "Sync sign in: released"},
+        {"annotation-color-feedback", "Annotation color: idle"},
+        {"annotation-color-feedback-pressed", "Annotation color: pressed"},
+        {"annotation-color-feedback-released", "Annotation color: released"},
+        {"library-option-feedback", "Library checkbox: idle"},
+        {"library-option-feedback-pressed", "Library checkbox: pressed"},
+        {"library-option-feedback-released", "Library checkbox: released"},
+        {"page-turn-animation", "Android page turn animation setting"},
+        {"page-turn-sweep", "Android banded sweep: mid-turn"},
+        {"settings-light-feedback", "Frontlight gesture feedback"},
+        {"settings-light-feedback-hidden", "Frontlight gesture feedback disabled"},
+        {"light-feedback-hidden", "Frontlight adjustment without feedback"},
+        {"brightness-gesture-feedback", "Brightness gesture popup"},
+        {"warmth-gesture-feedback", "Warmth gesture popup"},
         {"acknowledgments", "Acknowledgments"},
         {"alice-reading", "Alice in Wonderland"},
         {"annotating", "Annotation mode"},
@@ -57,10 +73,29 @@ inline QString screenshotTitle(const QString &scene, const QJsonObject &book) {
         {"bionic-reading", "Bold reading"},
         {"bionic-setting", "Bold reading setting"},
         {"bookmark-remove", "Remove a bookmark"},
+        {"bookmark-page-add-menu", "Bookmark the current page"},
+        {"bookmark-page-remove-menu", "Remove the current page bookmark"},
+        {"pinned-bookmark-remove", "Remove a pinned bookmark"},
         {"bookmarked", "Bookmarked page"},
         {"bookmarks", "Saved bookmarks"},
+        {"pinned-bookmark-editor", "Choose a bookmark name and icon"},
+        {"pinned-bookmark-edit", "Modify a pinned bookmark"},
+        {"pinned-bookmark-icons-page2", "Bookmark icons: page 2"},
+        {"pinned-bookmark-icons-page3", "Bookmark icons: page 3"},
+        {"pinned-bookmark-icons-page4", "Bookmark icons: page 4"},
+        {"pinned-bookmark-name", "Edit the bookmark name"},
+        {"pinned-bookmark-list", "Pinned and ordinary bookmarks"},
+        {"pinned-bookmark-single", "Single bookmark shortcut"},
+        {"pinned-bookmark-eight", "Eight bookmark shortcuts"},
+        {"pinned-bookmark-four", "Four bookmark shortcuts"},
+        {"pinned-bookmark-actions", "Bookmark actions"},
+        {"pinned-bookmark-limit", "Bookmark shortcut limit"},
         {"chapters", "Chapter list"},
         {"cover", "Book cover"},
+        {"image-viewer-entry", "Image page: zoom and return actions"},
+        {"image-viewer-fit", "Image viewer"},
+        {"image-viewer-zoomed", "Image viewer: zoom and pan"},
+        {"dictionary-downloading", "Dictionary download in progress"},
         {"dictionaries", "Manage dictionaries"},
         {"dictionary-choices", "Choose a dictionary"},
         {"dictionary-definition", "Dictionary definition"},
@@ -71,6 +106,8 @@ inline QString screenshotTitle(const QString &scene, const QJsonObject &book) {
         {"dictionary-no-definition", "No definition found"},
         {"dictionary-ui", "Dictionary appearance settings"},
         {"dictionary-unavailable", "Dictionary unavailable"},
+        {"dictionary-search-action", "Search in book from a definition"},
+        {"dictionary-search-results", "Book results for the lookup term"},
         {"embedded-fonts", "Publisher font picker"},
         {"embedded-reading", "Reading with a publisher font"},
         {"finish-book", "Finish reading confirmation"},
@@ -80,12 +117,14 @@ inline QString screenshotTitle(const QString &scene, const QJsonObject &book) {
         {"footnotes-long-preview", "Long footnote"},
         {"footnotes-page-2", "Footnote · Page 2"},
         {"footnotes-preview", "Footnote preview"},
+        {"header-footer-fields", "Choose a header or footer field"},
         {"header-footer", "Headers and footers"},
         {"header-footer-large", "Headers and footers: enlarged text"},
         {"header-footer-off", "Headers and footers: disabled"},
         {"layout", "Page layout"},
-        {"beautifier-off", "No book normalization rules selected"},
-        {"beautifier-rules", "Book normalization rules"},
+        {"beautifier-off", "Recommended book normalization"},
+        {"beautifier-rules", "Custom book normalization"},
+        {"beautifier-full", "Full book normalization"},
         {"beautifier-settings", "Book normalization in Settings"},
         {"library-book-menu", "Book actions"},
         {"library-empty", "Welcome to the library"},
@@ -119,6 +158,9 @@ inline QString screenshotTitle(const QString &scene, const QJsonObject &book) {
         {"menu", "Reading menu"},
         {"menu-return-pressed", "Return button pressed"},
         {"reading", "Reading"},
+        {"loading-cover", "Opening a book with its cover"},
+        {"loading-cover-slow", "Opening a book: delayed hint"},
+        {"loading-no-cover", "Opening a book without a cover"},
         {"saving", "Saving reading progress"},
         {"save-failed", "Saving failed"},
         {"save-retry-failed", "Saving retry failed"},
@@ -129,6 +171,9 @@ inline QString screenshotTitle(const QString &scene, const QJsonObject &book) {
         {"settings-controls", "Controls settings"},
         {"settings-defaults", "Default settings"},
         {"settings-display", "Display settings"},
+        {"settings-animations-supported", "Page animations on MTK"},
+        {"settings-animations-uncertain", "Page animations with compatibility warning"},
+        {"settings-animations-unsupported", "Page animations unavailable"},
         {"settings-kosync", "Sync settings"},
         {"kosync-manual-toolbar", "Manual sync toolbar"},
         {"kosync-manual-prompt", "Manual sync explanation"},
@@ -144,6 +189,7 @@ inline QString screenshotTitle(const QString &scene, const QJsonObject &book) {
         {"styling-word-spacing", "Word spacing preview"},
         {"settings-system", "System settings"},
         {"session-timeout", "New session after sleep"},
+        {"settings-time-remaining-format", "Time remaining format"},
         {"stats", "Reading statistics"},
         {"stats-dense-graph", "Dense chapter graph"},
         {"stats-dense-reading", "Moby Dick"},
@@ -182,6 +228,10 @@ inline QString screenshotTitle(const QString &scene, const QJsonObject &book) {
         {"widget-keyboard-libron-300ppi", "Keyboard with Libron"},
         {"widget-keyboard-mono-300ppi", "Keyboard with interface font"},
         {"widget-keyboard-symbols", "Keyboard symbols"},
+        {"widget-keyboard-shift", "Keyboard one-shot Shift"},
+        {"widget-keyboard-caps-lock", "Keyboard Caps Lock"},
+        {"widget-keyboard-qwertz", "German QWERTZ keyboard"},
+        {"widget-keyboard-azerty", "French AZERTY keyboard"},
     };
     if (titles.contains(scene)) return titles[scene];
     const auto page = QRegularExpression("^(.+)-(\\d+)$").match(scene);
@@ -216,7 +266,7 @@ inline QByteArray screenshotGallery(const QString &directory, const QJsonArray &
         const auto device = shot["device"].toString();
         const auto theme = shot["theme"].toString();
         if (QFileInfo(file).fileName() != file || !file.endsWith(".png") || QFileInfo(directory + '/' + file).isSymLink() ||
-            (device != "six-inch" && device != "seven-inch") || (theme != "light" && theme != "dark" && theme != "large") ||
+            (device != "six-inch" && device != "seven-inch" && device != "phone" && device != "six-inch-landscape" && device != "phone-landscape") || (theme != "light" && theme != "dark" && theme != "large") ||
             shot["capture"] != "screen" || shot["ppi"].toInt() != 300 || screen.isEmpty() || capturePage < 1) { qCritical() << "Invalid screenshot metadata:" << file; return {}; }
         const auto variant = device + '/' + theme;
         if (variants[screen][variant].contains(capturePage)) { qCritical() << "Duplicate screenshot page:" << file; return {}; }
@@ -243,13 +293,15 @@ inline QByteArray screenshotGallery(const QString &directory, const QJsonArray &
     QMap<QString, QString> sections;
     for (auto it = scenes.cbegin(); it != scenes.cend(); ++it) {
         const auto &pages = variants[it.key()];
-        // Light, dark and light with 150% text at both sizes. Larger text can
-        // add pages, so only the two themes must match page for page.
-        if (pages.size() != 6) { qCritical() << "Missing screenshot variants:" << it.key() << pages.keys(); return {}; }
-        for (const auto &device : {QString("six-inch"), QString("seven-inch")}) {
+        // Light and dark everywhere, and light with 150% text on the
+        // e-reader profiles. Larger text can add pages, so only the two
+        // themes must match page for page.
+        if (pages.size() != 13) { qCritical() << "Missing screenshot variants:" << it.key() << pages.keys(); return {}; }
+        for (const auto &device : {QString("six-inch"), QString("seven-inch"), QString("phone"), QString("six-inch-landscape"), QString("phone-landscape")}) {
             const auto light = pages.value(device + "/light");
             if (light != pages.value(device + "/dark")) { qCritical() << "Screenshot theme pages differ:" << it.key() << device << light << pages.value(device + "/dark"); return {}; }
             for (const auto &theme : {QString("light"), QString("large")}) {
+                if (device.startsWith("phone") && theme == "large") continue;
                 const auto captured = pages.value(device + '/' + theme);
                 for (int page = 1; page <= captured.size(); ++page)
                     if (!captured.contains(page)) { qCritical() << "Screenshot page missing:" << it.key() << device << theme << page; return {}; }
@@ -290,7 +342,7 @@ inline QByteArray screenshotGallery(const QString &directory, const QJsonArray &
             if (url.startsWith("https://")) credits += "<p><a href=\"" + escape(url) + "\">" + escape(item["title"].toString()) + "</a></p>";
         }
     }
-    const QMap<QString, QString> values{{"SUITE", manifest["suite"] == "light" ? "Light" : manifest["suite"] == "scenes" ? "Selected scenes" : "Full"}, {"GROUPS", groups}, {"OPTIONS", options}, {"IMAGES", images},
+    const QMap<QString, QString> values{{"SUITE", manifest["suite"] == "light" ? "Light" : manifest["suite"] == "scenes" ? "Selected scenes" : manifest["suite"] == "cases" ? "Selected cases" : "Full"}, {"GROUPS", groups}, {"OPTIONS", options}, {"IMAGES", images},
         {"COUNT", QString::number(scenes.size())}, {"CAPTURES", QString::number(captures.size())}, {"BOOKS", credits},
         {"BUILD", escape("Source " + manifest["commit"].toString() + (manifest["modified"].toBool() ? " (modified)" : "") +
                          " · Qt " + manifest["qt"].toString() + " · " + manifest["version"].toString())}};

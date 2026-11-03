@@ -110,6 +110,63 @@ void checkNativeHandoff(Factory &factory) {
     f.rotation.stop();
     require(nativeNotifications == count, "Closing asleep does not replay a sensor turn into the sleep screen");
 }
+void checkPinScreenHandoff(Factory &factory) {
+    QOrientationSensor sensor;
+    sensor.setIdentifier("kobalt-lock-test");
+    require(sensor.start(), "Start native sensor for PIN handoff");
+    auto *backend = factory.backend;
+    backend->sample(QOrientationReading::TopUp);
+    bool pin = false;
+    QList<Qt::ScreenOrientation> turns;
+    ReaderOrientation rotation(&sensor, [&](Qt::ScreenOrientation shown) { turns.append(shown); }, {},
+                               [&] { return pin; });
+    rotation.configure({{"auto_rotate", true}});
+    int nativeNotifications = 0;
+    QObject::connect(&sensor, &QSensor::readingChanged, [&] { ++nativeNotifications; });
+    rotation.start(Qt::PortraitOrientation);
+    backend->sample(QOrientationReading::LeftUp);
+    settle();
+    require(turns.last() == Qt::LandscapeOrientation, "Reader rotates before PIN handoff");
+    rotation.freeze();
+    turns.clear();
+    pin = true;
+    backend->sample(QOrientationReading::RightUp);
+    require(nativeNotifications == 1 && turns.isEmpty(), "PIN can rotate before the reader sleep handoff");
+    pin = false;
+    rotation.start(Qt::InvertedLandscapeOrientation);
+    require(turns == QList<Qt::ScreenOrientation>{Qt::LandscapeOrientation},
+            "Unlock before handoff restores the reading orientation");
+    for (int cycle = 0; cycle < 2; ++cycle) {
+        rotation.freeze();
+        rotation.stop(true);
+        const auto beforeSleep = nativeNotifications;
+        backend->sample(QOrientationReading::TopDown);
+        require(nativeNotifications == beforeSleep, "Sleep screen still blocks native sensor delivery");
+        turns.clear();
+        pin = true;
+        backend->sample(QOrientationReading::RightUp);
+        require(nativeNotifications == beforeSleep + 1 &&
+                    sensor.reading()->orientation() == QOrientationReading::RightUp,
+                "Awake PIN screen receives native sensor readings");
+        require(turns.isEmpty(), "PIN rotation does not turn or resume Kobalt");
+        pin = false;
+        backend->sample(QOrientationReading::TopDown);
+        require(nativeNotifications == beforeSleep + 1, "Returning to sleep blocks native readings again");
+        rotation.start(Qt::InvertedLandscapeOrientation);
+        require(turns == QList<Qt::ScreenOrientation>{Qt::LandscapeOrientation},
+                "Unlock restores held reading orientation instead of the PIN orientation");
+        backend->sample(QOrientationReading::LeftUp);
+        require(nativeNotifications == beforeSleep + 1, "Unlocked reader owns sensor delivery again");
+    }
+    rotation.stop(true);
+    pin = true;
+    backend->sample(QOrientationReading::TopDown);
+    rotation.stop();
+    require(turns.last() == Qt::PortraitOrientation, "Closing behind PIN restores the original native orientation");
+    const auto beforeClose = nativeNotifications;
+    backend->sample(QOrientationReading::TopUp);
+    require(nativeNotifications == beforeClose + 1, "Closing behind PIN releases the sensor filter");
+}
 void checkOpening(Factory &factory) {
     for (const auto lock : {Qt::PortraitOrientation, Qt::LandscapeOrientation}) {
         const auto inverted = Qt::ScreenOrientation(int(lock) * 4);
@@ -200,8 +257,8 @@ void checkSleepLifecycle(Factory &factory) {
     f.rotation.start(Qt::PortraitOrientation);
     settle();
     f.rotation.stop();
-    require(f.turns == QList<Qt::ScreenOrientation>{Qt::LandscapeOrientation, Qt::LandscapeOrientation},
-            "Quarter-turn sleep and wake retain a landscape opening orientation");
+    require(f.turns == QList<Qt::ScreenOrientation>{Qt::PortraitOrientation, Qt::LandscapeOrientation},
+            "Quarter-turn wake restores reading orientation; close restores native orientation");
     QList<Qt::ScreenOrientation> turns;
     {
         QOrientationSensor sensor;
@@ -218,6 +275,42 @@ void checkSleepLifecycle(Factory &factory) {
     require(turns == QList<Qt::ScreenOrientation>{Qt::PortraitOrientation},
             "Destruction while asleep restores opening");
 }
+void checkQuarterTurnWake(Factory &factory) {
+    for (const bool borrowed : {false, true}) {
+        for (const bool automatic : {false, true}) {
+            for (const bool inverted : {false, true}) {
+                Fixture f(factory, borrowed);
+                const auto reading = inverted ? Qt::InvertedLandscapeOrientation : Qt::LandscapeOrientation;
+                const auto sample = inverted ? QOrientationReading::RightUp : QOrientationReading::LeftUp;
+                f.rotation.configure({{"orientation", int(Qt::LandscapeOrientation)}, {"auto_rotate", automatic}});
+                f.rotation.start(Qt::PortraitOrientation);
+                f.sample(sample);
+                for (int cycle = 0; cycle < 2; ++cycle) {
+                    f.rotation.freeze();
+                    f.rotation.stop(true);
+                    require(f.turns.last() == Qt::PortraitOrientation, "Sleep still restores native geometry");
+                    f.sample(QOrientationReading::TopDown);
+                    f.turns.clear();
+                    f.rotation.start(Qt::PortraitOrientation);
+                    settle();
+                    require(f.turns == QList<Qt::ScreenOrientation>{reading},
+                            "Quarter-turn wake restores reading orientation without a new sample");
+                    require(f.sensor.isActive(), "Wake resumes sensor delivery");
+                }
+                f.rotation.setBlocked(true);
+                f.sample(inverted ? QOrientationReading::LeftUp : QOrientationReading::RightUp);
+                require(f.turns.last() == reading, "Fresh wake sample waits for layout to finish");
+                f.rotation.setBlocked(false);
+                settle();
+                require(f.turns.last() == (inverted ? Qt::LandscapeOrientation : Qt::InvertedLandscapeOrientation),
+                        "Fresh wake sample corrects restored orientation after layout");
+                f.rotation.stop();
+                require(f.turns.last() == Qt::PortraitOrientation, "Close retains original native orientation");
+            }
+        }
+    }
+}
+
 void checkPendingReadingAtSleep(Factory &factory) {
     Fixture f(factory);
     f.backend->sample(QOrientationReading::TopUp);
@@ -330,8 +423,10 @@ int main(int argc, char **argv) {
     require(manual.manual() == Qt::InvertedLandscapeOrientation, "Sensorless manual preference preserved");
     checkSleepRequest(factory);
     checkNativeHandoff(factory);
+    checkPinScreenHandoff(factory);
     checkOpening(factory);
     checkSleepLifecycle(factory);
+    checkQuarterTurnWake(factory);
     checkLatestReading(factory);
     checkPendingReadingAtSleep(factory);
     std::puts("PASS: sensor locks, opening, sleep/wake/close lifecycle, latest readings and sensor ownership");
@@ -340,6 +435,7 @@ int main(int argc, char **argv) {
 #else
 #include "platform/api/reader_orientation.h"
 #include <QCoreApplication>
+#include <cstdio>
 #include <cstdlib>
 
 int main(int argc, char **argv) {
@@ -348,26 +444,33 @@ int main(int argc, char **argv) {
     int ownership = 0;
     kobalt::ReaderOrientation rotation(nullptr, [&](Qt::ScreenOrientation value) { shown = value; },
         [&](bool owns) { ownership += owns ? 1 : -1; });
-    auto require = [](bool valid) { if (!valid) std::abort(); };
-    require(!rotation.automaticAvailable() && !rotation.setAutomatic(true));
+    auto require = [](bool valid, const char *message) {
+        if (!valid) {
+            std::fprintf(stderr, "%s\n", message);
+            std::exit(1);
+        }
+    };
+    require(!rotation.automaticAvailable() && !rotation.setAutomatic(true), "Sensorless rotation rejects Auto");
     rotation.configure({{"orientation", int(Qt::InvertedLandscapeOrientation)}, {"auto_rotate", true}});
-    require(rotation.manual() == Qt::InvertedLandscapeOrientation && !rotation.automatic());
+    require(rotation.manual() == Qt::InvertedLandscapeOrientation && !rotation.automatic(), "Sensorless manual preference preserved");
     rotation.start(Qt::PortraitOrientation);
-    require(shown == Qt::InvertedLandscapeOrientation && ownership == 1);
+    require(shown == Qt::InvertedLandscapeOrientation && ownership == 1, "Opening applies manual orientation and acquires ownership");
     rotation.rotate();
-    require(shown == Qt::PortraitOrientation);
+    require(shown == Qt::PortraitOrientation, "Manual rotation wraps to portrait");
     rotation.rotate();
-    require(shown == Qt::LandscapeOrientation);
+    require(shown == Qt::LandscapeOrientation, "Manual rotation advances to landscape");
     rotation.freeze();
     rotation.rotate();
-    require(shown == Qt::LandscapeOrientation);
+    require(shown == Qt::LandscapeOrientation, "Frozen rotation keeps the shown orientation");
+    require(rotation.manual() == Qt::LandscapeOrientation, "Frozen rotation keeps the manual preference");
     rotation.stop(true);
-    require(shown == Qt::PortraitOrientation && ownership == 0);
+    require(shown == Qt::PortraitOrientation && ownership == 0, "Quarter-turn sleep restores native geometry and releases ownership");
     rotation.start(Qt::PortraitOrientation);
+    require(shown == Qt::LandscapeOrientation, "Wake restores the reading orientation");
     rotation.configure({{"orientation", int(Qt::InvertedPortraitOrientation)}});
-    require(shown == Qt::InvertedPortraitOrientation);
-    require(rotation.settings().value("orientation").toInt() == int(Qt::InvertedPortraitOrientation));
+    require(shown == Qt::InvertedPortraitOrientation, "Awake configuration applies the new orientation");
+    require(rotation.settings().value("orientation").toInt() == int(Qt::InvertedPortraitOrientation), "Settings retain the manual preference");
     rotation.stop();
-    require(shown == Qt::PortraitOrientation && ownership == 0);
+    require(shown == Qt::PortraitOrientation && ownership == 0, "Closing restores native geometry and releases ownership");
 }
 #endif

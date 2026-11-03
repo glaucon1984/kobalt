@@ -1,11 +1,14 @@
 #pragma once
+#include "page_animation_support.h"
 #include "dictionary_service.h"
 #include "keyboard_controller.h"
 #include "sync_network.h"
 #include "light_controls.h"
+#include "safe_area.h"
 #include "window_presentation.h"
 #include <QFont>
 #include <QJsonObject>
+#include <QSize>
 #include <QStringList>
 #include <QUrl>
 #include <functional>
@@ -45,6 +48,11 @@ struct ReaderHostServices {
     QString backButtonLabel;
     // Desktop-only presentation preferences; fixtures retain device chrome.
     bool desktopUi = false;
+    // Narrow phone form factor, resolved from native bounds and reader density.
+    bool phoneLayout = false;
+    // Optional: the cutout, system-bar and corner bands of a reader of this
+    // size. The reader asks again on resize or refreshHostPresentation().
+    std::function<SafeArea(QSize)> safeArea;
     // Kobo supplies its default export folder. Other hosts open a save-location picker.
     std::function<QString()> annotationExportDirectory;
     // Optional native dialog parent for hosts that embed the reader in a canvas.
@@ -77,7 +85,10 @@ struct ReaderHostServices {
     std::function<int(QKeyEvent *)> pageButtonDirection;
     std::function<QStringList()> fontFamilies;
     std::function<QFont()> uiFont;
-    std::function<bool()> suspended, lightAvailable, animationsAvailable;
+    std::function<bool()> suspended, lightAvailable;
+    std::function<PageAnimationSupport()> animationSupport;
+    // Software page transitions on ordinary Android screens, separate from e-paper sweeps.
+    bool softwarePageAnimations = false;
     // Optional: the platform's text size setting, where 1 is standard. On
     // Android and desktop, the reader applies it when a book opens and the
     // Library when it is shown. Kobo applies Nickel's Large Print scale in its
@@ -101,7 +112,7 @@ struct ReaderHostServices {
     bool complete() const {
         return bool(automaticBookOpening) == bool(setAutomaticBookOpening) && clock && battery && pageButtons &&
                reverseLandscapeButtons && pageButtonDirection && fontFamilies && uiFont && suspended &&
-               lightAvailable && animationsAvailable && cancelAnimation && light && dictionary && keyboard &&
+               lightAvailable && animationSupport && cancelAnimation && light && dictionary && keyboard &&
                presentation && browserAvailable && openBrowser;
     }
 };

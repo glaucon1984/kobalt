@@ -81,6 +81,7 @@ enum class ControlIcon {
     WifiHigh,
     WifiDisconnected,
     KeyboardShift,
+    KeyboardCapsLock,
     KeyboardBackspace,
     KeyboardReturn,
     // Styling settings rows.
@@ -88,13 +89,57 @@ enum class ControlIcon {
     Paragraph,
     SpreadVertical,
     MagicWand,
-    Hidden
+    Hidden,
+    Star,
+    Map,
+    Pin,
+    Flag,
+    Heart,
+    Note,
+    Lightbulb,
+    Globe,
+    Mountains,
+    Tree,
+    Moon,
+    Clock,
+    Calendar,
+    Person,
+    People,
+    Crown,
+    Key,
+    Sword,
+    Quotes,
+    Question,
+    CheckCircle,
+    Warning,
+    Chat,
+    Scroll,
+    Image,
+    Books,
+    Castle,
+    Anchor,
+    Paw,
+    Flower,
+    Coffee,
+    Music,
+    Rocket,
+    Planet,
+    Lightning,
+    Flame,
+    Skull,
+    Diamond,
+    BookmarkAdd,
+    BookmarkRemove,
+    ExportAction,
+    FitImage
 };
 // Paint vectors at the target resolution without an intermediate icon bitmap.
 void paintOpeningIcon(QPainter &painter, ControlIcon icon, const QRectF &bounds, QColor color);
 // Use 90% of Bluetooth's visible height, centered on its intersection.
 void paintWifiStatusIcon(QPainter &painter, ControlIcon icon, const QRectF &bounds, QColor color);
 QIcon controlIcon(ControlIcon icon, QColor color = Qt::black, bool sideButtons = false);
+QStringList bookmarkIconNames();
+ControlIcon bookmarkIcon(const QString &name);
 // These Qt-facing helpers configure shared Button instances.
 // Original asset selection leaves the button painter unchanged.
 void buttonIcon(QPushButton *button, ControlIcon icon);

@@ -15,6 +15,8 @@ namespace lightSwipe {
 inline constexpr Px width{580}, height{252}, inset{64}, iconWidth{140}, iconHeight{156}, gap{48};
 inline constexpr Px percentText{78}, captionText{32}, captionGap{16};
 inline constexpr int hideMilliseconds = 850;
+// Wait for a pause in the swipe before changing e-ink feedback.
+inline constexpr int feedbackMilliseconds = 150;
 }
 namespace spacing {
 inline constexpr Px tight{8}, row{16}, section{24}, gutter{48};
@@ -149,6 +151,9 @@ inline int headerHeight() {
     return statusHeight + actionHeight;
 }
 inline constexpr Px cellWidth{118}, inset{36};
+// A header with more actions than a narrow screen holds at the usual width
+// uses this cell width there. It stays above the 7.6 mm touch-target minimum.
+inline constexpr Px compactCellWidth{96};
 inline constexpr IconPx cellIcon{40}, backIcon{44};
 inline constexpr Px returnLabelGap{25}; // 6 points at 300 ppi.
 inline constexpr Px returnArrowOffset{2}, returnTitleOffset{1};
@@ -158,7 +163,7 @@ inline constexpr IconPx tabIcon{48};
 inline constexpr Px tabGap{10};
 inline constexpr TextPx captionText{22}, numberText{22};
 inline constexpr Px captionSpacing{2};
-inline constexpr Px listActionHeight{list::twoLines}, optionHeight{list::twoLines}, checkSize{48};
+inline constexpr Px listActionHeight{list::twoLines}, menuActionHeight{128}, optionHeight{list::twoLines}, checkSize{48};
 // Settings tabs stack an icon over a label, as the bottom tabs do. The rail
 // is as wide as its widest label with this margin on each side.
 inline constexpr Px railRowHeight{124}, railInset{28};
@@ -244,6 +249,7 @@ inline constexpr int hintDelayMilliseconds = 4000;
 inline constexpr qreal referenceWidth = 402, referenceHeight = 543;
 inline constexpr qreal brandText = 40.5, labelText = 14.25, hintText = 8;
 inline const QRectF icon{172, 166, 58.5, 63};
+inline const QRectF cover{91, 63, 220, 330};
 inline constexpr qreal iconBarHeight = 6.5, iconBarPitch = 11.3, finalBarWidth = 42.3;
 inline const QRectF brand{100, 248, 202, 58};
 inline const QRectF label{60, 418, 282, 24};
@@ -286,6 +292,8 @@ inline constexpr Px outline{2}, handleRadius{14}, handleHitRadius{32};
 }
 namespace lookup {
 inline constexpr int heightPercent = 46, holdMilliseconds = 500;
+// On a short screen the sheet can take up to this share, if the word stays clear.
+inline constexpr int shortHeightPercent = 62;
 inline constexpr Px moveTolerance{40};
 inline constexpr Px choiceHeight{72};
 }

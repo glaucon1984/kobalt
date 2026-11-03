@@ -1,3 +1,4 @@
+#include "reading/reading_density.h"
 #include "interfaces/reader/ui/controls/buttons.h"
 #include "interfaces/reader/ui/controls/icons.h"
 #include "interfaces/reader/ui/controls/text.h"
@@ -53,6 +54,9 @@
 #include <QtMath>
 #include <QKeyEvent>
 #include <QProgressBar>
+#include <QTouchEvent>
+#include <QWindow>
+#include <private/qeventpoint_p.h>
 #include <QRawFont>
 #include <cstdio>
 #include <cstdlib>
@@ -1941,7 +1945,9 @@ int main(int argc, char **argv) {
         for (const int ppi : {167, 212, 300}) {
             setDensity(ppi);
             QWidget host;
-            host.resize(600, metrics::control::stepSize);
+            // Wide enough for a side caption at every density; narrower rows
+            // stack their caption above the controls and grow taller.
+            host.resize(900, metrics::control::stepSize);
             auto *rows = new QVBoxLayout(&host);
             rows->setContentsMargins(0, 0, 0, 0);
             auto *slider =
@@ -2059,6 +2065,30 @@ int main(int argc, char **argv) {
                 "Setting description does not fit its requested height");
     }
     {
+        kobalt::ui::DescribedOption sample("Pages", "", &optionsHost);
+        auto look = sample.presentation();
+        look.valueBelowLabel = true;
+        look.leadingIndicator = true;
+        sample.setPresentation(look);
+        sample.resize(720, sample.heightForWidth(720));
+        sample.show();
+        const auto firstValueInk = [&](bool halfSpaces) {
+            kobalt::ui::DescribedOption::ValueStyle style;
+            style.halfSpaces = halfSpaces;
+            sample.setValue("123 456", style);
+            sample.resize(720, sample.heightForWidth(720));
+            app.processEvents();
+            const auto image = sample.grab().toImage();
+            for (int y = 0; y < image.height(); ++y)
+                for (int x = image.width() / 2; x < image.width() - 4; ++x)
+                    if (qGray(image.pixel(x, y)) < 128) return y;
+            return -1;
+        };
+        const int normal = firstValueInk(false), spaced = firstValueInk(true);
+        require(normal > 0 && qAbs(normal - spaced) <= 1,
+                "Half-spaced page values must stay below their label");
+    }
+    {
         // Standard text keeps the description at its design offset below the
         // title; only large text makes the title line taller.
         namespace m = kobalt::ui::metrics;
@@ -2171,7 +2201,7 @@ int main(int argc, char **argv) {
                     ++toggles;
                 });
                 require(option.presentation().indicator == DescribedOption::Indicator::Toggle &&
-                            option.presentation().minimumRowHeight == 116 &&
+                            option.presentation().minimumRowHeight == int(metrics::settings::optionHeight) &&
                             option.presentation().labelPixels == int(metrics::text::body) &&
                             option.presentation().indicatorSize ==
                                 QSize(metrics::settings::toggleWidth, metrics::settings::toggleHeight),
@@ -2236,13 +2266,15 @@ int main(int argc, char **argv) {
                     app.processEvents();
                 }
                 DescribedOption compact("Compact", {}, &host);
+                require(compact.heightForWidth(px(700)) == int(metrics::control::stepSize),
+                        "Compact option default height changed");
                 auto compactPresentation = compact.presentation();
                 compactPresentation.indicator = DescribedOption::Indicator::Radio;
                 compactPresentation.minimumRowHeight = px(150);
                 compact.setPresentation(compactPresentation);
                 require(compact.minimumHeight() == px(150), "Option configuration lost caller minimum height");
-                require(compact.heightForWidth(px(700)) == int(metrics::control::stepSize),
-                        "Compact option height changed with presentation");
+                require(compact.heightForWidth(px(700)) == qMax(px(150), int(metrics::control::stepSize)),
+                        "Compact option ignored the configured minimum height");
             }
         }
         setDensity(savedDensity);
@@ -2876,11 +2908,9 @@ int main(int argc, char **argv) {
                     "Download progress rebuilt dictionary rows");
         }
         require(unrelatedPaints.paints == 0, "Download progress repainted an unchanged dictionary row");
-        auto *progress = page.findChild<QProgressBar *>("rrDictionaryProgress0");
-        require(progress && progress->width() == progress->height() && progress->value() > 0,
-                "Circular transfer progress is missing");
-        require(progress->parentWidget() == page.findChild<QPushButton *>("rrDictionaryAction0"),
-                "Progress is not inside the Stop button");
+        auto *stopAction = page.findChild<QPushButton *>("rrDictionaryAction0");
+        require(stopAction && !stopAction->icon().isNull() && stopAction->iconSize().width() == kobalt::ui::px(28),
+                "Transfer progress must use the Stop button's icon slot");
         require(page.findChild<QWidget *>("rrDictionaryRow0")->height() == kobalt::ui::metrics::list::oneLine,
                 "Downloading changed the dictionary row height");
         page.setTransfer({}, 0, 0, false);
@@ -3081,6 +3111,216 @@ int main(int argc, char **argv) {
             }
             settings.dismissFontChoices();
         }
+        int paragraphCommits = 0, chosenGap = -2, chosenIndent = -2;
+        settings.showParagraphAdjustments(-1, 60, [&](int gap, int indent) {
+            ++paragraphCommits;
+            chosenGap = gap;
+            chosenIndent = indent;
+        });
+        app.processEvents();
+        auto *indent = static_cast<kobalt::ui::SettingSlider *>(settings.fontDialog->findChild<QSlider *>("rrParagraphIndentSlider"));
+        auto *gap = static_cast<kobalt::ui::SettingSlider *>(settings.fontDialog->findChild<QSlider *>("rrParagraphSpacingSlider"));
+        require(indent && gap, "Paragraph adjustment sliders are missing");
+        const int inset = kobalt::ui::metrics::control::sliderInset;
+        const auto xAt = [inset](kobalt::ui::SettingSlider *control, double position) {
+            return inset + qRound((control->width() - 2 * inset) * position);
+        };
+        const auto mouse = [](kobalt::ui::SettingSlider *control, QEvent::Type type, int x) {
+            const QPointF local(x, control->height() / 2), global = control->mapToGlobal(local.toPoint());
+            QMouseEvent event(type, local, global, type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton,
+                              type == QEvent::MouseButtonRelease ? Qt::NoButton : Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(control, &event);
+        };
+        const QVector<int> indentStops{-1, 0, 25, 50, 75, 100, 125, 150, 175, 200, 300};
+        const QVector<double> indentPositions{0, .25, .3125, .375, .4375, .5, .5625, .625, .6875, .75, 1};
+        for (int i = 0; i < indentStops.size(); ++i) {
+            const int before = paragraphCommits;
+            indent->setValue(60);
+            const int x = xAt(indent, indentPositions[i]);
+            mouse(indent, QEvent::MouseButtonPress, x);
+            require(indent->value() == indentStops[i] && paragraphCommits == before,
+                    "Indent drag missed a hidden quarter stop or committed before release");
+            mouse(indent, QEvent::MouseButtonRelease, x);
+            require(paragraphCommits == before + 1 && chosenIndent == indentStops[i] && chosenGap == -1,
+                    "Indent release did not commit once with the unchanged Publisher gap");
+        }
+        // Sweep both ways to reject extra subdivisions, including above 200%.
+        for (const bool reverse : {false, true}) {
+            QVector<int> visited;
+            const int before = paragraphCommits;
+            const int span = indent->width() - 2 * inset;
+            mouse(indent, QEvent::MouseButtonPress, reverse ? indent->width() : 0);
+            for (int offset = 0; offset <= span; ++offset) {
+                mouse(indent, QEvent::MouseMove, inset + (reverse ? span - offset : offset));
+                if (visited.isEmpty() || visited.last() != indent->value())
+                    visited.append(indent->value());
+            }
+            auto expected = indentStops;
+            if (reverse)
+                std::reverse(expected.begin(), expected.end());
+            require(visited == expected && paragraphCommits == before,
+                    "Indent drag added stops, skipped quarter stops or committed a draft");
+            mouse(indent, QEvent::MouseButtonRelease, reverse ? 0 : indent->width());
+        }
+        for (const bool hide : {false, true}) {
+            indent->setValue(60);
+            const int before = paragraphCommits;
+            mouse(indent, QEvent::MouseButtonPress, xAt(indent, .375));
+            if (hide) {
+                indent->hide();
+                indent->show();
+            } else {
+                QEvent cancel(QEvent::TouchCancel);
+                QApplication::sendEvent(indent, &cancel);
+            }
+            mouse(indent, QEvent::MouseButtonRelease, xAt(indent, .375));
+            require(indent->value() == 60 && paragraphCommits == before,
+                    "Abandoned indent drag lost its fine value or committed");
+        }
+        QPointingDevice touchDevice("indentation test", 1, QInputDevice::DeviceType::TouchScreen,
+                                    QPointingDevice::PointerType::Finger, QInputDevice::Capability::Position, 2, 0);
+        const auto touch = [&](kobalt::ui::SettingSlider *control, QEvent::Type type, QPoint position, bool secondFinger = false) {
+            const auto state = type == QEvent::TouchBegin ? QEventPoint::Pressed :
+                type == QEvent::TouchEnd ? QEventPoint::Released : QEventPoint::Updated;
+            QEventPoint point(0, state, position, control->mapToGlobal(position));
+            QMutableEventPoint::setPosition(point, position);
+            QList<QEventPoint> points{point};
+            if (secondFinger)
+                points.append(QEventPoint(1, QEventPoint::Pressed, position, control->mapToGlobal(position)));
+            QTouchEvent event(type, &touchDevice, Qt::NoModifier, points);
+            QApplication::sendEvent(control, &event);
+        };
+        for (int i = 0; i < indentStops.size(); ++i) {
+            indent->setValue(60);
+            const int before = paragraphCommits;
+            const QPoint point(xAt(indent, indentPositions[i]), indent->height() / 2);
+            touch(indent, QEvent::TouchBegin, point);
+            require(indent->value() == indentStops[i] && paragraphCommits == before,
+                    "Touch indent drag differs from mouse snapping");
+            touch(indent, QEvent::TouchEnd, point);
+            require(paragraphCommits == before + 1 && chosenIndent == indentStops[i],
+                    "Touch indent release did not commit its stop once");
+        }
+        indent->setValue(60);
+        const int beforeTouchCancel = paragraphCommits;
+        const QPoint quarter(xAt(indent, .3125), indent->height() / 2);
+        const QPoint half(xAt(indent, .375), indent->height() / 2);
+        touch(indent, QEvent::TouchBegin, quarter);
+        touch(indent, QEvent::TouchUpdate, half);
+        require(indent->value() == 50 && paragraphCommits == beforeTouchCancel,
+                "Touch movement did not reach a hidden stop without committing");
+        QTouchEvent touchCancel(QEvent::TouchCancel, &touchDevice);
+        QApplication::sendEvent(indent, &touchCancel);
+        touch(indent, QEvent::TouchEnd, half);
+        require(indent->value() == 60 && paragraphCommits == beforeTouchCancel,
+                "Cancelled touch drag lost its fine value or committed");
+        touch(indent, QEvent::TouchBegin, quarter);
+        touch(indent, QEvent::TouchUpdate, half, true);
+        touch(indent, QEvent::TouchEnd, half);
+        require(indent->value() == 60 && paragraphCommits == beforeTouchCancel,
+                "Multi-touch indent drag lost its fine value or committed");
+        indent->setValue(60);
+        settings.fontDialog->findChild<QPushButton *>("rrParagraphIndentMore")->click();
+        require(chosenIndent == 61, "Indent plus did not keep one-percent adjustment");
+        settings.fontDialog->findChild<QPushButton *>("rrParagraphIndentLess")->click();
+        require(chosenIndent == 60, "Indent minus snapped instead of adjusting one percent");
+        indent->setValue(0);
+        settings.fontDialog->findChild<QPushButton *>("rrParagraphIndentLess")->click();
+        require(chosenIndent == -1, "Indent minus did not reach Publisher");
+        settings.fontDialog->findChild<QPushButton *>("rrParagraphIndentMore")->click();
+        require(chosenIndent == 0, "Indent plus did not leave Publisher at zero");
+        const QVector<int> gapStops{-1, 0, 25, 50, 75, 100, 125, 150, 175, 200};
+        const QVector<double> gapPositions{0, .2, .3, .4, .5, .6, .7, .8, .9, 1};
+        for (int i = 0; i < gapStops.size(); ++i) {
+            const QPoint point(xAt(gap, gapPositions[i]), gap->height() / 2);
+            for (const bool useTouch : {false, true}) {
+                gap->setValue(60);
+                const int before = paragraphCommits;
+                if (useTouch)
+                    touch(gap, QEvent::TouchBegin, point);
+                else
+                    mouse(gap, QEvent::MouseButtonPress, point.x());
+                require(gap->value() == gapStops[i] && paragraphCommits == before,
+                        "Paragraph gap missed a quarter stop or committed before release");
+                if (useTouch)
+                    touch(gap, QEvent::TouchEnd, point);
+                else
+                    mouse(gap, QEvent::MouseButtonRelease, point.x());
+                require(chosenGap == gapStops[i] && chosenIndent == 0 && paragraphCommits == before + 1,
+                        "Paragraph gap release did not commit once with unchanged indentation");
+            }
+        }
+        for (const bool reverse : {false, true}) {
+            QVector<int> visited;
+            const int before = paragraphCommits;
+            const int span = gap->width() - 2 * inset;
+            mouse(gap, QEvent::MouseButtonPress, reverse ? gap->width() : 0);
+            for (int offset = 0; offset <= span; ++offset) {
+                mouse(gap, QEvent::MouseMove, inset + (reverse ? span - offset : offset));
+                if (visited.isEmpty() || visited.last() != gap->value())
+                    visited.append(gap->value());
+            }
+            auto expected = gapStops;
+            if (reverse)
+                std::reverse(expected.begin(), expected.end());
+            require(visited == expected && paragraphCommits == before,
+                    "Paragraph gap drag skipped quarter stops or committed a draft");
+            mouse(gap, QEvent::MouseButtonRelease, reverse ? 0 : gap->width());
+        }
+        gap->setValue(60);
+        const int beforeGapCancel = paragraphCommits;
+        const QPoint gapQuarter(xAt(gap, .3), gap->height() / 2);
+        touch(gap, QEvent::TouchBegin, gapQuarter);
+        QTouchEvent gapCancel(QEvent::TouchCancel, &touchDevice);
+        QApplication::sendEvent(gap, &gapCancel);
+        touch(gap, QEvent::TouchEnd, gapQuarter);
+        require(gap->value() == 60 && paragraphCommits == beforeGapCancel,
+                "Cancelled paragraph gap drag lost its fine value or committed");
+        settings.fontDialog->findChild<QPushButton *>("rrParagraphSpacingMore")->click();
+        require(chosenGap == 61, "Paragraph gap plus did not keep one-percent adjustment");
+        settings.fontDialog->findChild<QPushButton *>("rrParagraphSpacingLess")->click();
+        require(chosenGap == 60, "Paragraph gap minus snapped instead of adjusting one percent");
+        gap->setValue(0);
+        settings.fontDialog->findChild<QPushButton *>("rrParagraphSpacingLess")->click();
+        require(chosenGap == -1, "Paragraph gap minus did not reach Publisher");
+        settings.fontDialog->findChild<QPushButton *>("rrParagraphSpacingMore")->click();
+        require(chosenGap == 0, "Paragraph gap plus did not leave Publisher at zero");
+        // Compare complete rail and label pixels with the original visible stops.
+        for (auto *control : {indent, gap}) {
+            for (const bool dark : {false, true}) {
+                QPalette colors = control->palette();
+                colors.setColor(QPalette::Window, dark ? Qt::black : Qt::white);
+                colors.setColor(QPalette::WindowText, dark ? Qt::white : Qt::black);
+                control->setPalette(colors);
+                control->setValue(60);
+                const auto withStops = control->grab().toImage();
+                kobalt::ui::SettingSlider original(nullptr, -1, control->maximum());
+                const bool isIndent = control == indent;
+                const QVector<int> visible = isIndent ? QVector<int>{-1, 0, 100, 200, 300} : QVector<int>{-1, 0, 50, 100, 150, 200};
+                const QStringList labels = isIndent ? QStringList{kobalt::strings::get("reader.publisher_spacing"), "0", "100%", "200%", "300%"} :
+                    QStringList{kobalt::strings::get("reader.publisher_spacing"), "0", "50%", "100%", "150%", "200%"};
+                original.setMarkers(visible, kobalt::ui::SettingSlider::MarkerMode::Stops);
+                original.setMarkerLabels(labels);
+                original.setPalette(colors);
+                original.resize(control->size());
+                original.setValue(60);
+                require(original.grab().toImage() == withStops,
+                        "Paragraph slider differs from the original visible markers and labels");
+                control->setAdditionalStops({});
+                require(control->grab().toImage() == withStops,
+                        "Hidden paragraph stops moved the handle, visible ticks or labels, or drew extra marks");
+                control->setAdditionalStops(isIndent ? QVector<int>{25, 50, 75, 125, 150, 175} : QVector<int>{25, 75, 125, 175});
+                const int markerY = kobalt::ui::metrics::control::sliderLabelHeight +
+                    kobalt::ui::metrics::control::sliderMarkerTop + kobalt::ui::metrics::control::sliderMarkerHeight / 2;
+                for (int i = 0; i < visible.size(); ++i)
+                    require(qGray(withStops.pixel(xAt(control, double(i) / (visible.size() - 1)), markerY)) == (dark ? 255 : 0),
+                            "Paragraph visible ticks no longer use the original equal spacing");
+                for (double position : (isIndent ? QVector<double>{.3125, .375, .4375, .5625, .625, .6875} : QVector<double>{.3, .5, .7, .9}))
+                    require(qGray(withStops.pixel(xAt(control, position), markerY)) == (dark ? 0 : 255),
+                            "Hidden paragraph stop drew a visible tick");
+            }
+        }
+        settings.dismissFontChoices();
     }
     {
         kobalt::ui::PagedText text(&reader);
@@ -3353,7 +3593,7 @@ int main(int argc, char **argv) {
                 "Keyboard submission must preserve accents, trim whitespace and run once");
         require(panel.geometry() == original && definition->isVisible() && !query->isVisible(),
                 "Submission must restore the original dictionary sheet");
-        require(panel.findChild<QPushButton *>("rrDictionarySelect")->text() == "Spanish",
+        require(panel.findChild<QPushButton *>("rrDictionarySelect")->accessibleDescription() == "Spanish",
                 "Editing must retain the selected dictionary");
         panel.open(requested, missing, selection);
         edit->click();
@@ -3407,6 +3647,11 @@ int main(int argc, char **argv) {
         panel.open("word", result, QRect(100, 100, 40, 40));
         auto *selector = panel.findChild<QPushButton *>("rrDictionarySelect");
         const int currentWidth = selector->width();
+        const auto wordBounds = panel.findChild<QLabel *>("rrDictionaryWord")->geometry();
+        require(currentWidth > int(kobalt::ui::metrics::chrome::cellWidth) && selector->text().isEmpty(),
+                "Dictionary selection must leave room for its icon and menu arrow");
+        require(selector->accessibleDescription() == result.dictionary,
+                "The current dictionary name must remain available to accessibility");
         choices.append({"long", QString(100, 'W')});
         panel.setChoices(choices);
         panel.place(QRect(100, 100, 40, 40));
@@ -3414,12 +3659,14 @@ int main(int argc, char **argv) {
                 "A different dictionary's long name must not widen the current selector");
         result.dictionary = "English";
         panel.open("word", result, QRect(100, 100, 40, 40));
-        require(selector->width() >= kobalt::ui::px(220) && selector->width() < currentWidth,
-                "Dictionary selector must adapt to its current label with a minimum width");
+        require(selector->width() == currentWidth && panel.findChild<QLabel *>("rrDictionaryWord")->geometry() == wordBounds,
+                "Changing dictionary names must not move or resize the lookup header");
         result.dictionary = "English monolingual";
         panel.open("word", result, QRect(100, 100, 40, 40));
+        require(selector->width() == currentWidth && selector->accessibleDescription() == result.dictionary,
+                "A long dictionary name must retain the same icon cell and update accessibility");
         if (qEnvironmentVariableIsSet("KOBALT_DICTIONARY_CONTROLS_CAPTURE"))
-            panel.grab().save(qEnvironmentVariable("KOBALT_DICTIONARY_CONTROLS_CAPTURE") + "/wrapped-selector.png");
+            panel.grab().save(qEnvironmentVariable("KOBALT_DICTIONARY_CONTROLS_CAPTURE") + "/icon-selector.png");
     }
     kobalt::DictionaryPanel dictionary(&reader);
     QVector<kobalt::DictionaryChoice> dictionaries;
@@ -3457,8 +3704,11 @@ int main(int argc, char **argv) {
                 "Dictionary picker changed definition geometry or pagination");
         auto *choices = dictionary.findChild<QWidget *>("rrDictionaryChoices");
         auto *count = dictionary.findChild<QLabel *>("rrDictionaryChoicesPages");
+        // A narrow sheet uses compact header cells.
+        const int closeWidth = kobalt::isNarrowWidth(dictionary.width(), kobalt::ui::density())
+            ? int(kobalt::ui::metrics::chrome::compactCellWidth) : int(kobalt::ui::metrics::chrome::cellWidth);
         require(dictionary.findChild<QPushButton *>("rrDictionaryClose")->size() ==
-                    QSize(kobalt::ui::metrics::chrome::cellWidth, kobalt::ui::metrics::chrome::actionHeight),
+                    QSize(closeWidth, kobalt::ui::metrics::chrome::actionHeight),
                 "Dictionary close is not a full header cell");
         require(dictionary.x() == 0 && dictionary.width() == reader.width(),
                 "Dictionary sheet does not span the screen");
@@ -4085,11 +4335,60 @@ int main(int argc, char **argv) {
         using namespace kobalt::ui;
         PageScrubber scrubber(nullptr);
         scrubber.resize(1000, 700);
+        int imageOpens = 0, imageDismissals = 0, returns = 0, stays = 0;
+        scrubber.imageRequested = [&] { ++imageOpens; };
+        scrubber.imageDismissed = [&] { ++imageDismissals; };
+        scrubber.returnRequested = [&] { ++returns; };
+        scrubber.stayRequested = [&] { ++stays; };
+        scrubber.setImageAction("Zoom image");
+        auto *imageAction = scrubber.findChild<QPushButton *>("rrScrubberImage");
+        require(imageAction && !imageAction->isHidden(), "Image suggestion is missing");
+        imageAction->click();
+        scrubber.findChild<QPushButton *>("rrScrubberImageDismiss")->click();
+        require(imageOpens == 1 && imageDismissals == 1 && !returns && !stays,
+                "Image suggestion dispatched return actions");
+        scrubber.setReturnAction("Return to page 8", "Chapter");
+        auto *returnAction = scrubber.findChild<QPushButton *>("rrScrubberReturn");
+        require(returnAction && returnAction->text() == "Return to page 8", "Image suggestion displaced return action");
+        require(!imageAction->isHidden() && !returnAction->isHidden(), "Roomy layout did not show both actions");
+        require(imageAction->geometry().right() < returnAction->geometry().left(), "Image and return actions overlap");
+        imageAction->click();
+        scrubber.findChild<QPushButton *>("rrScrubberImageDismiss")->click();
+
+        returnAction->click();
+        scrubber.findChild<QPushButton *>("rrScrubberStay")->click();
+        require(returns == 1 && stays == 1 && imageOpens == 2 && imageDismissals == 2,
+                "Return action dispatched image actions");
+        scrubber.show();
+        scrubber.resize(400, 700);
+        app.processEvents();
+        require(imageAction->isHidden() && !returnAction->isHidden(), "Narrow layout hid Return or squeezed both actions");
+        scrubber.resize(1000, 700);
+        app.processEvents();
+        require(!imageAction->isHidden() && !returnAction->isHidden(), "Widening did not restore both actions");
+        // Every shown action keeps its full label; resizing across the threshold is reversible.
+        for (int width = 400; width <= 1100; width += 10) {
+            scrubber.resize(width, 700);
+            app.processEvents();
+            if (!imageAction->isHidden()) {
+                require(imageAction->width() >= imageAction->sizeHint().width(), "Image label was squeezed");
+                require(returnAction->width() >= returnAction->sizeHint().width(), "Return label was squeezed");
+                const auto *dismiss = scrubber.findChild<QPushButton *>("rrScrubberImageDismiss");
+                require(dismiss->geometry().right() < returnAction->x(), "Image close overlaps Return");
+            }
+        }
+        scrubber.setReturnAction({}, {});
+        require(!imageAction->isHidden(), "Clearing return action lost image suggestion");
+        scrubber.setImageAction({});
+        require(!scrubber.hasActions(), "Dismissed actions left a floating button");
         QVector<QPair<int, QString>> chapters{{0, "Start"}, {200, "Middle"}, {900, "Later"}, {1500, "End"}};
         const auto checkMarkers = [&] {
             auto *actual = scrubber.slider();
             SettingSlider expected(nullptr, actual->minimum(), actual->maximum());
             expected.setPalette(actual->palette());
+            require(actual->isEnabled() == (actual->maximum() > actual->minimum()),
+                    "Page slider enablement does not match its page range");
+            expected.setEnabled(actual->isEnabled());
             expected.resize(actual->size());
             expected.setDotMarkers(true);
             expected.setValue(actual->value());
@@ -4413,6 +4712,26 @@ int main(int argc, char **argv) {
         require(choice.card()->width() <= host.width() - 2 * int(metrics::notice::sideClearance),
                 "Modal ignored the screen side clearance");
         require(choice.rect().contains(choice.card()->geometry()), "Resized modal card escaped its screen");
+    }
+    {
+        // Export destinations include the full path, including long profile paths.
+        kobalt::ui::setDensity(kobalt::ui::designPpi);
+        kobalt::ui::setLargeText(1.5);
+        QWidget landscape;
+        landscape.resize(1448, 1072);
+        const QString description =
+            "Export all annotations from Trevelyan's Type Tester as a compressed HTML file? "
+            "Unarchive the ZIP to open the HTML file.\n\nSave to /" +
+            QString("a-long-worktree-directory/").repeated(12) + "annotations/book-html.zip.";
+        kobalt::ui::ChoiceModal confirmation(&landscape, {description, "Export annotations?", {}},
+                                              {"Cancel", "cancel"}, {"Export", "export"});
+        confirmation.card()->fitToWidth(760);
+        landscape.show();
+        confirmation.show();
+        app.processEvents();
+        require(landscape.rect().contains(confirmation.card()->geometry()),
+                "A long export destination pushed the large-text landscape dialog outside the screen");
+        kobalt::ui::setLargeText(1);
     }
     kobalt::ui::setDensity(kobalt::ui::designPpi);
     std::puts("PASS: shared navigation, release-only sliders, continuous picker borders, actions and dark styling");

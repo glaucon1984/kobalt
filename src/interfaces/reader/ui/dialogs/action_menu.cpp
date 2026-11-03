@@ -13,7 +13,7 @@ namespace kobalt::ui {
 namespace m = metrics;
 namespace {
 // One action: an optional icon and a label across the card's full width,
-// with a divider above. A held row inverts its background, icon and label.
+// with a divider above. A held row uses the shared gray list feedback.
 class ActionRow final : public Button {
 public:
     ActionRow(const ActionMenuItem &item, bool divider, QWidget *parent)
@@ -22,7 +22,9 @@ public:
         setAccessibleName(item.text);
         setFocusPolicy(Qt::StrongFocus);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        setFixedHeight(m::list::oneLine);
+        readerStyle(this, QString("QPushButton{min-height:%1px;max-height:%1px;padding:0;border:none;}")
+                              .arg(int(m::chrome::menuActionHeight)));
+        setFixedHeight(m::chrome::menuActionHeight);
     }
 
 protected:
@@ -31,8 +33,8 @@ protected:
         const auto colors = parentWidget() ? parentWidget()->palette() : palette();
         const auto paper = colors.color(QPalette::Window), ink = colors.color(QPalette::WindowText);
         const bool pressed = isEnabled() && isDown();
-        const auto foreground = pressed ? paper : ink;
-        painter.fillRect(rect(), pressed ? ink : paper);
+        const auto foreground = ink;
+        painter.fillRect(rect(), pressed ? themeColors(this).pressedPaper : paper);
         if (divider)
             painter.fillRect(0, 0, width(), m::control::border, dividerColor(this));
         const int iconSize = m::control::iconSize, left = m::chrome::inset;
@@ -41,8 +43,15 @@ protected:
         const int textLeft = left + iconSize + m::chrome::selectorGap;
         painter.setFont(interfaceFont(m::chrome::labelText));
         painter.setPen(isEnabled() ? foreground : colors.color(QPalette::Mid));
-        const int available = qMax(1, width() - textLeft - m::chrome::inset);
-        drawInterfaceText(painter, QRect(textLeft, 0, available, height()), elideInterfaceText(text(), painter.font(), available), Qt::AlignLeft | Qt::AlignVCenter);
+        const int chevronSpace = item.chevron ? int(m::chrome::cellIcon + m::chrome::selectorGap) : 0;
+        const int available = qMax(1, width() - textLeft - m::chrome::inset - chevronSpace);
+        if (item.chevron) {
+            const int side = m::chrome::cellIcon;
+            controlIcon(ControlIcon::Next, foreground).paint(
+                &painter, QRect(width() - m::chrome::inset - side, (height() - side) / 2, side, side));
+        }
+        drawOpticalText(painter, QRect(textLeft, 0, available, height()),
+                        elideInterfaceText(text(), painter.font(), available));
     }
 
 private:

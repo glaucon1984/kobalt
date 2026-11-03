@@ -5,6 +5,7 @@
 #include "refresh.h"
 #include "platforms/kobo/display/page_animation.h"
 #include "platforms/kobo/common/native_lifecycle.h"
+#include "platforms/kobo/common/standby_input.h"
 #include "platforms/kobo/common/native_authorization.h"
 #include "platforms/kobo/common/native_light.h"
 #include "platforms/kobo/common/native_dictionary.h"
@@ -99,6 +100,24 @@ static nh_hook readerHooks[] = {
      .out = nh_symoutptr(kobalt::nativeShowSleepView),
      .desc = "Keep Kobalt visible until Nickel installs its sleep view",
      .optional = false},
+    {.sym = "_ZN12PowerManager13suspendDeviceERK7QString",
+     .sym_new = "kobalt_suspend_device",
+     .lib = "libnickel.so.1.0.0",
+     .out = nh_symoutptr(kobalt::nativeSuspendDevice),
+     .desc = "Trace native standby calls when diagnostics are enabled",
+     .optional = true},
+    {.sym = "_ZN12PowerManager22suspendDeviceWithAlarmERK7QString",
+     .sym_new = "kobalt_suspend_device_with_alarm",
+     .lib = "libnickel.so.1.0.0",
+     .out = nh_symoutptr(kobalt::nativeSuspendDeviceWithAlarm),
+     .desc = "Trace native alarm standby calls when diagnostics are enabled",
+     .optional = true},
+    {.sym = "_ZN6IOUtil12stringToFileERK7QStringS2_",
+     .sym_new = "kobalt_power_string_to_file",
+     .lib = "libnickel.so.1.0.0",
+     .out = nh_symoutptr(kobalt::nativePowerStringToFile),
+     .desc = "Defer reader standby if input arrives during preparation",
+     .optional = true},
     {.sym = "_ZN12PowerManager10canSuspendEv",
      .sym_new = "kobalt_can_suspend",
      .lib = "libnickel.so.1.0.0",

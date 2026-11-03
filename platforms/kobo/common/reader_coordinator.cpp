@@ -112,6 +112,7 @@ ReaderCoordinator::ReaderCoordinator(ReaderEnvironment &environment, Coordinator
             status("authorization-lost");
         }, false);
     };
+    lifecycle->readerInputActive = [this] { return run.reader && run.reader->isVisible(); };
     lifecycle->beforeStandby = [this] {
         return busy || !run.reader || run.reader->flushBeforeStandby();
     };
@@ -492,7 +493,8 @@ void ReaderCoordinator::prepareOpening(kobalt::ReaderBookRoute candidate) {
         fail(strings::get("reader_controller.native_publication_does_not_match_the_opening_request"));
     } else {
         run.orientation = std::make_unique<kobalt::ReaderOrientation>(
-            kobalt::nativeOrientationSensor(), kobalt::turnReaderScreen, kobalt::ownReaderRotation);
+            kobalt::nativeOrientationSensor(), kobalt::turnReaderScreen, kobalt::ownReaderRotation,
+            kobalt::NativeLifecycle::pinScreenActive);
         run.orientation->configure(kobalt::storage::readPreferences(environment_.paths.preferences()).object);
         run.statePath = environment_.paths.bookState(run.identity);
         load();
@@ -793,8 +795,10 @@ void ReaderCoordinator::load() {
     const bool unread = kobalt::resetNativeUnread(saved, run.diskBaseline);
     const bool useNative = unread || kobalt::preferNativeProgress(run.diskBaseline, savedBaseline);
     run.baseline = run.diskBaseline.valid ? run.diskBaseline : savedBaseline;
-    if (useNative)
+    if (useNative) {
         saved.remove("position");
+        saved.remove("finished_position");
+    }
     if (!run.model)
         run.model = std::make_unique<kobalt::ReaderSession>(environment_.fonts(), environment_.placeholderFamily());
     run.sourceLease = std::make_shared<kobalt::SourceLease>();
@@ -816,7 +820,8 @@ void ReaderCoordinator::load() {
         {run.identity, run.filePath, size, saved, nativeLocation, environment_.paths.layoutCache(),
          run.sourceLease, run.nativePublication->resources(run.sourceLease), positionCodec(),
          environment_.paths.documentCache(), temporaryAppearance, originalAppearance,
-         environment_.paths.directory + "/userstyle.css", kobalt::appearance::bookDefaults(preferences)},
+         environment_.paths.directory + "/userstyle.css", kobalt::appearance::bookDefaults(preferences), {},
+         run.diskBaseline.valid && run.diskBaseline.status == 2, run.nativePublication->coverPath()},
         [this](const kobalt::OpeningResult &outcome) {
             run.openingTimings["load_and_layout_ms"] = run.openingTimer.elapsed() - run.layoutStarted;
             if (!outcome.ready()) {
@@ -833,6 +838,10 @@ void ReaderCoordinator::load() {
         },
         [this](kobalt::OpeningStage stage, int percent) {
             updateOpening(stage, percent);
+        },
+        [this](QImage cover) {
+            if (run.loading)
+                run.loading->setCover(std::move(cover));
         });
 }
 

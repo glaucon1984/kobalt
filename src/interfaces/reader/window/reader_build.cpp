@@ -21,11 +21,13 @@
 #include "storage/reader_storage.h"
 #include "interfaces/reader/settings/settings_panel.h"
 #include "build_info.h"
+#include "model/page_refresh_regions.h"
 #include "reading/appearance_settings.h"
 #include "reading/page_navigation.h"
 #include <QApplication>
 #include <QGridLayout>
 #include <QPainter>
+#include <QMap>
 #include <QHBoxLayout>
 #include <QSlider>
 #include <QScreen>
@@ -47,6 +49,36 @@ using kobalt::Choice;
 using kobalt::ChoiceScreen;
 
 namespace {
+class BookmarkTray final : public ui::Panel {
+public:
+    explicit BookmarkTray(QWidget *parent) : ui::Panel(parent) { setAttribute(Qt::WA_OpaquePaintEvent, false); }
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const int padding = ui::px(12);
+        QMap<int, QVector<QRect>> columns;
+        for (auto *button : findChildren<QPushButton *>(QString(), Qt::FindDirectChildrenOnly))
+            if (!button->isHidden()) columns[button->x()].append(button->geometry());
+        for (const auto &buttons : columns) {
+            QRect content;
+            for (const auto &button : buttons) content |= button;
+            const qreal inset = int(m::control::border) / 2.0;
+            const auto bounds = QRectF(content.adjusted(-padding, -2 * padding, padding, 2 * padding))
+                .adjusted(inset, inset, -inset, -inset);
+            painter.setPen(QPen(palette().color(QPalette::WindowText), m::control::border));
+            painter.setBrush(palette().color(QPalette::Window));
+            painter.drawRoundedRect(bounds, bounds.width() / 2, bounds.width() / 2);
+            painter.setPen(QPen(ui::dividerColor(this), m::control::border));
+            const qreal dividerInset = bounds.width() / 4;
+            for (int row = 1; row < buttons.size(); ++row) {
+                const qreal y = (buttons[row - 1].bottom() + 1 + buttons[row].top()) / 2.0;
+                painter.drawLine(QPointF(bounds.left() + dividerInset, y),
+                                 QPointF(bounds.right() - dividerInset, y));
+            }
+        }
+    }
+};
 class ReturnTitle final : public ui::InterfaceLabel {
 public:
     using ui::InterfaceLabel::InterfaceLabel;
@@ -99,7 +131,8 @@ protected:
         const auto ink = palette().color(QPalette::WindowText);
         painter.fillRect(rect(), pressed ? ink : paper);
         const QRect iconCell(0, 0, m::chrome::cellWidth, height());
-        ui::paintEdges(painter, rect(), Qt::RightEdge, palette().color(QPalette::Mid));
+        if (property("reader_return_divider").toBool())
+            ui::paintEdges(painter, rect(), Qt::RightEdge, palette().color(QPalette::Mid));
         if (!isEnabled()) painter.setOpacity(.45);
         const auto *title = findChild<QLabel *>("rrReturnTitle");
         qreal letterOffset = 0;
@@ -329,7 +362,7 @@ Reader::Reader(std::unique_ptr<kobalt::ReadingBook> openedBook, kobalt::ReaderOr
         refreshRenderNotice();
     };
     this->model->turnBoundary = [this](int direction) {
-        turnPage(direction);
+        turnPage(direction, 0, false);
     };
     connect(QGuiApplication::primaryScreen(), &QScreen::geometryChanged, this, [this](const QRect &geometry) {
         if (isVisible() && !closing)
@@ -381,6 +414,9 @@ void Reader::buildReadingPage() {
         dictionaryPanel->setChoices(dictionary->choices());
         dictionaryPanel->setBookFont(bookFace());
         dictionaryPanel->open(lookupText, result, lookupBounds);
+    };
+    dictionaryPanel->searchRequested = [this](const QString &query) {
+        openSearch(query);
     };
     dictionaryPanel->chosen = [this](const QString &id) {
         if (lifecycleHidden || services.suspended() || closing)
@@ -448,8 +484,52 @@ void Reader::buildReadingPage() {
         if (beginAnnotationDrag(point, -1))
             finishAnnotationDrag(false);
     };
+    imageViewer = new ImageViewer(this);
+    imageViewer->rememberView = [this](QString id, QJsonObject view) {
+        if (book->rememberImageView(id, view)) {
+            QJsonObject snapshot;
+            book->checkpoint(&snapshot, true);
+        }
+    };
+    imageViewer->dismissed = [this] {
+        ++imageRequest;
+        page->setFocus();
+        observeReading();
+        page->cleanRefresh(true);
+        updateOrientationBlock();
+    };
+    page->imageHeld = [this](QPoint point) {
+        if (model->busy() || lifecycleHidden || closing || exitPending || exportRunning || annotationSaving ||
+            services.suspended() || book->deviceTransition() ||
+            appearanceEdit.panelOpen() || general->isVisible() || searchPanel->isVisible() ||
+            linksActive() || !pageImageAtPoint(page->image, point))
+            return false;
+        // Small image-only note references keep their link/selection behavior.
+        for (const auto &link : model->pageLinks())
+            if (link.kind == LinkKind::Footnote)
+                for (const auto &rect : link.rectangles)
+                    if (rect.contains(point)) return false;
+        dismissControls();
+        dismissLookup();
+        clearAnnotationDraft();
+        const auto safe = safeArea();
+        imageViewer->setGeometry(rect().adjusted(0, safe.top, 0, -safe.bottom));
+        imageViewer->open();
+        observeReading();
+        updateOrientationBlock();
+        const auto request = ++imageRequest;
+        QPointer<Reader> guard(this);
+        model->imageAt(point, [guard, request](QImage image) {
+            if (guard && guard->imageRequest == request && guard->imageViewer->isVisible() &&
+                !guard->lifecycleHidden && !guard->closing) {
+                const auto id = image.text("kobalt.image_id");
+                guard->imageViewer->setImage(std::move(image), guard->book->imageView(id));
+            }
+        });
+        return true;
+    };
     header = new ChapterHeader(page);
-    const auto chrome = kobalt::headerfooter::select(preferences);
+    const auto chrome = kobalt::headerfooter::select(preferences, services.phoneLayout);
     chromePreset = chrome.preset;
     page->chrome = chrome.layout;
 }
@@ -470,7 +550,7 @@ void Reader::startClockTimer() {
         const auto before = page->slotContents;
         showChapterText();
         if (page->slotContents != before) {
-            page->refreshContent(true);
+            page->refreshContent();
         }
     });
     // The clock and menu status change once a minute. Wake just after each
@@ -493,7 +573,9 @@ void Reader::startClockTimer() {
         showChapterText();
         if (page->slotContents == before)
             return;
-        page->refreshContent(true);
+        // A clock tick changes the strips, not the book page. Keep its damage
+        // out of the page-turn image and colour refresh policy.
+        page->refreshContent();
     });
     startClock();
 }
@@ -689,6 +771,15 @@ void Reader::buildBottomControls() {
             navigation->stayRequested();
         }
     };
+    pageScrubber->imageRequested = [this] {
+        const auto target = pageSingleImage(page->image);
+        if (!target.isEmpty() && page->imageHeld)
+            page->imageHeld(target.center());
+    };
+    pageScrubber->imageDismissed = [this] {
+        imageSuggestionDismissed = true;
+        syncNavigation();
+    };
     pageScrubber->previewRequested = [this](int target, QSize bounds) {
         if (closing || lifecycleHidden || services.suspended())
             return;
@@ -781,7 +872,23 @@ void Reader::buildOverlays() {
     chapterGraph->setDense(preferences.value("dense_stats_chart").toBool(false));
     choices = new ChoiceScreen(this);
     choices->hide();
-    bookmarkList = new kobalt::BookmarkList(this);
+    pinnedBookmarks = new BookmarkTray(this);
+    pinnedBookmarks->setObjectName("rrPinnedBookmarks");
+    ui::readerStyle(pinnedBookmarks, "QFrame#rrPinnedBookmarks{background:transparent;}");
+    pinnedBookmarks->hide();
+    for (int i = 0; i < BookmarkStore::maxPins; ++i) {
+        auto *button = new ui::CellButton(ui::ControlIcon::Star, pinnedBookmarks, qRound(1.2 * int(m::chrome::cellIcon)));
+        button->setCircular(true);
+        button->setObjectName(QString("rrPinnedBookmark%1").arg(i));
+        pinnedButtons.append(button);
+        connect(button, &QPushButton::clicked, this, [this, button] {
+            if (button->isEnabled()) goToPassage(button->property("bookmark_position").toString(), true);
+        });
+    }
+    bookmarkList = new kobalt::BookmarkList(this, services.keyboard);
+    bookmarkList->pinRequested = [this](const QString &position, const QString &name, const QString &icon) {
+        return bookmarks->setPin(position, name, icon);
+    };
     bookmarkList->actionsRequested = [this] { openMarksActions(); };
     bookmarkList->annotationDetails = [this](const QStringList &ids, QVector<BookmarkRow> *rows) {
         QVector<HighlightExcerpt> excerpts;
@@ -865,6 +972,7 @@ void Reader::buildOverlays() {
 void Reader::buildAppearance(const kobalt::reader::AppearanceLayout &layout) {
     auto *typeRows = layout.typeRows, *pageRows = layout.pageRows;
     kobalt::reader::AppearancePanelInputs appearanceInputs;
+    appearanceInputs.phone = services.phoneLayout;
     appearanceInputs.sideButtons = services.pageButtons();
     appearanceInputs.reverseLandscapeButtons = services.reverseLandscapeButtons();
     appearanceInputs.automaticRotationAvailable = orientation->automaticAvailable();
@@ -1131,7 +1239,7 @@ void Reader::buildSettings() {
     settingsInputs.commitVisible = kobaltCommit[0] != '\0';
     settingsInputs.qtMajor = QT_VERSION >> 16;
     settingsInputs.downloadableDictionaries = services.downloadableDictionaries;
-    settingsInputs.animationsSupported = services.animationsAvailable();
+    settingsInputs.animationSupport = services.animationSupport();
     settingsInputs.lightSupported = services.lightAvailable();
     settingsInputs.warmthSupported = warmthSupported;
     settingsInputs.sleepScreenSupported = presentation->supportsSleepScreen();
@@ -1143,6 +1251,10 @@ void Reader::buildSettings() {
     general = settings;
     kosyncPage = settings->kosync;
     buildKosync();
+    settings->refitRequested = [this] {
+        fitSettings();
+        refresh();
+    };
     connect(settings->closeButton, &QPushButton::clicked, this, [this] {
         if (appearanceEdit.applying())
             return;
@@ -1198,6 +1310,7 @@ void Reader::buildSettings() {
     inheritTextLayoutOption = settings->inheritTextLayoutOption;
     animationOption = settings->animationOption;
     edgeLightOption = settings->edgeLightOption;
+    lightGestureFeedbackOption = settings->lightGestureFeedbackOption;
     denseGraphOption = settings->denseGraphOption;
     sleepScreenButton = settings->sleepScreenButton;
     sleepTileButton = settings->sleepTileButton;
@@ -1213,9 +1326,9 @@ void Reader::buildSettings() {
     minimalAnnotationOption = settings->minimalAnnotationOption;
     automaticOpeningOption = settings->automaticOpeningOption;
     hideTabLabelsOption = settings->hideTabLabelsOption;
+    hideTabLabelsOption->setVisible(!services.phoneLayout);
     linkIndicatorOption = settings->linkIndicatorOption;
     hideNonlinearOption = settings->hideNonlinearOption;
-    avoidWastefulStylingOption = settings->avoidWastefulStylingOption;
     connect(settings->columnSpacingButton, &QPushButton::clicked, this, [this, settings] {
         settings->showColumnSpacingChoices(settingsColumnSpacing, [this, settings](int percent) {
             settingsColumnSpacing = percent;
@@ -1298,6 +1411,12 @@ void Reader::buildSettings() {
     connect(settings->headerFooterFontButton, &QPushButton::clicked, this, [this] {
         openSettingsFont("header_footer_font_face");
     });
+    connect(settings->timeRemainingFormatButton, &QPushButton::clicked, this, [this, settings] {
+        settings->showTimeRemainingFormats(settingsTimeRemainingFormat, [this](const QString &format) {
+            settingsTimeRemainingFormat = format;
+            showSettingsFonts();
+        });
+    });
     connect(settings->headerFooterWeightButton, &QPushButton::clicked, this, [this, settings] {
         auto sampleFont = ui::headerFooterFont(page->headerTextPixels());
         if (!settingsHeaderFooterFontFace.isEmpty())
@@ -1366,6 +1485,7 @@ void Reader::buildSettings() {
         settingsDictionaryFontFace.clear();
         settingsDictionaryFontSize = 100;
         settingsHeaderFooterWeight = 2;
+        settingsTimeRemainingFormat = "detailed";
         hideTabLabelsOption->setChecked(false);
         for (const auto *key : appearance::fallbackFontKeys)
             settingsFontFaces[key] = QString();
@@ -1377,7 +1497,7 @@ void Reader::buildSettings() {
         settingsVerticalSpacingScope = "all";
         settingsParagraphSpacing = -1;
         settingsParagraphIndent = -1;
-        settingsBeautifier = appearance::beautifierSettings({});
+        settingsBeautifier = appearance::normalizationPresetSettings("recommended");
         showAdvancedText();
         screenRefreshMode = kobalt::ScreenRefresh::Smart;
         showScreenRefresh();
@@ -1433,6 +1553,20 @@ void Reader::buildNotices() {
 }
 
 void Reader::connectLightGestures() {
+    lightFeedback.setSingleShot(true);
+    lightFeedback.setInterval(m::lightSwipe::feedbackMilliseconds);
+    connect(&lightFeedback, &QTimer::timeout, this, [this] {
+        if (lightFeedbackLevel < 0 || !takesInput() || book->deviceTransition() || annotationMode ||
+            model->busy() || general->isVisible() || topControls->isVisible() || appearanceEdit.panelOpen() ||
+            choices->isVisible() || dictionaryPanel->isVisible() || searchPanel->isVisible() || linksActive() ||
+            lookupPending || syncDialog || kosyncDialog || finishDialog || lightPopup->isVisible())
+            return;
+        brightnessNotice->setLevel(gestureWarmth, lightFeedbackLevel);
+        brightnessNotice->show();
+        brightnessNotice->raise();
+        if (!lightGestureActive)
+            brightnessHide.start();
+    });
     page->lightStarted = [this](bool warmth) {
         if (annotationMode || !isVisible() || services.suspended() || book->deviceTransition() || this->model->busy() ||
             appearanceEdit.preview() || general->isVisible() || topControls->isVisible() || choices->isVisible() ||
@@ -1450,39 +1584,35 @@ void Reader::connectLightGestures() {
             brightnessInitial = light->brightness();
         }
         gestureWarmth = warmth;
+        lightGestureActive = true;
+        lightFeedback.stop();
+        lightFeedbackLevel = -1;
         brightnessHide.stop();
         return true;
     };
     page->lightChanged = [this](double moved) {
-        if (gestureWarmth) {
-            // Like Nickel's slider, a manual change turns automatic warmth off.
-            const int minimum = light->warmthMinimum(), range = light->warmthMaximum() - minimum;
-            if (range <= 0) {
-                return;
-            }
-            const double percent =
-                100.0 * (warmthInitial - minimum) / range + kobalt::ui::BrightnessGesture::change(moved);
-            const int step = qMax(1, light->warmthStep());
-            // Snap to the host's warmth resolution in percent (10 on a ten-level light, 1 on a
-            // hundred-level one), not to a fixed 10 %.
-            const int stepPercent = qBound(1, qRound(100.0 * step / range), 10);
-            const int snapped = qBound(0, qRound(percent / stepPercent) * stepPercent, 100);
-            const int level =
-                qBound(minimum, minimum + qRound(snapped * range / (100.0 * step)) * step, minimum + range);
-            const int value = light->setWarmth(snapped == 100 ? minimum + range : level);
-            if (value < 0)
-                return;
-            brightnessNotice->setLevel(true, qRound(100.0 * (value - minimum) / range));
-        } else {
-            const int value = light->setGestureLevel(brightnessInitial + kobalt::ui::BrightnessGesture::change(moved));
-            if (value < 0)
-                return;
-            brightnessNotice->setLevel(false, value);
+        lightMovement = moved;
+        lightFeedback.stop();
+        // Keep only the latest position. Deliver it before queued paints, on
+        // the GUI thread required by the native light controller. Feedback
+        // waits for a pause instead of requesting an e-ink flush per move.
+        if (!lightCommandPending) {
+            lightCommandPending = true;
+            QCoreApplication::postEvent(this, new QEvent(lightCommandEventType()), Qt::HighEventPriority);
         }
-        brightnessNotice->show();
-        brightnessNotice->raise();
     };
     page->lightFinished = [this](bool save) {
+        // Release can arrive before the queued command. Save the final level;
+        // cancellation drops it before restoring the original host state.
+        if (save)
+            dispatchLightGesture();
+        lightCommandPending = false;
+        QCoreApplication::removePostedEvents(this, lightCommandEventType());
+        lightGestureActive = false;
+        if (!save) {
+            lightFeedback.stop();
+            lightFeedbackLevel = -1;
+        }
         if (!gestureWarmth)
             light->finishGesture(save);
         else if (save)
@@ -1493,13 +1623,54 @@ void Reader::connectLightGestures() {
             if (warmthAutomatic)
                 light->setAutomaticWarmth(true);
         }
-        if (save)
+        if (save && brightnessNotice->isVisible())
             brightnessHide.start();
         else {
             brightnessHide.stop();
             brightnessNotice->hide();
         }
     };
+}
+
+QEvent::Type Reader::lightCommandEventType() {
+    static const auto type = static_cast<QEvent::Type>(QEvent::registerEventType());
+    return type;
+}
+
+void Reader::dispatchLightGesture() {
+    if (!lightCommandPending)
+        return;
+    lightCommandPending = false;
+    const double moved = lightMovement;
+    int feedback = -1;
+    if (gestureWarmth) {
+        // Like Nickel's slider, a manual change turns automatic warmth off.
+        const int minimum = light->warmthMinimum(), range = light->warmthMaximum() - minimum;
+        if (range <= 0)
+            return;
+        const double percent =
+            100.0 * (warmthInitial - minimum) / range + kobalt::ui::BrightnessGesture::change(moved);
+        const int step = qMax(1, light->warmthStep());
+        // Snap to the host's warmth resolution in percent (10 on a ten-level light, 1 on a
+        // hundred-level one), not to a fixed 10 %.
+        const int stepPercent = qBound(1, qRound(100.0 * step / range), 10);
+        const int snapped = qBound(0, qRound(percent / stepPercent) * stepPercent, 100);
+        const int level =
+            qBound(minimum, minimum + qRound(snapped * range / (100.0 * step)) * step, minimum + range);
+        const int value = light->setWarmth(snapped == 100 ? minimum + range : level);
+        if (value < 0)
+            return;
+        feedback = qRound(100.0 * (value - minimum) / range);
+    } else {
+        const int value = light->setGestureLevel(brightnessInitial + kobalt::ui::BrightnessGesture::change(moved));
+        if (value < 0)
+            return;
+        feedback = value;
+    }
+    if (preferences.value("show_light_gesture_feedback").toBool(true)) {
+        lightFeedbackLevel = feedback;
+        lightFeedback.start();
+    }
 }
 
 void Reader::connectPageInput() {
@@ -1539,7 +1710,7 @@ void Reader::connectPageInput() {
             lookupPending || appearanceEdit.preview() || general->isVisible() || choices->isVisible() ||
             topControls->isVisible())
             return;
-        turnPage(model->state().value("page_progression_rtl").toBool() ? -direction : direction);
+        turnPage(model->state().value("page_progression_rtl").toBool() ? -direction : direction, page->gestureTimestamp());
     };
     page->tapped = [this](QPoint point) {
         const QPoint bodyPoint = point - QPoint(0, page->topHeight());
@@ -1608,7 +1779,7 @@ void Reader::connectPageInput() {
         const int direction = action == tapZones::Action::Previous ? -1 : 1;
         const bool reverse =
             layout == tapZones::Layout::LeftRight && model->state().value("page_progression_rtl").toBool();
-        turnPage(reverse ? -direction : direction);
+        turnPage(reverse ? -direction : direction, page->gestureTimestamp());
     };
 }
 
@@ -1675,7 +1846,7 @@ void Reader::showFontPicker() {
     Choice slot{QStringLiteral("Aa"), defaultFace, "rrFontDefaultSlot", strings::get("reader.recommended_fonts")};
     slot.detail = strings::get("reader.set_default_font");
     slot.placeholder = true;
-    items.insert(qMin(2, items.size()), slot);
+    if (!services.phoneLayout) items.insert(qMin(2, items.size()), slot);
     choices->defaultRequested = [this](const QString &face, bool instructions) {
         showFontDefaultDialog(face, instructions);
     };

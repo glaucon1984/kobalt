@@ -1,3 +1,4 @@
+#include "interfaces/reader/ui/controls/rows.h"
 #include "interfaces/reader/ui/controls/text.h"
 #include "reader_p.h"
 #include "reading/appearance_settings.h"
@@ -164,7 +165,10 @@ void Reader::syncFrameState() {
         // Accept the visit only after the engine confirms a different passage.
         const auto origin = std::exchange(pendingPassage, {});
         if (model->error().isEmpty() && model->state().value("position").toString() != origin.position) {
-            linkHistory.append(origin);
+            // One return point covers a chain of pinned reference shortcuts.
+            // Ordinary links can still nest above it and return normally.
+            if (!origin.pinnedShortcut || linkHistory.isEmpty() || !linkHistory.last().pinnedShortcut)
+                linkHistory.append(origin);
         }
     }
     if (returningFromLink && !model->busy()) {
@@ -223,6 +227,7 @@ void Reader::showChapterText() {
 }
 
 void Reader::showPageImage(const QImage &nextImage) {
+    page->setPageAnimationStyle(services.softwarePageAnimations ? pageTurn::selected(preferences) : pageTurn::Style::Off);
     auto displayedImage = nextImage;
     if (appearanceEdit.edited() && appearanceEdit.ready() && appearanceEdit.preview()) {
         const auto *preview = appearanceEdit.preview();
@@ -239,7 +244,9 @@ void Reader::showPageImage(const QImage &nextImage) {
         page->animationDirection =
             isVisible() && !appearanceEdit.panelOpen() && !topControls->isVisible() && !general->isVisible() &&
                     !linkReturn->isVisible() && !syncDialog && !kosyncDialog && !finishDialog && !services.suspended() &&
-                    preferences.value("page_animations").toBool(false) && services.animationsAvailable()
+                    (services.softwarePageAnimations ? pageTurn::selected(preferences) != pageTurn::Style::Off
+                                                     : preferences.value("page_animations").toBool(false)) &&
+                    pageAnimationsAvailable(services.animationSupport())
                 ? model->turnDirection()
                 : 0;
     }
@@ -266,10 +273,13 @@ void Reader::paintTurn() {
     if (kobalt::refreshOnTurn(mode, pagesSinceFlash, chapterStart))
         requestFlash(mode == kobalt::ScreenRefresh::Smart || mode == kobalt::ScreenRefresh::Chapter ? "chapter"
                                                                                                     : "pages");
+    if (kobalt::diagnosticsActive())
+        kobalt::diagnostic("page-paint-start", {{"render_id", double(model->renderId())}, {"page", model->page()}}, false);
     page->refreshContent(true, true);
     if (turnStarted.isValid()) {
         kobalt::diagnostic("page-turn-painted",
-                           {{"elapsed_ms", turnStarted.nsecsElapsed() / 1e6},
+                           {{"render_id", double(model->renderId())}, {"page", model->page()},
+                            {"elapsed_ms", turnStarted.nsecsElapsed() / 1e6},
                             {"render_ms", rendered},
                             {"paint_ms", painting.nsecsElapsed() / 1e6}},
                            false);
@@ -298,7 +308,7 @@ void Reader::syncAppearanceControls(bool pickingFont) {
                 strings::get("reader.text_size_value").arg(QString::number(halfPoints / 2.0, 'f', halfPoints % 2)));
     }
     const auto optical = settings->opticalSizeAxis();
-    opticalSizeSlider->parentWidget()->setVisible(optical.available());
+    ui::controlRowOf(opticalSizeSlider)->setVisible(optical.available());
     if (optical.available() && !opticalSizeSlider->interacting()) {
         opticalSizeSlider->setRange(qCeil(optical.minimum), qFloor(optical.maximum));
         QVector<int> stops{opticalSizeSlider->minimum()};
@@ -326,7 +336,7 @@ void Reader::syncAppearanceControls(bool pickingFont) {
          {"rrFontWeight", "rrLighter", "rrHeavier", "rrVariableFontWeight", "rrVariableLighter", "rrVariableHeavier"})
         if (auto *widget = findChild<QWidget *>(name))
             widget->setEnabled(normalWeight);
-    variableWeightSlider->parentWidget()->setVisible(weightAxis.available());
+    ui::controlRowOf(variableWeightSlider)->setVisible(weightAxis.available());
     // Navigation places this panel above the bottom bar. Moving it below
     // the toolbar here would invalidate it before navigation moves it back.
     fitAppearance();
@@ -379,7 +389,7 @@ void Reader::syncReadingControls() {
         chapters.append({chapter.page, chapter.title});
     pageScrubber->setChapterJumps(pageNavigation::barButtons(preferences) == pageNavigation::BarButtons::Chapters);
     pageScrubber->setBook(model->page(), model->pages(), chapters, model->image().size());
-    pageScrubber->setEnabled(!model->busy() && model->pages() > 1);
+    pageScrubber->setEnabled(!model->busy());
     const auto chapter = model->chapterTitle().isEmpty() ? strings::get("reader.contents") : model->chapterTitle();
     chapterButton->setText(chapter);
     chapterButton->setAccessibleName(strings::get("reader.contents_detail").arg(chapter));

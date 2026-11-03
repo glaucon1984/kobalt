@@ -18,7 +18,7 @@ public:
                      std::function<ReaderHostServices()> services, std::function<void(Qt::ScreenOrientation)> rotate,
                      QObject *parent = nullptr);
     ~ReaderController() override;
-    void open(const QString &path, QSize pixels, QString sourceKey = {});
+    void open(const QString &path, QSize pixels, QString sourceKey = {}, bool restartAtStart = false);
     void close();
     QJsonObject lastBook() const;
     bool forgetLastBook();
@@ -40,6 +40,7 @@ public:
 signals:
     void opened();
     void openingProgress(int percent);
+    void openingCover(QImage cover);
     void failed(QString error);
     // Emitted before shutdown can remove the reader from its canvas.
     void retiring();
@@ -54,6 +55,7 @@ private:
     QString placeholder, current, pending, currentSourceKey, pendingSourceKey;
     std::shared_ptr<ReadingHistory::Profile> historyProfile;
     QSize pendingSize;
+    bool restartAtStart = false, pendingRestartAtStart = false;
     std::function<ReaderHostServices()> services;
     ReaderOrientation orientation;
     std::unique_ptr<native::PublicationEndpoint> source;

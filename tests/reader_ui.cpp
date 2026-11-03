@@ -1,5 +1,7 @@
 #include "interfaces/reader/panels/choice_screen.h"
 #include "ui/hold_timer.h"
+#include "ui/page_turn_paint.h"
+#include "reading/page_navigation.h"
 #include "support/paint_regions.h"
 #include "interfaces/reader/ui/controls/keyboard.h"
 #include <QLineEdit>
@@ -7,6 +9,8 @@
 #include "assets/bundled_fonts.h"
 #include "interfaces/library/library_view.h"
 #include "interfaces/reader/ui/controls/buttons.h"
+#include "interfaces/reader/ui/controls/highlight_palette.h"
+#include "interfaces/reader/ui/controls/options.h"
 #include "interfaces/reader/ui/controls/loading.h"
 #include "interfaces/reader/ui/controls/sliders.h"
 #include "interfaces/reader/ui/controls/rows.h"
@@ -14,6 +18,7 @@
 #include "interfaces/reader/ui/controls/text.h"
 #include "interfaces/reader/ui/controls/paging.h"
 #include "interfaces/reader/ui/dialogs/modals.h"
+#include "interfaces/reader/ui/dialogs/action_menu.h"
 #include "interfaces/reader/ui/style/fonts.h"
 #include "interfaces/reader/ui/style/metrics.h"
 #include "interfaces/reader/ui/style/scale.h"
@@ -38,6 +43,7 @@
 #include <QApplication>
 #include <QFontDatabase>
 #include <QLocale>
+#include <QScopeGuard>
 #include <QDir>
 #include <QDialog>
 #include <QTimer>
@@ -119,6 +125,124 @@ void variants() {
 class ReaderUiTests final : public QObject {
     Q_OBJECT
 private slots:
+    void pageTurnFrames_data() { variants(); }
+    void pageTurnFrames() {
+        QFETCH(bool, dark);
+        QFETCH(int, ppi);
+        ui::setDensity(ppi);
+        const auto colors = ui::themeColors(dark);
+        const auto sheet = [&](QSize size, const QString &title) {
+            QImage image(size, QImage::Format_RGB32);
+            image.fill(colors.paper);
+            QPainter painter(&image);
+            painter.setPen(colors.ink);
+            painter.setFont(ui::brandFont(ui::px(42)));
+            ui::drawInterfaceText(painter, image.rect().adjusted(ui::px(36), ui::px(40), -ui::px(36), 0), title,
+                                  Qt::AlignLeft | Qt::AlignTop);
+            painter.setFont(ui::interfaceFont(ui::px(26)));
+            for (int y = ui::px(140); y < image.height() - ui::px(60); y += ui::px(50))
+                ui::drawInterfaceText(painter, QRect(ui::px(36), y, image.width() - ui::px(72), ui::px(44)),
+                                      "The next page waits beneath the turning paper.", Qt::AlignLeft | Qt::AlignTop);
+            ui::drawInterfaceText(painter, QRect(ui::px(36), image.height() - ui::px(58), image.width() - ui::px(72), ui::px(44)),
+                                  title, Qt::AlignRight | Qt::AlignVCenter);
+            return image;
+        };
+        const auto capture = qEnvironmentVariable("KOBALT_TEST_CAPTURE_DIR");
+        for (const auto size : {QSize(ui::px(720), ui::px(1440)), QSize(ui::px(1440), ui::px(720))}) {
+            const auto oldPage = sheet(size, "Chapter one"), nextPage = sheet(size, "Chapter two");
+            for (auto style : {pageTurn::Style::Sweep}) {
+                const auto frame = [&](qreal progress, int direction) {
+                    QImage image(size, QImage::Format_RGB32);
+                    image.fill(Qt::magenta);
+                    QPainter painter(&image);
+                    ui::paintPageTurn(painter, oldPage, nextPage, progress, direction, style);
+                    painter.end();
+                    return image;
+                };
+                for (int direction : {-1, 1}) {
+                    QCOMPARE(frame(0, direction), oldPage);
+                    QCOMPARE(frame(1, direction), nextPage);
+                    const auto middle = frame(.45, direction);
+                    QVERIFY2(middle != oldPage && middle != nextPage, qPrintable(pageTurn::value(style)));
+                    QVERIFY(middle.pixelColor(size.width() / 2, size.height() / 2) != QColor(Qt::magenta));
+                    if (!capture.isEmpty())
+                        QVERIFY(middle.save(capture + QString("/turn-%1-%2-%3-%4-%5.png").arg(ppi).arg(dark ? "dark" : "light")
+                            .arg(size.width() > size.height() ? "landscape" : "portrait").arg(direction).arg(pageTurn::value(style))));
+                }
+            }
+        }
+        {
+            QImage oldPage(101, 82, QImage::Format_RGB32), nextPage(oldPage.size(), QImage::Format_RGB32);
+            for (int y = 0; y < oldPage.height(); ++y)
+                for (int x = 0; x < oldPage.width(); ++x) {
+                    oldPage.setPixelColor(x, y, QColor(200, x, y));
+                    nextPage.setPixelColor(x, y, QColor(5, x + 20, y + 50));
+                }
+            for (int direction : {-1, 1}) {
+                const auto frame = [&](qreal progress) {
+                    QImage image(oldPage.size(), QImage::Format_RGB32);
+                    QPainter painter(&image);
+                    ui::paintPageTurn(painter, oldPage, nextPage, progress, direction, pageTurn::Style::Sweep);
+                    return image;
+                };
+                const auto banded = frame(.21);
+                QCOMPARE(frame(.24), banded); // Both values reveal the same three of ten bands.
+                for (int y = 0; y < oldPage.height(); ++y)
+                    for (int x = 0; x < oldPage.width(); ++x)
+                        QCOMPARE(banded.pixel(x, y), (direction > 0 ? x >= 70 : x < 30)
+                            ? nextPage.pixel(x, y) : oldPage.pixel(x, y));
+            }
+        }
+        QCOMPARE(pageTurn::selected({}), pageTurn::Style::Off);
+        QCOMPARE(pageTurn::parse("invalid"), pageTurn::Style::Off);
+        QCOMPARE(pageTurn::parse("curl"), pageTurn::Style::Sweep);
+        QCOMPARE(pageTurn::parse("fade"), pageTurn::Style::Sweep);
+        QCOMPARE(pageTurn::parse("sweep"), pageTurn::Style::Sweep);
+        QCOMPARE(pageTurn::parse("off"), pageTurn::Style::Off);
+        QWidget host;
+        host.setProperty("reader_dark", dark);
+        host.setPalette(ui::readerPalette(host.palette(), dark));
+        host.resize(ui::px(720), ui::px(1600));
+        ReadingPage page(&host, [] {});
+        page.setPalette(host.palette());
+        page.resize(host.size());
+        page.chrome = headerfooter::presetLayout(headerfooter::Preset::Phone);
+        page.image = sheet(QSize(page.width(), page.height() - page.topHeight() - page.bottomHeight()), "Chapter one");
+        host.show();
+        page.show();
+        page.refreshContent();
+        page.setPageAnimationStyle(pageTurn::Style::Sweep);
+        const auto destination = sheet(page.image.size(), "Chapter two");
+        page.image = destination;
+        page.animationDirection = 1;
+        page.refreshContent(true);
+        auto *animation = page.findChild<QTimeLine *>("rrPageTurn");
+        QVERIFY(animation);
+        QCOMPARE(animation->duration(), 180);
+        QCOMPARE(animation->easingCurve().type(), QEasingCurve::InOutSine);
+        QVERIFY(animation->updateInterval() > 0 && animation->updateInterval() <= 17);
+        QCOMPARE(animation->state(), QTimeLine::Running);
+        QCOMPARE(host.property("reader_animation_direction").toInt(), 0);
+        animation->setCurrentTime(animation->duration() / 2);
+        QVERIFY(page.grab().toImage().convertToFormat(QImage::Format_RGB32) != page.snapshot());
+        // Sleep snapshots must contain the destination, not a partial sweep.
+        QCOMPARE(page.snapshot().copy(0, page.topHeight(), page.width(), destination.height()), destination);
+        page.cancelHold();
+        QCOMPARE(animation->state(), QTimeLine::NotRunning);
+        QCOMPARE(page.grab().toImage().convertToFormat(QImage::Format_RGB32), page.snapshot());
+        page.image = sheet(destination.size(), "Chapter three");
+        page.animationDirection = -1;
+        page.refreshContent(true);
+        QCOMPARE(animation->state(), QTimeLine::Running);
+        page.hide();
+        QCOMPARE(animation->state(), QTimeLine::NotRunning);
+        page.show();
+        page.setPageAnimationStyle(pageTurn::Style::Off);
+        page.image = destination;
+        page.animationDirection = 1;
+        page.refreshContent(true);
+        QCOMPARE(animation->state(), QTimeLine::NotRunning);
+    }
     void pagedListSwipes_data() { variants(); }
     void pagedListSwipes() {
         QFETCH(bool, dark);
@@ -275,6 +399,38 @@ private slots:
         QCOMPARE(defaults, 1);
         QCOMPARE(selections, 0);
         QCOMPARE(counter->text(), first);
+    }
+    void pageTurnTapFilter() {
+        pageNavigation::TapFilter filter;
+        QVERIFY(filter.accept(1000, 0));
+        QVERIFY(!filter.accept(1130, 5000)); // A queued tap is still only 130 ms later.
+        QVERIFY(!filter.accept(1199, 5100));
+        QVERIFY(filter.accept(1200, 5101)); // Ignored taps do not extend the window.
+        QVERIFY(filter.accept(2200, 5102)); // Widely spaced queued taps remain valid.
+        QVERIFY(!filter.accept(2100, 5103)); // Reject stale input.
+        pageNavigation::TapFilter wrap;
+        QVERIFY(wrap.accept(0xffffffc0u, 0));
+        QVERIFY(!wrap.accept(0x41u, 10));
+        QVERIFY(wrap.accept(0x88u, 20)); // Exactly 200 ms across source-clock wrap.
+        pageNavigation::TapFilter fallback;
+        QVERIFY(fallback.accept(0, 0));
+        QVERIFY(!fallback.accept(0, 199));
+        QVERIFY(fallback.accept(0, 200));
+        QVERIFY(fallback.accept(8000, 400));
+        QVERIFY(!fallback.accept(0, 500)); // Mixed input uses delivery time.
+    }
+    void pageTurnFilterSeparatesInputClocks() {
+        pageNavigation::TapFilter filter;
+        using Clock = pageNavigation::InputClock;
+        // Recorded Libra timestamps after suspension: touch includes time
+        // asleep, while page buttons use a clock that excludes it.
+        QVERIFY(filter.accept(4778052, 0, Clock::Pointer));
+        QVERIFY(filter.accept(1233250, 930, Clock::Key));
+        QVERIFY(!filter.accept(1233380, 5000, Clock::Key)); // Queued duplicate.
+        QVERIFY(filter.accept(1236767, 6000, Clock::Key));
+        QVERIFY(!filter.accept(4789322, 6100, Clock::Pointer)); // Mixed duplicate.
+        QVERIFY(filter.accept(4789322, 6300, Clock::Pointer));
+        QVERIFY(filter.accept(1245159, 7962, Clock::Key));
     }
     void holdSourceTime_data() {
         QTest::addColumn<quint32>("pressed");
@@ -546,6 +702,7 @@ private slots:
         };
         typePage();
         QVERIFY(action("widgetKeyboardShift"));
+        QVERIFY(action("widgetKeyboardShift"));
         typePage();
         QVERIFY(action("widgetKeyboardSymbols"));
         QCOMPARE(panel->findChild<QPushButton *>("widgetKeyboardSymbols")->text(), QString("ABC"));
@@ -640,7 +797,6 @@ private slots:
         QCOMPARE(editor.text(), QString::fromUtf8("éİ"));
         panel->findChild<QPushButton *>("widgetKeyboardDelete")->click();
         QCOMPARE(editor.text(), QString::fromUtf8("é"));
-        panel->findChild<QPushButton *>("widgetKeyboardShift")->click();
         QTest::mousePress(e, Qt::LeftButton);
         QTRY_VERIFY(panel->findChild<QWidget *>("widgetKeyboardAccents"));
         QEvent cancel(QEvent::TouchCancel);
@@ -674,6 +830,153 @@ private slots:
         send(e, QEvent::MouseButtonRelease, 7000);
         QCOMPARE(editor.text(), QString::fromUtf8("ée"));
         QVERIFY(!panel->findChild<QWidget *>("widgetKeyboardAccents"));
+    }
+    void widgetKeyboardLayouts_data() {
+        QTest::addColumn<QString>("localeName");
+        QTest::addColumn<QStringList>("rows");
+        const QStringList qwerty{"qwertyuiop", "asdfghjkl", "zxcvbnm"};
+        QTest::newRow("Dutch") << QString("nl_NL") << qwerty;
+        QTest::newRow("English") << QString("en_GB") << qwerty;
+        QTest::newRow("German") << QString("de_DE") << QStringList{"qwertzuiop", "asdfghjkl", "yxcvbnm"};
+        QTest::newRow("French") << QString("fr_FR") << QStringList{"azertyuiop", "qsdfghjklm", "wxcvbn"};
+        QTest::newRow("French-Canada") << QString("fr_CA") << qwerty;
+        QTest::newRow("fallback") << QString("ja_JP") << qwerty;
+    }
+    void widgetKeyboardLayouts() {
+        QFETCH(QString, localeName);
+        QFETCH(QStringList, rows);
+        const QLocale original;
+        const auto restore = qScopeGuard([original] { QLocale::setDefault(original); });
+        QLocale::setDefault(QLocale(localeName));
+        QWidget host;
+        host.resize(1072, 1448);
+        QLineEdit editor(&host);
+        auto keyboard = ui::makeWidgetKeyboard(&host, &editor);
+        host.show();
+        QVERIFY(keyboard->show());
+        auto *panel = host.findChild<QWidget *>("widgetKeyboard");
+        for (int row = 0; row < rows.size(); ++row) {
+            QString actual;
+            for (int column = 0; column < rows[row].size(); ++column) {
+                auto *key = panel->findChild<QPushButton *>(QString("widgetKey%1_%2").arg(row + 1).arg(column));
+                QVERIFY(key && key->isVisible());
+                actual += key->property("keyboard.character").toString();
+                key->click();
+            }
+            QCOMPARE(actual, rows[row]);
+        }
+        QCOMPARE(editor.text(), rows.join(""));
+        auto *symbols = panel->findChild<QPushButton *>("widgetKeyboardSymbols");
+        symbols->click(); symbols->click();
+        QCOMPARE(panel->findChild<QPushButton *>("widgetKey1_0")->text(), rows[0].left(1));
+    }
+    void widgetKeyboardCase_data() { variants(); }
+    void widgetKeyboardCase() {
+        QFETCH(bool, dark);
+        QFETCH(int, ppi);
+        ui::setDensity(ppi);
+        QWidget host;
+        host.setProperty("reader_dark", dark);
+        host.resize(ui::px(1072), ui::px(1448));
+        ui::applyReaderPalette(&host, ui::readerPalette(host.palette(), dark));
+        QLineEdit editor(&host);
+        auto keyboard = ui::makeWidgetKeyboard(&host, &editor);
+        host.show();
+        QVERIFY(keyboard->show());
+        auto *panel = host.findChild<QWidget *>("widgetKeyboard");
+        auto *shift = panel->findChild<QPushButton *>("widgetKeyboardShift");
+        auto *q = panel->findChild<QPushButton *>("widgetKey1_0");
+        auto *w = panel->findChild<QPushButton *>("widgetKey1_1");
+        auto *symbols = panel->findChild<QPushButton *>("widgetKeyboardSymbols");
+        auto *erase = panel->findChild<QPushButton *>("widgetKeyboardDelete");
+        auto *space = panel->findChild<QPushButton *>("widgetKeyboardSpace");
+        const auto tap = [&](ulong stamp, bool second = false) {
+            pointerEvent(shift, second ? QEvent::MouseButtonDblClick : QEvent::MouseButtonPress,
+                         stamp, shift->rect().center());
+            pointerEvent(shift, QEvent::MouseButtonRelease, stamp + 20, shift->rect().center());
+        };
+        tap(1000);
+        const auto once = shift->grab().toImage();
+        QVERIFY(shift->isChecked());
+        q->click(); w->click();
+        QCOMPARE(editor.text(), QString("Qw"));
+        QVERIFY(!shift->isChecked());
+        tap(2000); tap(2100, true);
+        QVERIFY(shift->isChecked());
+        QCOMPARE(shift->accessibleName(), strings::get("keyboard.caps_lock"));
+        QVERIFY(shift->grab().toImage() != once);
+        q->click(); w->click(); space->click();
+        QCOMPARE(editor.text(), QString("QwQW "));
+        QVERIFY(shift->isChecked());
+        symbols->click();
+        panel->findChild<QPushButton *>("widgetKey0_0")->click();
+        symbols->click(); q->click();
+        QCOMPARE(editor.text(), QString("QwQW 1Q"));
+        tap(2300); q->click();
+        QVERIFY(editor.text().endsWith("Qq"));
+        // Queued events must respect the real gap, not their delivery speed.
+        tap(3000); tap(5000);
+        QVERIFY(!shift->isChecked());
+        // Unsigned source-clock wrap still permits a real double tap.
+        tap(0xffffff00u); tap(0x20u);
+        QCOMPARE(shift->accessibleName(), strings::get("keyboard.caps_lock"));
+        tap(0x80u);
+        tap(6000); erase->click();
+        QVERIFY(shift->isChecked());
+        symbols->click();
+        panel->findChild<QPushButton *>("widgetKey0_0")->click();
+        symbols->click();
+        QVERIFY(shift->isChecked());
+        q->click(); w->click();
+        QVERIFY(editor.text().endsWith("1Qw"));
+        QVERIFY(!shift->isChecked());
+        tap(7000); space->click();
+        QVERIFY(!shift->isChecked());
+        editor.setText("q"); editor.selectAll();
+        tap(8000); q->click();
+        QCOMPARE(editor.text(), QString("Q"));
+        QVERIFY(!shift->isChecked());
+        editor.setMaxLength(1);
+        tap(9000); w->click();
+        QCOMPARE(editor.text(), QString("Q"));
+        QVERIFY(shift->isChecked());
+        erase->click(); w->click();
+        QCOMPARE(editor.text(), QString("W"));
+        QVERIFY(!shift->isChecked());
+        editor.setMaxLength(256);
+        editor.clear();
+        auto *e = panel->findChild<QPushButton *>("widgetKey1_2");
+        tap(10000);
+        pointerEvent(e, QEvent::MouseButtonPress, 11000, e->rect().center());
+        pointerEvent(e, QEvent::MouseButtonRelease, 11600, e->rect().center());
+        QVERIFY(panel->findChild<QWidget *>("widgetKeyboardAccents"));
+        QTest::keyClick(&editor, Qt::Key_Escape);
+        QVERIFY(shift->isChecked());
+        QCOMPARE(editor.text(), QString());
+        e->click();
+        QCOMPARE(editor.text(), QString("E"));
+        QVERIFY(!shift->isChecked());
+        tap(12000);
+        pointerEvent(e, QEvent::MouseButtonPress, 13000, e->rect().center());
+        pointerEvent(e, QEvent::MouseButtonRelease, 13600, e->rect().center());
+        auto *popup = panel->findChild<QWidget *>("widgetKeyboardAccents");
+        QVERIFY(popup);
+        auto *acute = popup->findChild<QPushButton *>("widgetAccent00c9");
+        QVERIFY(acute);
+        acute->click();
+        QCOMPARE(editor.text(), QString::fromUtf8("EÉ"));
+        QVERIFY(!shift->isChecked());
+        const auto untimedTap = [&] {
+            pointerEvent(shift, QEvent::MouseButtonPress, 0, shift->rect().center());
+            pointerEvent(shift, QEvent::MouseButtonRelease, 0, shift->rect().center());
+        };
+        // The Qt5 touch fallback synthesizes mouse events without timestamps.
+        untimedTap();
+        QTest::qWait(QApplication::doubleClickInterval() + 50);
+        untimedTap();
+        QVERIFY(!shift->isChecked());
+        untimedTap(); untimedTap();
+        QCOMPARE(shift->accessibleName(), strings::get("keyboard.caps_lock"));
     }
     void widgetKeyboardLifetime() {
         QWidget host;
@@ -1125,7 +1428,7 @@ private slots:
         view.refresh();
         const auto libraryImage = view.grab().toImage();
         view.findChild<QPushButton *>("libraryMore")->click();
-        auto *menu = dynamic_cast<ui::ModalOverlay *>(view.findChild<QWidget *>("libraryMoreSheet"));
+        auto *menu = dynamic_cast<ui::ActionMenu *>(view.findChild<QWidget *>("libraryMoreSheet"));
         QVERIFY(menu && menu->inputBarrier());
         QCOMPARE(menu->geometry(), view.rect());
         QVERIFY(view.rect().contains(menu->card()->geometry()));
@@ -1134,24 +1437,31 @@ private slots:
         for (const auto &item : {qMakePair("libraryMoreAddFolder", ui::ControlIcon::FolderPlus),
                                   qMakePair("libraryMoreOpenBook", ui::ControlIcon::Dictionary),
                                   qMakePair("libraryMoreFolders", ui::ControlIcon::Folders)}) {
-            auto *row = dynamic_cast<ui::ListRow *>(view.findChild<QPushButton *>(item.first));
+            auto *row = menu->action(item.first);
             QVERIFY(row && row->isVisible());
             const int side = ui::metrics::control::iconSize;
-            const QRect iconArea(ui::metrics::list::inset, (row->height() - side) / 2, side, side);
+            const QRect iconArea(ui::metrics::chrome::inset, (row->height() - side) / 2, side, side);
             QImage expected(side, side, QImage::Format_ARGB32);
             expected.fill(paper);
             {
                 QPainter painter(&expected);
-                ui::Button reference(&view);
-                reference.setIconConfiguration({item.second, ui::IconRendition::Action});
-                reference.icon().paint(&painter, expected.rect());
+                ui::controlIcon(item.second, ink).paint(&painter, expected.rect());
             }
             QImage empty(side, side, QImage::Format_ARGB32);
             empty.fill(paper);
             QVERIFY(expected != empty);
-            QCOMPARE(row->grab().toImage().copy(iconArea).convertToFormat(QImage::Format_ARGB32), expected);
-            QVERIFY(row->titleLabel()->x() >= iconArea.right() + ui::metrics::chrome::selectorGap);
-            QCOMPARE(row->titleLabel()->text(), row->text());
+            const auto labeled = row->grab().toImage();
+            QCOMPARE(labeled.copy(iconArea).convertToFormat(QImage::Format_ARGB32), expected);
+            const auto text = row->text();
+            QVERIFY(!text.isEmpty());
+            QCOMPARE(row->accessibleName(), text);
+            row->setText({});
+            const auto blank = row->grab().toImage();
+            row->setText(text);
+            const int labelLeft = iconArea.right() + 1 + ui::metrics::chrome::selectorGap;
+            const QRect labelArea(labelLeft, 0, row->width() - labelLeft, row->height());
+            QVERIFY(labeled.copy(labelArea) != blank.copy(labelArea));
+            QCOMPARE(labeled.copy(0, 0, labelLeft, row->height()), blank.copy(0, 0, labelLeft, row->height()));
         }
         capture("more");
         QTest::mouseClick(menu, Qt::LeftButton, Qt::NoModifier, QPoint(ui::px(8), view.height() - ui::px(8)));
@@ -1247,6 +1557,34 @@ private slots:
         QTRY_VERIFY(pager->isVisible());
         QCOMPARE(counter->text(), QString("1 of 2"));
         QCOMPARE(pages->geometry().bottom() + 1, pager->y());
+    }
+    void libraryThemeSurface_data() { variants(); }
+    void libraryThemeSurface() {
+        QFETCH(bool, dark);
+        QFETCH(int, ppi);
+        ui::setDensity(ppi);
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        library::Store store(directory.path(), std::make_shared<library::LocalSource>());
+        QWidget host;
+        host.setAutoFillBackground(true);
+        host.setPalette(ui::readerPalette(host.palette(), !dark));
+        host.resize(600, 800);
+        host.setContentsMargins(0, 60, 0, 40);
+        android::StartScreen start(test::makeHostPresentation, store, {}, &host);
+        start.setGeometry(host.contentsRect());
+        host.show();
+        start.show();
+        for (bool next : {dark, !dark, dark}) {
+            start.setDark(next);
+            const auto paper = ui::themeColors(next).paper;
+            QCOMPARE(start.library()->palette().color(QPalette::Window), paper);
+            QCOMPARE(start.palette().color(QPalette::Window), paper);
+            host.setPalette(start.palette());
+            QCoreApplication::processEvents();
+            QCOMPARE(host.grab().toImage().pixelColor(2, 2), paper);
+            QCOMPARE(host.grab().toImage().pixelColor(2, host.height() - 2), paper);
+        }
     }
     void libraryCanvasFollowsViewport_data() { variants(); }
     void libraryCanvasFollowsViewport() {
@@ -1763,6 +2101,77 @@ private slots:
             QCOMPARE(owner.grab().toImage().copy(gap), blank);
         }
     }
+    void listPressFeedback_data() { variants(); }
+    void listPressFeedback() {
+        QFETCH(bool, dark);
+        QFETCH(int, ppi);
+        ui::setDensity(ppi);
+        QWidget host;
+        host.setProperty("reader_dark", dark);
+        host.setPalette(ui::readerPalette(host.palette(), dark));
+        host.resize(ui::px(1072), ui::px(1448));
+        ui::ListRow row(&host);
+        row.resize(ui::px(700), ui::px(160));
+        auto *more = row.addAction("more", "More");
+        row.setActionIcon(ui::ControlIcon::More);
+        ui::ActionMenu menu(&host, {}, {ui::actionItem("Modify bookmark", "modify", ui::ControlIcon::Pin, {})});
+        menu.setPalette(host.palette());
+        menu.card()->setPalette(host.palette());
+        menu.fitCard();
+        const auto background = [](QWidget *widget) { return widget->grab().toImage().pixelColor(ui::px(8), ui::px(8)); };
+        const auto gray = ui::themeColors(dark).pressedPaper;
+        row.setDown(true);
+        QCOMPARE(background(&row), gray);
+        more->setDown(true);
+        QCOMPARE(background(more), gray);
+        auto *action = menu.action("modify");
+        action->setDown(true);
+        QCOMPARE(background(action), gray);
+        action->setDown(false);
+        QCOMPARE(background(action), ui::themeColors(dark).paper);
+        row.setCheckable(true);
+        row.setChecked(true);
+        QCOMPARE(background(&row), ui::themeColors(dark).ink);
+        ui::CellButton toolbar(ui::ControlIcon::Search, &host);
+        toolbar.resize(ui::px(112), ui::px(112));
+        toolbar.setDown(true);
+        QCOMPARE(background(&toolbar), ui::themeColors(dark).ink);
+    }
+    void optionAndSwatchPressFeedback_data() { variants(); }
+    void optionAndSwatchPressFeedback() {
+        QFETCH(bool, dark);
+        QFETCH(int, ppi);
+        ui::setDensity(ppi);
+        QWidget host;
+        host.setProperty("reader_dark", dark);
+        host.setPalette(ui::readerPalette(host.palette(), dark));
+        host.resize(ui::px(800), ui::px(500));
+        ui::DescribedOption option("Check at start", "Scan configured folders", &host);
+        auto look = option.presentation();
+        look.indicator = ui::DescribedOption::Indicator::Square;
+        option.setPresentation(look);
+        option.resize(ui::px(700), ui::px(160));
+        ui::HighlightSwatch swatch("yellow", "Yellow", &host);
+        swatch.move(0, ui::px(200));
+        swatch.resize(ui::px(160), swatch.height());
+        host.show();
+        for (auto *control : {static_cast<QAbstractButton *>(&option), static_cast<QAbstractButton *>(&swatch)}) {
+            for (bool checked : {false, true}) {
+                control->setChecked(checked);
+                const auto normal = control->grab().toImage();
+                QTest::mousePress(control, Qt::LeftButton);
+                QVERIFY(control->isDown());
+                QCOMPARE(control->grab().toImage().pixelColor(ui::px(4), ui::px(4)), ui::themeColors(dark).pressedPaper);
+                QCOMPARE(control->isChecked(), checked);
+                QTest::mouseRelease(control, Qt::LeftButton, Qt::NoModifier, QPoint(-1, -1));
+                QVERIFY(!control->isDown());
+                QCOMPARE(control->grab().toImage(), normal);
+            }
+            control->setEnabled(false);
+            control->setDown(true);
+            QCOMPARE(control->grab().toImage().pixelColor(ui::px(4), ui::px(4)), ui::themeColors(dark).paper);
+        }
+    }
     void marksSortingAndAnnotationRows_data() { variants(); }
     void marksSortingAndAnnotationRows() {
         QFETCH(bool, dark);
@@ -1833,6 +2242,14 @@ private slots:
         QVERIFY(!row()->captionLabel()->text().contains("Dotted underline"));
         QVERIFY(row()->captionLabel()->text().contains(QLocale().toString(late.toLocalTime(), "HH:mm")));
         const int annotationHeight = row()->height();
+        const auto annotationImage = row()->grab().toImage();
+        auto pinned = a;
+        pinned.pinName = "Reference";
+        pinned.pinIcon = "map";
+        list.showBookmarks({pinned});
+        list.showAnnotations({c, b, a});
+        QCoreApplication::processEvents();
+        QCOMPARE(row()->grab().toImage(), annotationImage);
         QCOMPARE(list.findChild<QPushButton *>("rrMarksSort")->y(), list.findChild<QPushButton *>("rrAnnotationsTab")->y());
         auto *sortControl = list.findChild<QPushButton *>("rrMarksSort");
         const auto sortImage = sortControl->grab().toImage();
@@ -1902,9 +2319,9 @@ private slots:
         bookmark->click();
         QCOMPARE(selected, QString("first"));
         QVERIFY(bookmark->detailLabel()->wordWrap());
-        QCOMPARE(bookmark->height(), annotationHeight);
+        QCOMPARE(bookmark->height(), annotationHeight - (int(ui::px(12)) - int(ui::px(4))));
         QCOMPARE(bookmark->titleLabel()->font().pixelSize(), int(ui::px(24)));
-        QVERIFY(bookmark->detailLabel()->y() - bookmark->titleLabel()->geometry().bottom() >= ui::px(12));
+        QVERIFY(bookmark->detailLabel()->y() - bookmark->titleLabel()->geometry().bottom() >= ui::px(4));
         if (!captureRoot.isEmpty())
             QVERIFY(owner.grab().save(captureRoot + QString("/bookmarks-%1-%2.png").arg(dark ? "dark" : "light").arg(ppi)));
         QVERIFY(bookmark->captionLabel()->text().contains(QLocale().toString(late.toLocalTime(), "HH:mm")));
@@ -1955,7 +2372,8 @@ private slots:
             QCoreApplication::processEvents();
             const QString prefix = annotations ? "rrAnnotation" : "rrBookmark";
             auto *middle = list.findChild<QWidget *>(prefix + "1");
-            auto *removeMiddle = list.findChild<QPushButton *>(prefix + "Remove1");
+            const QString actionPrefix = prefix + (annotations ? "Remove" : "More");
+            auto *removeMiddle = list.findChild<QPushButton *>(actionPrefix + "1");
             QVERIFY(middle && removeMiddle);
             const int middleY = middle->y(), middleHeight = middle->height();
             for (const auto &order : {QStringLiteral("newest"), QStringLiteral("oldest"), QStringLiteral("position")}) {
@@ -1963,7 +2381,7 @@ private slots:
                 QCoreApplication::processEvents();
                 for (int index = 0; index < 4; ++index) {
                     auto *item = list.findChild<QWidget *>(prefix + QString::number(index));
-                    auto *remove = list.findChild<QWidget *>(prefix + "Remove" + QString::number(index));
+                    auto *remove = list.findChild<QWidget *>(actionPrefix + QString::number(index));
                     QVERIFY(item && remove && item->isVisible() && remove->isVisible());
                     QCOMPARE(remove->geometry(), QRect(item->geometry().right() + 1 - ui::metrics::chrome::cellWidth,
                                                       item->y(), ui::metrics::chrome::cellWidth, item->height()));
@@ -1971,7 +2389,13 @@ private slots:
                 if (order == "newest") {
                     QVERIFY(middle->y() < middleY);
                     QCOMPARE(middle->height(), middleHeight);
+                    removed.clear();
                     removeMiddle->click();
+                    if (!annotations) {
+                        auto *remove = owner.findChild<QPushButton *>("rrBookmarkDelete");
+                        QVERIFY(remove && remove->isVisible());
+                        remove->click();
+                    }
                     QCOMPARE(removed, QString("second"));
                 }
             }
@@ -2393,6 +2817,54 @@ private slots:
         opening->window()->hide();
         QCoreApplication::processEvents();
         QCOMPARE(paints.count, 0);
+    }
+    void openingCoverLayout() {
+        for (const QSize screen : {QSize(1072, 1448), QSize(1448, 1072), QSize(600, 800)}) {
+            QWidget owner;
+            owner.resize(screen);
+            auto opening = createEmbeddedOpening(&owner, test::makeHostPresentation);
+            auto *view = opening->window();
+            view->setGeometry(owner.rect());
+            owner.show();
+            view->show();
+            QVERIFY(view->findChild<QLabel *>("rrOpeningBrand")->isVisible());
+            for (const QSize size : {QSize(200, 300), QSize(300, 100), QSize(100, 400)}) {
+                QImage cover(size, QImage::Format_RGB32);
+                cover.fill(Qt::red);
+                opening->setCover(cover);
+                opening->setProgress(45);
+                QCoreApplication::processEvents();
+                QVERIFY(!view->findChild<QLabel *>("rrOpeningBrand")->isVisible());
+                auto *progress = view->findChild<QProgressBar *>("rrOpeningProgress");
+                auto *label = view->findChild<QLabel *>("rrOpeningLabel");
+                auto *hint = view->findChild<QLabel *>("rrOpeningHint");
+                QVERIFY(progress->isVisible());
+                QCOMPARE(progress->value(), 45);
+                QVERIFY(label->isVisible());
+                QVERIFY(label->geometry().bottom() < progress->geometry().top());
+                QVERIFY(progress->geometry().bottom() < hint->geometry().top());
+                const qreal scale = qMin(screen.width() / ui::metrics::opening::referenceWidth,
+                                         screen.height() / ui::metrics::opening::referenceHeight);
+                const QPointF origin((screen.width() - ui::metrics::opening::referenceWidth * scale) / 2,
+                                     (screen.height() - ui::metrics::opening::referenceHeight * scale) / 2);
+                const auto area = ui::metrics::opening::cover;
+                const auto fit = QSizeF(size).scaled(area.size(), Qt::KeepAspectRatio);
+                const QRectF bounds(origin + (area.center() - QPointF(fit.width()/2, fit.height()/2)) * scale, fit * scale);
+                const auto pixels = view->grab().toImage();
+                QCOMPARE(pixels.pixelColor(bounds.center().toPoint()), QColor(Qt::red));
+                QVERIFY(bounds.bottom() < label->y());
+                QCOMPARE(pixels.pixelColor(QPoint(qRound(bounds.left()) - 2, qRound(bounds.center().y()))),
+                         view->palette().color(QPalette::Window));
+            }
+            opening->setCover({});
+            QVERIFY(view->findChild<QLabel *>("rrOpeningBrand")->isVisible());
+            opening->showFallback(OpeningFallback::Protected);
+            QImage late(200, 300, QImage::Format_RGB32);
+            late.fill(Qt::red);
+            opening->setCover(late);
+            QVERIFY(view->findChild<QLabel *>("rrOpeningBrand")->isVisible());
+            QVERIFY(!view->findChild<QProgressBar *>("rrOpeningProgress")->isVisible());
+        }
     }
     void openingFirstPaintCallback() {
         QWidget owner;
@@ -3107,6 +3579,7 @@ private slots:
 int main(int argc, char **argv) {
     qputenv("QT_QPA_PLATFORM", "minimal:enable_fonts:freetype");
     QApplication app(argc, argv);
+    QLocale::setDefault(QLocale(QLocale::English, QLocale::UnitedStates));
     if (QGuiApplication::platformName() != "minimal")
         return 2;
     app.setStyle("Fusion");

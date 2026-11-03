@@ -77,7 +77,7 @@ void StartScreen::buildLibrary() {
     view->setDark(dark);
     view->show();
     if (hostScaled)
-        setLibraryScale(scale.pixels, scale.scale, scale.nativePixels, scale.rasterScale);
+        setLibraryScale(scale.pixels, scale.scale, scale.nativePixels, scale.rasterScale, scale.topInset);
     else
         fitLibrary();
 }
@@ -142,6 +142,8 @@ bool StartScreen::libraryShown() const {
 }
 void StartScreen::setDark(bool value) {
     dark = value;
+    setProperty("reader_dark", dark);
+    ui::applyReaderPalette(this, ui::readerPalette(palette(), dark));
     if (view)
         view->setDark(dark);
     if (canvas) {
@@ -153,12 +155,12 @@ void StartScreen::fitLibrary() {
     if (canvas && !hostScaled)
         canvas->fitContent();
 }
-void StartScreen::setLibraryScale(QSize pixels, qreal factor, bool nativePixels, qreal rasterScale) {
+void StartScreen::setLibraryScale(QSize pixels, qreal factor, bool nativePixels, qreal rasterScale, int topInset) {
     hostScaled = true;
-    scale = {pixels, factor, rasterScale, nativePixels};
+    scale = {pixels, factor, rasterScale, nativePixels, topInset};
     if (!view)
         return;
-    view->resize(pixels);
+    view->setGeometry(0, topInset, pixels.width(), pixels.height() - topInset);
     canvas->setNativePixels(nativePixels);
     canvas->setRasterScale(rasterScale);
     canvas->setTransform(QTransform::fromScale(factor, factor));
@@ -196,6 +198,10 @@ void StartScreen::showOpening() {
     addWidget(openingSurface);
     setCurrentWidget(openingSurface);
     openingSurface->fitContent();
+}
+void StartScreen::setCover(QImage cover) {
+    if (opening && currentWidget() == openingSurface)
+        opening->setCover(std::move(cover));
 }
 void StartScreen::setProgress(int percent) {
     if (opening && currentWidget() == openingSurface)

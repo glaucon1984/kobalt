@@ -21,11 +21,13 @@ public:
         int labelPixels, descriptionPixels;
         QSize indicatorSize;
         // A held row turns the list's pressed gray and fills its radio.
-        bool pressedFill = false;
+        bool pressedFill = true;
         // The indicator sits before the label instead of after it.
         bool leadingIndicator = false;
         // Align a font-name preview by its visible ink, like the font panel.
         bool opticalLabel = false;
+        // Narrow field lists keep the complete label above its sample value.
+        bool valueBelowLabel = false;
         bool operator==(const Presentation &other) const;
     };
     void setPresentation(const Presentation &value);
@@ -71,6 +73,7 @@ private:
     // Large text makes the title line taller by what it adds to the line
     // height; the description moves down with it.
     int labelHeight() const;
+    int valueHeight() const;
     // How far a label that stands alone beside its indicator is raised, so
     // its capitals center on the indicator.
     int labelRaise(const QFont &labelFont) const;

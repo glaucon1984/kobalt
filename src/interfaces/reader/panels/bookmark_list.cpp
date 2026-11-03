@@ -16,11 +16,21 @@
 #include <QPainter>
 #include <algorithm>
 #include <climits>
+#include <QLineEdit>
+#include <QGridLayout>
+#include <QVBoxLayout>
+#include <QTimer>
+#include <QStyle>
+#include "interfaces/reader/ui/dialogs/action_menu.h"
+#include <QDynamicPropertyChangeEvent>
+#include "storage/bookmark_store.h"
+#include "reading/reading_density.h"
 
 namespace kobalt {
 namespace c = ui::metrics::chrome;
 namespace strip = ui::metrics::contents;
-BookmarkList::BookmarkList(QWidget *parent) : Panel(parent) {
+BookmarkList::BookmarkList(QWidget *parent, KeyboardFactory factory) : Panel(parent), makeKeyboard(std::move(factory)) {
+    window()->installEventFilter(this);
     setObjectName("rrBookmarkList");
     close = new ui::CellButton(ui::ControlIcon::Close, this);
     close->setObjectName("rrBookmarkListClose");
@@ -110,6 +120,193 @@ void BookmarkList::setSortOrder(const QString &value) {
     sortItems();
     arrange();
     redraw();
+}
+BookmarkList::~BookmarkList() { closePin(); }
+void BookmarkList::closePin() {
+    if (keyboard) { keyboard->hide(); keyboard->submitted = {}; keyboard.reset(); }
+    if (pinPopup) { pinPopup->hide(); pinPopup->deleteLater(); pinPopup.clear(); }
+}
+void BookmarkList::placePin() {
+    if (!pinPopup) return;
+    pinPopup->setGeometry(parentWidget()->rect());
+    const auto bounds = window()->property("reader_keyboard_bounds").toRect();
+    const int bottom = bounds.isEmpty() ? pinPopup->height() : pinPopup->mapFrom(window(), bounds.topLeft()).y();
+    if (auto *icons = pinPopup->findChild<QWidget *>("rrPinIconSection"))
+        icons->setVisible(bounds.isEmpty());
+    pinPopup->setCardArea(QRect(0, 0, pinPopup->width(), qMax(1, bottom)));
+    const int cardWidth = qMin<int>(ui::metrics::notice::cardWidth, width() - 2 * ui::metrics::notice::sideClearance);
+    auto *title = pinPopup->card()->findChild<QLabel *>("rrModalTitle");
+    if (title) title->show();
+    pinPopup->card()->fitToWidth(cardWidth);
+    // On a short screen the keyboard leaves room for the name and the buttons
+    // only. The title returns when the keyboard closes.
+    if (title && !bounds.isEmpty() && pinPopup->card()->height() > bottom - 2 * int(ui::metrics::notice::sideClearance)) {
+        title->hide();
+        pinPopup->card()->fitToWidth(cardWidth);
+    }
+    pinPopup->centerCard();
+}
+bool BookmarkList::eventFilter(QObject *object, QEvent *event) {
+    if (pinPopup && event->type() == QEvent::DynamicPropertyChange &&
+        static_cast<QDynamicPropertyChangeEvent *>(event)->propertyName() == "reader_keyboard_bounds") placePin();
+    if (object == pinPopup && event->type() == QEvent::Resize) {
+        if (keyboard) keyboard->place();
+        placePin();
+    }
+    return Panel::eventFilter(object, event);
+}
+void BookmarkList::openRowActions(const BookmarkRow &row) {
+    closeSort();
+    closePin();
+    auto *menu = new ui::ActionMenu(parentWidget(), {}, {
+        ui::actionItem(strings::get(row.pinIcon.isEmpty() ? "bookmarks.pin" : "bookmarks.modify"),
+            "rrBookmarkPin", ui::ControlIcon::Pin, [this, row] { openPin(row); }),
+        ui::actionItem(strings::get("bookmarks.remove_this"), "rrBookmarkDelete", ui::ControlIcon::Trash,
+            [this, row] { if (removeRequested) removeRequested(row.position); })});
+    pinPopup = menu;
+    menu->setObjectName("rrBookmarkRowActions");
+    menu->dismissed = [this] { closePin(); };
+    menu->setDimmed(true);
+    menu->setProperty("reader_standard_modal", true);
+    menu->setGeometry(parentWidget()->rect());
+    menu->fitCard();
+    menu->show();
+    menu->raise();
+    menu->setFocus();
+}
+void BookmarkList::openPin(const BookmarkRow &row) {
+    closeSort();
+    closePin();
+    int count = 0;
+    for (const auto &item : items) count += !item.pinIcon.isEmpty();
+    if (row.pinIcon.isEmpty() && count >= BookmarkStore::maxPins) {
+        auto *notice = new ui::NoticeModal(parentWidget(),
+            {strings::get("bookmarks.pin_limit"), strings::get("bookmarks.pin"), {}},
+            {strings::get("common.ok"), "rrPinLimitClose"});
+        pinPopup = notice;
+        connect(notice->primaryButton(), &QPushButton::clicked, this, [this] { closePin(); });
+        notice->dismissed = [this] { closePin(); };
+        notice->setObjectName("rrPinLimit");
+        notice->setDimmed(true); placePin(); notice->show(); notice->raise();
+        return;
+    }
+    auto *dialog = new ui::ChoiceModal(parentWidget(),
+        {{}, strings::get(row.pinIcon.isEmpty() ? "bookmarks.pin" : "bookmarks.modify"), {}},
+        {strings::get("common.cancel"), "rrPinCancel"}, {strings::get("common.save"), "rrPinSave"});
+    pinPopup = dialog;
+    dialog->setObjectName("rrPinEditor");
+    dialog->setDimmed(true);
+    dialog->installEventFilter(this);
+    auto *card = dialog->card();
+    auto *title = card->findChild<QLabel *>("rrModalTitle");
+    title->setProperty("reader_modal_heading", true);
+    title->style()->unpolish(title);
+    title->style()->polish(title);
+    auto *input = new QLineEdit(card);
+    input->setObjectName("rrPinName");
+    input->setMaxLength(128);
+    input->setText(row.pinName.isEmpty() ? row.chapter : row.pinName);
+    input->setAccessibleName(strings::get("bookmarks.pin_name"));
+    input->setPlaceholderText(strings::get("bookmarks.pin_name"));
+    input->setMinimumHeight(c::actionHeight);
+    input->setTextMargins(ui::metrics::notice::cardMargins.left(), 0, ui::metrics::notice::cardMargins.right(), 0);
+    ui::readerStyle(input, QString("QLineEdit{border:%1px solid palette(mid);border-radius:0;padding:0;background:palette(window);color:palette(window-text);").arg(int(ui::metrics::control::border)) + ui::styles::font(c::labelText) + "}");
+    auto *inputRow = new QWidget(card);
+    auto *inputLayout = new QHBoxLayout(inputRow);
+    inputLayout->setContentsMargins(ui::metrics::notice::cardMargins.left(), ui::metrics::notice::cardMargins.top(),
+                                   ui::metrics::notice::cardMargins.right(), ui::metrics::notice::cardGap);
+    inputLayout->addWidget(input);
+    card->rows()->insertWidget(1, inputRow);
+    auto selected = std::make_shared<QString>(row.pinIcon.isEmpty() ? ui::bookmarkIconNames().first() : row.pinIcon);
+    auto *iconSection = new QWidget(card);
+    iconSection->setObjectName("rrPinIconSection");
+    auto *sectionLayout = new QVBoxLayout(iconSection);
+    sectionLayout->setContentsMargins(0, 0, 0, 0);
+    sectionLayout->setSpacing(0);
+    auto *gridWidget = new QWidget(iconSection);
+    auto *grid = new QGridLayout(gridWidget);
+    grid->setContentsMargins(ui::metrics::notice::cardMargins.left(), 0,
+                            ui::metrics::notice::cardMargins.right(), ui::metrics::notice::cardMargins.bottom());
+    grid->setSpacing(ui::px(12));
+    // A short screen, such as a phone in landscape, has room for one row of
+    // icons between the name and the buttons. It shows six per page.
+    const bool shortScreen = isShortHeight(parentWidget()->height(), ui::density());
+    const int columns = shortScreen ? 6 : 4, iconRows = shortScreen ? 1 : 3;
+    for (int row = 0; row < iconRows; ++row)
+        grid->setRowMinimumHeight(row, c::actionHeight);
+    auto *group = new QButtonGroup(gridWidget);
+    group->setExclusive(true);
+    const auto icons = ui::bookmarkIconNames();
+    const int pageSize = columns * iconRows;
+    const int pageCount = (icons.size() + pageSize - 1) / pageSize;
+    auto page = std::make_shared<int>(qMax(0, int(icons.indexOf(*selected))) / pageSize);
+    QVector<ui::CellButton *> iconButtons;
+    for (int i = 0; i < pageSize; ++i) {
+        auto *button = new ui::CellButton(ui::ControlIcon::Star, gridWidget, qRound(1.2 * int(c::cellIcon)));
+        button->setRule(ui::Edges(Qt::LeftEdge) | Qt::TopEdge | Qt::RightEdge | Qt::BottomEdge);
+        button->setCheckable(true);
+        button->setFixedHeight(c::actionHeight);
+        group->addButton(button);
+        grid->addWidget(button, i / columns, i % columns);
+        iconButtons.append(button);
+        connect(button, &QPushButton::clicked, this, [selected, page, icons, i, pageSize] {
+            const int index = *page * pageSize + i;
+            if (index < icons.size()) *selected = icons[index];
+        });
+    }
+    sectionLayout->addWidget(gridWidget);
+    auto *pager = new ui::PagerBar(iconSection, "rrPinIcons");
+    sectionLayout->addWidget(pager);
+    pager->setVisible(pageCount > 1);
+    const auto showPage = [this, page, icons, selected, iconButtons, group, pager, pageCount, pageSize] {
+        group->setExclusive(false);
+        for (int i = 0; i < iconButtons.size(); ++i) {
+            auto *button = iconButtons[i];
+            const int index = *page * pageSize + i;
+            button->setVisible(index < icons.size());
+            if (index >= icons.size()) continue;
+            const auto token = icons[index];
+            button->setObjectName("rrPinIcon_" + token);
+            button->setAccessibleName(strings::get(("bookmarks.icon_" + token).toLatin1().constData()));
+            button->setGlyph(ui::bookmarkIcon(token));
+            button->setChecked(*selected == token);
+        }
+        group->setExclusive(true);
+        pager->setPage(*page, pageCount);
+        placePin();
+    };
+    connect(pager->previous, &QPushButton::clicked, this, [page, showPage] { --*page; showPage(); });
+    connect(pager->next, &QPushButton::clicked, this, [page, showPage] { ++*page; showPage(); });
+    card->rows()->insertWidget(2, iconSection);
+    showPage();
+    const auto finish = [this, dialog, row, input, selected] {
+        if (!pinPopup || pinPopup != dialog || !dialog->isVisible()) return;
+        if (!pinRequested || !pinRequested(row.position, input->text(), *selected)) return;
+        dialog->hide();
+        // Submission may be inside the keyboard controller's own callback.
+        QTimer::singleShot(0, this, [this, guard = QPointer<ui::ModalOverlay>(dialog)] {
+            if (pinPopup == guard) closePin();
+        });
+    };
+    connect(dialog->primaryButton(), &QPushButton::clicked, this, finish);
+    connect(dialog->secondaryButton(), &QPushButton::clicked, this, [this] { closePin(); });
+    const auto finishNaming = [this, dialog] {
+        if (pinPopup != dialog) return;
+        if (keyboard) keyboard->hide();
+        dialog->setFocus();
+        placePin();
+    };
+    connect(input, &QLineEdit::returnPressed, this, finishNaming);
+    dialog->dismissed = [this] { closePin(); };
+    dialog->setFocusPolicy(Qt::StrongFocus);
+    placePin(); dialog->show(); dialog->raise();
+    dialog->setFocus();
+    if (makeKeyboard) {
+        keyboard = makeKeyboard(dialog, input);
+        keyboard->setSubmitText(strings::get("keyboard.done"));
+        keyboard->submitted = finishNaming;
+        placePin();
+    }
 }
 void BookmarkList::closeSort() {
     if (!sortPopup)
@@ -239,6 +436,8 @@ void BookmarkList::resizeEvent(QResizeEvent *) {
     redraw();
 }
 void BookmarkList::hideEvent(QHideEvent *event) {
+    closePin();
+    closeSort();
     visibleDetailIds.clear();
     visibleDetails.clear();
     visibleDetailsReady = false;
@@ -271,9 +470,9 @@ void BookmarkList::paintEvent(QPaintEvent *event) {
 void BookmarkList::arrange() {
     const int first = pageStarts.value(page, 0), top = listTop(), available = qMax(1, height() - top);
     const auto font = excerptFont();
-    const int lineHeight = ui::px(44);
     const int textLineHeight = ui::needsPrivateText(QStringLiteral("Mg"), font)
         ? ui::measurePrivateTextLayout(QStringLiteral("Mg"), font).lineHeight : QFontMetrics(font).lineSpacing();
+    const int lineHeight = qMax(ui::px(44), qMax(textLineHeight, ui::interfaceLineHeight(ui::interfaceFont(c::captionText))));
     const int textWidth = qMax(1, width() - c::cellWidth - 2 * ui::metrics::list::inset);
     if (excerptCacheFont != font || excerptCacheWidth != textWidth || excerptCacheLineHeight != textLineHeight) {
         excerptLineCache.clear();
@@ -295,7 +494,7 @@ void BookmarkList::arrange() {
             count = qBound(1, (ui::wrappedInterfaceTextHeight(item.excerpt, font, textWidth) + textLineHeight - 1) / qMax(1, textLineHeight), 2);
         if (!lazy) nextLineCache.insert(item.excerpt, count);
         const int itemHeight = qMax(int(ui::metrics::list::threeLines),
-            2 * int(ui::metrics::list::lineInset) + (count + 2) * lineHeight + int(ui::px(12)) + int(ui::metrics::control::border));
+            2 * int(ui::metrics::list::lineInset) + (count + 2) * lineHeight + int(ui::px(annotations ? 12 : 4)) + int(ui::metrics::control::border));
         excerptLines.append(count);
         itemHeights.append(itemHeight);
         total += itemHeight;
@@ -368,6 +567,10 @@ void BookmarkList::redraw() {
     }
     bookmarksTab->setChecked(!annotations);
     annotationsTab->setChecked(annotations);
+    const bool currentBookmarked = std::any_of(items.cbegin(), items.cend(), [](const BookmarkRow &row) { return row.current; });
+    moreButton->setGlyph(annotations ? ui::ControlIcon::ExportAction
+                                    : currentBookmarked ? ui::ControlIcon::BookmarkRemove : ui::ControlIcon::BookmarkAdd);
+    moreButton->setAccessibleName(strings::get(annotations ? "annotations.export" : "bookmarks.actions"));
     empty->setText(strings::get(loading ? "annotations.loading" : annotations ? "annotations.empty" : "bookmarks.empty"));
     emptyHint->setText(strings::get(annotations ? "annotations.empty_hint" : "bookmarks.empty_hint"));
     page = qBound(0, page, pageCount() - 1);
@@ -401,7 +604,9 @@ void BookmarkList::redraw() {
         connect(remove, &QPushButton::clicked, this, [this, row] {
             const int index = pageStarts.value(page, 0) + row;
             if (removes[row]->isEnabled() && index < items.size()) {
-                if (removeRequested) {
+                if (!annotations) {
+                    openRowActions(items[index]);
+                } else if (removeRequested) {
                     removeRequested(items[index].position);
                 }
             }
@@ -432,20 +637,22 @@ void BookmarkList::redraw() {
         const int itemHeight = itemHeights[index];
         auto *button = buttons[row];
         button->setObjectName(QString(annotations ? "rrAnnotation%1" : "rrBookmark%1").arg(index));
-        removes[row]->setObjectName(QString(annotations ? "rrAnnotationRemove%1" : "rrBookmarkRemove%1").arg(index));
-        removes[row]->setAccessibleName(strings::get(annotations ? "annotations.remove" : "bookmarks.remove"));
+        removes[row]->setObjectName(QString(annotations ? "rrAnnotationRemove%1" : "rrBookmarkMore%1").arg(index));
+        removes[row]->setAccessibleName(strings::get(annotations ? "annotations.remove" : "bookmarks.actions"));
 
         button->setAccessibleName(chapter);
         button->setEnabled(item.page >= 0 && detailsReady);
         removes[row]->setEnabled(detailsReady);
         button->setGeometry(0, y, width(), itemHeight);
         auto *itemRow = static_cast<ui::ListRow *>(button);
-        itemRow->setActionIcon(ui::ControlIcon::Close);
+        itemRow->setActionIcon(annotations ? ui::ControlIcon::Close : ui::ControlIcon::More);
         itemRow->setDetailFont(excerptFont());
         itemRow->setMetadataFont(ui::interfaceFont(c::captionText));
-        itemRow->setTitle(chapter);
+        itemRow->setTitle(item.pinName.isEmpty() ? chapter : item.pinName);
         itemRow->setTitlePixels(ui::px(24));
-        itemRow->setTitleGap(ui::px(12));
+        itemRow->setTitleIcon(ui::ControlIcon::Pin, !annotations && !item.pinIcon.isEmpty(), !annotations);
+        itemRow->setTitleGap(ui::px(annotations ? 12 : 4));
+        itemRow->titleLabel()->setAlignment(Qt::AlignLeft | (annotations ? Qt::AlignVCenter : Qt::AlignBottom));
         itemRow->setDetailLines(excerptLines[index]);
         itemRow->setDetail(excerpt);
         itemRow->setDetailHighlight(annotations && detailsReady ? (item.style.isEmpty() ? QStringLiteral("shaded") : item.style) : QString(),
@@ -462,5 +669,6 @@ void BookmarkList::redraw() {
                                  numberWidth});
         y += itemHeight;
     }
+    update();
 }
 }

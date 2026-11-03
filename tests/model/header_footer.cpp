@@ -1,4 +1,7 @@
 #include "reading/header_footer.h"
+#include "reading/reading_density.h"
+#include "reading/remaining_time.h"
+#include <limits>
 #include "support/qt_compat.h"
 #include "support/strings.h"
 #include "check.h"
@@ -12,6 +15,16 @@ using namespace kobalt::headerfooter;
 int main() {
     // Default keeps the chapter prominent and the footer free of a bar.
     const auto standard = presetLayout(Preset::Default);
+    require(isPhoneScreen({720, 1600}, 300) && isPhoneScreen({1600, 720}, 300), "Phone detection changed with rotation");
+    require(isPhoneScreen({1080, 2400}, 450), "Phone detection ignored density");
+    require(!isPhoneScreen({1072, 1448}, 300) && !isPhoneScreen({1448, 1072}, 300), "Six-inch reader detected as a phone");
+    require(isPhoneScreen({824, 1648}, 300), "BOOX Palma not detected as a phone");
+    require(!isPhoneScreen({758, 1024}, 212), "Six-inch 212 PPI reader detected as a phone");
+    const auto phone = select({}, true);
+    require(phone.preset == Preset::Phone && !phone.layout.header() && phone.layout.footer(), "Phone default did not remove the header");
+    require(select(qt::object({{presetKey, "default"}}), true).layout == standard, "Phone default replaced an explicit Kobalt preset");
+    require(select(qt::object({{"show_header", true}}), true).preset != Preset::Phone, "Phone default replaced legacy settings");
+
     require(standard.slotFields[0] == Field::Time && standard.slotFields[1] == Field::Chapter &&
                 standard.slotFields[2] == Field::Nothing && standard.slotFields[4] == Field::Nothing &&
                 standard.slotFields[3] == Field::ChapterPagesLeft && standard.slotFields[5] == Field::BookPercent,
@@ -252,6 +265,36 @@ int main() {
     values.learningPace = true;
     require(content(Field::BookTimeLeft, values, false).text.startsWith(QStringLiteral("≈ ")),
             "A rough estimate was shown as a learned pace");
+    values.approximateTime = true;
+    struct Estimate { qint64 milliseconds; const char *duration; };
+    for (const auto &estimate : {Estimate{1, "about 15 minutes"}, {15 * 60000, "about 15 minutes"},
+                                {15 * 60000 + 1, "about 30 minutes"}, {30 * 60000, "about 30 minutes"},
+                                {30 * 60000 + 1, "about 45 minutes"}, {45 * 60000, "about 45 minutes"},
+                                {45 * 60000 + 1, "about an hour"}, {60 * 60000, "about an hour"},
+                                {60 * 60000 + 1, "about 2 hours"}, {120 * 60000, "about 2 hours"},
+                                {120 * 60000 + 1, "about 3 hours"}}) {
+        values.chapterMilliseconds = values.bookMilliseconds = estimate.milliseconds;
+        const auto duration = QString::fromLatin1(estimate.duration);
+        require(remainingTime::approximateDuration(estimate.milliseconds) == duration,
+                "Approximate duration crossed a rounding boundary incorrectly");
+        for (const auto field : {Field::ChapterTimeLeft, Field::BookTimeLeft}) {
+            const auto expected = strings::get("header_footer.time_left").arg(duration);
+            require(content(field, values, false).text == expected,
+                    "Approximate time was not applied to both chapter and book estimates");
+            require(content(field, values, true).text == expected.toUpper(),
+                    "Approximate time ignored uppercase or added a second learning marker");
+        }
+    }
+    require(!remainingTime::approximateDuration(std::numeric_limits<qint64>::max()).isEmpty(),
+            "A large estimate overflowed approximate formatting");
+    values.chapterMilliseconds = values.bookMilliseconds = -1;
+    require(content(Field::BookTimeLeft, values, false).text == strings::get("header_footer.learning_pace"),
+            "Approximate mode lost the unknown-pace message");
+    values.learningPace = false;
+    require(content(Field::BookTimeLeft, values, false).empty(), "Unknown approximate time became a numeric estimate");
+    values.chapterMilliseconds = values.bookMilliseconds = 0;
+    require(content(Field::ChapterTimeLeft, values, false).empty(), "A zero approximate estimate displayed time left");
+    values.approximateTime = false;
     values.deviceStatus = false;
     require(content(Field::Battery, values, false).empty(), "The battery showed on a host without device status");
     require(content(Field::Time, values, false).text == values.time, "The time hid with device status");

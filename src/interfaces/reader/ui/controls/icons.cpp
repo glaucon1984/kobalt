@@ -14,6 +14,36 @@
 #include <reader_icon_vectors.h>
 
 namespace kobalt::ui {
+QStringList bookmarkIconNames() { return {
+        "map", "compass", "home", "flag",
+        "heart", "lightbulb", "people", "tree",
+        "sun", "moon", "crown", "key",
+        "sword", "warning", "scroll", "eye",
+        "castle", "anchor", "paw", "flower",
+        "coffee", "rocket", "lightning", "flame",
+        "planet", "star", "bookmark", "dictionary",
+        "chapters", "link", "note", "globe",
+        "mountains", "clock", "calendar", "person",
+        "pencil", "quotes", "question", "check",
+        "chat", "image", "search", "lock",
+        "books", "music", "skull", "diamond"}; }
+ControlIcon bookmarkIcon(const QString &name) {
+    const ControlIcon icons[] = {
+        ControlIcon::Map, ControlIcon::Compass, ControlIcon::Home, ControlIcon::Flag,
+        ControlIcon::Heart, ControlIcon::Lightbulb, ControlIcon::People, ControlIcon::Tree,
+        ControlIcon::Light, ControlIcon::Moon, ControlIcon::Crown, ControlIcon::Key,
+        ControlIcon::Sword, ControlIcon::Warning, ControlIcon::Scroll, ControlIcon::Display,
+        ControlIcon::Castle, ControlIcon::Anchor, ControlIcon::Paw, ControlIcon::Flower,
+        ControlIcon::Coffee, ControlIcon::Rocket, ControlIcon::Lightning, ControlIcon::Flame,
+        ControlIcon::Planet, ControlIcon::Star, ControlIcon::Bookmark, ControlIcon::Dictionary,
+        ControlIcon::Chapters, ControlIcon::Link, ControlIcon::Note, ControlIcon::Globe,
+        ControlIcon::Mountains, ControlIcon::Clock, ControlIcon::Calendar, ControlIcon::Person,
+        ControlIcon::EditHighlight, ControlIcon::Quotes, ControlIcon::Question, ControlIcon::CheckCircle,
+        ControlIcon::Chat, ControlIcon::Image, ControlIcon::Search, ControlIcon::Lock,
+        ControlIcon::Books, ControlIcon::Music, ControlIcon::Skull, ControlIcon::Diamond};
+    const int index = bookmarkIconNames().indexOf(name);
+    return index < 0 ? ControlIcon::Star : icons[index];
+}
 namespace m = metrics;
 namespace {
 struct Geometry {
@@ -42,17 +72,73 @@ Geometry geometry(ControlIcon icon, bool sideButtons) {
         path.lineTo(x2, y2);
     };
     // Keyboard symbols use the same 24-unit grid and stroke as our other drawings.
-    if (icon == ControlIcon::KeyboardShift) {
+    if (icon == ControlIcon::FitImage) {
+        line(22, 9, 9, 9); line(9, 9, 9, 22);
+        line(42, 9, 55, 9); line(55, 9, 55, 22);
+        line(9, 42, 9, 55); line(9, 55, 22, 55);
+        line(42, 55, 55, 55); line(55, 55, 55, 42);
+        path.addRect(20, 23, 24, 18);
+    } else if (icon == ControlIcon::BookmarkAdd || icon == ControlIcon::BookmarkRemove || icon == ControlIcon::ExportAction) {
+        result.canvas = 256;
+        result.filled = true;
+        phosphorGeometry(icon == ControlIcon::ExportAction ? QStringLiteral("export")
+                                                          : QStringLiteral("bookmark-simple"), path);
+        if (icon == ControlIcon::BookmarkAdd) {
+            QPainterPath horizontal, vertical;
+            horizontal.addRect(96, 104, 64, 16);
+            vertical.addRect(120, 80, 16, 64);
+            path = path.united(horizontal.united(vertical));
+        } else if (icon == ControlIcon::BookmarkRemove) {
+            QPainterPath slash;
+            slash.moveTo(40, 32);
+            slash.lineTo(216, 224);
+            QPainterPathStroker stroke;
+            stroke.setCapStyle(Qt::RoundCap);
+            stroke.setWidth(28);
+            path = path.subtracted(stroke.createStroke(slash));
+            stroke.setWidth(16);
+            path = path.united(stroke.createStroke(slash));
+        }
+    } else if (icon >= ControlIcon::Flag && icon <= ControlIcon::Diamond) {
+        const char *names[] = {"flag", "heart", "note", "lightbulb", "globe", "mountains", "tree", "moon",
+                               "clock", "calendar", "user", "users", "crown", "key", "sword",
+                               "quotes", "question", "check-circle", "warning", "chat-circle", "scroll", "image", "books",
+                               "castle-turret", "anchor", "paw-print", "flower", "coffee", "music-note", "rocket", "planet",
+                               "lightning", "flame", "skull", "diamond"};
+        result.canvas = 256;
+        result.filled = true;
+        phosphorGeometry(QString::fromLatin1(names[int(icon) - int(ControlIcon::Flag)]), path);
+    } else if (icon == ControlIcon::Pin) {
+        result.canvas = 24;
+        result.stroke = 1.5;
+        path.moveTo(8, 3); path.lineTo(16, 3); path.lineTo(15, 10);
+        path.lineTo(19, 14); path.lineTo(5, 14); path.lineTo(9, 10); path.closeSubpath();
+        line(12, 14, 12, 22);
+    } else if (icon == ControlIcon::Star) {
+        result.canvas = 24;
+        result.stroke = 1.5;
+        path.moveTo(12, 2); path.lineTo(15, 8.5); path.lineTo(22, 9.5);
+        path.lineTo(17, 14.5); path.lineTo(18, 22); path.lineTo(12, 18.5);
+        path.lineTo(6, 22); path.lineTo(7, 14.5); path.lineTo(2, 9.5);
+        path.lineTo(9, 8.5); path.closeSubpath();
+    } else if (icon == ControlIcon::Map) {
+        result.canvas = 24;
+        result.stroke = 1.5;
+        path.moveTo(2, 5); path.lineTo(8, 2); path.lineTo(16, 5); path.lineTo(22, 2);
+        path.lineTo(22, 19); path.lineTo(16, 22); path.lineTo(8, 19); path.lineTo(2, 22);
+        path.closeSubpath(); line(8, 2, 8, 19); line(16, 5, 16, 22);
+    } else if (icon == ControlIcon::KeyboardShift || icon == ControlIcon::KeyboardCapsLock) {
         result.canvas = 24;
         result.stroke = 1.5;
         path.moveTo(12, 3);
         path.lineTo(21, 12);
         path.lineTo(16, 12);
-        path.lineTo(16, 21);
-        path.lineTo(8, 21);
+        path.lineTo(16, icon == ControlIcon::KeyboardCapsLock ? 17 : 21);
+        path.lineTo(8, icon == ControlIcon::KeyboardCapsLock ? 17 : 21);
         path.lineTo(8, 12);
         path.lineTo(3, 12);
         path.closeSubpath();
+        if (icon == ControlIcon::KeyboardCapsLock) line(8, 21, 16, 21);
     } else if (icon == ControlIcon::KeyboardBackspace) {
         result.canvas = 24;
         result.stroke = 1.5;
@@ -429,12 +515,13 @@ void paintWifiStatusIcon(QPainter &painter, ControlIcon icon, const QRectF &boun
 }
 QIcon controlIcon(ControlIcon icon, QColor color, bool sideButtons) {
     if (int(icon) < 0 ||
-        (int(icon) > int(ControlIcon::System) && icon != ControlIcon::PreviousChapter &&
+        (int(icon) > int(ControlIcon::System) && icon != ControlIcon::BookmarkAdd && icon != ControlIcon::BookmarkRemove && icon != ControlIcon::ExportAction && icon != ControlIcon::FitImage &&
+         icon != ControlIcon::PreviousChapter &&
          icon != ControlIcon::NextChapter && icon != ControlIcon::Sync && icon != ControlIcon::Sort &&
          icon != ControlIcon::ArrowDownRight && icon != ControlIcon::EditHighlight &&
          (icon < ControlIcon::Rows || icon > ControlIcon::Export) &&
          (icon < ControlIcon::KeyboardShift || icon > ControlIcon::KeyboardReturn) &&
-         (icon < ControlIcon::SpreadHorizontal || icon > ControlIcon::Hidden)))
+         (icon < ControlIcon::SpreadHorizontal || icon > ControlIcon::Diamond)))
         return {};
     return QIcon(new VectorIconEngine(icon, color, sideButtons));
 }

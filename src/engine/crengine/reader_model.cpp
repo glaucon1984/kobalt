@@ -60,7 +60,7 @@ bool equationImage(const LVImageSourceRef &image) {
     }
     return false;
 }
-// Transform equation ink before alpha compositing, so transparent pixels keep
+// Transform neutral ink before alpha compositing, so transparent pixels keep
 // the actual page background. Delegate vector sizing to avoid an extra raster scale.
 class EquationImage : public LVImageSource, private LVImageDecoderCallback {
 public:
@@ -119,17 +119,58 @@ private:
     LVImageDecoderCallback *callback = nullptr;
     std::vector<lUInt32> row;
 };
+// A white border and mostly white paper distinguish illustrations from dark artwork.
+// Check every visible source pixel so even a small colour accent prevents inversion.
+class IllustrationProbe : public LVImageDecoderCallback {
+public:
+    IllustrationProbe(int width, int height) : width(width), height(height) {}
+    bool eligible(LVImageSourceRef source) {
+        return source->Decode(this) && !failed && lines == height && neutral && total &&
+               white * 2 >= total && border && whiteBorder * 10 >= border * 8;
+    }
+private:
+    bool GetTargetSize(int &w, int &h) const override { w = width; h = height; return true; }
+    void OnStartDecode(LVImageSource *) override {}
+    bool OnLineDecoded(LVImageSource *, int y, lUInt32 *pixels) override {
+        ++lines;
+        for (int x = 0; x < width; ++x) {
+            const auto pixel = pixels[x];
+            // CREngine uses an inverted alpha channel. Invisible RGB is irrelevant.
+            const int transparency = pixel >> 24;
+            if (transparency != 255 && (qRed(pixel) != qGreen(pixel) || qRed(pixel) != qBlue(pixel)))
+                neutral = false;
+            const bool paper = transparency == 255 ||
+                (qRed(pixel) >= 245 && qGreen(pixel) >= 245 && qBlue(pixel) >= 245);
+            ++total;
+            white += paper;
+            if (x == 0 || y == 0 || x == width - 1 || y == height - 1) {
+                ++border;
+                whiteBorder += paper;
+            }
+        }
+        return true;
+    }
+    void OnEndDecode(LVImageSource *, bool errors) override { failed = errors; }
+    int width, height, lines = 0;
+    quint64 total = 0, white = 0, border = 0, whiteBorder = 0;
+    bool neutral = true, failed = false;
+};
 class PageDrawBuffer : public LVColorDrawBuf {
 public:
-    PageDrawBuffer(QImage &image, bool dark, bool smooth)
-        : LVColorDrawBuf(image.width(), image.height(), image.bits(), 32), pageSize(image.size()), dark(dark) {
+    PageDrawBuffer(QImage &image, bool dark, bool smooth, QMap<std::tuple<quintptr, int, int>, bool> *inversion = nullptr)
+        : LVColorDrawBuf(image.width(), image.height(), image.bits(), 32), pageSize(image.size()), dark(dark), inversion(inversion) {
         setInvertColors(dark);
         setSmoothScalingImages(smooth);
     }
-    bool hasImages = false;
+    bool hasImages = false, hasText = false;
     QVector<QRect> imageRegions;
     using LVColorDrawBuf::Draw;
     void Draw(int x, int y, const lUInt8 *bitmap, int width, int height, const lUInt32 *palette) override {
+        lvRect clip;
+        GetClipRect(&clip);
+        if (width > 0 && height > 0 && qint64(x) + width > clip.left && x < clip.right &&
+            qint64(y) + height > clip.top && y < clip.bottom)
+            hasText = true;
         const auto color = palette ? palette[0] : GetTextColor();
         const auto background = GetBackgroundColor();
         const bool neutral = qRed(color) == qGreen(color) && qRed(color) == qBlue(color);
@@ -159,7 +200,23 @@ public:
                 imageRegionsFull = true;
             }
         }
-        if (dark && equationImage(image))
+        bool invertIllustration = false;
+        if (dark && inversion && !equationImage(image)) {
+            const auto node = reinterpret_cast<quintptr>(image->GetSourceNode());
+            // Vector details can appear at a larger size. Do not reuse a smaller raster verdict.
+            const auto key = std::make_tuple(node, image->IsScalable() ? width : 0, image->IsScalable() ? height : 0);
+            auto found = inversion->constFind(key);
+            if (node && found != inversion->constEnd()) {
+                invertIllustration = found.value();
+            } else {
+                IllustrationProbe probe(image->IsScalable() ? width : image->GetWidth(),
+                                        image->IsScalable() ? height : image->GetHeight());
+                invertIllustration = probe.eligible(image);
+                if (inversion->size() >= 1024) inversion->clear();
+                if (node) inversion->insert(key, invertIllustration);
+            }
+        }
+        if (dark && (equationImage(image) || invertIllustration))
             image = LVImageSourceRef(new EquationImage(image));
         // Composite images in the final page colors. CREngine's invert-images
         // option instead blends transparency against a white background.
@@ -174,6 +231,7 @@ private:
     QSize pageSize;
     bool imageRegionsFull = false;
     bool dark;
+    QMap<std::tuple<quintptr, int, int>, bool> *inversion;
 };
 QString regionMetadata(const QVector<QRect> &regions) {
     QJsonArray array;
@@ -404,6 +462,9 @@ void ReaderModel::configure(QSize size, const QJsonObject &settings) {
     setExtraFontWeight(0);
     sourceIndex_.reset();
     engine_.reset();
+    alternateViewport_ = {};
+    layoutPpi_ = readingPpi.load();
+    layoutCss_ = userStyleSheet_;
     anchor_.clear();
     contents_.clear();
     graph_.clear();
@@ -416,8 +477,11 @@ void ReaderModel::configure(QSize size, const QJsonObject &settings) {
     damage_.clear();
     size_ = size;
     darkMode_ = saved.value("dark_mode").toBool(false);
+    imageInversion_.clear();
     hideNonlinearFragments_ = saved.value("hide_nonlinear_fragments").toBool(false);
-    avoidWastefulStyling_ = saved.value("avoid_wasteful_styling").toBool(true);
+    const auto normalization = appearance::normalizationSettings(saved);
+    normalizePageMargins_ = normalization.value("normalize_page_margins").toBool();
+    reduceChapterSpacing_ = normalization.value("reduce_chapter_spacing").toBool();
     verticalSpacing_ = appearance::verticalSpacingMode(saved.value("vertical_justification"));
     verticalSpacingScope_ = appearance::verticalSpacingScope(saved.value("vertical_spacing_scope"));
     wordSpacing_ = saved.value("word_spacing").toInt(100);
@@ -500,7 +564,7 @@ void ReaderModel::configure(QSize size, const QJsonObject &settings) {
     properties->setInt(PROP_FORMAT_MAX_ADDED_LETTER_SPACING_PERCENT, justificationTracking_);
     properties->setInt(PROP_FLOATING_PUNCTUATION, 0);
     properties->setInt(PROP_RENDER_BLOCK_RENDERING_FLAGS,
-                       avoidWastefulStyling_
+                       reduceChapterSpacing_
                            ? DEF_RENDER_BLOCK_RENDERING_FLAGS
                            : DEF_RENDER_BLOCK_RENDERING_FLAGS & ~BLOCK_RENDERING_DISCARD_FORCED_BREAK_MARGINS);
     // CSS already sizes images against the reading font. The engine's legacy
@@ -566,8 +630,8 @@ QString ReaderModel::author() const {
 QImage ReaderModel::coverImage(QSize maximumSize, const QString &preferredPath, QString *usedPath) const {
     if (usedPath)
         usedPath->clear();
-    if (!engine_ || maximumSize.isEmpty() || qint64(maximumSize.width()) * maximumSize.height() > 4 * 1024 * 1024) {
-        diagnostic("cover-decode", {{"reason", !engine_ ? "no engine" : "request size"}}, false);
+    if (maximumSize.isEmpty() || qint64(maximumSize.width()) * maximumSize.height() > 4 * 1024 * 1024) {
+        diagnostic("cover-decode", {{"reason", "request size"}}, false);
         return {};
     }
     const auto decode = [maximumSize](LVStreamRef stream) -> QImage {
@@ -651,7 +715,7 @@ QImage ReaderModel::coverImage(QSize maximumSize, const QString &preferredPath, 
             return image;
         }
     }
-    return decode(engine_->getCoverPageImageStream());
+    return engine_ ? decode(engine_->getCoverPageImageStream()) : QImage();
 }
 
 QString ReaderModel::position() const {
@@ -721,7 +785,7 @@ bool ReaderModel::applyAppearance(const QJsonObject &settings, QSize size, Openi
         ? appearance::paragraphIndent(settings.value("paragraph_indent")) : paragraphIndent_;
     if (settings.contains("paragraph_indent") && settings.value("paragraph_indent") != paragraphIndent)
         return false;
-    for (const auto *key : appearance::beautifierKeys)
+    for (const auto *key : appearance::normalizationKeys)
         if (settings.contains(key) && !settings.value(key).isBool()) return false;
     const bool beautifierInitials = settings.value("beautifier_initials").toBool(beautifierInitials_);
     const bool beautifierSpacing = settings.value("beautifier_spacing").toBool(beautifierSpacing_);
@@ -754,7 +818,8 @@ bool ReaderModel::applyAppearance(const QJsonObject &settings, QSize size, Openi
     const auto hyphenation = settings.value("hyphenation").toString(hyphenation_);
     const bool dark = settings.value("dark_mode").toBool(darkMode_);
     const bool hideNonlinear = settings.value("hide_nonlinear_fragments").toBool(hideNonlinearFragments_);
-    const bool avoidWastefulStyling = settings.value("avoid_wasteful_styling").toBool(avoidWastefulStyling_);
+    const bool normalizePageMargins = settings.value("normalize_page_margins").toBool(normalizePageMargins_);
+    const bool reduceChapterSpacing = settings.value("reduce_chapter_spacing").toBool(reduceChapterSpacing_);
     const auto verticalSpacing = settings.contains("vertical_justification")
         ? appearance::verticalSpacingMode(settings.value("vertical_justification")) : verticalSpacing_;
     const auto verticalScope = settings.contains("vertical_spacing_scope")
@@ -786,7 +851,7 @@ bool ReaderModel::applyAppearance(const QJsonObject &settings, QSize size, Openi
     // Outline thickness changes pixels only. Keep the formatted page and its anchors.
     const bool thicknessChanged = weight != weight_;
     const bool styled = beautifierInitials != beautifierInitials_ || beautifierSpacing != beautifierSpacing_ ||
-        beautifierIndent != beautifierIndent_ || fallbackFaces != fallbackFaces_ || avoidWastefulStyling != avoidWastefulStyling_ ||
+        beautifierIndent != beautifierIndent_ || fallbackFaces != fallbackFaces_ || normalizePageMargins != normalizePageMargins_ || reduceChapterSpacing != reduceChapterSpacing_ ||
                         wordSpacing != wordSpacing_ || tracking != justificationTracking_ || widowsOrphans != widowsOrphans_ ||
                         bionicChanged || axisChanged || opticalChanged || pixels != pixels_ || spacing != spacing_ ||
                         paragraphSpacing != paragraphSpacing_ ||
@@ -801,6 +866,30 @@ bool ReaderModel::applyAppearance(const QJsonObject &settings, QSize size, Openi
     if (styled || resized || verticalChanged)
         sourceIndex_.reset();
     const QString anchor = position();
+    auto *document = engine_->getDocument();
+    // Snapshots belong to this live publication and parser instance. Invalidate
+    // before any setting or stylesheet edit; only geometry can swap layouts.
+    const bool layoutInputsChanged = styled || verticalChanged || layoutPpi_ != readingPpi.load() ||
+                                     layoutCss_ != userStyleSheet_;
+    if (layoutInputsChanged) {
+        document->clearAlternateLayout();
+        alternateViewport_ = {};
+        layoutPpi_ = readingPpi.load();
+        layoutCss_ = userStyleSheet_;
+    }
+    const bool reuseLayout = !layoutInputsChanged && resized && size == alternateViewport_ &&
+                             columns == alternateColumns_ && columnSpacing == alternateColumnSpacing_;
+    const auto previousSize = size_;
+    const int previousColumns = columns_, previousSpacing = columnSpacing_;
+    if (resized && !reuseLayout && !layoutInputsChanged) {
+        if (document->retainLayout(maxAlternateLayoutBytes)) {
+            alternateViewport_ = size_;
+            alternateColumns_ = columns_;
+            alternateColumnSpacing_ = columnSpacing_;
+        } else {
+            alternateViewport_ = {};
+        }
+    }
     OpeningCallback callback(engine_, std::move(progress));
     pixels_ = pixels;
     spacing_ = spacing;
@@ -824,7 +913,8 @@ bool ReaderModel::applyAppearance(const QJsonObject &settings, QSize size, Openi
     darkMode_ = dark;
     activateFontParameters();
     hideNonlinearFragments_ = hideNonlinear;
-    avoidWastefulStyling_ = avoidWastefulStyling;
+    normalizePageMargins_ = normalizePageMargins;
+    reduceChapterSpacing_ = reduceChapterSpacing;
     verticalSpacing_ = verticalSpacing;
     verticalSpacingScope_ = verticalScope;
     engine_->setVerticalSpacing(verticalSpacing_ == "center" ? 2 : verticalSpacing_ == "expand" ? 1 : 0, verticalSpacingScope_ == "protection");
@@ -838,7 +928,7 @@ bool ReaderModel::applyAppearance(const QJsonObject &settings, QSize size, Openi
         properties->setInt(PROP_FORMAT_SPACE_WIDTH_SCALE_PERCENT, wordSpacing_);
         properties->setInt(PROP_FORMAT_MAX_ADDED_LETTER_SPACING_PERCENT, justificationTracking_);
         properties->setInt(PROP_RENDER_BLOCK_RENDERING_FLAGS,
-                           avoidWastefulStyling_
+                           reduceChapterSpacing_
                                ? DEF_RENDER_BLOCK_RENDERING_FLAGS
                                : DEF_RENDER_BLOCK_RENDERING_FLAGS & ~BLOCK_RENDERING_DISCARD_FORCED_BREAK_MARGINS);
         engine_->propsApply(properties);
@@ -877,6 +967,15 @@ bool ReaderModel::applyAppearance(const QJsonObject &settings, QSize size, Openi
         return true;
     // Applying a panel can change typography, hyphenation and the viewport together.
     // Set all three before paginating so the book is laid out only once.
+    if (reuseLayout) {
+        if (engine_->swapLayout()) {
+            alternateViewport_ = previousSize;
+            alternateColumns_ = previousColumns;
+            alternateColumnSpacing_ = previousSpacing;
+        } else {
+            alternateViewport_ = {};
+        }
+    }
     engine_->Render();
     return goTo(anchor);
 }
@@ -923,7 +1022,7 @@ void ReaderModel::applyPublisherFontFallbacks() {
 }
 void ReaderModel::applyStyleSheet() {
     QString overrides;
-    if (avoidWastefulStyling_) {
+    if (normalizePageMargins_) {
         overrides = "html,body,DocFragment { margin:0 !important; padding:0 !important; }\n";
     }
     overrides += "svg[data-kobalt-fullpage=\"1\"] { width:100% !important; height:100vh !important; }\n";
@@ -931,7 +1030,7 @@ void ReaderModel::applyStyleSheet() {
     // collapsing through the body and disappearing at the page boundary.
     // Round upward in the engine's 1/256 CSS-pixel units so every density keeps it.
     const double boundaryCssPixels = qCeil(256.0 * 96 / readingPpi.load()) / 256.0;
-    if (avoidWastefulStyling_) {
+    if (normalizePageMargins_) {
         overrides += QString("body[data-kobalt-leading-image=\"1\"] { padding-top:%1px !important; }\n")
                          .arg(boundaryCssPixels, 0, 'f', 6);
     }
@@ -1059,7 +1158,13 @@ bool ReaderModel::loadNextImage() {
     source_->resources->loadNextImage();
     return refreshImages();
 }
+size_t ReaderModel::alternateLayoutBytes() const {
+    return engine_ ? engine_->getDocument()->alternateLayoutBytes() : 0;
+}
 void ReaderModel::releaseImages() {
+    if (engine_)
+        engine_->getDocument()->clearAlternateLayout();
+    alternateViewport_ = {};
     cache_.clear();
     spareImage_ = {};
     damage_.clear();
@@ -1068,6 +1173,7 @@ void ReaderModel::releaseImages() {
     if (source_ && source_->resources) {
         source_->resources->releaseBytes();
         imageRevision_ = source_->resources->imageRevision();
+        imageInversion_.clear();
     }
 }
 bool ReaderModel::refreshImages() {
@@ -1076,6 +1182,7 @@ bool ReaderModel::refreshImages() {
     // Appearance previews share resources but keep their own rendered pages.
     // A load in either model must invalidate placeholders in the other one.
     imageRevision_ = source_->resources->imageRevision();
+    imageInversion_.clear();
     cache_.clear();
     spareImage_ = {};
     damage_.clear();
@@ -1097,7 +1204,7 @@ QImage ReaderModel::image(int pageNumber) {
         result = QImage(size_, QImage::Format_RGB32);
     if (result.isNull())
         return {};
-    PageDrawBuffer buffer(result, darkMode_, true);
+    PageDrawBuffer buffer(result, darkMode_, true, &imageInversion_);
     if (columns_ == 1) {
         engine_->drawColumn(buffer, pageNumber, 0);
     } else {
@@ -1107,9 +1214,10 @@ QImage ReaderModel::image(int pageNumber) {
             return {};
         QPainter painter(&result);
         for (int i = 0; i < columns_; ++i) {
-            PageDrawBuffer part(column, darkMode_, true);
+            PageDrawBuffer part(column, darkMode_, true, &imageInversion_);
             engine_->drawColumn(part, pageNumber, i);
             buffer.hasImages |= part.hasImages;
+            buffer.hasText |= part.hasText;
             const int x = engine_->columnOffset(i);
             painter.drawImage(x, 0, column);
             for (const auto &region : part.imageRegions)
@@ -1129,6 +1237,7 @@ QImage ReaderModel::image(int pageNumber) {
                                    format == QImage::Format_RGBX8888);
     usePageFormat(result, format);
     result.setText("kobalt.image_regions", regionMetadata(buffer.imageRegions));
+    result.setText("kobalt.image_only", buffer.imageRegions.size() == 1 && !buffer.hasText ? "true" : "false");
     result.setText(
         "kobalt.colour_regions",
         regionMetadata(hasColor ? (boundedTiles ? colourTileRegions(colourTiles, tileColumns, tileRows, result.size())
@@ -1420,7 +1529,7 @@ QJsonObject ReaderModel::state() const {
                                {"hyphenation", hyphenation_},
                                {"dark_mode", darkMode_},
                                {"hide_nonlinear_fragments", hideNonlinearFragments_},
-                               {"avoid_wasteful_styling", avoidWastefulStyling_},
+                               {"normalize_page_margins", normalizePageMargins_}, {"reduce_chapter_spacing", reduceChapterSpacing_},
                                {"vertical_justification", verticalSpacing_},
                                {"vertical_spacing_scope", verticalSpacingScope_},
                                {"columns", columns_},

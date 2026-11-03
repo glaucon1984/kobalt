@@ -680,6 +680,25 @@ PIN screen, and `Host::start()` ran 9 s later, after the font setup. The restore
 with the one in `start()` kept as a fallback. The silent write and the persistence log were
 removed again.
 
+### Upstream develop 7415fd2 (2026-11-03): v1.0-beta.6 nightly 1
+
+55 commits past the beta 5 merge: named bookmark shortcuts, an image viewer, inverted greyscale
+illustrations in dark mode, reading-time formats, normalization presets, book search from a
+lookup, regional keyboard layouts, optional light-gesture feedback, the cover on the opening
+screen, layout reuse across viewport changes, a duplicate page-turn filter (200 ms, below the
+host's 350 ms held-button repeat), and a CREngine patch (`crengine-alternate-layout.patch`), so
+the dependencies were rebuilt (`tools/remote-rebuild-deps.sh`; prefix headers unchanged, Qt
+kept). Two conflicts, both in files the fork had touched: the cover decode (upstream dropped
+the engine requirement so a cover can be read from a file before the book opens; the fork's
+diagnostic stays) and the light gesture, which upstream moved into `dispatchLightGesture()`
+behind a posted event (the warmth snap to the host's resolution moved with it). Host changes:
+`animationsAvailable` became `animationSupport` (`PageAnimationSupport::Supported`), and the
+controller's new `openingCover` signal is shown on the opening view. The `origin` fetch refspec
+now also tracks `develop`.
+
+Upstream's light-gesture pop-up now waits for a 150 ms pause in the swipe before it is drawn,
+on every platform; that is upstream's design, not a port issue.
+
 ## Name and icon on the PocketBook home screen (manual firmware files)
 
 These live in the firmware's user config, not in the app package, so a plain copy of the zip

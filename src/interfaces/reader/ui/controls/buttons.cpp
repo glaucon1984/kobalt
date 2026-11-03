@@ -69,7 +69,9 @@ void Button::paintEvent(QPaintEvent *) {
             QPainter painter(this);
             style()->drawControl(QStyle::CE_PushButton, &option, &painter, this);
             const bool primary = property("reader_primary_action").toBool();
-            const bool active = isEnabled() && (primary ? !isDown() : isChecked() || isDown());
+            // Ordinary actions use a gray pressed fill and keep their ink.
+            // Checkable controls and primary actions use inverted content.
+            const bool active = isEnabled() && (primary ? !isDown() : isCheckable() && (isChecked() || isDown()));
             const auto colors = primary ? readerPalette(palette(), darkTheme(this)) : palette();
             painter.setPen(colors.color(!isEnabled() ? QPalette::Mid
                                            : active     ? QPalette::Window
@@ -461,7 +463,7 @@ void CaptionButton::paintEvent(QPaintEvent *) {
     if (mode == Presentation::ListAction) {
         namespace c = m::chrome;
         QPainter painter(this);
-        painter.fillRect(rect(), isEnabled() && isDown() ? sectionColor(this) : palette().color(QPalette::Window));
+        painter.fillRect(rect(), isEnabled() && isDown() ? themeColors(this).pressedPaper : palette().color(QPalette::Window));
         paintEdges(painter, rect(), rule, dividerColor(this));
         if (!isEnabled())
             painter.setOpacity(.45);
@@ -516,7 +518,7 @@ void CaptionButton::paintEvent(QPaintEvent *) {
     }
     namespace c = m::chrome;
     QPainter painter(this);
-    painter.fillRect(rect(), isEnabled() && isDown() ? sectionColor(this) : palette().color(QPalette::Window));
+    painter.fillRect(rect(), isEnabled() && isDown() ? themeColors(this).pressedPaper : palette().color(QPalette::Window));
     paintEdges(painter, rect(), rule, dividerColor(this));
     const auto ink = palette().color(QPalette::WindowText);
     controlIcon(glyph, ink).paint(&painter, QRect(c::inset, (height() - c::cellIcon) / 2, c::cellIcon, c::cellIcon));
@@ -583,7 +585,8 @@ CellButton::CellButton(ControlIcon icon, QWidget *parent, int iconPixels)
 }
 QSize CellButton::sizeHint() const {
     if (text().isEmpty())
-        return {m::chrome::cellWidth, m::chrome::actionHeight};
+        return {m::chrome::cellWidth + (dropdownIndicator ? px(8) + int(m::chrome::selectorIcon) : 0),
+                m::chrome::actionHeight};
     // Paint with our own font; the reader's button style sets a larger size.
     QFont label = interfaceFont(m::chrome::countText);
     label.setCapitalization(QFont::AllUppercase);
@@ -592,7 +595,7 @@ QSize CellButton::sizeHint() const {
 }
 int CellButton::widthForLabel(int maximumWidth) const {
     if (text().isEmpty())
-        return qMin(maximumWidth, int(m::chrome::cellWidth));
+        return qMin(maximumWidth, sizeHint().width());
     QFont label = interfaceFont(m::chrome::countText);
     label.setCapitalization(QFont::AllUppercase);
     const int reserve = m::chrome::inset + trailingInset + m::chrome::selectorGap + iconPixels;
@@ -604,17 +607,37 @@ int CellButton::widthForLabel(int maximumWidth) const {
 }
 void CellButton::paintEvent(QPaintEvent *) {
     QPainter painter(this);
-    const bool active = isEnabled() && (isDown() || isChecked());
+    const bool pressed = isEnabled() && isDown();
+    const bool active = isEnabled() && (isChecked() || (pressed && !grayPress));
     const auto paper = palette().color(inverted ? QPalette::WindowText : QPalette::Window);
     const auto ink = palette().color(inverted ? QPalette::Window : QPalette::WindowText);
-    painter.fillRect(rect(), active ? ink : paper);
+    if (circular) {
+        painter.setRenderHint(QPainter::Antialiasing);
+        const qreal inset = int(m::control::border) / 2.0;
+        if (active) {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(ink);
+            painter.drawEllipse(QRectF(rect()).adjusted(inset, inset, -inset, -inset));
+        }
+        if (!isEnabled()) painter.setOpacity(.45);
+        controlIcon(glyph, active ? paper : ink).paint(&painter,
+            QRect((width() - iconPixels) / 2, (height() - iconPixels) / 2, iconPixels, iconPixels));
+        return;
+    }
+    painter.fillRect(rect(), active ? ink : pressed && grayPress ? themeColors(this).pressedPaper : paper);
     paintEdges(painter, rect(), rule, palette().color(QPalette::Mid));
     if (!isEnabled())
         painter.setOpacity(.45);
     const auto color = active ? paper : ink;
     if (text().isEmpty()) {
+        const int indicator = dropdownIndicator ? int(m::chrome::selectorIcon) : 0;
+        const int gap = dropdownIndicator ? px(8) : 0;
+        const int left = (width() - iconPixels - gap - indicator) / 2;
         controlIcon(glyph, color)
-            .paint(&painter, QRect((width() - iconPixels) / 2, (height() - iconPixels) / 2, iconPixels, iconPixels));
+            .paint(&painter, QRect(left, (height() - iconPixels) / 2, iconPixels, iconPixels));
+        if (dropdownIndicator)
+            controlIcon(ControlIcon::Down, color)
+                .paint(&painter, QRect(left + iconPixels + gap, (height() - indicator) / 2, indicator, indicator));
         return;
     }
     QFont label = interfaceFont(m::chrome::countText);

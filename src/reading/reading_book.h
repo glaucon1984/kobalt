@@ -9,6 +9,7 @@
 #include "storage/reading_history.h"
 #include <QElapsedTimer>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <memory>
 #include <utility>
 
@@ -90,6 +91,7 @@ public:
     }
     bool offerFinish() const;
     void markFinished();
+    void suppressFinishPrompt() { finishPromptSuppressed = true; }
     void pollProgress();
     void invalidateProgress() {
         progressPoll.invalidate();
@@ -131,8 +133,13 @@ public:
         return dictionaryChoice_;
     }
     bool saveDictionaryChoice(const QString &id);
+    QJsonObject imageView(const QString &id) const;
+    // Memory only. The caller can queue the existing background checkpoint.
+    bool rememberImageView(const QString &id, const QJsonObject &view);
 
 private:
+    bool canFinish() const;
+    bool finishPromptSuppressed = false;
     struct ActivitySave;
     void writeActivity(std::shared_ptr<ActivitySave>, int attempt);
     void resumeActivityCheckpoints();
@@ -181,6 +188,7 @@ private:
     // Keep extra fields from the supported record loaded at opening. Reader
     // fields are regenerated at each checkpoint.
     QJsonObject preservedState;
+    QJsonArray imageViews;
     // The background checkpoint that has not reported back yet.
     QJsonObject pendingCheckpoint;
     std::function<void()> checkpointFailed;

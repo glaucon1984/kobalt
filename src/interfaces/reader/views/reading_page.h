@@ -2,6 +2,7 @@
 #include <QPainterPath>
 #include "interfaces/reader/ui/style/metrics.h"
 #include "reading/header_footer.h"
+#include "reading/page_turn_animation.h"
 #include "reading/highlight_geometry.h"
 #include "ui/brightness_gesture.h"
 #include <QWidget>
@@ -9,6 +10,7 @@
 #include "ui/hold_timer.h"
 #include <QRegion>
 #include <QElapsedTimer>
+#include <QTimeLine>
 #include <QHash>
 #include <array>
 #include <functional>
@@ -22,6 +24,7 @@ class ReadingPage : public QWidget {
 public:
     QImage image;
     int animationDirection = 0;
+    void setPageAnimationStyle(pageTurn::Style style);
     // What the header and footer show. `notice`, such as an error, replaces
     // the footer's slots while it is set. It never adds a footer, because
     // that would change the page height.
@@ -52,11 +55,18 @@ public:
     QRect headerTextRect() const;
     // The footer's text line, in page coordinates. Empty without a footer.
     QRect footerTextRect() const;
+    // Rounded screen corners that touch the page's top or bottom edge.
+    void setCornerRadii(int top, int bottom);
+    // The space beside a strip's slot text. It grows to keep the text clear of
+    // a rounded screen corner.
+    int slotSide(bool footer) const;
     // The ribbon that marks a bookmarked page, and the corner that toggles it.
     bool bookmarked = false;
     QRect ribbonRect() const;
     QRect bookmarkCorner() const;
     std::function<void(QPoint)> held;
+    // An image hold takes precedence over text selection, including annotation mode.
+    std::function<bool(QPoint)> imageHeld;
     // Ends the current touch: no lookup, tap, swipe or light change follows.
     void cancelHold();
     // Stops only the lookup that a long hold would start. A tap or swipe still completes.
@@ -93,6 +103,8 @@ public:
     void revealLinks(const QVector<QRect> &rectangles, const QVector<QRect> &footnotes = {});
     std::function<void(QPoint)> tapped;
     std::function<void(int)> swiped;
+    // Available only while a completed input gesture calls tapped or swiped.
+    quint32 gestureTimestamp() const { return gestureTime; }
     std::function<void()> annotationRequested;
     ReadingPage(QWidget *parent, std::function<void()> cancelAnimation);
     // Copy the cached page and chrome without widget layout or backing-store work.
@@ -116,6 +128,11 @@ protected:
 
 private:
     std::function<void()> cancelAnimation;
+    void stopPageAnimation();
+    pageTurn::Style pageAnimationStyle = pageTurn::Style::Off;
+    QTimeLine pageTurnAnimation;
+    QImage animationFrame, animationFrom, animationTo;
+    int animationTurnDirection = 0, animationStep = -1;
     // Text weight and family changes draw the strips again.
     using Slots = std::array<headerfooter::Content, 3>;
     using HeaderState =
@@ -126,6 +143,7 @@ private:
     std::array<headerfooter::Field, 3> stripFields(bool footer) const;
     void paintSlots(QPainter &painter, const QRect &bounds, bool footer, bool sleeping = false) const;
     bool panelBelowHeader = false;
+    int cornerTop = 0, cornerBottom = 0;
     HeaderState headerState;
     FooterState footerState;
     QImage renderedBody, headerPixels, footerPixels;
@@ -173,6 +191,7 @@ private:
     kobalt::ui::BrightnessGesture brightnessGesture;
     void updatePointer();
     void finishGesture();
+    quint32 pressTime = 0, gestureTime = 0;
 };
 
 }

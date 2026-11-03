@@ -6,6 +6,7 @@
 #include "interfaces/reader/ui/controls/panels.h"
 #include "interfaces/reader/ui/style/theme.h"
 #include "choice_screen.h"
+#include "reading/reading_density.h"
 #include "interfaces/reader/ui/style/fonts.h"
 #include "interfaces/reader/ui/style/styles.h"
 #include "interfaces/reader/ui/style/metrics.h"
@@ -310,6 +311,7 @@ void ChoiceScreen::setFontGeometry(const QRect &bounds) {
     if (geometry() == bounds)
         return;
     setDropdownGeometry(bounds);
+    layoutChoices();
     redraw();
 }
 void ChoiceScreen::resizeEvent(QResizeEvent *) {
@@ -361,7 +363,7 @@ void ChoiceScreen::layoutChoices() {
         return;
     }
     if (mode == Mode::Fonts) {
-        pageSize = 12;
+        pageSize = parentWidget() && isPhoneScreen(parentWidget()->size(), ui::density()) ? 6 : 12;
         fontPages.clear();
         QStringList sections;
         for (const auto &item : items)
@@ -451,7 +453,6 @@ void ChoiceScreen::redrawFonts() {
     navigation.back->hide();
     navigation.setPagingVisible(false);
     page = qBound(0, page, pageCount() - 1);
-    pageSize = 12;
     const int header = m::choices::pickerHeader, sectionHeight = ui::px(42), pager = m::chrome::actionHeight;
     fontHeader->setGeometry(0, 0, width(), header);
     const int cell = qMin(int(m::choices::pickerHeader), width() / 4);
@@ -483,6 +484,11 @@ void ChoiceScreen::redrawFonts() {
         });
     }
     const int body = qMax(4, height() - header - sectionHeight - pager);
+    // Phone pages show six choices with room for the font name and captions.
+    // Wider e-reader sheets retain twelve choices.
+    const int columns = pageSize == 6 ? (width() > height() ? 3 : 2)
+        : body / 4 < int(m::choices::pickerRow) * 3 / 4 && width() >= 6 * ui::px(200) ? 6 : 3;
+    const int rows = pageSize / columns;
     int used = header + sectionHeight;
     for (int row = 0; row < buttons.size(); ++row) {
         const int index = itemIndex(row);
@@ -508,11 +514,10 @@ void ChoiceScreen::redrawFonts() {
         button->setAccessibleDescription(item.detail);
         button->setCheckable(true);
         button->setChecked(selectedItem);
-        const int columns = 3;
-        const int col = row % 3, line = row / 3;
-        button->setGeometry(col * width() / columns, header + sectionHeight + line * body / 4,
+        const int col = row % columns, line = row / columns;
+        button->setGeometry(col * width() / columns, header + sectionHeight + line * body / rows,
                             (col + 1) * width() / columns - col * width() / columns,
-                            (line + 1) * body / 4 - line * body / 4);
+                            (line + 1) * body / rows - line * body / rows);
         readerStyle(
             button,
             QString(
@@ -547,6 +552,14 @@ void ChoiceScreen::redrawFonts() {
                                 .arg(caption.family())
                                 .arg(caption.pixelSize()));
         const int inset = ui::px(12), detailWidth = qMax(1, button->width() - 2 * inset);
+        // A short cell, as in two rows of six, keeps a line for the name. The
+        // caption drops its first lines, which give the least detail.
+        auto lines = item.detail.toUpper().split('\n');
+        while (!item.placeholder && lines.size() > 1 &&
+               button->height() - detail->heightForWidth(detailWidth) - ui::px(32) < labelFont.pixelSize()) {
+            lines.removeFirst();
+            detail->setText(lines.join('\n'));
+        }
         const int detailHeight = item.detail.isEmpty() ? 0 : detail->heightForWidth(detailWidth);
         const int titleLimit = item.detail.isEmpty() ? ui::px(96) : ui::px(64);
         const int titleHeight = item.placeholder

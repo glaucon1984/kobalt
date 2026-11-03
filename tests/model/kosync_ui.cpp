@@ -6,9 +6,12 @@
 #include "interfaces/reader/ui/style/fonts.h"
 #include "interfaces/reader/ui/style/styles.h"
 #include "interfaces/reader/ui/style/theme.h"
+#include "interfaces/reader/ui/style/private_text.h"
+#include <QLabel>
 #include "interfaces/reader/ui/controls/keyboard.h"
 #include <QApplication>
 #include <QLineEdit>
+#include <QLocale>
 #include <QFontInfo>
 #include <QKeyEvent>
 #include <QElapsedTimer>
@@ -39,6 +42,7 @@ void checkKeyboardInputStaysInEditor() {
         for (bool dark : {false, true}) {
             ui::setDensity(ppi);
             QWidget host;
+            host.setProperty("reader_dark", dark);
             host.resize(ui::px(800), ui::px(1136));
             host.setFont(ui::interfaceFont());
             ui::applyReaderPalette(&host, ui::readerPalette(host.palette(), dark));
@@ -48,6 +52,27 @@ void checkKeyboardInputStaysInEditor() {
             host.show();
             page.show();
             QApplication::processEvents();
+            for (const char *name : {"rrKosyncLogin", "rrKosyncNow", "rrKosyncLogout", "rrKosyncLearnMore"}) {
+                page.setNativeCloudSync(QString(name) == "rrKosyncLearnMore");
+                page.setAccount("https://sync.example", "reader", QString(name) != "rrKosyncLogin", true);
+                auto *action = page.findChild<QPushButton *>(name);
+                require(action && action->isVisible() && action->isEnabled(), "Sync action is available for contrast check");
+                const auto normal = action->grab().toImage();
+                QTest::mousePress(action, Qt::LeftButton);
+                require(action->isDown(), "Sync contrast check delivered a press");
+                const auto held = action->grab().toImage();
+                const auto colors = ui::themeColors(dark);
+                require(held.pixelColor(ui::px(4), ui::px(4)) == colors.pressedPaper, "Sync action uses the list pressed fill");
+                int ink = 0;
+                for (int y = ui::px(4); y < held.height() - ui::px(4); ++y)
+                    for (int x = ui::px(24); x < held.width() - ui::px(24); ++x)
+                        ink += held.pixelColor(x, y) == colors.ink;
+                require(ink > 10, "Sync action retains contrasting label ink while pressed");
+                QTest::mouseRelease(action, Qt::LeftButton, Qt::NoModifier, QPoint(-1, -1));
+                require(action->grab().toImage() == normal, "Cancelled Sync action restores its appearance");
+            }
+            page.setNativeCloudSync(false);
+            page.setAccount({}, {}, false, true);
             for (const auto *field : {"rrKosyncServer", "rrKosyncUsername", "rrKosyncPassword"}) {
                 page.findChild<QPushButton *>(field)->click();
                 QApplication::processEvents();
@@ -90,6 +115,34 @@ void checkKeyboardInputStaysInEditor() {
                 for (int i = 0; i < 100; ++i) QTest::mouseClick(first, Qt::LeftButton);
                 require(page.editorDialog && input->text() == prefix + "qqqw" + QString(100, QChar('q')),
                         "rapid key clicks continue editing after gaps and cancelled presses");
+                if (QString(field) == "rrKosyncPassword") {
+                    input->clear();
+                    auto *shift = panel->findChild<QPushButton *>("widgetKeyboardShift");
+                    auto *reveal = dialog->findChild<QPushButton *>("rrKosyncPasswordReveal");
+                    QTest::mouseClick(shift, Qt::LeftButton);
+                    QTest::mouseClick(first, Qt::LeftButton);
+                    QTest::mouseClick(second, Qt::LeftButton);
+                    require(input->text() == "Qw" && input->echoMode() == QLineEdit::Password && !shift->isChecked(),
+                            "masked passwords consume Shift after one letter");
+                    reveal->click();
+                    require(input->displayText() == "Qw", "Show reveals the exact mixed-case draft");
+                    shift->click(); shift->click();
+                    const auto lockedIcon = shift->icon().cacheKey();
+                    require(shift->accessibleName() == strings::get("keyboard.caps_lock"), "locked Shift has an explicit accessible name");
+                    QTest::mouseClick(first, Qt::LeftButton);
+                    QTest::mouseClick(second, Qt::LeftButton);
+                    reveal->click();
+                    require(input->text() == "QwQW" && input->echoMode() == QLineEdit::Password && shift->isChecked(),
+                            "Caps Lock remains active through password reveal and hiding");
+                    require(shift->icon().cacheKey() == lockedIcon, "typing while locked keeps the lock icon");
+                    dialog->findChild<QPushButton *>("rrKosyncEditSave")->click();
+                    QApplication::processEvents();
+                    require(page.takePassword() == "QwQW", "saving passes the exact mixed-case password to the account owner");
+                    page.findChild<QPushButton *>(field)->click();
+                    dialog = page.editorDialog.data();
+                    shift = dialog->findChild<QPushButton *>("widgetKeyboardShift");
+                    require(!shift->isChecked(), "a new password editor starts in lowercase");
+                }
                 dialog->findChild<QPushButton *>("rrKosyncEditCancel")->click();
                 require(!page.editorDialog, "Cancel still closes the account editor");
                 QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
@@ -98,12 +151,96 @@ void checkKeyboardInputStaysInEditor() {
     ui::setDensity(savedDensity);
 }
 }
+namespace {
+void checkPhoneSettings() {
+    const int savedDensity = ui::density();
+    for (int ppi : {212, 300}) {
+        ui::setDensity(ppi);
+        for (bool dark : {false, true}) {
+            QWidget host;
+            host.setProperty("reader_dark", dark);
+            host.setPalette(ui::readerPalette(host.palette(), dark));
+            ui::readerStyle(&host, ui::styles::reader());
+            host.resize(ui::px(720), ui::px(1600));
+            reader::SettingsPanel panel(&host, {});
+            panel.refitRequested = [&] { panel.fitContent(host.size()); };
+            panel.resize(host.size());
+            panel.fitContent(host.size());
+            host.show();
+            panel.show();
+            QApplication::processEvents();
+            auto *title = panel.findChild<QLabel *>("rrSettingsTitle");
+            require(title, "Settings has a title");
+            const auto inkBounds = [](const QImage &image, QColor paper) {
+                QRect bounds;
+                for (int y = 0; y < image.height(); ++y)
+                    for (int x = 0; x < image.width(); ++x)
+                        if (image.pixelColor(x, y).alpha() && image.pixelColor(x, y) != paper) bounds |= QRect(x, y, 1, 1);
+                return bounds;
+            };
+            const auto baseline = [&] {
+                const auto shape = ui::renderPrivateText(title->text(), title->font());
+                QRect ink;
+                for (int y = 0; y < shape.image.height(); ++y)
+                    for (int x = 0; x < shape.image.width(); ++x)
+                        if (qAlpha(shape.image.pixel(x, y))) ink |= QRect(x, y, 1, 1);
+                const auto shown = inkBounds(title->grab().toImage(), ui::themeColors(dark).paper);
+                return shown.top() - ink.top() - shape.origin.y();
+            };
+            const int reference = baseline();
+            const auto position = title->mapTo(&panel, title->contentsRect().topLeft());
+            for (const char *name : {"rrSettingsDisplay", "rrSettingsControls", "rrSettingsDefaults", "rrSettingsStyling",
+                                     "rrSettingsDictionaries", "rrSettingsSystem", "rrSettingsAbout", "rrSettingsKosync"}) {
+                auto *row = panel.findChild<QPushButton *>(name);
+                require(row && row->isVisible(), "Phone Settings section row is visible");
+                const auto idle = row->grab().toImage();
+                row->setDown(true);
+                const auto held = row->grab().toImage();
+                require(held.pixelColor(5, 5) == ui::themeColors(dark).pressedPaper,
+                        "Phone Settings section rows use the shared pressed gray");
+                const auto countInk = [&](QRect area) {
+                    int count = 0;
+                    for (int y = area.top(); y <= area.bottom(); ++y)
+                        for (int x = area.left(); x <= area.right(); ++x)
+                            count += qAbs(qGray(held.pixel(x, y)) - qGray(ui::themeColors(dark).ink.rgb())) < 64;
+                    return count;
+                };
+                require(countInk(QRect(0, 4, held.width() / 2, held.height() - 8)) > 30,
+                        "Pressed settings rows keep visible label and icon ink");
+                auto *chevron = row->findChild<QWidget *>("rrSettingsSectionChevron");
+                require(chevron && countInk(chevron->geometry()) > 5,
+                        "Pressed settings rows keep a visible chevron");
+                require(held.pixelColor(chevron->x(), chevron->y()) == ui::themeColors(dark).pressedPaper,
+                        "Settings chevrons do not cover the pressed gray with a paper rectangle");
+                const auto directory = qEnvironmentVariable("KOBALT_TEST_CAPTURE_DIR");
+                const auto out = directory.isEmpty() ? QString() : directory + "/" + QString::number(ppi) + "-" + name;
+                if (!out.isEmpty()) require(panel.grab().save(out + (dark ? "-held-dark.png" : "-held-light.png")), "save held Settings row");
+                row->setDown(false);
+                require(row->grab().toImage() == idle, "Releasing the settings row restores its original appearance");
+                row->click();
+                panel.fitContent(host.size());
+                QApplication::processEvents();
+                require(title->mapTo(&panel, title->contentsRect().topLeft()) == position,
+                        "Settings submenu titles keep the same text origin");
+                require(baseline() == reference, "Settings submenu titles keep the Settings baseline");
+                if (!out.isEmpty()) require(panel.grab().save(out + (dark ? "-dark.png" : "-light.png")), "save Settings submenu");
+                panel.findChild<QPushButton *>("rrSettingsBack")->click();
+                panel.fitContent(host.size());
+                QApplication::processEvents();
+            }
+        }
+    }
+    ui::setDensity(savedDensity);
+}
+}
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
+    QLocale::setDefault(QLocale(QLocale::English, QLocale::UnitedStates));
     app.setStyle(QStyleFactory::create("Fusion"));
     app.setPalette(ui::readerPalette(app.palette(), false));
     ui::setInterfaceWeight(ui::heavierTextSteps);
     require(ui::initializeInterfaceFonts(test::readerAssets()), "load the production interface fonts");
+    checkPhoneSettings();
     checkKeyboardInputStaysInEditor();
     {
         QWidget host;
@@ -228,7 +365,8 @@ int main(int argc, char **argv) {
     tab->click();
     panel.fitContent(window.size());
     QApplication::processEvents();
-    require(panel.settingsPages->currentIndex() == reader::KosyncSettings && tab->isChecked(),
+    // A narrow panel lists its sections without a selection; the rail checks the open one.
+    require(panel.settingsPages->currentIndex() == reader::KosyncSettings && (tab->isChecked() || !tab->isCheckable()),
             "Sync tab selects its page and check state");
     auto *about = panel.findChild<QPushButton *>("rrSettingsAbout");
     require(about && tab->mapTo(&panel, QPoint()).y() < about->mapTo(&panel, QPoint()).y(),
@@ -446,7 +584,9 @@ int main(int argc, char **argv) {
     panel.fitContent(window.size());
     QApplication::processEvents();
     auto *disclaimer = page->findChild<QLabel *>("rrKosyncDescription");
-    require(tab->isVisible() && disclaimer && disclaimer->isVisible() &&
+    // A narrow panel shows an open section without its list, so the tab is
+    // not on screen; it must still exist rather than be hidden.
+    require(!tab->isHidden() && disclaimer && disclaimer->isVisible() &&
             disclaimer->text().contains("Kobo’s built-in sync system") &&
             page->findChild<QLabel *>("rrKosyncSideloadGuidance")->text().contains("DRM-free copy"), "Kobo-managed books retain a Sync tab with a sideloading disclaimer");
     for (const auto *control : {server, page->findChild<QPushButton *>("rrKosyncUsername"), password, login,

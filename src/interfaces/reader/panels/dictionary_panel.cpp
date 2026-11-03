@@ -7,6 +7,7 @@
 #include "interfaces/reader/ui/style/theme.h"
 #include "support/strings.h"
 #include "dictionary_panel.h"
+#include "reading/reading_density.h"
 #include "dictionaries/manager.h"
 #include "interfaces/reader/ui/style/metrics.h"
 #include "interfaces/reader/ui/style/styles.h"
@@ -44,11 +45,10 @@ private:
 DictionaryPanel::DictionaryPanel(QWidget *parent, KeyboardFactory makeKeyboard) : ui::Panel(parent, Qt::TopEdge) {
     setEdgeWidth(c::heavyRule);
     setObjectName("rrDictionary");
-    dictionary = new ui::CellButton(ui::ControlIcon::Down, this, c::selectorIcon);
+    dictionary = new ui::CellButton(ui::ControlIcon::Dictionaries, this);
     dictionary->setObjectName("rrDictionarySelect");
+    dictionary->setDropdownIndicator(true);
     dictionary->setRule(Qt::LeftEdge);
-    dictionary->setMaximumLabelLines(2);
-    dictionary->setTrailingInset(ui::px(12));
     headword = new ui::PrivateTextLabel(this);
     headword->setObjectName("rrDictionaryWord");
     headword->setTextFormat(Qt::PlainText);
@@ -113,6 +113,14 @@ DictionaryPanel::DictionaryPanel(QWidget *parent, KeyboardFactory makeKeyboard) 
         else if (dismissed)
             dismissed();
     });
+    search = new ui::CellButton(ui::ControlIcon::Search, this);
+    search->setObjectName("rrDictionarySearch");
+    search->setAccessibleName(strings::get("dictionary_panel.search_in_book"));
+    search->setRule(Qt::LeftEdge);
+    connect(search, &QPushButton::clicked, this, [this] {
+        if (searchRequested && !word.isEmpty())
+            searchRequested(word);
+    });
     text = new ui::PagedText(this);
     text->setObjectName("rrDefinition");
     text->setTextFont(ui::interfaceFont(c::labelText));
@@ -153,6 +161,13 @@ void DictionaryPanel::place(const QRect &selection) {
     this->selection = selection;
     const auto size = parentWidget()->size();
     int h = size.height() * m::lookup::heightPercent / 100;
+    // A short screen leaves the usual share too little room for a definition.
+    // The sheet grows into the half without the word, but never over it.
+    if (!editing && isShortHeight(size.height(), ui::density())) {
+        const bool below = selection.center().y() < size.height() / 2;
+        const int room = below ? size.height() - selection.bottom() - 1 : selection.top();
+        h = qBound(h, room - int(m::lookup::moveTolerance), size.height() * m::lookup::shortHeightPercent / 100);
+    }
     if (editing) {
         const auto keyboardBounds = parentWidget()->window()->property("reader_keyboard_bounds").toRect();
         if (!keyboardBounds.isEmpty()) {
@@ -163,7 +178,9 @@ void DictionaryPanel::place(const QRect &selection) {
     // The sheet takes the half without the word and meets the page with its rule.
     lower = !editing && selection.center().y() < size.height() / 2;
     setEdges(lower ? Qt::TopEdge : Qt::BottomEdge);
-    setGeometry(0, lower ? size.height() - h : 0, size.width(), h);
+    // At the top, the sheet starts below a camera band.
+    const int safeTop = lower ? 0 : parentWidget()->property("reader_safe_top").toInt();
+    setGeometry(0, lower ? size.height() - h : safeTop, size.width(), h);
     arrange();
 }
 QString DictionaryPanel::formatDefinition(const QString &html) {
@@ -206,8 +223,10 @@ void DictionaryPanel::open(const QString &word, const DictionaryResult &result, 
     query->setFont(headwordFont);
     ui::readerStyle(query, headword->property("reader_style").toString() +
                               "border:none;padding:0;background:palette(window);");
-    dictionary->setText(result.dictionary.isEmpty() ? strings::get("dictionary_panel.dictionary_unavailable")
-                                                    : result.dictionary);
+    const auto dictionaryName = result.dictionary.isEmpty() ? strings::get("dictionary_panel.dictionary_unavailable")
+                                                           : result.dictionary;
+    dictionary->setAccessibleDescription(dictionaryName);
+    dictionary->setToolTip(dictionaryName);
     currentId = result.dictionaryId;
     dropdown->hide();
     const auto note = QString("font-size:%1px;color:%2;").arg(int(c::descriptionText)).arg(ui::noteColor(this).name());
@@ -356,21 +375,30 @@ void DictionaryPanel::arrange() {
     query->setVisible(editing);
     editHint->setVisible(editing);
     submit->setVisible(editing);
+    search->setVisible(!editing);
     close->setAccessibleName(strings::get(editing ? "dictionary_panel.cancel_edit" : "dictionary_panel.close_definition"));
     dictionary->setEnabled(!editing && options.size() > 1);
     const int top = rowTop(), bottom = contentBottom();
     // The word leads the row, like a printed entry. The dictionary sits beside close.
-    const int minimumSelector = ui::px(220);
-    const int maximumSelector = qMax(1, qMin(width() - 3 * c::cellWidth,
-                                            qMax(ui::px(300), (width() - 2 * c::cellWidth) * 2 / 5)));
-    const int selector = qMin(maximumSelector, qMax(minimumSelector, dictionary->widthForLabel(maximumSelector)));
-    const int selectorLeft = width() - c::cellWidth - selector;
-    dictionary->setGeometry(selectorLeft, top, selector, c::actionHeight);
-    close->setGeometry(width() - c::cellWidth, top, c::cellWidth, c::actionHeight);
-    edit->setGeometry(selectorLeft - c::cellWidth, top, c::cellWidth, c::actionHeight);
-    submit->setGeometry(edit->geometry());
-    query->setGeometry(0, top, qMax(1, selectorLeft - c::cellWidth), c::actionHeight);
-    const int wordWidth = qMax(1, selectorLeft - c::cellWidth - 2 * c::inset);
+    // On a narrow panel the actions use compact cells, and the dictionary's name
+    // wraps or shortens before the word does, so a word of ordinary length stays whole.
+    const int cell = isNarrowWidth(width(), ui::density()) ? int(c::compactCellWidth) : int(c::cellWidth);
+    int selectorWidth = dictionary->sizeHint().width();
+    const int actionCells = editing ? 2 : 3;
+    const int wordRoom = width() - actionCells * cell - 2 * int(c::inset);
+    const int wordWanted = qMin(ui::interfaceTextWidth(word, headwordFont), width() / 2);
+    if (wordRoom - selectorWidth < wordWanted)
+        selectorWidth = dictionary->widthForLabel(qMax(cell, wordRoom - wordWanted));
+    const int selectorLeft = width() - cell - selectorWidth;
+    dictionary->setGeometry(selectorLeft, top, selectorWidth, c::actionHeight);
+    close->setGeometry(width() - cell, top, cell, c::actionHeight);
+    const int editorLeft = selectorLeft - cell;
+    const int editLeft = editorLeft - (editing ? 0 : cell);
+    edit->setGeometry(editLeft, top, cell, c::actionHeight);
+    search->setGeometry(editorLeft, top, cell, c::actionHeight);
+    submit->setGeometry(search->geometry());
+    query->setGeometry(0, top, qMax(1, editorLeft), c::actionHeight);
+    const int wordWidth = qMax(1, editLeft - 2 * c::inset);
     headword->setGeometry(c::inset, top, wordWidth, c::actionHeight);
     headword->setText(ui::elideInterfaceText(word, headwordFont, wordWidth));
     int textTop = top + c::actionHeight + m::control::border;

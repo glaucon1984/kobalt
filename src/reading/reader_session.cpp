@@ -329,7 +329,8 @@ static bool openAtPlatform(ReaderModel &engine, const PositionCodec &codec, cons
     return true;
 }
 
-void ReaderSession::open(OpenRequest request, std::function<void(OpeningResult)> finished, OpeningProgress progress) {
+void ReaderSession::open(OpenRequest request, std::function<void(OpeningResult)> finished, OpeningProgress progress,
+                         std::function<void(QImage)> coverReady) {
     syncDigest_.clear();
     syncFilenameDigest_ = kosync::filenameDigest(request.syncFilename.isNull() ? request.path : request.syncFilename);
     if (ownsLease_)
@@ -348,6 +349,7 @@ void ReaderSession::open(OpenRequest request, std::function<void(OpeningResult)>
     const auto lease = lease_;
     const auto path = std::move(request.path), identity = std::move(request.identity);
     const auto size = request.size;
+    const bool restartAtStart = request.restartAtStart;
     auto saved = std::move(request.saved);
     temporaryAppearance = request.temporaryAppearance;
     originalAppearance = request.originalAppearance;
@@ -358,6 +360,7 @@ void ReaderSession::open(OpenRequest request, std::function<void(OpeningResult)>
                layoutCachePath = std::move(request.layoutCachePath);
     const auto documentCachePath = std::move(request.documentCachePath);
     const auto userStyleSheetPath = std::move(request.userStyleSheetPath);
+    const auto coverPath = std::move(request.coverImagePath);
     const auto factory = std::move(request.resources);
     running = true;
     retiring = false;
@@ -400,8 +403,21 @@ void ReaderSession::open(OpenRequest request, std::function<void(OpeningResult)>
         [guard, engine, path, identity, size, saved, nativeLocation, lease, factory, finished, report, systemFont,
          layoutCachePath, documentCachePath, retainedHash, retainedSettings, latest, job, positions, pinnedAppearance,
          retainedWarning, retainedDetails, userStyleSheetPath, appearanceDefaults, markup, markupGeneration,
-         neighbourCount]() mutable {
+         neighbourCount, restartAtStart, coverReady, coverPath]() mutable {
             EngineJob activity;
+            bool coverPublished = false;
+            const auto publishCover = [&] {
+                if (coverPublished || !coverReady || !lease || lease->revoked())
+                    return;
+                auto image = engine->coverImage({2048, 2048}, coverPath);
+                coverPublished = !image.isNull();
+                kobalt::qt::invoke(qApp, [guard, lease, job, coverReady, image = std::move(image)]() mutable {
+                    if (guard && guard->revision == job && !lease->revoked())
+                        coverReady(std::move(image));
+                }, Qt::QueuedConnection);
+            };
+            if (!coverPath.isEmpty())
+                publishCover();
             QElapsedTimer timer;
             timer.start();
             diagnostic("open-start");
@@ -482,7 +498,7 @@ void ReaderSession::open(OpenRequest request, std::function<void(OpeningResult)>
                 const auto bionic = saved.value("bold_reading");
                 const auto dark = saved.value("dark_mode");
                 const auto hideNonlinear = saved.value("hide_nonlinear_fragments");
-                const auto avoidWastefulStyling = saved.value("avoid_wasteful_styling");
+                const auto normalization = appearance::normalizationSettings(saved);
                 const auto landscapeColumns = saved.value("two_columns_landscape");
                 const auto columnSpacing = saved.value("column_spacing_percent");
                 const auto wordSpacing = saved.value("word_spacing");
@@ -495,7 +511,7 @@ void ReaderSession::open(OpenRequest request, std::function<void(OpeningResult)>
                 saved["bold_reading"] = bionic;
                 saved["dark_mode"] = dark;
                 saved["hide_nonlinear_fragments"] = hideNonlinear;
-                saved["avoid_wasteful_styling"] = avoidWastefulStyling;
+                for (const auto *key : appearance::normalizationKeys) saved[key] = normalization.value(key);
                 saved["two_columns_landscape"] = landscapeColumns;
                 saved["column_spacing_percent"] = columnSpacing;
                 saved["word_spacing"] = wordSpacing;
@@ -509,7 +525,12 @@ void ReaderSession::open(OpenRequest request, std::function<void(OpeningResult)>
                 }
                 if (!pinnedAppearance.isEmpty())
                     appearance::copy(saved, pinnedAppearance);
-                const auto initial = saved.value("position").toString().isEmpty() ? nativeLocation : QString();
+                const bool restart = restartAtStart || !saved.value("finished_position").toString().isEmpty();
+                // Keep the saved position until the document loads: it selects
+                // the DOM version used by existing bookmarks and annotations.
+                if (restart)
+                    saved.remove("imported_native_location");
+                const auto initial = !restart && saved.value("position").toString().isEmpty() ? nativeLocation : QString();
                 auto resources = factory(publication.sizes(), systemFont, contentRejected);
                 if (!resources)
                     outcome = OpeningResult::failed(OpeningFailureKind::HostUnavailable,
@@ -553,10 +574,13 @@ void ReaderSession::open(OpenRequest request, std::function<void(OpeningResult)>
                 if (retainedHit && outcome.ready() && !engine->rebindResources(resources, publication.sizes()))
                     retainedHit = false;
                 if (retainedHit && outcome.ready()) {
+                    publishCover();
                     const auto modelStart = timer.elapsed();
                     if (!engine->applyAppearance(saved, size))
                         outcome = OpeningResult::failed(OpeningFailureKind::InvalidContent,
                                                         strings::key("error.cannot_restore_the_retained_appearance"));
+                    else if (restart)
+                        engine->go(0);
                     else if (!initial.isEmpty())
                         locate(initial);
                     else if (!saved.value("position").toString().isEmpty() &&
@@ -611,8 +635,11 @@ void ReaderSession::open(OpenRequest request, std::function<void(OpeningResult)>
                     const auto modelStart = timer.elapsed();
                     report(OpeningStage::Text, 0);
                     if (outcome.ready() &&
-                        engine->openResources(resources, publication.sizes(), size, saved, nullptr, report, &outcome)) {
-                        if (!initial.isEmpty())
+                        engine->openResources(resources, publication.sizes(), size, saved, nullptr, report,
+                                              &outcome, publishCover)) {
+                        if (restart)
+                            engine->go(0);
+                        else if (!initial.isEmpty())
                             locate(initial);
                         if (outcome.ready()) {
                             report(OpeningStage::Ready, 0);
@@ -1443,6 +1470,21 @@ void ReaderSession::wordAt(QPoint point, std::function<void(WordSelection)> fini
         },
         Qt::QueuedConnection);
 }
+void ReaderSession::imageAt(QPoint point, std::function<void(QImage)> finished) {
+    if (running)
+        return;
+    auto engine = model;
+    QPointer<ReaderSession> guard(this);
+    const auto job = revision;
+    kobalt::qt::invoke(engineWorker(), [engine, guard, job, point, finished] {
+        EngineJob activity;
+        const auto image = engine->imageAt(point);
+        kobalt::qt::invoke(qApp, [guard, job, image, finished] {
+            if (guard)
+                finished(guard->revision == job && !guard->running ? image : QImage());
+        }, Qt::QueuedConnection);
+    }, Qt::QueuedConnection);
+}
 void ReaderSession::linkDetails(const QString &source, std::function<void(LinkDetails)> finished) {
     if (running)
         return;
@@ -1486,7 +1528,7 @@ void ReaderSession::cancelSearch() {
 }
 void ReaderSession::search(const QString &query, std::function<void(SearchBatch)> finished) {
     cancelSearch();
-    if (query.trimmed().isEmpty() || query.size() > 128 || !finished) {
+    if (query.trimmed().isEmpty() || query.size() > 256 || !finished) {
         return;
     }
     searchQuery = query.trimmed();
@@ -2047,6 +2089,7 @@ void ReaderSession::dispatch(bool pageTurn) {
             },
             Qt::QueuedConnection);
     };
+    if (diagnosticsActive()) diagnostic("render-queued", {{"render_id", double(job)}, {"delta", delta}}, false);
     kobalt::qt::invoke(
         engineWorker(),
         [guard, engine, requested, size, anchor, delta, target, job, lease, progress, positions, markup,
@@ -2055,7 +2098,7 @@ void ReaderSession::dispatch(bool pageTurn) {
             const bool timing = diagnosticsActive();
             QElapsedTimer timer;
             if (timing) timer.start();
-            if (timing) diagnostic("render-start", {{"page_turn", delta != 0}, {"jump", !anchor.isEmpty() || target >= 0}},
+            if (timing) diagnostic("render-start", {{"render_id", double(job)}, {"page_turn", delta != 0}, {"jump", !anchor.isEmpty() || target >= 0}},
                        delta == 0);
             const auto before = engine->state();
             const auto oldSize = engine->viewport();
@@ -2093,11 +2136,12 @@ void ReaderSession::dispatch(bool pageTurn) {
                 engine->preparedDamage(oldImage, result.image.cacheKey(), &result.damage))
                 result.damageFrom = oldImage;
             if (timing)
-                diagnostic("render-end", {{"elapsed_ms", double(timer.elapsed())}, {"failed", !result.error.isEmpty()}},
+                diagnostic("render-end", {{"render_id", double(job)}, {"page", engine->page()}, {"elapsed_ms", double(timer.elapsed())}, {"failed", !result.error.isEmpty()}},
                            result.error.isEmpty() ? DiagnosticSeverity::Activity : DiagnosticSeverity::Error);
             else
                 diagnostic("render-end", {{"failed", !result.error.isEmpty()}},
                            result.error.isEmpty() ? DiagnosticSeverity::Activity : DiagnosticSeverity::Error);
+            result.renderId = job;
             const bool failed = !result.error.isEmpty();
             kobalt::qt::invoke(
                 qApp,
@@ -2117,6 +2161,7 @@ void ReaderSession::dispatch(bool pageTurn) {
                                 return;
                             }
                             guard->frame = result;
+                            if (diagnosticsActive()) diagnostic("frame-ready", {{"render_id", double(job)}, {"page", guard->page()}}, false);
                             // A rejected jump or appearance edit can retain a
                             // usable layout while reporting the command error.
                             guard->layoutReady_ = !result.image.isNull() && result.state.value("pages").toInt() > 0;

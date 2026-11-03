@@ -1,4 +1,5 @@
 #pragma once
+#include "platform/api/page_animation_support.h"
 #include "interfaces/reader/ui/controls/buttons.h"
 #include "interfaces/reader/ui/controls/options.h"
 #include "interfaces/reader/ui/controls/panels.h"
@@ -29,7 +30,8 @@ struct SettingsPanelInputs {
     QString release, commit;
     int qtMajor = 0;
     bool commitVisible = false;
-    bool animationsSupported = false, lightSupported = false, warmthSupported = false;
+    PageAnimationSupport animationSupport = PageAnimationSupport::Unavailable;
+    bool lightSupported = false, warmthSupported = false;
     bool debugProgressAvailable = false;
     bool downloadableDictionaries = true;
     bool sleepScreenSupported = false;
@@ -48,6 +50,8 @@ public:
     void showHeaderFooterWeights(int current, const QFont &sampleFont, std::function<void(int)> chosen);
     void showDictionaryFontSizes(int current, const QString &family, bool customFont, std::function<void(int)> chosen);
     static QString dictionaryFontSizeLabel(int percent);
+    void showTimeRemainingFormats(const QString &current, std::function<void(const QString &)> chosen);
+    static QString timeRemainingFormatLabel(const QString &format);
     void showColumnSpacingChoices(int current, std::function<void(int)> chosen);
     static QString columnSpacingLabel(int percent);
     enum class AdvancedText { WordSpacing, Tracking, Pagination, VerticalSpacing, VerticalSpacingScope, ParagraphSpacing };
@@ -76,22 +80,24 @@ public:
     QSize stylingTextPageSize(QSize readingPage, int horizontalMargin) const;
     QPointer<ui::ModalOverlay> fontDialog;
     ui::CellButton *closeButton = nullptr;
+    // Asks the reader to fit the panel again, for changes that do not switch
+    // the page, such as returning to the section list.
+    std::function<void()> refitRequested;
     void showDictionaries(bool visible);
     int fitContent(QSize availableSize);
     ui::DescribedOption *hideTabLabelsOption = nullptr;
     QStackedWidget *settingsPages = nullptr;
     QVector<QPushButton *> settingsTabButtons;
     ui::DescribedOption *darkOption = nullptr, *inheritTextLayoutOption = nullptr, *animationOption = nullptr;
-    ui::DescribedOption *edgeLightOption = nullptr, *denseGraphOption = nullptr;
-    ui::DescribedOption *linkIndicatorOption = nullptr, *hideNonlinearOption = nullptr,
-                        *avoidWastefulStylingOption = nullptr;
+    ui::DescribedOption *edgeLightOption = nullptr, *lightGestureFeedbackOption = nullptr, *denseGraphOption = nullptr;
+    ui::DescribedOption *linkIndicatorOption = nullptr, *hideNonlinearOption = nullptr;
     ui::DescribedOption *automaticOpeningOption = nullptr, *minimalAnnotationOption = nullptr;
     ui::CaptionButton *defaultFontButton = nullptr, *uiFontButton = nullptr, *uiMonoFontButton = nullptr,
                       *headerFooterFontButton = nullptr, *headerFooterWeightButton = nullptr;
     ui::CaptionButton *serifFontButton = nullptr, *sansFontButton = nullptr, *monoFontButton = nullptr;
     ui::CaptionButton *dictionaryFontButton = nullptr, *dictionaryFontSizeButton = nullptr;
     ui::DescribedOption *landscapeColumnsOption = nullptr;
-    ui::CaptionButton *columnSpacingButton = nullptr;
+    ui::CaptionButton *columnSpacingButton = nullptr, *timeRemainingFormatButton = nullptr;
     ui::CaptionButton *verticalSpacingButton = nullptr, *verticalSpacingScopeButton = nullptr;
     ui::CaptionButton *wordSpacingButton = nullptr, *trackingButton = nullptr, *widowsOrphansButton = nullptr;
     ui::CaptionButton *paragraphSpacingButton = nullptr, *beautifierButton = nullptr;
@@ -113,7 +119,16 @@ protected:
 private:
     void showStylingChoices(AdvancedText feature, int current, std::function<void(int)> chosen,
                             const QString &alignment, int indent, std::function<void(int, int)> paragraphChosen);
-    QWidget *tabRail = nullptr;
+    QWidget *tabRail = nullptr, *optionsColumn = nullptr;
+    QLabel *settingsTitle = nullptr;
+    ui::CellButton *backButton = nullptr;
+    // A narrow screen shows the sections as a list. Choosing one opens its
+    // page at full width, with a back cell in place of the close cell.
+    bool listMode = false, sectionOpen = false;
+    // A short screen keeps the rail but puts each icon beside its label, so
+    // eight sections fit its height.
+    bool shortRail = false;
+    void styleTabs(bool list);
     QWidget *optionsViewport = nullptr, *optionsClip = nullptr;
     ui::PagerBar *optionsPager = nullptr;
     QVector<QPair<int, int>> optionPages;
@@ -129,5 +144,6 @@ private:
     AdvancedText stylingFeature = AdvancedText::WordSpacing;
     int stylingChoice = 0;
     void showStylingPreview();
+    void fitStylingCard();
 };
 }

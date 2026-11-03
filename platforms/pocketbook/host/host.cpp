@@ -87,6 +87,10 @@ Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
         if (currentWidget() == openingPage)
             opening->setProgress(percent);
     });
+    connect(&controller, &android::ReaderController::openingCover, this, [this](QImage cover) {
+        if (currentWidget() == openingPage)
+            opening->setCover(std::move(cover));
+    });
     connect(&controller, &android::ReaderController::opened, this, [this] {
         openingBusy = false;
         updateKeepAwake();

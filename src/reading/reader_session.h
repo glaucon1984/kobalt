@@ -38,6 +38,7 @@ struct ReaderMarkupFrame {
     int resolvedRanges = 0;
 };
 struct ReaderFrame {
+    quint64 renderId = 0;
     int turnDirection = 0;
     QImage image;
     ReaderMarkupFrame markup;
@@ -106,7 +107,8 @@ public:
     ~ReaderSession() override;
     // Call after deleting sessions and cancelling their resources.
     static void drain(std::function<void()> finished);
-    void open(OpenRequest request, std::function<void(OpeningResult)> finished, OpeningProgress progress = {});
+    void open(OpenRequest request, std::function<void(OpeningResult)> finished, OpeningProgress progress = {},
+              std::function<void(QImage)> coverReady = {});
     // A fresh facade prevents callbacks from the closed reader reaching a reopen.
     std::unique_ptr<ReaderSession> retained();
     void cancelSource();
@@ -177,6 +179,7 @@ public:
     void annotationRange(const QString &start, const QString &end, std::function<void(TextRange)> finished);
     void textRange(const QString &start, const QString &end, std::function<void(TextRange)> finished);
     void wordAt(QPoint point, std::function<void(WordSelection)> finished);
+    void imageAt(QPoint point, std::function<void(QImage)> finished);
     void linkDetails(const QString &source, std::function<void(LinkDetails)> finished);
     const QVector<PageLink> &pageLinks() const {
         return frame.links;
@@ -192,6 +195,7 @@ public:
     void rangeRectGroups(QVector<QPair<QString, QString>> ranges,
                          std::function<void(QVector<QVector<QRect>>)> finished);
     void resize(QSize size);
+    quint64 renderId() const { return frame.renderId; }
     bool busy() const {
         return running;
     }

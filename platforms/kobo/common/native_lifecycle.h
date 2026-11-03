@@ -9,6 +9,8 @@ namespace kobalt {
 extern void (*nativeShowSleepView)(void *);
 extern void (*nativeHideSleepView)(void *);
 extern bool (*nativeCanSuspend)(void *);
+extern void (*nativeSuspendDevice)(void *, const QString &);
+extern void (*nativeSuspendDeviceWithAlarm)(void *, const QString &);
 extern void (*nativeUsbConnect)(void *);
 extern void (*nativeUsbWorkflow)(void *);
 extern void (*nativeAboutUsbConnect)(void *);
@@ -24,6 +26,8 @@ public:
     explicit NativeLifecycle(QObject *parent);
     static bool powerAvailable();
     static bool suspended();
+    // PIN entry can own native rotation while the reader remains suspended.
+    static bool pinScreenActive();
     static bool sleepSaveAllowed();
     static bool usbSaveAllowed();
     // Thread-safe gate for queued session writes. Closed before storage is
@@ -57,6 +61,8 @@ public:
     std::function<void(std::function<void()>)> prepareShutdown;
     // False keeps the device awake while pending reader saves are started.
     std::function<bool()> beforeStandby;
+    std::function<bool()> readerInputActive;
+    static bool protectStandbyInput();
     static void disconnected();
     static bool canSuspend();
     static void beginUsb();
@@ -70,6 +76,8 @@ public:
     bool testSleepCovered = false, testSleepViewReady = false;
 #endif
 private slots:
+    void standbyRequested();
+    void standbyResumed();
     void usbPlugged();
     void aboutToSleep();
     void resumed();
