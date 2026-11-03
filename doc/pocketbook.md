@@ -13,8 +13,9 @@ page covers installing and using it. [Building](building.md#pocketbook) covers t
 
 ## What works
 
-- Opening DRM-free EPUBs from the library with **Open with → Kobalt**. The built-in reader stays
-  the default; Kobalt is a choice in the long-press menu.
+- Opening DRM-free EPUBs from the library: Kobalt is the default reader for EPUBs after the
+  install, as on Kobo, and a choice in the long-press **Open with** menu; the installer can
+  leave the existing default instead.
 - Kobalt's reader as on Kobo: fonts, margins, justification, dark mode, header and footer,
   bookmarks, annotations and their export, dictionaries, search, table of contents.
 - The physical page-turn buttons, which also swap sides when the device is held upside down;
@@ -81,7 +82,18 @@ had little testing, and the port has only been run on one device model.
    usually `/media/<user>/<device name>`. Python 3 is needed for the home-screen step.
 
    Both installers do the same things and can be run again to update.
-4. Eject the device. Long-press an EPUB, choose **Open with** and pick **Kobalt**.
+
+   The install makes Kobalt the default reader for EPUBs, as on Kobo: the app the firmware
+   opens a book with when that book has no "Open with" choice of its own (a per-book choice
+   still wins). To keep the existing default (usually KOReader or the built-in reader) and have
+   Kobalt only in the "Open with" menu, add `-KeepDefaultReader` to the PowerShell command, or
+   set `KOBALT_KEEP_DEFAULT_READER=1` for the shell one:
+
+   ```sh
+   KOBALT_KEEP_DEFAULT_READER=1 sh platforms/pocketbook/tools/install-kobalt.sh /l kobalt-pb.tar.gz
+   ```
+4. Eject the device and open an EPUB from the library; it opens in Kobalt. A book that already
+   has an "Open with" choice keeps it: long-press it, choose **Open with** and pick **Kobalt**.
 
 What the installer does, in case you prefer to do it by hand:
 
@@ -91,7 +103,9 @@ What the installer does, in case you prefer to do it by hand:
   Kobalt's settings, bookmarks and dictionaries live in `applications/kobalt/profile/` and
   `applications/kobalt/dictionaries/`; those are kept across updates.
 - Adds `kobalt.app` to the EPUB line of `system/config/extensions.cfg` (the "Open with" list),
-  after the existing default. A copy of the original is kept as `extensions.cfg.before-kobalt`.
+  first on the line, since the first app listed is what opens a book that has no "Open with"
+  choice of its own; after the existing default with the keep-default option. A copy of the
+  original is kept as `extensions.cfg.before-kobalt`.
 - Registers the name and icon for the Apps screen: copies two 8-bit BMP icons to
   `applications/icons/`, adds `@kobalt=Kobalt` to `system/language/en.txt` and an entry for
   `kobalt.app` to `system/config/desktop/view.json` (copy kept as `view.json.before-kobalt`).

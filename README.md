@@ -32,7 +32,7 @@ The macOS development app uses the same reader in a resizable window for testing
 
 #### PocketBook
 
-The PocketBook version is this fork's addition: Kobalt's reader as a standalone app on PocketBook e-readers. It opens DRM-free EPUBs from the device's library through **Open with**, shares reading progress with the built-in reader, and brings Kobalt's dictionaries, KOsync, fonts, frontlight control and sleep screen to the device. It is developed and tested on a PocketBook Era Lite. [Kobalt on PocketBook](doc/pocketbook.md) has the installation steps; [Building](doc/building.md#pocketbook) the build; the [port notes](doc/pocketbook-notes.md) are the development log, written for the next person (or agent) who works on the port.
+The PocketBook version is this fork's addition: Kobalt's reader as a standalone app on PocketBook e-readers. It opens DRM-free EPUBs from the device's library (as the default reader, or through **Open with**), shares reading progress with the built-in reader, and brings Kobalt's dictionaries, KOsync, fonts, frontlight control and sleep screen to the device. It is developed and tested on a PocketBook Era Lite. [Kobalt on PocketBook](doc/pocketbook.md) has the installation steps; [Building](doc/building.md#pocketbook) the build; the [port notes](doc/pocketbook-notes.md) are the development log, written for the next person (or agent) who works on the port.
 
 Kobalt was built for Kobo devices, and almost everything in the port exists because a PocketBook does the same things differently. What had to change, in plain words:
 

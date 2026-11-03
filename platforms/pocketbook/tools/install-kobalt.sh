@@ -1,10 +1,13 @@
 #!/bin/sh
 # Install Kobalt on a PocketBook mounted over USB (Git Bash on Windows, or any POSIX shell):
 # applications/kobalt.app (launcher) + applications/kobalt/ (binary, assets, profile), and an
-# "Open with" entry for EPUBs in system/config/extensions.cfg (the existing default reader stays
-# the default). Then tools/pocketbook-desktop.py registers the name and icon on the home screen.
-# Usage: platforms/pocketbook/tools/install-kobalt.sh [mount, default /l] [package, default
-#        build/pocketbook/kobalt-pb.tar.gz or a downloaded release]
+# "Open with" entry for EPUBs in system/config/extensions.cfg, first on the line, so that Kobalt
+# is the default reader as it is on Kobo (the firmware opens a book that has no "Open with"
+# choice of its own with the first app listed); KOBALT_KEEP_DEFAULT_READER=1 leaves the existing
+# default and adds Kobalt after it. Then tools/pocketbook-desktop.py registers the name and icon
+# on the home screen.
+# Usage: [KOBALT_KEEP_DEFAULT_READER=1] platforms/pocketbook/tools/install-kobalt.sh [mount,
+#        default /l] [package, default build/pocketbook/kobalt-pb.tar.gz or a downloaded release]
 set -eu
 here=$(CDPATH= cd "$(dirname "$0")" && pwd)
 root=$(CDPATH= cd "$here/../../.." && pwd)
@@ -31,6 +34,12 @@ if [ -f "$cfg" ] && ! grep -q "kobalt.app" "$cfg"; then
     # epub:@EPUB_file:1:koreader.app,eink-reader.app:ICON_EPUB -> add kobalt.app after the first handler
     sed -i -E '/^epub:/ s/^(epub:[^:]*:[^:]*:[^,:]+)/\1,kobalt.app/' "$cfg"
     echo "extensions.cfg epub line now: $(grep '^epub:' "$cfg")"
+fi
+if [ -z "${KOBALT_KEEP_DEFAULT_READER:-}" ] && [ -f "$cfg" ] && ! grep -q '^epub:[^:]*:[^:]*:kobalt\.app' "$cfg"; then
+    [ -f "$cfg.before-kobalt" ] || cp "$cfg" "$cfg.before-kobalt"
+    # epub:@EPUB_file:1:koreader.app,kobalt.app,eink-reader.app:ICON_EPUB -> kobalt.app first
+    sed -i -E '/^epub:/ { s/,kobalt\.app//; s/^(epub:[^:]*:[^:]*:)/\1kobalt.app,/ }' "$cfg"
+    echo "extensions.cfg epub line now (Kobalt the default): $(grep '^epub:' "$cfg")"
 fi
 python3 "$here/pocketbook-desktop.py" "$mnt" ${KOBALT_RESET_HANDLERS:+--reset-handlers}
 ls -la "$mnt/applications/kobalt.app" "$mnt/applications/kobalt/kobalt-pb"

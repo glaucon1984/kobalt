@@ -10,7 +10,8 @@ release package carries a copy of this script, so no checkout is needed: downloa
 
 - applications/kobalt.app (launcher, also in system/bin where the firmware runs file handlers)
 - applications/kobalt/ (binary kobalt-pb, assets/, the CA bundle cacert.pem); profile/ untouched
-- an "Open with" entry for EPUBs in system/config/extensions.cfg (the default reader stays)
+- an "Open with" entry for EPUBs in system/config/extensions.cfg, first on the line, so Kobalt
+  is the default reader as on Kobo (-KeepDefaultReader leaves the existing default)
 - the home-screen icon and name (applications/icons/, system/language/en.txt, the U_kobalt block
   in system/config/desktop/view.json), as pocketbook-desktop.py does
 - removes files the library would show as books from Kobalt's folders
@@ -26,6 +27,12 @@ build\pocketbook\ of this checkout.
 Also points the per-book "Open with" choices in system/config/handlers.cfg that name kobalt.app
 back at koreader.app.
 
+.PARAMETER KeepDefaultReader
+Leaves the existing default reader for EPUBs (usually KOReader or the built-in reader) and
+adds Kobalt after it. Without it Kobalt becomes the default, as on Kobo: the firmware opens a
+book that has no "Open with" choice of its own with the first app on the EPUB line of
+system/config/extensions.cfg, and the installer puts kobalt.app there.
+
 .EXAMPLE
 powershell -ExecutionPolicy Bypass -File platforms\pocketbook\tools\install-kobalt.ps1 L: $env:USERPROFILE\Downloads\kobalt-pb.tar.gz
 #>
@@ -33,7 +40,8 @@ powershell -ExecutionPolicy Bypass -File platforms\pocketbook\tools\install-koba
 param(
     [string]$Mount = "L:",
     [string]$Package = "",
-    [switch]$ResetHandlers
+    [switch]$ResetHandlers,
+    [switch]$KeepDefaultReader
 )
 Set-StrictMode -Version 2
 $ErrorActionPreference = "Stop"
@@ -100,6 +108,19 @@ if ((Test-Path $cfg) -and ((Read-Text $cfg) -notmatch "kobalt\.app")) {
         if ($lines[$i] -like "epub:*") {
             $lines[$i] = $lines[$i] -replace '^(epub:[^:]*:[^:]*:[^,:]+)', '$1,kobalt.app'
             Write-Host "extensions.cfg epub line now: $($lines[$i])"
+        }
+    }
+    Write-Text $cfg ($lines -join $nl)
+}
+if (-not $KeepDefaultReader -and (Test-Path $cfg) -and ((Read-Text $cfg) -notmatch '(?m)^epub:[^:]*:[^:]*:kobalt\.app')) {
+    if (-not (Test-Path "$cfg.before-kobalt")) { Copy-Item $cfg "$cfg.before-kobalt" -Force }
+    $text = Read-Text $cfg
+    $nl = if ($text -match "`r`n") { "`r`n" } else { "`n" }
+    $lines = $text -split "`r?`n"
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -like "epub:*") {
+            $lines[$i] = ($lines[$i] -replace ',kobalt\.app', '') -replace '^(epub:[^:]*:[^:]*:)', '$1kobalt.app,'
+            Write-Host "extensions.cfg epub line now (Kobalt the default): $($lines[$i])"
         }
     }
     Write-Text $cfg ($lines -join $nl)
