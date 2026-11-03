@@ -44,6 +44,9 @@ public:
     Light() {
         flush.setSingleShot(true);
         QObject::connect(&flush, &QTimer::timeout, [this] { writePending(); });
+        scheduleResume.setSingleShot(true);
+        scheduleResume.setInterval(scheduleResumeMs);
+        QObject::connect(&scheduleResume, &QTimer::timeout, [this] { resumeSchedule(); });
         autoColor = reinterpret_cast<int (*)()>(dlsym(RTLD_DEFAULT, "hw_is_frontlight_color_auto"));
         setAutoColor = reinterpret_cast<void (*)(int)>(dlsym(RTLD_DEFAULT, "hw_set_frontlight_color_auto_enabled"));
     }
@@ -95,6 +98,13 @@ public:
         value = qBound(0, value, 100);
         if (automaticWarmth())
             setAutomaticWarmth(false);
+        // The brightness schedule would hold the colour back until something re-applies the light.
+        bool lifted = false;
+        timedLight("lift brightness schedule", value, [&lifted] { lifted = pocketbook::liftBrightnessSchedule(); });
+        if (lifted)
+            qInfo("kobalt-pb: brightness schedule lifted for a warmth change");
+        if (lifted || scheduleResume.isActive())
+            scheduleResume.start();
         pendingWarmth = value;
         schedule();
         return value;
@@ -147,7 +157,21 @@ public:
         return active;
     }
 
+    ~Light() override {
+        resumeSchedule();
+    }
+
 private:
+    static constexpr int scheduleResumeMs = 1000;
+    QTimer scheduleResume;
+    void resumeSchedule() {
+        scheduleResume.stop();
+        writePending(); // the colour goes out while the schedule is still lifted
+        bool resumed = false;
+        timedLight("resume brightness schedule", 1, [&resumed] { resumed = pocketbook::resumeBrightnessSchedule(); });
+        if (resumed)
+            qInfo("kobalt-pb: brightness schedule resumed after a warmth change, level %d", frontlightLevel());
+    }
     bool warm = false, active = false;
     int original = 0;
     int pendingBrightness = -1, pendingWarmth = -1;

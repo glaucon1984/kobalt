@@ -699,6 +699,27 @@ now also tracks `develop`.
 Upstream's light-gesture pop-up now waits for a 150 ms pause in the swipe before it is drawn,
 on every platform; that is upstream's design, not a port issue.
 
+### Warmth while the brightness schedule runs (2026-11-03)
+
+Diego: warmth swipes applied only after the finger lifted, until a brightness swipe, after which
+warmth followed the finger. A timing diagnostic (one line per hardware write: finger to level,
+level to write, call time, CPU clock) showed Kobalt writing the colour every ~120 ms from about
+100-280 ms after the press, each `SetFrontlightColor` taking 2-8 ms, in every swipe; the
+difference was the brightness schedule, which the brightness swipe had switched off. In
+libinkview, `SetFrontlightColor` is `hw_set_frontlight_color`: it stores the colour in the
+shared light state (+0x4474, beside the level at +0x4478) and sends the same message (0x11b)
+as `hw_set_frontlight_state`, and the monitor applies neither while
+`FL_MODE_AUTO_BRIGHTNESS` is set. Not a regression of the merge: it is there since the
+schedule option (0.3.6) whenever the schedule is on.
+
+A warmth change now lifts the schedule (`liftBrightnessSchedule()`: flag off, the monitor
+re-applies the stored state) and resumes it 1 s after the last warmth change, after the last
+colour is written. The shared level is the schedule's current one (the log showed the
+schedule's 84 there after a manual 89), so the brightness does not move. While lifted,
+`automaticBrightness()` still reports the schedule on, so the panel and the standby record
+(`light.standby` "auto") are unchanged; `setAutomaticBrightness()` (a brightness swipe, the
+panel option, the standby darkening) ends the lift. Diego: as responsive as on Kobo.
+
 ## Name and icon on the PocketBook home screen (manual firmware files)
 
 These live in the firmware's user config, not in the app package, so a plain copy of the zip

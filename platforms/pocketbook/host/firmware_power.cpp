@@ -114,6 +114,8 @@ AutoBrightness &autoBrightness() {
     }
     return a;
 }
+// Switched off by liftBrightnessSchedule() for a warmth change, to be switched on again.
+bool scheduleLifted = false;
 }
 
 bool hasAutomaticBrightness() {
@@ -123,7 +125,7 @@ bool hasAutomaticBrightness() {
 }
 
 bool automaticBrightness() {
-    return hasAutomaticBrightness() && autoBrightness().enabled() != 0;
+    return hasAutomaticBrightness() && (scheduleLifted || autoBrightness().enabled() != 0);
 }
 
 bool setAutomaticBrightness(bool enabled) {
@@ -133,8 +135,25 @@ bool setAutomaticBrightness(bool enabled) {
     // clears the firmware's flag), the schedule alone leaves it off.
     if (enabled && !frontlightEnabled())
         setFrontlightEnabled(true);
+    scheduleLifted = false;
     autoBrightness().setEnabled(enabled ? 1 : 0);
     return automaticBrightness() == enabled;
+}
+
+bool liftBrightnessSchedule() {
+    if (scheduleLifted || !automaticBrightness())
+        return false;
+    autoBrightness().setEnabled(0);
+    scheduleLifted = true;
+    return true;
+}
+
+bool resumeBrightnessSchedule() {
+    if (!scheduleLifted)
+        return false;
+    scheduleLifted = false;
+    autoBrightness().setEnabled(1);
+    return true;
 }
 
 namespace {

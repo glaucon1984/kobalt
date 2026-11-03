@@ -33,6 +33,15 @@ bool hasAutomaticBrightness();
 bool automaticBrightness();
 // Returns whether the firmware reports the new state afterwards.
 bool setAutomaticBrightness(bool enabled);
+// The schedule holds back warmth too: SetFrontlightColor stores the colour in the same shared state
+// and sends the same message as a level, and the monitor applies neither while the schedule runs
+// (seen: a warmth swipe took effect only after the finger lifted, live once a brightness swipe had
+// switched the schedule off). A warmth change lifts the schedule for its duration and resumes it
+// afterwards. The shared level is the schedule's current one, so the brightness does not move.
+// While lifted, automaticBrightness() still reports it on (the panel, the standby record), and
+// setAutomaticBrightness() ends the lift. Both return whether they changed anything.
+bool liftBrightnessSchedule();
+bool resumeBrightnessSchedule();
 // Kobalt switches the light off at this level: both flag and level are set to off/0 (the
 // brightness schedule, which would hold the level, is switched off too), and the level and the
 // schedule are recorded on disk, because the firmware keeps the off state across a power-off
