@@ -66,6 +66,9 @@ public:
     // USB state at the last touch or key: a USB connection that is new at EVT_BACKGROUND is a PC
     // plug (the firmware's PC Link / Charge prompt took the foreground), not a standby.
     bool usbAtLastInput = false;
+    // The firmware's screens were put back at a USB plug (leaveFirmwareScreens): a wake with the
+    // book still open (Charge chosen) writes Kobalt's sleep image again.
+    bool firmwareScreensLeft = false;
     // The frontlight was on at standby and Kobalt switched it off (the firmware's lock screen
     // is drawn by then), so that the wake the firmware's timed power-off causes stays dark; a
     // wake by a press switches it on again.

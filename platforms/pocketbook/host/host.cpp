@@ -144,7 +144,7 @@ Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
         markCurrentBook({});
         // Standby and power-off from the library are the firmware's business: its own screens
         // from here on, whatever Kobalt showed while the book was open.
-        leaveFirmwareScreens(bookCover);
+        leaveFirmwareScreens(bookCover, "close");
         if (closing)
             close();
         else
@@ -322,12 +322,18 @@ void Host::taskBackground() {
     // With the built-in sleep screen the power-off file holds the plain cover (applyStockSleepScreen),
     // as the firmware's reader leaves it; the boot capture is kept in every mode, so a power-off
     // with the book open boots into the page whatever the sleep screen.
-    if (sleepMode() != sleep::Mode::Stock)
-        writePowerOffImage(reader->composePowerOffImage());
     if (usbPlug) {
-        forgetBootLogo();
-        qInfo("kobalt-pb: USB connected: boot capture forgotten");
+        // PC Link ends the app under the firmware's prompt, without a close: from here on the
+        // book is open in Kobalt no longer, so a standby or power-off from the home screen is
+        // the firmware's, with its own screens (as at a close). Should the prompt end in
+        // Charge instead, Kobalt is woken with the book still open and writes its sleep image
+        // again (finishWake). The writes land before the sync below.
+        leaveFirmwareScreens(bookCover, "USB");
+        firmwareScreensLeft = true;
+        qInfo("kobalt-pb: USB connected: firmware screens restored, boot capture forgotten");
     } else {
+        if (sleepMode() != sleep::Mode::Stock)
+            writePowerOffImage(reader->composePowerOffImage());
         updateBootLogo(page, "standby");
     }
     // EVT_BACKGROUND precedes every standby and every USB export. The firmware's PC Link export
@@ -405,6 +411,15 @@ void Host::finishWake(const char *how) {
         reader->show();
     }
     setUpdatesEnabled(true);
+    if (firmwareScreensLeft) {
+        // The USB prompt ended in Charge: the book is still open here, so Kobalt's sleep image
+        // goes back (the files were removed at the plug) before the next standby.
+        firmwareScreensLeft = false;
+        if (reader && !quitting) {
+            qInfo("kobalt-pb: awake after the USB prompt with the book open: sleep image written again");
+            scheduleSleepRefresh();
+        }
+    }
     if (takeLockReloadPending()) {
         // Right after the unlock press, when another lock is least likely.
         holdAwakeForRefresh();

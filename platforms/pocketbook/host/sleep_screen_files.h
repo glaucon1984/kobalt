@@ -71,13 +71,14 @@ bool restoreFirmwareLockImages();
 // (the built-in sleep screen chosen): fitted to the panel, turned as the device is held, no
 // status. Blocking, tens of ms. False for a null cover or a failed write.
 bool writeCoverAsPowerOffImage(const QImage &cover);
-// At the book's close, in every sleep screen mode: the firmware's own screens from here on. The
-// lock bitmaps go (the firmware draws its picture; taskmgr is told, detached), the power-off
-// file and the boot logo get the book's plain cover as the firmware's reader leaves them (the
-// firmware's logo settings decide whether they show), and the capture kept for the boot is
-// dropped. Blocking for the bitmap writes (under a second); the firmware's tool runs on after
-// the process has quit.
-void leaveFirmwareScreens(const QImage &cover);
+// At the book's close, and at a USB plug (PC Link ends the app without a close), in every sleep
+// screen mode: the firmware's own screens from here on. The lock bitmaps go (the firmware draws
+// its picture; taskmgr is told, detached), the power-off file and the boot logo get the book's
+// plain cover as the firmware's reader leaves them (the firmware's logo settings decide whether
+// they show), and the capture kept for the boot is dropped. Blocking for the bitmap writes
+// (under a second); the firmware's tool runs on after the process has quit. `when` names the
+// occasion in the log.
+void leaveFirmwareScreens(const QImage &cover, const char *when);
 // A write made while the device goes to sleep defers its reload request to the next wake.
 void markLockReloadPending();
 bool takeLockReloadPending();

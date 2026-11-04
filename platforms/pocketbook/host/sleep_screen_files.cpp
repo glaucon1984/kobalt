@@ -411,17 +411,17 @@ static QString lockReloadCommand() {
         "[ -n \"$p\" ] && exec /ebrmain/bin/iv2sh SendEventTo \"$p\" 154 0");
 }
 
-void leaveFirmwareScreens(const QImage &cover) {
+void leaveFirmwareScreens(const QImage &cover, const char *when) {
     QElapsedTimer clock;
     clock.start();
     // The lock screen: the firmware's own picture. The reload outlives this process.
     if (restoreFirmwareLockImages()) {
         QProcess::startDetached(QStringLiteral("/bin/sh"), {QStringLiteral("-c"), lockReloadCommand()});
-        qInfo("kobalt-pb: lock image reload requested (close, detached)");
+        qInfo("kobalt-pb: lock image reload requested (%s, detached)", when);
     }
     forgetBootLogo();
     if (cover.isNull()) {
-        qInfo("kobalt-pb: firmware screens at close: no cover, power-off and boot logos left as written");
+        qInfo("kobalt-pb: firmware screens (%s): no cover, power-off and boot logos left as written", when);
         return;
     }
     // The power-off file and the boot logo: the book's plain cover, what the firmware's reader
@@ -431,14 +431,14 @@ void leaveFirmwareScreens(const QImage &cover) {
     // being worse than a stale page.
     writeCoverAsPowerOffImage(cover);
     if (bootLogoInFlight) {
-        qWarning("kobalt-pb: boot logo busy at close: the last capture stays as the boot logo");
+        qWarning("kobalt-pb: boot logo busy (%s): the last capture stays as the boot logo", when);
     } else if (writeBmp24(toPanel(cover, panelRotation()), bootLogoPath())) {
         QProcess::startDetached(QStringLiteral("/ebrmain/bin/iv2sh"), {QStringLiteral("WriteStartupLogo"), bootLogoPath()});
-        qInfo("kobalt-pb: boot logo write started (close, cover, detached)");
+        qInfo("kobalt-pb: boot logo write started (%s, cover, detached)", when);
     } else {
-        qWarning("kobalt-pb: boot logo image NOT written (close)");
+        qWarning("kobalt-pb: boot logo image NOT written (%s)", when);
     }
-    qInfo("kobalt-pb: firmware screens restored at close in %lld ms", static_cast<long long>(clock.elapsed()));
+    qInfo("kobalt-pb: firmware screens restored (%s) in %lld ms", when, static_cast<long long>(clock.elapsed()));
 }
 
 void requestLockImageReload(const char *reason, std::function<void()> done) {
