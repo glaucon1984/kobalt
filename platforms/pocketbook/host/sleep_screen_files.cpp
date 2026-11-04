@@ -401,14 +401,48 @@ bool lockImageReloadInFlight() {
     return reloadsInFlight > 0;
 }
 
-void requestLockImageReload(const char *reason, std::function<void()> done) {
-    // taskmgr.app caches the image; EVT_CONFIGCHANGED (154) makes it reload. Found by apastuszak
-    // (coverprogresspocketbook.koplugin); same command as standbycover.koplugin, without its
-    // `sync`: taskmgr reads the file through the page cache, and a lock press that arrives while
-    // it reloads is dropped by the firmware, so the reload must be as short as possible.
-    const QString command = QStringLiteral(
+// taskmgr.app caches the lock image; EVT_CONFIGCHANGED (154) makes it reload. Found by apastuszak
+// (coverprogresspocketbook.koplugin); same command as standbycover.koplugin, without its
+// `sync`: taskmgr reads the file through the page cache, and a lock press that arrives while
+// it reloads is dropped by the firmware, so the reload must be as short as possible.
+static QString lockReloadCommand() {
+    return QStringLiteral(
         "p=$(ps | grep '[t]askmgr\\.app' | grep -v visualizer | awk '{print $1}' | head -n 1); "
         "[ -n \"$p\" ] && exec /ebrmain/bin/iv2sh SendEventTo \"$p\" 154 0");
+}
+
+void leaveFirmwareScreens(const QImage &cover) {
+    QElapsedTimer clock;
+    clock.start();
+    // The lock screen: the firmware's own picture. The reload outlives this process.
+    if (restoreFirmwareLockImages()) {
+        QProcess::startDetached(QStringLiteral("/bin/sh"), {QStringLiteral("-c"), lockReloadCommand()});
+        qInfo("kobalt-pb: lock image reload requested (close, detached)");
+    }
+    forgetBootLogo();
+    if (cover.isNull()) {
+        qInfo("kobalt-pb: firmware screens at close: no cover, power-off and boot logos left as written");
+        return;
+    }
+    // The power-off file and the boot logo: the book's plain cover, what the firmware's reader
+    // leaves in both when its logo settings say "book cover". The boot logo goes through the
+    // firmware's tool, started detached so it finishes after this process has quit (under a
+    // second); skipped while a capture is still being written, two writers on the partition
+    // being worse than a stale page.
+    writeCoverAsPowerOffImage(cover);
+    if (bootLogoInFlight) {
+        qWarning("kobalt-pb: boot logo busy at close: the last capture stays as the boot logo");
+    } else if (writeBmp24(toPanel(cover, panelRotation()), bootLogoPath())) {
+        QProcess::startDetached(QStringLiteral("/ebrmain/bin/iv2sh"), {QStringLiteral("WriteStartupLogo"), bootLogoPath()});
+        qInfo("kobalt-pb: boot logo write started (close, cover, detached)");
+    } else {
+        qWarning("kobalt-pb: boot logo image NOT written (close)");
+    }
+    qInfo("kobalt-pb: firmware screens restored at close in %lld ms", static_cast<long long>(clock.elapsed()));
+}
+
+void requestLockImageReload(const char *reason, std::function<void()> done) {
+    const QString command = lockReloadCommand();
     auto *process = new QProcess(QCoreApplication::instance());
     auto *clock = new QElapsedTimer;
     clock->start();

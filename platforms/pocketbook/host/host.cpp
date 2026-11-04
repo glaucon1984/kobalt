@@ -142,6 +142,9 @@ Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
         quitting = true;
         setUpdatesEnabled(false);
         markCurrentBook({});
+        // Standby and power-off from the library are the firmware's business: its own screens
+        // from here on, whatever Kobalt showed while the book was open.
+        leaveFirmwareScreens(bookCover);
         if (closing)
             close();
         else
@@ -223,8 +226,20 @@ void Host::open(const QString &path) {
     // sensor), so a page captured upside down and resumed upright reads right, and vice versa.
     // A book that was closed on purpose has no capture any more (markCurrentBook) and gets
     // Kobalt's opening view as usual; a different book never matches the capture's path, and a
-    // capture taken in this same boot (no power-off since) is not used either.
-    const QImage saved = savedBootLogo(bookPath);
+    // capture taken in this same boot (no power-off since) is not used either. Nor is one at an
+    // open long after the boot: the capture stands in for the page the boot screen just showed,
+    // which is the firmware's relaunch of the book (about 15 s in) or an open from the home
+    // screen right after; a book opened later in the day (after a PC session, say) starts with
+    // the opening view, whatever ended the session before.
+    static const int captureWindowSeconds = 180;
+    const double uptime = uptimeSeconds();
+    QImage saved;
+    if (uptime >= 0 && uptime <= captureWindowSeconds) {
+        saved = savedBootLogo(bookPath);
+    } else {
+        forgetBootLogo();
+        qInfo("kobalt-pb: boot capture not used: opened %.0f s after the boot", uptime);
+    }
     if (!saved.isNull() && saved.size() == size()) {
         bootPage->setPage(saved);
         setCurrentWidget(bootPage);

@@ -147,8 +147,11 @@ would for the built-in reader; a copy from before Kobalt's first write is
   loads, so the boot goes from the page to the same page, with a small loading bar at the
   top-left over the header (where the firmware shows its own while it launches an app) that
   fills as the book opens: the page is not live until the bar is gone. The capture is used only once the
-  device has been powered off since it was taken: a book that was closed in Kobalt, or left by
-  connecting the device to a PC and opened again without a power-off in between, shows the
+  device has been powered off since it was taken, and only within the first three minutes
+  after the boot (the firmware's relaunch of the book, or an open from the home screen right
+  after it): a book that was closed in Kobalt, or left by
+  connecting the device to a PC and opened again without a power-off in between, or opened
+  later in the day, shows the
   usual loading screen, and so does any other book. A power-off
   straight from a page, without a standby first, shows the capture of the last standby or open
   at the next boot.
@@ -158,6 +161,10 @@ would for the built-in reader; a copy from before Kobalt's first write is
   power-off logo is then the firmware's choice in Settings → Personalize → Logos: "Book cover"
   shows the cover of the book being read, the default or your own pictures show those. The boot
   capture is kept in every mode, so a power-off with the book open still boots into the page.
+- **After the book is closed**, in every mode, the firmware's screens are its own again: Kobalt
+  removes its lock image and leaves the book's plain cover in the power-off file and as the
+  boot logo, as the built-in reader does, so a standby or power-off from the library shows
+  what the PocketBook settings say.
 - **Automatic power-off**: when the PocketBook switches itself off after a standby (its
   Power-off timeout), the firmware wakes the device for a moment to do it, which used to light
   the screen and show the page for a few seconds on the way to the power-off screen. When a
