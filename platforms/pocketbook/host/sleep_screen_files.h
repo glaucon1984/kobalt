@@ -62,6 +62,11 @@ bool writeLockImagesAsync(const QImage &image, const QImage &powerOff, std::func
 void requestLockImageReload(const char *reason, std::function<void()> done = {});
 // True from a reload request until its `done` ran.
 bool lockImageReloadInFlight();
+// The firmware's own lock screen again (the built-in sleep screen chosen): removes Kobalt's lock
+// bitmaps (the portrait file and a landscape one another app may have left), after which the
+// firmware draws its built-in picture; the caller asks taskmgr to reload. Returns false when
+// there was nothing to remove. The next Kobalt image is written whatever was written last.
+bool restoreFirmwareLockImages();
 // A write made while the device goes to sleep defers its reload request to the next wake.
 void markLockReloadPending();
 bool takeLockReloadPending();

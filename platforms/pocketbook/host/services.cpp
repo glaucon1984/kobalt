@@ -232,6 +232,9 @@ public:
     bool supportsSleepScreen() const override {
         return true;
     }
+    const char *stockSleepScreenKey() const override {
+        return "settings.sleep_stock_pocketbook";
+    }
     bool presentSleepScreen(QImage image, Qt::ScreenOrientation) override {
         if (!writeLockImages(image))
             return false;

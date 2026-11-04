@@ -152,6 +152,11 @@ would for the built-in reader; a copy from before Kobalt's first write is
   usual loading screen, and so does any other book. A power-off
   straight from a page, without a standby first, shows the capture of the last standby or open
   at the next boot.
+- **The firmware's own screens**: choosing "PocketBook's built-in sleep screen" in Kobalt's
+  Settings → Sleep screen removes Kobalt's lock image (the firmware draws its own picture again)
+  and stops the power-off image and the boot capture. The power-off and boot logos themselves
+  are the firmware's choice: pick them in Settings → Personalize → Logos, since the "book
+  cover" choice there keeps showing the last image Kobalt or KOReader wrote.
 - **Automatic power-off**: when the PocketBook switches itself off after a standby (its
   Power-off timeout), the firmware wakes the device for a moment to do it, which used to light
   the screen and show the page for a few seconds on the way to the power-off screen. When a

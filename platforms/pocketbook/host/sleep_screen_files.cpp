@@ -353,6 +353,23 @@ void forgetBootLogo() {
     QFile::remove(bootLogoBookPath());
 }
 
+bool restoreFirmwareLockImages() {
+    bool removed = false;
+    for (const char *path : {lockPortrait, "/mnt/ext1/system/resources/Line/taskmgr_lock_background_landscape.bmp"}) {
+        if (!QFile::exists(QString::fromLatin1(path)))
+            continue;
+        if (QFile::remove(QString::fromLatin1(path))) {
+            removed = true;
+            qInfo("kobalt-pb: removed %s (built-in sleep screen)", path);
+        } else {
+            qWarning("kobalt-pb: cannot remove %s", path);
+        }
+    }
+    lastWritten = QImage();
+    lastRotation = -1;
+    return removed;
+}
+
 void markLockReloadPending() {
     pendingReload = true;
 }

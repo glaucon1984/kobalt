@@ -764,6 +764,7 @@
 "settings.navigation_menu_hint" = "Tap the middle of the page to open the menu in any mode.";
 "settings.sleep_stock" = "Kobo's built-in sleep screen";
 "settings.sleep_stock_description" = "Default";
+"settings.sleep_stock_pocketbook" = "PocketBook's built-in sleep screen";
 "settings.sleep_cover" = "Kobalt with book cover";
 "settings.sleep_cover_description" = "Shows the book cover with reading progress and battery status.";
 "settings.sleep_page" = "Kobalt with reading page";

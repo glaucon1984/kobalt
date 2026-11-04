@@ -1,5 +1,6 @@
 #pragma once
 #include "platforms/android/reader.h"
+#include "reading/sleep_screen.h"
 #include <QStackedWidget>
 #include <QElapsedTimer>
 #include <QTimer>
@@ -85,6 +86,13 @@ public:
     static double uptimeSeconds();
     void holdAwakeForRefresh();
     void releaseAwakeForRefresh();
+    // Kobalt's sleep screen setting as saved (reader-settings.json). With the built-in one
+    // chosen, nothing of Kobalt's is written for the firmware's screens: the lock bitmaps are
+    // removed once (applyStockSleepScreen), and the power-off image and the boot capture are
+    // not written, so the firmware's own logos (its Settings > Personalize > Logos) stand.
+    sleep::Mode sleepMode() const;
+    void applyStockSleepScreen();
+    bool stockApplied = false;
 
 protected:
     void closeEvent(QCloseEvent *event) override;

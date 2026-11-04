@@ -839,10 +839,10 @@ void Reader::openScreenRefresh() {
 }
 
 namespace {
-QString sleepLabel(sleep::Mode mode) {
+QString sleepLabel(sleep::Mode mode, const char *stockKey) {
     switch (mode) {
     case sleep::Mode::Stock:
-        return strings::get("settings.sleep_stock");
+        return strings::get(stockKey); // the host's device: "settings.sleep_stock" unless it says otherwise
     case sleep::Mode::Cover:
         return strings::get("settings.sleep_cover");
     case sleep::Mode::Page:
@@ -892,8 +892,9 @@ QString sessionTimeoutLabel(int minutes) {
 }
 void Reader::showSleepScreen() {
     sessionTimeoutButton->setCaption(sessionTimeoutLabel(sessionTimeout::minutes(preferences)).toUpper());
-    sleepScreenButton->setCaption(sleepScreenButton->isEnabled() ? sleepLabel(sleep::mode(preferences)).toUpper()
-                                                                 : strings::get("settings.unsupported_caption"));
+    sleepScreenButton->setCaption(sleepScreenButton->isEnabled()
+                                      ? sleepLabel(sleep::mode(preferences), presentation->stockSleepScreenKey()).toUpper()
+                                      : strings::get("settings.unsupported_caption"));
     sleepTileButton->setCaption(sleepTileButton->isEnabled() ? sleepTileLabel(sleep::tile(preferences)).toUpper()
                                                              : strings::get("settings.unsupported_caption"));
 }
@@ -926,7 +927,7 @@ void Reader::openSleepScreen() {
     for (const auto mode : sleep::modes) {
         if (mode == sleep::mode(preferences))
             current = int(options.size());
-        options.append({sleep::value(mode), sleepLabel(mode), sleepExplanation(mode)});
+        options.append({sleep::value(mode), sleepLabel(mode, presentation->stockSleepScreenKey()), sleepExplanation(mode)});
     }
     openSleepChoice("rrSleepScreen", "rrSleep_", strings::get("settings.sleep_screen"), options, current,
                     [this](int index) {

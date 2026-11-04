@@ -223,7 +223,12 @@ void Host::open(const QString &path) {
     // A book that was closed on purpose has no capture any more (markCurrentBook) and gets
     // Kobalt's opening view as usual; a different book never matches the capture's path, and a
     // capture taken in this same boot (no power-off since) is not used either.
-    const QImage saved = savedBootLogo(bookPath);
+    // With the built-in sleep screen chosen, the boot logo is the firmware's again: no capture
+    // is shown, and one left from before the choice is dropped.
+    const bool stock = sleepMode() == sleep::Mode::Stock;
+    if (stock)
+        forgetBootLogo();
+    const QImage saved = stock ? QImage() : savedBootLogo(bookPath);
     if (!saved.isNull() && saved.size() == size()) {
         bootPage->setPage(saved);
         setCurrentWidget(bootPage);
@@ -278,8 +283,9 @@ void Host::taskBackground() {
     // close. Such a session is not resumed from the boot capture: the next open gets the
     // opening view. Told apart from a standby on the charger by the connection being new.
     const bool usbPlug = IsUSBconnected() > 0 && !usbAtLastInput;
+    const bool stock = sleepMode() == sleep::Mode::Stock;
     // The page as it was shown, before the sleep view is painted over it: the boot logo.
-    const QImage page = usbPlug ? QImage() : capturePanel();
+    const QImage page = usbPlug || stock ? QImage() : capturePanel();
     if (sleepRefreshTimer.isActive()) {
         sleepRefreshTimer.stop();
         releaseAwakeForRefresh();
@@ -303,12 +309,18 @@ void Host::taskBackground() {
     // image for the sleep screen just presented (its page or cover under the "Powered off"
     // status, so the two screens tell apart as on Kobo), not an older one, and the boot logo
     // with it. The reader reuses its sleep image for it, so this is a tile paint and a write.
-    writePowerOffImage(reader->composePowerOffImage());
-    if (usbPlug) {
+    if (stock) {
+        // The firmware's own screens: its power-off and boot logos stand, and no capture of
+        // this session is kept.
         forgetBootLogo();
-        qInfo("kobalt-pb: USB connected: boot capture forgotten");
     } else {
-        updateBootLogo(page, "standby");
+        writePowerOffImage(reader->composePowerOffImage());
+        if (usbPlug) {
+            forgetBootLogo();
+            qInfo("kobalt-pb: USB connected: boot capture forgotten");
+        } else {
+            updateBootLogo(page, "standby");
+        }
     }
     // EVT_BACKGROUND precedes every standby and every USB export. The firmware's PC Link export
     // was seen to drop what the apps had written since the last sync(2) (a standby's suspend
@@ -449,6 +461,14 @@ void Host::refreshSleepScreen(const char *reason) {
         releaseAwakeForRefresh();
         return;
     }
+    // The built-in sleep screen: the reader composes nothing for it (captureSleepScreen), and
+    // the firmware's own picture is put back instead of Kobalt's last one staying on disk.
+    if (sleepMode() == sleep::Mode::Stock) {
+        applyStockSleepScreen();
+        releaseAwakeForRefresh();
+        return;
+    }
+    stockApplied = false;
     composingSleepImage = true;
     QElapsedTimer composeClock;
     composeClock.start();
@@ -490,6 +510,32 @@ void Host::refreshSleepScreen(const char *reason) {
     });
     if (!queued) // same image as the one already on disk
         releaseAwakeForRefresh();
+}
+
+sleep::Mode Host::sleepMode() const {
+    return sleep::mode(storage::readPreferences(preferencesPath).object);
+}
+
+// Once per choice of the built-in sleep screen: Kobalt's lock bitmaps go, taskmgr reloads (so
+// the next standby shows the firmware's picture, not its cached copy of Kobalt's), and the
+// capture kept for the boot is dropped. The power-off file and the boot logo partition keep
+// what was last written until the firmware's own logo settings are changed; they are the
+// firmware's choice (Settings > Personalize > Logos), not touched from here.
+void Host::applyStockSleepScreen() {
+    if (stockApplied)
+        return;
+    stockApplied = true;
+    forgetBootLogo();
+    if (!restoreFirmwareLockImages()) {
+        qInfo("kobalt-pb: built-in sleep screen: no lock image of Kobalt's to remove");
+        return;
+    }
+    holdAwakeForRefresh();
+    QPointer<Host> self(this);
+    requestLockImageReload("built-in sleep screen", [self] {
+        if (self)
+            self->releaseAwakeForRefresh();
+    });
 }
 
 void Host::usbEvent(int type) {
