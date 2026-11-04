@@ -87,9 +87,9 @@ public:
     void holdAwakeForRefresh();
     void releaseAwakeForRefresh();
     // Kobalt's sleep screen setting as saved (reader-settings.json). With the built-in one
-    // chosen, nothing of Kobalt's is written for the firmware's screens: the lock bitmaps are
-    // removed once (applyStockSleepScreen), and the power-off image and the boot capture are
-    // not written, so the firmware's own logos (its Settings > Personalize > Logos) stand.
+    // chosen, the lock bitmaps are removed once and the power-off file gets the plain cover
+    // (applyStockSleepScreen), as the firmware's own reader leaves them; the boot capture is
+    // kept in every mode.
     sleep::Mode sleepMode() const;
     void applyStockSleepScreen();
     bool stockApplied = false;
