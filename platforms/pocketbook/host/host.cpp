@@ -325,10 +325,11 @@ void Host::taskBackground() {
     if (usbPlug) {
         // PC Link ends the app under the firmware's prompt, without a close: from here on the
         // book is open in Kobalt no longer, so a standby or power-off from the home screen is
-        // the firmware's, with its own screens (as at a close). Should the prompt end in
-        // Charge instead, Kobalt is woken with the book still open and writes its sleep image
-        // again (finishWake). The writes land before the sync below.
-        leaveFirmwareScreens(bookCover, "USB");
+        // the firmware's, with its own screens (as at a close). Files only: the firmware's
+        // prompt is up and must not be disturbed (see leaveFirmwareScreens). Should the prompt
+        // end in Charge instead, Kobalt is woken with the book still open and writes its sleep
+        // image again (finishWake). The writes land before the sync below.
+        leaveFirmwareScreens(bookCover, "USB", true);
         firmwareScreensLeft = true;
         qInfo("kobalt-pb: USB connected: firmware screens restored, boot capture forgotten");
     } else {

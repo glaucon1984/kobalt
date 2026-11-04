@@ -411,17 +411,22 @@ static QString lockReloadCommand() {
         "[ -n \"$p\" ] && exec /ebrmain/bin/iv2sh SendEventTo \"$p\" 154 0");
 }
 
-void leaveFirmwareScreens(const QImage &cover, const char *when) {
+void leaveFirmwareScreens(const QImage &cover, const char *when, bool filesOnly) {
     QElapsedTimer clock;
     clock.start();
     // The lock screen: the firmware's own picture. The reload outlives this process.
-    if (restoreFirmwareLockImages()) {
+    if (restoreFirmwareLockImages() && !filesOnly) {
         QProcess::startDetached(QStringLiteral("/bin/sh"), {QStringLiteral("-c"), lockReloadCommand()});
         qInfo("kobalt-pb: lock image reload requested (%s, detached)", when);
     }
     forgetBootLogo();
     if (cover.isNull()) {
         qInfo("kobalt-pb: firmware screens (%s): no cover, power-off and boot logos left as written", when);
+        return;
+    }
+    if (filesOnly) {
+        writeCoverAsPowerOffImage(cover);
+        qInfo("kobalt-pb: firmware screens (%s): files only, in %lld ms", when, static_cast<long long>(clock.elapsed()));
         return;
     }
     // The power-off file and the boot logo: the book's plain cover, what the firmware's reader

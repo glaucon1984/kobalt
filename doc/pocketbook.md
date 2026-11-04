@@ -164,8 +164,10 @@ would for the built-in reader; a copy from before Kobalt's first write is
 - **After the book is closed**, in every mode, the firmware's screens are its own again: Kobalt
   removes its lock image and leaves the book's plain cover in the power-off file and as the
   boot logo, as the built-in reader does, so a standby or power-off from the library shows
-  what the PocketBook settings say. The same happens when the device is plugged into a computer
-  while a book is open, since choosing PC Link ends Kobalt without a close; if Charge is chosen
+  what the PocketBook settings say. Plugging the device into a computer while a book is open
+  does the same for the power-off file, since choosing PC Link ends Kobalt without a close (the
+  firmware's prompt must not be disturbed then, so the task manager picks up the removed lock
+  image at the next app launch, and the boot logo keeps the last page); if Charge is chosen
   instead, Kobalt carries on with the book and writes its sleep image again.
 - **Automatic power-off**: when the PocketBook switches itself off after a standby (its
   Power-off timeout), the firmware wakes the device for a moment to do it, which used to light

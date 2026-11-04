@@ -78,7 +78,12 @@ bool writeCoverAsPowerOffImage(const QImage &cover);
 // they show), and the capture kept for the boot is dropped. Blocking for the bitmap writes
 // (under a second); the firmware's tool runs on after the process has quit. `when` names the
 // occasion in the log.
-void leaveFirmwareScreens(const QImage &cover, const char *when);
+// `filesOnly`: nothing of the firmware is asked (no reload request to taskmgr, no boot logo
+// tool), only the files change. For the USB plug: the firmware's PC Link / Charge prompt is up
+// then, and both the event and the tool left it unresponsive (seen: nothing but the power
+// button worked). taskmgr reloads its lock image at the next app launch anyway, and the boot
+// logo keeps the last page capture.
+void leaveFirmwareScreens(const QImage &cover, const char *when, bool filesOnly = false);
 // A write made while the device goes to sleep defers its reload request to the next wake.
 void markLockReloadPending();
 bool takeLockReloadPending();
