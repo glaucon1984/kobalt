@@ -51,7 +51,8 @@ set(host "${CMAKE_CURRENT_SOURCE_DIR}/host")
 add_executable(kobalt-pb ${shared}
     "${KOBALT_ROOT}/platforms/android/reader.cpp" "${KOBALT_ROOT}/platforms/android/reader.h"
     "${host}/main.cpp" "${host}/host.cpp" "${host}/host.h" "${host}/services.cpp" "${host}/services.h"
-    "${host}/display.cpp" "${host}/orientation_sensor.cpp" "${host}/orientation_sensor.h"
+    "${host}/display.cpp" "${host}/boot_page.cpp" "${host}/boot_page.h"
+    "${host}/orientation_sensor.cpp" "${host}/orientation_sensor.h"
     "${host}/sleep_screen_files.cpp" "${host}/sleep_screen_files.h"
     "${host}/explorer_progress.cpp" "${host}/explorer_progress.h" "${host}/epub_cfi.cpp" "${host}/epub_cfi.h"
     "${host}/futex_compat.cpp" "${host}/firmware_power.cpp" "${host}/firmware_power.h"

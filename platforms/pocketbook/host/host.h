@@ -12,6 +12,7 @@ class ReaderOpeningView;
 }
 
 namespace kobalt::pocketbook {
+class BootPage;
 // Full-screen host: Kobalt's opening view while a book loads, then the reader window itself.
 // Closing the book (its own close, or the Home/Back key) quits the app, which returns the
 // PocketBook to its library.
@@ -94,7 +95,7 @@ private:
     std::unique_ptr<ReaderOpeningView> opening;
     QWidget *openingPage;
     QLabel *message;
-    QLabel *bootPage; // the boot logo's page while a reopened book loads
+    BootPage *bootPage; // the boot logo's page, with a loading bar, while a reopened book loads
     QString bookPath;
     bool closing = false;
     QTimer turnTimer;

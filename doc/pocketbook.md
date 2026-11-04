@@ -144,7 +144,9 @@ would for the built-in reader; a copy from before Kobalt's first write is
   is stored as the boot logo (through the firmware's own tool, which takes a few seconds in the
   background) after the book opens and at each standby. When the book is opened again after a
   power-off (by the firmware at boot, or by hand), Kobalt shows that capture while the book
-  loads, so the boot goes from the page to the same page. The capture is used only once the
+  loads, so the boot goes from the page to the same page, with a small loading bar at the
+  top-left over the header (where the firmware shows its own while it launches an app) that
+  fills as the book opens: the page is not live until the bar is gone. The capture is used only once the
   device has been powered off since it was taken: a book that was closed in Kobalt, or left by
   connecting the device to a PC and opened again without a power-off in between, shows the
   usual loading screen, and so does any other book. A power-off

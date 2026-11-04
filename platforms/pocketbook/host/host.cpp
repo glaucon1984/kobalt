@@ -1,4 +1,5 @@
 #include "host.h"
+#include "boot_page.h"
 #include "services.h"
 #include "interfaces/reader/views/opening.h"
 #include "platform/api/kobo_refresh.h"
@@ -72,8 +73,7 @@ Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
     message->setAlignment(Qt::AlignCenter);
     message->setMargin(48);
     addWidget(message);
-    bootPage = new QLabel(this);
-    bootPage->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    bootPage = new BootPage(this);
     addWidget(bootPage);
     openingPage = new QWidget(this);
     auto *body = new QVBoxLayout(openingPage);
@@ -86,6 +86,8 @@ Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
     connect(&controller, &android::ReaderController::openingProgress, this, [this](int percent) {
         if (currentWidget() == openingPage)
             opening->setProgress(percent);
+        else if (currentWidget() == bootPage)
+            bootPage->setProgress(percent);
     });
     connect(&controller, &android::ReaderController::openingCover, this, [this](QImage cover) {
         if (currentWidget() == openingPage)
@@ -197,11 +199,13 @@ void Host::start() {
     // the standby: the firmware keeps the light off across it. Normally switched back on at
     // launch already (main); this catches a record that launch could not act on.
     restoreStandbyLight("start");
-    showFullScreen();
+    // The page to show is chosen before the window is shown: the first frame is the boot
+    // capture (or the opening view), never the empty host while the capture is read.
     if (!startPath.isEmpty())
         open(startPath);
     else
         showMessage(startMessage);
+    showFullScreen();
 }
 
 void Host::open(const QString &path) {
@@ -221,9 +225,10 @@ void Host::open(const QString &path) {
     // capture taken in this same boot (no power-off since) is not used either.
     const QImage saved = savedBootLogo(bookPath);
     if (!saved.isNull() && saved.size() == size()) {
-        bootPage->setPixmap(QPixmap::fromImage(saved));
+        bootPage->setPage(saved);
         setCurrentWidget(bootPage);
-        qInfo("kobalt-pb: showing the boot logo's page while the book loads (uptime %.0f s)", uptimeSeconds());
+        qInfo("kobalt-pb: showing the boot logo's page with the loading bar while the book loads (uptime %.0f s)",
+              uptimeSeconds());
     } else {
         setCurrentWidget(openingPage);
     }
