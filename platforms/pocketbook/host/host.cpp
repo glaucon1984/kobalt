@@ -90,6 +90,7 @@ Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
             bootPage->setProgress(percent);
     });
     connect(&controller, &android::ReaderController::openingCover, this, [this](QImage cover) {
+        bookCover = cover;
         if (currentWidget() == openingPage)
             opening->setCover(std::move(cover));
     });
@@ -517,15 +518,19 @@ sleep::Mode Host::sleepMode() const {
 }
 
 // Once per choice of the built-in sleep screen: Kobalt's lock bitmaps go, taskmgr reloads (so
-// the next standby shows the firmware's picture, not its cached copy of Kobalt's), and the
-// capture kept for the boot is dropped. The power-off file and the boot logo partition keep
-// what was last written until the firmware's own logo settings are changed; they are the
-// firmware's choice (Settings > Personalize > Logos), not touched from here.
+// the next standby shows the firmware's picture, not its cached copy of Kobalt's), the capture
+// kept for the boot is dropped, and the power-off file gets the book's plain cover, which is
+// what the firmware's own reader puts there: the firmware's Power-off logo setting then means
+// the same with Kobalt as with its reader (the cover, or the firmware's default or the user's
+// own pictures, which ignore the file). The boot logo partition keeps what was last written
+// until the firmware's Boot logo setting is changed (Settings > Personalize > Logos).
 void Host::applyStockSleepScreen() {
     if (stockApplied)
         return;
     stockApplied = true;
     forgetBootLogo();
+    if (!writeCoverAsPowerOffImage(bookCover))
+        qInfo("kobalt-pb: built-in sleep screen: no cover for the power-off file");
     if (!restoreFirmwareLockImages()) {
         qInfo("kobalt-pb: built-in sleep screen: no lock image of Kobalt's to remove");
         return;

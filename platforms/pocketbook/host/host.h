@@ -93,6 +93,10 @@ public:
     sleep::Mode sleepMode() const;
     void applyStockSleepScreen();
     bool stockApplied = false;
+    // The book's cover as the controller decoded it at open; in built-in mode it is the
+    // power-off file, as the firmware's own reader writes the cover there (shown when the
+    // firmware's Power-off logo setting is the book cover).
+    QImage bookCover;
 
 protected:
     void closeEvent(QCloseEvent *event) override;

@@ -67,6 +67,10 @@ bool lockImageReloadInFlight();
 // firmware draws its built-in picture; the caller asks taskmgr to reload. Returns false when
 // there was nothing to remove. The next Kobalt image is written whatever was written last.
 bool restoreFirmwareLockImages();
+// The book's plain cover as the power-off file, what the firmware's own reader writes there
+// (the built-in sleep screen chosen): fitted to the panel, turned as the device is held, no
+// status. Blocking, tens of ms. False for a null cover or a failed write.
+bool writeCoverAsPowerOffImage(const QImage &cover);
 // A write made while the device goes to sleep defers its reload request to the next wake.
 void markLockReloadPending();
 bool takeLockReloadPending();

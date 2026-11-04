@@ -370,6 +370,24 @@ bool restoreFirmwareLockImages() {
     return removed;
 }
 
+bool writeCoverAsPowerOffImage(const QImage &cover) {
+    if (cover.isNull())
+        return false;
+    const int rotation = panelRotation();
+    std::lock_guard<std::mutex> guard(writeMutex);
+    QElapsedTimer clock;
+    clock.start();
+    backupOnce(powerOffCover);
+    const bool ok = writeBmp8(toPanel(cover, rotation), powerOffCover);
+    if (ok) {
+        pendingPowerOff = QImage();
+        powerOffWritten();
+    }
+    qInfo("kobalt-pb: power-off image %s (plain cover, rotation %d) in %lld ms", ok ? "written" : "NOT written",
+          rotation, static_cast<long long>(clock.elapsed()));
+    return ok;
+}
+
 void markLockReloadPending() {
     pendingReload = true;
 }
