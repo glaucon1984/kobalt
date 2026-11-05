@@ -1,5 +1,5 @@
 #pragma once
-#include "engine/crengine/reader_model.h"
+#include "engine/crengine/engine_document.h"
 #include <QImage>
 #include <QJsonObject>
 #include <QJsonValue>
@@ -18,7 +18,8 @@ namespace kobalt {
 // settings. One request varies one setting through its options; the others
 // keep their current values, because page-break settings change each other's
 // results.
-struct StyleSampleRequest {
+struct StyleSampleRequest
+{
     QJsonObject settings;
     QString key;
     QVector<QJsonValue> values;
@@ -31,6 +32,7 @@ struct StyleSampleRequest {
     // after the last whole line. Empty when the setting changes page breaks.
     QSize crop;
     QPoint cropOrigin;
+    bool marginGuides = false;
     // Page spacing only: the reading area within the page, and the size of a
     // full-resolution view of its bottom edge on the page that changes.
     QRect readingArea;
@@ -39,7 +41,9 @@ struct StyleSampleRequest {
     // step, so a closed Settings panel does not delay the book behind it.
     std::shared_ptr<std::atomic_bool> cancelled;
 };
-struct StyleSample {
+
+struct StyleSample
+{
     // The spread shown, as the first of two page indices.
     int page = 0;
     // False when every option lays out and draws the sample the same way.
@@ -48,6 +52,8 @@ struct StyleSample {
     QVector<QVector<QImage>> spreads;
     // One crop per option when the request asked for crops.
     QVector<QImage> crops;
+    // Text edges in crop pixels, or an empty rectangle when no guides are needed.
+    QRect cropReadingArea;
     // Extra paragraph gaps within each crop, excluding ordinary line leading.
     QVector<QVector<QRect>> cropGaps;
     // The reading area on a scaled page of the spread.
@@ -58,10 +64,10 @@ struct StyleSample {
     QVector<QImage> details;
     QRect detailArea;
     QVector<QVector<QRect>> spare;
-    bool valid() const {
-        return !spreads.isEmpty();
-    }
+
+    bool valid() const { return !spreads.isEmpty(); }
 };
+
 // Lays out the sample on the shared engine worker and calls `finished` on
 // the GUI thread, unless `context` was destroyed first.
 void renderStyleSample(EngineFontInputs fonts, StyleSampleRequest request, QObject *context,
@@ -74,4 +80,4 @@ QJsonObject styleSampleSettings(QJsonObject state);
 QJsonObject styleSamplePageSettings(const QJsonObject &reading);
 QSize styleSamplePageSize();
 QRect styleSampleReadingArea();
-}
+} // namespace kobalt

@@ -1,9 +1,20 @@
 #pragma once
 #include <QString>
+#include <functional>
+
+class QSqlDatabase;
 
 namespace kobalt::storage {
 // The profile database stays open on the writer thread while Kobalt runs. See
-// the profile connection in annotation_database.cpp.
+// the profile connection in profile_database.cpp.
+
+// Runs `operation` in a write transaction on the profile database in
+// `directory`. Shared profile tables use the same ownership, version and
+// durability checks. A false result rolls the transaction back. The handle
+// must not escape.
+bool profileTransaction(const QString &directory,
+                        const std::function<bool(QSqlDatabase &)> &operation,
+                        QString *error = nullptr);
 
 // Waits for waiting writes, then folds the log into the main file, returns it
 // to a rollback journal and closes it. With `keepClosed`, every operation
@@ -21,19 +32,20 @@ ProfileDatabaseState inspectProfileDatabase(const QString &directory, QString *e
 // Syncs recent commits and folds them into the main file, for example before
 // sleep.
 void checkpointProfile();
-// True when routine commits need durability and the last sync is at least
-// a minute old. Urgent low-battery standby skips that age check. A failed
-// checkpoint suppresses maintenance retries for five minutes.
-bool profileCheckpointDue(bool urgent = false);
+// True when routine commits need durability. A failed checkpoint suppresses
+// further attempts for five minutes. Low-battery standby uses it.
+bool profileCheckpointDue();
 // True while routine commits wait for a sync.
 bool profileHasUnsyncedWrites();
 // Starts a checkpoint on the writer thread without waiting for it.
 void requestProfileCheckpoint();
 bool profileCheckpointPending();
+
 // Use WAL NORMAL for transactions started in this scope. There is no extra
 // per-commit sync; automatic checkpoints and the rollback-journal fallback
 // can still sync. A lifecycle checkpoint makes prior commits durable.
-class RoutineWrites {
+class RoutineWrites
+{
 public:
     RoutineWrites();
     ~RoutineWrites();
@@ -43,4 +55,4 @@ public:
 private:
     bool previous;
 };
-}
+} // namespace kobalt::storage

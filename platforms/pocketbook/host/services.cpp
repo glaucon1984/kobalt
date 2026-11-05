@@ -1,8 +1,8 @@
 #include "services.h"
 #include "host.h"
 #include "sleep_screen_files.h"
-#include "interfaces/reader/ui/controls/keyboard.h"
-#include "interfaces/reader/ui/style/fonts.h"
+#include "ui/controls/keyboard.h"
+#include "ui/style/fonts.h"
 #include <QGuiApplication>
 #include <qpa/qplatformnativeinterface.h>
 #include <QScreen>

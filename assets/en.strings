@@ -5,11 +5,12 @@
 "common.save" = "Save";
 "bookmarks.pin" = "Pin bookmark";
 "bookmarks.modify" = "Modify pinned bookmark";
+"bookmarks.unpin" = "Unpin bookmark";
 "bookmarks.actions" = "Bookmark actions";
 "bookmarks.remove_this" = "Remove this bookmark";
 "bookmarks.edit_pin" = "Edit pinned bookmark";
 "bookmarks.pin_name" = "Bookmark name";
-"bookmarks.pin_limit" = "You can pin up to eight bookmarks in this book. Remove a pinned bookmark to add another.";
+"bookmarks.pin_limit" = "You can pin up to eight bookmarks in this book. Unpin or remove a pinned bookmark to add another.";
 "bookmarks.icon_map" = "Map";
 "bookmarks.icon_star" = "Star";
 "bookmarks.icon_bookmark" = "Bookmark";
@@ -79,9 +80,35 @@
 "kosync.login" = "Sign in";
 "kosync.logout" = "Sign out";
 "kosync.automatic" = "Automatic sync";
-"kosync.automatic_description" = "Sync on open, close, sleep and wake, and while reading. Ask before moving to a synced position.";
+"kosync.automatic_caption_wait" = "%1, when Wi-Fi is on";
+"kosync.automatic_caption_wake" = "%1, turns on Wi-Fi";
+"kosync.automatic_off_caption" = "Off, sync button in the toolbar";
+"kosync.automatic_caption_never" = "Not while reading";
+"kosync.when_heading" = "When Kobalt syncs your progress";
+"kosync.when_open" = "When you open a book";
+"kosync.when_open_description" = "Gets your latest progress. If another device is further along, Kobalt asks before moving.";
+"kosync.when_reading" = "While you read";
+"kosync.when_reading_description" = "Syncs your progress periodically.";
+"kosync.when_sleep_wake" = "When your device sleeps or wakes";
+"kosync.when_sleep_wake_description" = "Syncs your progress before sleep if you're online, and gets your latest progress on wake.";
+"kosync.when_close" = "When you close the book";
+"kosync.when_close_description" = "Syncs your progress if you're online.";
+"kosync.interval_description" = "Choose how often Kobalt syncs your progress while a book is open. Syncing more often uses more battery.";
+"kosync.interval_0" = "Every page";
+"kosync.interval_1" = "Every minute";
+"kosync.interval_5" = "Every 5 minutes";
+"kosync.interval_15" = "Every 15 minutes";
+"kosync.interval_30" = "Every 30 minutes";
+"kosync.interval_60" = "Every hour";
+"kosync.interval_never" = "Never";
+"kosync.wifi_heading" = "While you read and Wi-Fi is off";
+"kosync.wifi_wait" = "Wait";
+"kosync.wifi_wait_picture" = "Keep progress here until Wi-Fi is on";
+"kosync.wifi_wait_outcome" = "Longest battery life";
+"kosync.wifi_wake" = "Turn on Wi-Fi";
+"kosync.wifi_wake_picture" = "Turn on Wi-Fi, sync, then turn it off again";
+"kosync.wifi_wake_outcome" = "Other devices stay up to date";
 "kosync.sync_now" = "Sync now";
-"kosync.manual_description" = "With automatic sync disabled, a manual sync button is added to the top toolbar.";
 "kosync.manual_prompt" = "Would you like to sync progress with KOsync?";
 "kosync.manual_prompt_description" = "This button syncs progress when you choose. Automatic sync is disabled, so Kobalt will not sync on open, close, sleep or wake. Later taps sync immediately.";
 "kosync.show_password" = "Show";
@@ -692,6 +719,8 @@
 "settings.animations_description" = "Page animations are supported on this device.";
 "settings.unsupported_caption" = "Disabled: unsupported on this device.";
 "settings.unsupported_description" = "Disabled because this option is not supported on this device.";
+"settings.light_dark_mode" = "Show dark mode in Light";
+"settings.light_dark_mode_description" = "Add a dark-mode shortcut to the Light panel.";
 "settings.dark_description" = "Light text on a dark background.";
 "settings.display" = "Display";
 "settings.controls" = "Controls";
@@ -753,6 +782,9 @@
 "settings.section_reading_menu" = "Reading menu";
 "settings.section_reader" = "Reader";
 "settings.section_sleep" = "Sleep and wake";
+"settings.section_power" = "Power management";
+"settings.wifi_power_saver" = "Smart Wi-Fi power saving";
+"settings.wifi_power_saver_description" = "Turns Wi-Fi off when a book opens and when the device sleeps. Wi-Fi stays on while Bluetooth is on or a sync needs it.";
 "settings.navigation_taps_and_swipes" = "Swipes and taps";
 "settings.navigation_taps_and_swipes_description" = "Default";
 "settings.navigation_taps_only" = "Taps only";
@@ -1040,9 +1072,7 @@
 "annotations.export_filter" = "ZIP archives (*.zip)";
 /* Arguments: %1 */
 "annotations.export_saved" = "Annotations exported to %1";
-"annotations.retry_save" = "Retry save";
 "annotations.cancel_selection" = "Clear selection";
-"annotations.discard_and_stop" = "Discard selection and stop highlighting";
 "annotations.stop" = "Stop highlighting";
 "annotations.empty" = "No annotations yet";
 "annotations.loading" = "Finding pages…";
@@ -1176,7 +1206,6 @@
 "settings.tappable_links_all_description" = "Tap footnotes and links to open them.";
 "settings.vertical_spacing" = "Vertical page spacing";
 "settings.vertical_spacing_mode" = "Page spacing";
-"settings.vertical_spacing_apply_to" = "Pages to adjust";
 "settings.vertical_spacing_description" = "Adjust blank space on nearly full pages.";
 "settings.vertical_spacing_off" = "Normal";
 "settings.vertical_spacing_off_description" = "Keep the usual line spacing and top alignment.";
@@ -1192,7 +1221,7 @@
 "settings.vertical_spacing_scope_all_short" = "All pages";
 "settings.vertical_spacing_scope_all_description" = "Also adjust ordinary pagination gaps on nearly full prose pages.";
 "settings.vertical_spacing_scope_protection" = "Only widow/orphan gaps";
-"settings.vertical_spacing_scope_protection_short" = "Widows only";
+"settings.vertical_spacing_scope_protection_short" = "Widow/orphan";
 "settings.vertical_spacing_scope_protection_description" = "Adjust only when widow/orphan protection moves lines that would otherwise fit.";
 
 "kosync.last_synced" = "Last synced: %1";
@@ -1265,3 +1294,11 @@
 "time_remaining.about_hour" = "about an hour";
 /* Arguments: %1 */
 "time_remaining.about_hours" = "about %1 hours";
+
+"settings.hanging_punctuation" = "Hanging punctuation";
+"settings.hanging_punctuation_summary" = "Let punctuation and hyphens extend into the margins.";
+"settings.hanging_punctuation_off" = "Off";
+"settings.hanging_punctuation_on" = "On";
+"settings.hanging_punctuation_off_description" = "Keep punctuation within the text edges.";
+"settings.hanging_punctuation_on_description" = "Let punctuation and line-ending hyphens extend beyond the text edges.";
+"settings.hanging_punctuation_description" = "The dashed lines mark the text edges. The sample uses justified text. This preference affects all books.";

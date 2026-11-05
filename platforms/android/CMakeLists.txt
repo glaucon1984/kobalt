@@ -9,11 +9,12 @@ if(NOT ANDROID OR NOT ANDROID_ABI STREQUAL "arm64-v8a")
     message(FATAL_ERROR "Use the prepared Android ARM64 SDK and the android preset")
 endif()
 get_filename_component(KOBALT_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
-foreach(retired KOBALT_DEPENDENCIES KOBALT_DEPENDENCY_CACHE KOBALT_ASSETS)
+foreach(retired KOBALT_DEPENDENCIES KOBALT_ASSETS)
     unset(${retired} CACHE)
 endforeach()
 set(source "${KOBALT_ROOT}/src")
-add_subdirectory("${KOBALT_ROOT}/dependencies" "${CMAKE_CURRENT_BINARY_DIR}/dependencies")
+include("${KOBALT_ROOT}/dependencies/cache.cmake")
+kobalt_dependencies()
 add_subdirectory("${KOBALT_ROOT}/assets" "${CMAKE_CURRENT_BINARY_DIR}/assets")
 
 
@@ -58,8 +59,8 @@ configure_file("${source}/support/build_info.h.in" build_info.h @ONLY)
 file(GLOB_RECURSE shared CONFIGURE_DEPENDS "${source}/*.cpp" "${source}/*.h")
 # The scenario player is built only into evaluation builds.
 list(FILTER shared EXCLUDE REGEX "/src/scenario/")
-list(REMOVE_ITEM shared "${source}/publication/loopback.cpp" "${source}/assets/system_fonts.cpp")
-file(GLOB adapters CONFIGURE_DEPENDS "*.cpp" "*.h")
+list(REMOVE_ITEM shared "${source}/assets/system_fonts.cpp")
+file(GLOB adapters CONFIGURE_DEPENDS "*.cpp" "*.h" "../standalone/*.cpp" "../standalone/*.h")
 qt_add_executable(kobalt_android ${shared} ${adapters})
 option(KOBALT_SQLITE_ANNOTATIONS_DEFAULT "Use SQLite annotation storage by default" ON)
 if(KOBALT_SQLITE_ANNOTATIONS_DEFAULT)
@@ -69,7 +70,7 @@ else()
     set_source_files_properties("${source}/storage/annotation_database.cpp" PROPERTIES
         COMPILE_DEFINITIONS KOBALT_SQLITE_ANNOTATIONS_DEFAULT=0)
 endif()
-target_include_directories(kobalt_android PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" "${source}/interfaces/reader/ui/controls")
+target_include_directories(kobalt_android PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_include_directories(kobalt_android SYSTEM PRIVATE "${CRENGINE_SOURCE}/crengine/include" "${CRENGINE_BUILD}"
     "${prefix}/include" "${prefix}/include/harfbuzz" "${prefix}/include/freetype2" "${prefix}/include/fribidi")
 target_compile_options(kobalt_android PRIVATE -Wall -Wextra "-iquote${KOBALT_ROOT}" "-iquote${source}")
@@ -82,7 +83,6 @@ add_custom_command(OUTPUT "${engine}"
         --redefine-sym FT_Render_Glyph=kobalt_font_render_glyph "${CRENGINE_BUILD}/libcrengine.a" "${engine}"
     DEPENDS "${CRENGINE_BUILD}/libcrengine.a" VERBATIM)
 add_custom_target(reader-engine DEPENDS "${engine}")
-add_dependencies(reader-engine kobalt-dependencies)
 add_dependencies(kobalt_android reader-engine)
 target_link_libraries(kobalt_android PRIVATE Qt6::Widgets Qt6::Network Qt6::Sensors Qt6::Sql "${engine}"
     "${prefix}/lib/libharfbuzz.a" "${prefix}/lib/libxxhash.a" "${prefix}/lib/libutf8proc.a"
@@ -96,7 +96,8 @@ qt_add_resources(kobalt_android android_manifest PREFIX "/android-assets" FILES 
 set(resources "${KOBALT_ROOT}/assets")
 file(GLOB notices CONFIGURE_DEPENDS "${resources}/notices/*")
 qt_add_resources(kobalt_android notices PREFIX "/kobalt" BASE "${resources}" FILES "${resources}/acknowledgments.json" ${notices}
-    "${resources}/samples/words-and-letters.html" "${resources}/samples/layout.html")
+    "${resources}/samples/words-and-letters.html" "${resources}/samples/layout.html"
+    "${resources}/samples/hanging-punctuation.html")
 
 if(KOBALT_ANDROID_RELEASE)
     set(KOBALT_ANDROID_PACKAGE com.nicoverbruggen.kobalt)

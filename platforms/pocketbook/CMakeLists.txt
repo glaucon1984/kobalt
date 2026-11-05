@@ -1,5 +1,5 @@
 # Kobalt for PocketBook: Kobalt's reader (src/ without the standalone library), the
-# ReaderController from the Android target (with its KOBALT_POCKETBOOK hooks), the pbink inkview
+# ReaderController from the standalone (desktop and Android) host, with its KOBALT_POCKETBOOK hooks, the pbink inkview
 # platform plugin (pbink/) and a small host (host/), linked into one static-Qt executable.
 # Third-party libraries come prebuilt from KOBALT_DEPS (Kobalt's own dependencies/ recipes, built
 # once by tools/kobalt-check with the same toolchain; tools/rebuild-deps.sh). See doc/building.md.
@@ -43,13 +43,15 @@ configure_file("${source}/support/build_info.h.in" build_info.h @ONLY)
 
 # Like Kobo: the reader without the standalone Library model and view.
 file(GLOB_RECURSE shared CONFIGURE_DEPENDS "${source}/*.cpp" "${source}/*.h")
-list(FILTER shared EXCLUDE REGEX "/(library|interfaces/library)/")
+list(FILTER shared EXCLUDE REGEX "/(library|app/library)/")
 # The scenario player belongs to Kobo's evaluation packages only.
 list(FILTER shared EXCLUDE REGEX "/src/scenario/")
 set(plugin "${CMAKE_CURRENT_SOURCE_DIR}/pbink")
 set(host "${CMAKE_CURRENT_SOURCE_DIR}/host")
 add_executable(kobalt-pb ${shared}
-    "${KOBALT_ROOT}/platforms/android/reader.cpp" "${KOBALT_ROOT}/platforms/android/reader.h"
+    "${KOBALT_ROOT}/platforms/standalone/reader.cpp" "${KOBALT_ROOT}/platforms/standalone/reader.h"
+    # The loopback repair for the resource server (plain Linux ioctls, as on Kobo's firmware).
+    "${KOBALT_ROOT}/platforms/kobo/common/loopback.cpp"
     "${host}/main.cpp" "${host}/host.cpp" "${host}/host.h" "${host}/services.cpp" "${host}/services.h"
     "${host}/display.cpp" "${host}/boot_page.cpp" "${host}/boot_page.h"
     "${host}/orientation_sensor.cpp" "${host}/orientation_sensor.h"
@@ -63,8 +65,7 @@ set_source_files_properties("${source}/storage/annotation_database.cpp" PROPERTI
 # Reading time on a clock that keeps counting through the device's light sleep, as on Kobo.
 set_source_files_properties("${source}/reading/reading_timer.cpp" PROPERTIES
     COMPILE_DEFINITIONS KOBALT_READING_CLOCK_BOOTTIME=1)
-target_include_directories(kobalt-pb PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" "${host}" "${plugin}"
-    "${source}/interfaces/reader/ui/controls")
+target_include_directories(kobalt-pb PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" "${host}" "${plugin}")
 target_include_directories(kobalt-pb SYSTEM PRIVATE "${CRENGINE_SOURCE}/crengine/include" "${CRENGINE_BUILD}"
     "${prefix}/include" "${prefix}/include/harfbuzz" "${prefix}/include/freetype2" "${prefix}/include/fribidi"
     "${PB_SYSROOT}/usr/local/include"

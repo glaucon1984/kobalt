@@ -6,8 +6,8 @@
 # Android recipe commit: b55f833f909841c3b0394912bbd628bf5804fc42
 set -eu
 case "${1:-}" in
-    qt5) echo ghcr.io/nicoverbruggen/kobuild@sha256:c5c2c0e4f1ebd5268ea631c89354976ef090fc571e162c294644677c5aedad05 ;;
+    qt5) echo ghcr.io/nicoverbruggen/kobuild@sha256:34e7c1dc6bd23be7d5ea5d53a6eb889885743e2aeaa0ca8e95b6827aec6f6af7 ;;
     qt6) echo ghcr.io/nicoverbruggen/kobuild@sha256:b939301323e1bed0bf6b0bee43b8791db2efdf01231d4245c1f972d57433644a ;;
-    android) echo ghcr.io/nicoverbruggen/kobuild@sha256:013a0509703e6499529a438659ea3a8d0a18d3eedaf24fdfea548840878008b3 ;;
+    android) echo ghcr.io/nicoverbruggen/kobuild@sha256:bb32726522eec89ea849ca85916d6819d492c8dfdcf3855c868bfa96dc21964c ;;
     *) echo 'Expected qt5, qt6 or android' >&2; exit 2 ;;
 esac

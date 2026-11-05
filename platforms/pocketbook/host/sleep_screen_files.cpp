@@ -1,5 +1,5 @@
 #include "sleep_screen_files.h"
-#include "interfaces/reader/views/sleep_screen.h"
+#include "app/reader/views/sleep_screen.h"
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>

@@ -7,8 +7,9 @@
 #include "support/strings.h"
 #include "book_menu.h"
 #include "browser_handoff.h"
-#include "interfaces/reader_window.h"
+#include "app/reader_window.h"
 #include "reading/reading_book.h"
+#include "reading/reading_timer.h"
 #include "storage/profile_database.h"
 #include "storage/annotation_database.h"
 #include "storage/reader_storage.h"
@@ -30,31 +31,36 @@
 #include "platform/api/reader_orientation.h"
 #include "orientation.h"
 #include "support/diagnostics.h"
+#include "support/main_thread.h"
 #include "reader_environment.h"
 #include "reader_host_services.h"
-#include "interfaces/reader/ui/style/fonts.h"
-#include "interfaces/reader_interface.h"
-#include "interfaces/opening_message.h"
-#include "interfaces/recovery_message.h"
+#include "ui/style/fonts.h"
+#include "app/reader_interface.h"
+#include "app/messages/opening_message.h"
+#include "app/messages/recovery_message.h"
 #ifdef KOBALT_SCENARIO_PLAYER
-#include "interfaces/benchmark_message.h"
+#  include "app/messages/benchmark_message.h"
 #endif
 #include "platforms/kobo/display/screen_density.h"
 #include <NickelHook.h>
 #include <QApplication>
 #include <QFile>
+#include <QPointer>
+#include <QTimer>
 #include <QKeyEvent>
 #include <QScreen>
 #ifdef KOBALT_SCENARIO_PLAYER
-#include "reading/kosync.h"
-#include "scenario/player.h"
-#include "scenario/sleep_persistence.h"
-#include <QFileInfo>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QMouseEvent>
-#include <QSaveFile>
-#include <QWindow>
+#  include "sync/kosync.h"
+#  include "scenario/player.h"
+#  include "native_sync_network.h"
+#  include "scenario/sleep_persistence.h"
+#  include <QFileInfo>
+#  include <QJsonArray>
+#  include <QJsonDocument>
+#  include <QMouseEvent>
+#  include <QSaveFile>
+#  include <QWindow>
+#  include <dlfcn.h>
 #endif
 #include <QThread>
 #include <utility>
@@ -62,25 +68,59 @@
 namespace kobalt::nickel {
 using kobalt::storage::readJson;
 using kobalt::storage::writeJson;
+
 namespace {
 // A profile path as the user finds it on the Kobo's storage over USB.
-QString usbPath(QString path) {
+QString usbPath(QString path)
+{
     if (path.startsWith(QLatin1String("/mnt/onboard/")))
         path.remove(0, int(qstrlen("/mnt/onboard/")));
     return path;
 }
+
 QPointer<ReaderCoordinator> activeCoordinator;
 #ifdef KOBALT_SCENARIO_PLAYER
 bool benchmarkTypographyEnabled = false;
+
+// Nickel's own store sync, for the evaluation player. On firmware 4.46.23836
+// and 6.0.279225 the status-bar sync button calls N3SyncManager::sync(). The
+// call returns once the sync has started, and Nickel's workers do the rest.
+struct NativeSync
+{
+    QObject *(*instance)() = reinterpret_cast<decltype(instance)>(
+            dlsym(RTLD_DEFAULT, "_ZN13N3SyncManager14sharedInstanceEv"));
+    void (*sync)(QObject *) = reinterpret_cast<decltype(sync)>(dlsym(RTLD_DEFAULT,
+                                                                     "_ZN13N3SyncManager4syncEv"));
+    bool (*syncing)(const QObject *) = reinterpret_cast<decltype(syncing)>(
+            dlsym(RTLD_DEFAULT, "_ZNK15SyncManagerBase9isSyncingEv"));
+
+    QObject *manager() const { return instance && sync && syncing ? instance() : nullptr; }
+};
+
+// The radio calls a scenario uses to start from Wi-Fi off. off() is the call
+// that KOSync's release makes after a sync it connected for.
+struct NativeRadio
+{
+    QObject *(*instance)() = reinterpret_cast<decltype(instance)>(
+            dlsym(RTLD_DEFAULT, "_ZN15WirelessManager14sharedInstanceEv"));
+    void (*off)(QObject *) = reinterpret_cast<decltype(off)>(dlsym(RTLD_DEFAULT,
+                                                                   "_ZN15WirelessManager3offEv"));
+    bool (*up)(QObject *) = reinterpret_cast<decltype(up)>(dlsym(RTLD_DEFAULT,
+                                                                 "_ZNK15WirelessManager2upEv"));
+
+    QObject *manager() const { return instance && off && up ? instance() : nullptr; }
+};
 #endif
-}
+} // namespace
 
 #ifdef KOBALT_SCENARIO_PLAYER
-extern "C" __attribute__((visibility("default"))) int kobalt_benchmark_typography_v1(const char *contentId,
-                                                                                     int enable) {
-    if (!qApp || QThread::currentThread() != qApp->thread() || !contentId || (enable != 0 && enable != 1) ||
-        kobalt::appearance::benchmarkTypography(QString::fromUtf8(contentId)).isEmpty() || !activeCoordinator ||
-        (enable && !activeCoordinator->idleForBenchmark()))
+extern "C" __attribute__((visibility("default"))) int
+kobalt_benchmark_typography_v1(const char *contentId, int enable)
+{
+    if (!qApp || QThread::currentThread() != qApp->thread() || !contentId
+        || (enable != 0 && enable != 1)
+        || kobalt::appearance::benchmarkTypography(QString::fromUtf8(contentId)).isEmpty()
+        || !activeCoordinator || (enable && !activeCoordinator->idleForBenchmark()))
         return 0;
     benchmarkTypographyEnabled = enable != 0;
     return 1;
@@ -90,9 +130,14 @@ extern "C" __attribute__((visibility("default"))) int kobalt_benchmark_typograph
 ReaderCoordinator::ReadingRun::ReadingRun() = default;
 ReaderCoordinator::ReadingRun::~ReadingRun() = default;
 
-ReaderCoordinator::ReaderCoordinator(ReaderEnvironment &environment, CoordinatorBindings bindings, QObject *parent)
-    : QObject(parent), environment_(environment), bindings_(bindings), lifecycle(new kobalt::NativeLifecycle(this)),
-      authorization(new kobalt::NativeAuthorization(this)) {
+ReaderCoordinator::ReaderCoordinator(ReaderEnvironment &environment, CoordinatorBindings bindings,
+                                     QObject *parent)
+    : QObject(parent),
+      environment_(environment),
+      bindings_(bindings),
+      lifecycle(new kobalt::NativeLifecycle(this)),
+      authorization(new kobalt::NativeAuthorization(this))
+{
     activeCoordinator = this;
     homeSleep = std::make_unique<HomeSleepScreen>(environment_.paths, this);
     authorization->revoked = [this](kobalt::NativeAuthorization::Reason) {
@@ -108,9 +153,7 @@ ReaderCoordinator::ReaderCoordinator(ReaderEnvironment &environment, Coordinator
             reader->hide();
         // Save the local checkpoint and release all content without native
         // progress writeback or retrying the retained opening request.
-        disposeForTransition([this] {
-            status("authorization-lost");
-        }, false);
+        disposeForTransition([this] { status("authorization-lost"); }, false);
     };
     lifecycle->readerInputActive = [this] { return run.reader && run.reader->isVisible(); };
     lifecycle->beforeStandby = [this] {
@@ -127,7 +170,7 @@ ReaderCoordinator::ReaderCoordinator(ReaderEnvironment &environment, Coordinator
         authorization->setBlocked(true);
         timer.stop();
         if (busy) {
-            disposeForTransition([] {});
+            disposeForTransition([] { });
         } else if (run.reader) {
             // The browser owns the screen while this reader is already
             // hidden. Keep its saved position without creating a sleep cover.
@@ -136,9 +179,9 @@ ReaderCoordinator::ReaderCoordinator(ReaderEnvironment &environment, Coordinator
             else
                 run.reader->sleepReader();
         } else if (busy || run.fallbackAlert)
-            disposeForTransition([] {});
-        else if (!lifecycle->storageBlocked() && !lifecycle->shuttingDown() &&
-                 ui::initializeInterfaceFonts(environment_.assets))
+            disposeForTransition([] { });
+        else if (!lifecycle->storageBlocked() && !lifecycle->shuttingDown()
+                 && ui::initializeInterfaceFonts(environment_.assets))
             homeSleep->prepare(bindings_.enabled());
     };
     lifecycle->sleepViewReady = [this] {
@@ -166,17 +209,18 @@ ReaderCoordinator::ReaderCoordinator(ReaderEnvironment &environment, Coordinator
         }
         authorization->setBlocked(false);
         timer.start();
-        if (run.reader || run.model) {
+        if (run.reader || run.session) {
             const bool allowed = authorization->checkNow();
-            if (allowed && run.reader && !BrowserHandoff::activeFor(run.reader))
+            if (allowed && run.reader && !BrowserHandoff::activeFor(run.reader)) {
                 run.reader->wakeReader();
-            else if (!allowed && (run.reader || run.model) && !lifecycle->draining) {
+                // A sync can finish while the device sleeps. Check after the wake paint.
+                checkProgressSoon();
+            } else if (!allowed && (run.reader || run.session) && !lifecycle->draining) {
                 // A deferred or unavailable check must not leave an invisible
                 // reader holding Nickel's backing store indefinitely.
-                kobalt::diagnostic("resume-authorization-unavailable", {}, kobalt::DiagnosticSeverity::Warning);
-                disposeForTransition([this] {
-                    status("authorization-unavailable");
-                });
+                kobalt::diagnostic("resume-authorization-unavailable", {},
+                                   kobalt::DiagnosticSeverity::Warning);
+                disposeForTransition([this] { status("authorization-unavailable"); });
             }
         }
     };
@@ -186,15 +230,15 @@ ReaderCoordinator::ReaderCoordinator(ReaderEnvironment &environment, Coordinator
         authorization->setBlocked(true);
         timer.stop();
         prepareUsbTransition(
-            busy ? nullptr : run.reader.data(), cleanupCallbacks,
-            [this] {
-                kobalt::diagnostic("usb-release-start");
-                disposeForTransition([] {});
-            },
-            [this, ready = std::move(ready)] {
-                environment_.assets.invalidate();
-                ready();
-            });
+                busy ? nullptr : run.reader.data(), cleanupCallbacks,
+                [this] {
+                    kobalt::diagnostic("usb-release-start");
+                    disposeForTransition([] { });
+                },
+                [this, ready = std::move(ready)] {
+                    environment_.assets.invalidate();
+                    ready();
+                });
     };
     lifecycle->preparePowerScreen = [this](NativeLifecycle::Shutdown mode) {
         homeSleep->clear();
@@ -202,7 +246,8 @@ ReaderCoordinator::ReaderCoordinator(ReaderEnvironment &environment, Coordinator
             return;
         if (run.reader && !busy && !BrowserHandoff::activeFor(run.reader))
             homeSleep->preparePowerOff(run.reader->powerScreenSnapshot());
-        else if (!run.reader && !busy && !run.fallbackAlert && ui::initializeInterfaceFonts(environment_.assets))
+        else if (!run.reader && !busy && !run.fallbackAlert
+                 && ui::initializeInterfaceFonts(environment_.assets))
             homeSleep->prepare(bindings_.enabled(), true);
     };
     lifecycle->prepareShutdown = [this](std::function<void()> ready) {
@@ -217,19 +262,27 @@ ReaderCoordinator::ReaderCoordinator(ReaderEnvironment &environment, Coordinator
             ready();
         });
         if (run.reader && !busy)
-            run.reader->prepareShutdown([this] {
-                homeSleep->persistPowerOff(run.identity);
-                disposeForTransition([] {});
-            }, lifecycle->batteryLowShutdown());
+            run.reader->prepareShutdown(
+                    [this] {
+                        homeSleep->persistPowerOff(run.identity);
+                        disposeForTransition([] { });
+                    },
+                    lifecycle->batteryLowShutdown());
         else
-            disposeForTransition([] {});
+            disposeForTransition([] { });
     };
     if (bindings_.installInput)
         bindings_.installInput(this);
-    connect(&timer, &QTimer::timeout, this, [this] {
-        poll();
-    });
-    timer.setInterval(250);
+    connect(&timer, &QTimer::timeout, this, [this] { poll(); });
+    // Nickel's sleep, wake, USB and sync signals drive the reader. This check
+    // repeats the visibility checks in case a transition left the reader in the
+    // wrong state. It reads Nickel's saved position only after a signal or a
+    // failed read, or once a minute when Nickel's signals are unavailable.
+    // A visible reader runs it on its clock tick (minuteTicked); this timer is
+    // the fallback for a hidden or sleeping reader, and slightly longer than a
+    // minute so a ticking clock always comes first.
+    timer.setTimerType(Qt::PreciseTimer);
+    timer.setInterval(65000);
     if (!lifecycle->blocked())
         timer.start();
     // Read and check the interface faces on a worker thread before any tap,
@@ -244,32 +297,41 @@ ReaderCoordinator::ReaderCoordinator(ReaderEnvironment &environment, Coordinator
 #endif
 }
 
-void forgetHomeSleepScreen() {
+void forgetHomeSleepScreen()
+{
     if (activeCoordinator)
         activeCoordinator->forgetSleepScreen();
     else if (!NativeLifecycle::suspended())
-        storage::removeSleepSnapshot(storage::Paths{QString::fromLatin1(configDir)}.sleepScreen());
+        storage::removeSleepSnapshot(
+                storage::Paths{ QString::fromLatin1(configDir) }.sleepScreen());
 }
-void ReaderCoordinator::forgetSleepScreen() {
+
+void ReaderCoordinator::forgetSleepScreen()
+{
     if (!lifecycle->storageBlocked() && !lifecycle->shuttingDown())
         homeSleep->forget();
 }
 
-bool interceptHomeKey(QKeyEvent *event) {
+bool interceptHomeKey(QKeyEvent *event)
+{
     return activeCoordinator && activeCoordinator->handleHomeKey(event);
 }
 
-bool ReaderCoordinator::handleHomeKey(QKeyEvent *event) {
-    if (!bindings_.goHome || (event->type() != QEvent::KeyPress && event->type() != QEvent::KeyRelease)) {
+bool ReaderCoordinator::handleHomeKey(QKeyEvent *event)
+{
+    if (!bindings_.goHome
+        || (event->type() != QEvent::KeyPress && event->type() != QEvent::KeyRelease)) {
         return false;
     }
-    if (event->key() != Qt::Key_Home || event->modifiers() != Qt::NoModifier || lifecycle->blocked() ||
-        kobalt::NativeLifecycle::suspended()) {
+    if (event->key() != Qt::Key_Home || event->modifiers() != Qt::NoModifier || lifecycle->blocked()
+        || kobalt::NativeLifecycle::suspended()) {
         return false;
     }
-    const bool readerVisible = run.reader && run.reader->isVisible() && !BrowserHandoff::activeFor(run.reader);
-    const bool openingVisible = (run.loading && run.loading->window() && run.loading->window()->isVisible()) ||
-                                (run.fallbackAlert && run.fallbackAlert->isVisible());
+    const bool readerVisible =
+            run.reader && run.reader->isVisible() && !BrowserHandoff::activeFor(run.reader);
+    const bool openingVisible =
+            (run.loading && run.loading->window() && run.loading->window()->isVisible())
+            || (run.fallbackAlert && run.fallbackAlert->isVisible());
     if (!homeAfterClose && !readerVisible && !openingVisible) {
         return false;
     }
@@ -280,30 +342,34 @@ bool ReaderCoordinator::handleHomeKey(QKeyEvent *event) {
         if (readerVisible) {
             run.reader->close();
         } else {
-            disposeForTransition([this] {
-                finishHomeNavigation();
-            });
+            disposeForTransition([this] { finishHomeNavigation(); });
         }
     }
     event->accept();
     return true;
 }
 
-void ReaderCoordinator::finishHomeNavigation() {
-    if (std::exchange(homeAfterClose, false) && !lifecycle->blocked() && !kobalt::NativeLifecycle::suspended()) {
+void ReaderCoordinator::finishHomeNavigation()
+{
+    if (std::exchange(homeAfterClose, false) && !lifecycle->blocked()
+        && !kobalt::NativeLifecycle::suspended()) {
         bindings_.goHome();
     }
 }
 
-bool ReaderCoordinator::idleForBenchmark() const {
+bool ReaderCoordinator::idleForBenchmark() const
+{
     return !busy && !run.reader && !run.fallbackAlert && !lifecycle->draining;
 }
 
-bool ReaderCoordinator::available() const {
-    return lifecycle->connected() && authorization->available() && kobalt::NativeReadingSession::available();
+bool ReaderCoordinator::available() const
+{
+    return lifecycle->connected() && authorization->available()
+            && kobalt::NativeReadingSession::available();
 }
 
-bool ReaderCoordinator::begin(const RetainOpening &retainOpening) {
+bool ReaderCoordinator::begin(const RetainOpening &retainOpening)
+{
     if (!available())
         return false;
     if (lifecycle->blocked() || lifecycle->draining)
@@ -319,7 +385,8 @@ bool ReaderCoordinator::begin(const RetainOpening &retainOpening) {
     if (kobalt::previewBook(request->volume()))
         return false;
     QString nextIdentity, nextPath;
-    const auto route = kobalt::readerBookCandidateRoute(request->volume(), &nextIdentity, &nextPath);
+    const auto route =
+            kobalt::readerBookCandidateRoute(request->volume(), &nextIdentity, &nextPath);
     if (route == kobalt::ReaderBookRoute::Unsupported)
         return false;
     // Nickel is settled and Kobalt has built nothing for reading yet.
@@ -332,10 +399,10 @@ bool ReaderCoordinator::begin(const RetainOpening &retainOpening) {
         if (!assetsReady || !kobalt::ui::initializeInterfaceFonts(environment_.assets))
             return missingAssetsBeforeOpening(assetsReady);
     }
-    const bool discardRetained = run.model && nextIdentity != run.identity;
+    const bool discardRetained = run.session && nextIdentity != run.identity;
     run.identity = nextIdentity;
     run.filePath = nextPath;
-    if (!writeJson(activePath, kobalt::qt::object({{"book", run.identity}}))) {
+    if (!writeJson(activePath, kobalt::qt::object({ { "book", run.identity } }))) {
         kobalt::diagnostic("session-arm-failed", {}, kobalt::DiagnosticSeverity::Error);
         return false;
     }
@@ -354,23 +421,23 @@ bool ReaderCoordinator::begin(const RetainOpening &retainOpening) {
             background = window;
             break;
         }
-    const auto preferences = kobalt::storage::readPreferences(environment_.paths.preferences()).object;
+    const auto preferences =
+            kobalt::storage::readPreferences(environment_.paths.preferences()).object;
     run.interface = &kobalt::readerInterface();
     run.interface->setDensity(kobalt::currentScreenDensity());
     // Nickel's Large Print enlarges Kobalt's interface text the same way.
     run.interface->setLargeText(nativeFontScale());
     {
         NativeFontScaleScope building;
-        run.loading = run.interface->createOpening(background, preferences, readerHostServices().presentation);
+        run.loading = run.interface->createOpening(background, preferences,
+                                                   readerHostServices().presentation);
         ignoreNativeFontScale(run.loading->window());
     }
     run.openingStage = kobalt::OpeningStage::Content;
     run.openingPercent = -1;
     run.progressPainted = -1000;
     updateOpening(kobalt::OpeningStage::Content, 0);
-    connect(run.loading->window(), &QDialog::rejected, this, [this] {
-        cancelOpening();
-    });
+    connect(run.loading->window(), &QDialog::rejected, this, [this] { cancelOpening(); });
     const auto epoch = generation;
     run.loading->afterFirstPaint([this, epoch, route, discardRetained] {
         if (epoch == generation && busy && run.opening && run.loading) {
@@ -378,7 +445,7 @@ bool ReaderCoordinator::begin(const RetainOpening &retainOpening) {
                 if (run.sourceLease) {
                     run.sourceLease->cancel();
                 }
-                run.model.reset();
+                run.session.reset();
                 run.sourceLease.reset();
             }
             prepareOpening(route);
@@ -389,14 +456,17 @@ bool ReaderCoordinator::begin(const RetainOpening &retainOpening) {
     return true;
 }
 
-bool ReaderCoordinator::missingAssetsBeforeOpening(bool assetsReady) {
+bool ReaderCoordinator::missingAssetsBeforeOpening(bool assetsReady)
+{
     kobalt::diagnostic(assetsReady ? "interface-fonts-unavailable" : "assets-unavailable");
     // Keep the native settings and reader choice available. This failure
     // needs no Kobalt window or asset-backed font, and consumes no book.
-    const bool filesystemRecovery = !assetsReady && environment_.assets.hasFilesystemRecoveryFiles();
+    const bool filesystemRecovery =
+            !assetsReady && environment_.assets.hasFilesystemRecoveryFiles();
     if (filesystemRecovery)
         kobalt::diagnostic("asset-filesystem-recovery");
-    run.fallbackAlert = kobalt::showMissingAssetsAlert(QStringLiteral(KOBALT_VERSION), filesystemRecovery);
+    run.fallbackAlert =
+            kobalt::showMissingAssetsAlert(QStringLiteral(KOBALT_VERSION), filesystemRecovery);
     if (!run.fallbackAlert) {
         kobalt::diagnostic("assets-alert-unavailable", {}, kobalt::DiagnosticSeverity::Warning);
         return false;
@@ -415,19 +485,23 @@ bool ReaderCoordinator::missingAssetsBeforeOpening(bool assetsReady) {
     return true;
 }
 
-void ReaderCoordinator::missingAssets(bool assetsReady) {
+void ReaderCoordinator::missingAssets(bool assetsReady)
+{
     kobalt::diagnostic(assetsReady ? "interface-fonts-unavailable" : "assets-unavailable");
-    const bool filesystemRecovery = !assetsReady && environment_.assets.hasFilesystemRecoveryFiles();
+    const bool filesystemRecovery =
+            !assetsReady && environment_.assets.hasFilesystemRecoveryFiles();
     if (filesystemRecovery) {
         kobalt::diagnostic("asset-filesystem-recovery");
     }
     auto fallback = std::move(run.opening);
     release();
-    run.fallbackAlert = kobalt::showMissingAssetsAlert(QStringLiteral(KOBALT_VERSION), filesystemRecovery);
+    run.fallbackAlert =
+            kobalt::showMissingAssetsAlert(QStringLiteral(KOBALT_VERSION), filesystemRecovery);
     if (!run.fallbackAlert) {
         kobalt::diagnostic("assets-alert-unavailable", {}, kobalt::DiagnosticSeverity::Warning);
         status("stock");
-        if (fallback && !lifecycle->blocked() && !lifecycle->draining && !kobalt::NativeLifecycle::suspended()) {
+        if (fallback && !lifecycle->blocked() && !lifecycle->draining
+            && !kobalt::NativeLifecycle::suspended()) {
             fallback->openStock();
         }
         return;
@@ -445,7 +519,8 @@ void ReaderCoordinator::missingAssets(bool assetsReady) {
     status("assets-unavailable");
 }
 
-void ReaderCoordinator::prepareOpening(kobalt::ReaderBookRoute candidate) {
+void ReaderCoordinator::prepareOpening(kobalt::ReaderBookRoute candidate)
+{
     // Nickel initializes its own database and imports books during startup.
     // Wait until a reading request, with the loading view already painted,
     // before opening our database or importing the profile's saved files.
@@ -457,15 +532,17 @@ void ReaderCoordinator::prepareOpening(kobalt::ReaderBookRoute candidate) {
             return;
         }
         if (recovery.recovered())
-            pendingNotice = kobalt::profileRecoveryNotice(recovery, usbPath(environment_.paths.directory + "/backups"));
+            pendingNotice = kobalt::profileRecoveryNotice(
+                    recovery, usbPath(environment_.paths.directory + "/backups"));
     }
     if (!historyProfile && kobalt::annotationDatabaseEnabled()) {
         QString error;
         if (profilePrepared)
-            historyProfile = kobalt::ReadingHistory::openProfile(environment_.paths.directory, &error);
+            historyProfile =
+                    kobalt::ReadingHistory::openProfile(environment_.paths.directory, &error);
         if (!historyProfile) {
             fail(error == "profile-in-use" ? strings::get("error.profile_already_in_use")
-                                          : strings::get("error.saved_data_unavailable"));
+                                           : strings::get("error.saved_data_unavailable"));
             return;
         }
     }
@@ -481,27 +558,31 @@ void ReaderCoordinator::prepareOpening(kobalt::ReaderBookRoute candidate) {
     }
     QString identity, path;
     const auto route = candidate == kobalt::ReaderBookRoute::Direct
-                           ? kobalt::readerBookRoute(run.opening->volume(), &identity, &path)
-                           : candidate;
+            ? kobalt::readerBookRoute(run.opening->volume(), &identity, &path)
+            : candidate;
     if (route == kobalt::ReaderBookRoute::Protected) {
         fail(QString(), kobalt::OpeningFallback::Protected);
     } else if (route == kobalt::ReaderBookRoute::Remembered) {
         fail(QString(), kobalt::OpeningFallback::Remembered);
     } else if (route == kobalt::ReaderBookRoute::Failed) {
         fail(strings::get("opening.failed"));
-    } else if (route != kobalt::ReaderBookRoute::Direct || identity != run.identity || path != run.filePath) {
-        fail(strings::get("reader_controller.native_publication_does_not_match_the_opening_request"));
+    } else if (route != kobalt::ReaderBookRoute::Direct || identity != run.identity
+               || path != run.filePath) {
+        fail(strings::get(
+                "reader_controller.native_publication_does_not_match_the_opening_request"));
     } else {
         run.orientation = std::make_unique<kobalt::ReaderOrientation>(
-            kobalt::nativeOrientationSensor(), kobalt::turnReaderScreen, kobalt::ownReaderRotation,
-            kobalt::NativeLifecycle::pinScreenActive);
-        run.orientation->configure(kobalt::storage::readPreferences(environment_.paths.preferences()).object);
+                kobalt::nativeOrientationSensor(), kobalt::turnReaderScreen,
+                kobalt::ownReaderRotation, kobalt::NativeLifecycle::pinScreenActive);
+        run.orientation->configure(
+                kobalt::storage::readPreferences(environment_.paths.preferences()).object);
         run.statePath = environment_.paths.bookState(run.identity);
         load();
     }
 }
 
-void ReaderCoordinator::updateOpening(kobalt::OpeningStage stage, int percent) {
+void ReaderCoordinator::updateOpening(kobalt::OpeningStage stage, int percent)
+{
     if (!run.loading || int(stage) < int(run.openingStage))
         return;
     percent = qBound(0, percent, 100);
@@ -513,9 +594,10 @@ void ReaderCoordinator::updateOpening(kobalt::OpeningStage stage, int percent) {
     if (!changedStage && percent != 100 && now - run.progressPainted < 200)
         return;
     if (changedStage || percent == 100)
-        kobalt::diagnostic(
-            "opening-stage",
-            kobalt::qt::object({{"stage", int(stage)}, {"percent", percent}, {"elapsed_ms", double(now)}}));
+        kobalt::diagnostic("opening-stage",
+                           kobalt::qt::object({ { "stage", int(stage) },
+                                                { "percent", percent },
+                                                { "elapsed_ms", double(now) } }));
     run.openingStage = stage;
     run.openingPercent = percent;
     run.progressPainted = now;
@@ -525,29 +607,32 @@ void ReaderCoordinator::updateOpening(kobalt::OpeningStage stage, int percent) {
     run.loading->setProgress(overall);
 }
 
-void ReaderCoordinator::status(const QString &value, const QString &reason) {
+void ReaderCoordinator::status(const QString &value, const QString &reason)
+{
     int nativeViews = 0, nativeReaders = 0;
     for (auto *widget : QApplication::allWidgets()) {
         const QByteArray type = widget->metaObject()->className();
         nativeViews += type == "ReadingView";
         nativeReaders += type == "PageImageReader";
     }
-    kobalt::diagnostic("session", kobalt::qt::object({{"status", value},
-                                                      {"failed", !reason.isEmpty()},
-                                                      {"native_views", nativeViews},
-                                                      {"native_readers", nativeReaders},
-                                                      {"opening_timings", run.openingTimings}}));
-    environment_.reportSession(kobalt::qt::object({{"status", value},
-                                                 {"reason", reason},
-                                                 {"book", run.identity},
-                                                 {"native_views", nativeViews},
-                                                 {"native_readers", nativeReaders},
-                                                 {"retained_book", bool(run.model) && !busy},
-                                                 {"opening_timings", run.openingTimings}}));
+    kobalt::diagnostic("session",
+                       kobalt::qt::object({ { "status", value },
+                                            { "failed", !reason.isEmpty() },
+                                            { "native_views", nativeViews },
+                                            { "native_readers", nativeReaders },
+                                            { "opening_timings", run.openingTimings } }));
+    environment_.reportSession(kobalt::qt::object({ { "status", value },
+                                                    { "reason", reason },
+                                                    { "book", run.identity },
+                                                    { "native_views", nativeViews },
+                                                    { "native_readers", nativeReaders },
+                                                    { "retained_book", bool(run.session) && !busy },
+                                                    { "opening_timings", run.openingTimings } }));
     nh_log("reader: %s %s", qPrintable(value), qPrintable(reason));
 }
 
-void ReaderCoordinator::hideLoading() {
+void ReaderCoordinator::hideLoading()
+{
     if (run.loading) {
         if (auto *window = run.loading->window())
             window->disconnect(this);
@@ -555,11 +640,13 @@ void ReaderCoordinator::hideLoading() {
     }
 }
 
-void ReaderCoordinator::drainReadingJobs(std::function<void()> finished) {
+void ReaderCoordinator::drainReadingJobs(std::function<void()> finished)
+{
     kobalt::ReaderSession::drain(std::move(finished));
 }
 
-void ReaderCoordinator::disposeForTransition(std::function<void()> finished, bool nativeAllowed) {
+void ReaderCoordinator::disposeForTransition(std::function<void()> finished, bool nativeAllowed)
+{
     authorization->end();
     if (run.fallbackAlert)
         run.fallbackAlert->reject();
@@ -576,23 +663,27 @@ void ReaderCoordinator::disposeForTransition(std::function<void()> finished, boo
     finishDisposal(finalStatus, nativeAllowed);
 }
 
-void ReaderCoordinator::finishDisposal(const QString &finalStatus, bool nativeAllowed) {
+void ReaderCoordinator::finishDisposal(const QString &finalStatus, bool nativeAllowed)
+{
     if (run.reader) {
         const QPointer<ReaderCoordinator> guard(this);
-        run.reader->finishStorageSave([guard, finalStatus, nativeAllowed](bool saved) {
-            if (!guard || !NativeLifecycle::nativeSessionSaveAllowed())
-                return;
-            // Reader completion means every in-flight write has ended, even
-            // when the bounded save job failed. Do not renew its budget here.
-            if (!saved)
-                kobalt::diagnostic("reader-disposed-unsaved", {}, kobalt::DiagnosticSeverity::Error);
-            delete guard->run.reader.data();
-            guard->run.reader.clear();
-            guard->finishDisposal(finalStatus, nativeAllowed);
-        }, nativeAllowed);
+        run.reader->finishStorageSave(
+                [guard, finalStatus, nativeAllowed](bool saved) {
+                    if (!guard || !NativeLifecycle::nativeSessionSaveAllowed())
+                        return;
+                    // Reader completion means every in-flight write has ended, even
+                    // when the bounded save job failed. Do not renew its budget here.
+                    if (!saved)
+                        kobalt::diagnostic("reader-disposed-unsaved", {},
+                                           kobalt::DiagnosticSeverity::Error);
+                    delete guard->run.reader.data();
+                    guard->run.reader.clear();
+                    guard->finishDisposal(finalStatus, nativeAllowed);
+                },
+                nativeAllowed);
         return;
     }
-    run.model.reset();
+    run.session.reset();
     run.nativeProgress.reset();
     run.opening.reset();
     run.orientation.reset();
@@ -625,7 +716,8 @@ void ReaderCoordinator::finishDisposal(const QString &finalStatus, bool nativeAl
     });
 }
 
-void ReaderCoordinator::release(bool endAuthorization) {
+void ReaderCoordinator::release(bool endAuthorization)
+{
     if (endAuthorization)
         authorization->end();
     ++generation;
@@ -636,7 +728,7 @@ void ReaderCoordinator::release(bool endAuthorization) {
     if (run.sourceLease)
         run.sourceLease->cancel();
     hideLoading();
-    run.model.reset();
+    run.session.reset();
     run.nativeProgress.reset();
     run.nativePublication.reset();
     run.opening.reset();
@@ -646,25 +738,26 @@ void ReaderCoordinator::release(bool endAuthorization) {
     QFile::remove(activePath);
 }
 
-void ReaderCoordinator::cancelOpening() {
+void ReaderCoordinator::cancelOpening()
+{
     if (run.reader && busy) {
-        disposeForTransition([this] {
-            status("cancelled");
-        });
+        disposeForTransition([this] { status("cancelled"); });
         return;
     }
     release();
     status("cancelled");
 }
 
-void ReaderCoordinator::fail(const QString &reason, kobalt::OpeningFallback state, bool publicationRejected) {
-    const bool automatic =
-        state == kobalt::OpeningFallback::Protected || state == kobalt::OpeningFallback::Remembered;
+void ReaderCoordinator::fail(const QString &reason, kobalt::OpeningFallback state,
+                             bool publicationRejected)
+{
+    const bool automatic = state == kobalt::OpeningFallback::Protected
+            || state == kobalt::OpeningFallback::Remembered;
     const bool protectedBook = state == kobalt::OpeningFallback::Protected;
-    kobalt::diagnostic(protectedBook ? "opening-protected-handoff"
-                       : automatic   ? "opening-remembered-handoff"
-                                     : "opening-failed",
-                       {{"error_code", kobalt::diagnosticErrorCode(reason)}});
+    kobalt::diagnostic(protectedBook       ? "opening-protected-handoff"
+                               : automatic ? "opening-remembered-handoff"
+                                           : "opening-failed",
+                       { { "error_code", kobalt::diagnosticErrorCode(reason) } });
     auto fallback = std::move(run.opening);
     // Keep the splash on screen while releasing failed loading resources.
     auto view = std::move(run.loading);
@@ -673,8 +766,8 @@ void ReaderCoordinator::fail(const QString &reason, kobalt::OpeningFallback stat
     release(false);
     status("stock", reason);
     run.loading = std::move(view);
-    if (fallback && run.loading && !lifecycle->blocked() && !lifecycle->draining &&
-        !kobalt::NativeLifecycle::suspended()) {
+    if (fallback && run.loading && !lifecycle->blocked() && !lifecycle->draining
+        && !kobalt::NativeLifecycle::suspended()) {
         const auto epoch = generation;
         const std::shared_ptr<kobalt::NativeOpening> retained(std::move(fallback));
         busy = true;
@@ -682,23 +775,23 @@ void ReaderCoordinator::fail(const QString &reason, kobalt::OpeningFallback stat
         run.loading->showFallback(state);
         run.fallbackAlert = run.loading->window();
         kobalt::bindReaderFallback(
-            this, run.fallbackAlert,
-            [this, epoch, retained, publicationRejected] {
-                if (epoch != generation)
-                    return;
-                busy = false;
-                run.fallbackAlert.clear();
-                hideLoading();
-                const bool allowed = !lifecycle->blocked() && !lifecycle->draining &&
-                                     !kobalt::NativeLifecycle::suspended() && authorization->checkNow();
-                authorization->end();
-                if (allowed) {
-                    if (publicationRejected)
-                        kobalt::rememberNativeBook(run.identity, run.filePath, false);
-                    retained->openStock();
-                }
-            },
-            automatic ? 3000 : -1);
+                this, run.fallbackAlert,
+                [this, epoch, retained, publicationRejected] {
+                    if (epoch != generation)
+                        return;
+                    busy = false;
+                    run.fallbackAlert.clear();
+                    hideLoading();
+                    const bool allowed = !lifecycle->blocked() && !lifecycle->draining
+                            && !kobalt::NativeLifecycle::suspended() && authorization->checkNow();
+                    authorization->end();
+                    if (allowed) {
+                        if (publicationRejected)
+                            kobalt::rememberNativeBook(run.identity, run.filePath, false);
+                        retained->openStock();
+                    }
+                },
+                automatic ? 3000 : -1);
         if (run.fallbackAlert)
             connect(run.fallbackAlert.data(), &QDialog::finished, this, [this, epoch] {
                 if (epoch == generation) {
@@ -714,11 +807,13 @@ void ReaderCoordinator::fail(const QString &reason, kobalt::OpeningFallback stat
     }
 }
 
-bool ReaderCoordinator::sameBook() const {
+bool ReaderCoordinator::sameBook() const
+{
     return busy && run.nativePublication && run.nativePublication->active();
 }
 
-void ReaderCoordinator::poll() {
+void ReaderCoordinator::poll()
+{
 #ifndef KOBALT_READER_HARDWARE
     kobalt::NativeProgress::testCommand();
     kobalt::NativeReadingSession::testCommand();
@@ -749,40 +844,59 @@ void ReaderCoordinator::poll() {
 #endif
 }
 
-void ReaderCoordinator::watch() {
+void ReaderCoordinator::checkProgressSoon()
+{
+    // Leave Nickel's signal, or the opening and wake work, before reading
+    // Nickel's saved position.
+    QPointer<ReaderWindow> reader(run.reader);
+    kobalt::qt::later(0, this, [this, reader] {
+        if (reader && reader == run.reader && !busy && !lifecycle->blocked()
+            && !lifecycle->draining)
+            reader->progressTick();
+    });
+}
+
+void ReaderCoordinator::watch()
+{
     if (!lifecycle->blocked() && !timer.isActive())
         timer.start();
 }
 
-void ReaderCoordinator::load() {
+void ReaderCoordinator::load()
+{
     if (kobalt::NativeLifecycle::suspended()) {
         cancelOpening();
         return;
     }
     run.orientation->start(kobalt::shownOrientation(QGuiApplication::primaryScreen()));
     // A retained document is data, never proof that access is still allowed.
-    if (run.model && !authorization->checkNow()) {
+    if (run.session && !authorization->checkNow()) {
         if (!lifecycle->draining)
             fail(strings::get("reader_controller.native_authorization_is_unavailable"));
         return;
     }
     QString error;
     run.nativePublication = std::make_unique<kobalt::NativePublication>();
-    if (!run.nativePublication->open(run.opening->volume(), run.opening->bookmark(), &error,
-                                     bindings_.publicationKeys ? bindings_.publicationKeys(*run.opening) : nullptr)) {
+    if (!run.nativePublication->open(
+                run.opening->volume(), run.opening->bookmark(), &error,
+                bindings_.publicationKeys ? bindings_.publicationKeys(*run.opening) : nullptr)) {
         fail(error);
         return;
     }
-    if (run.nativePublication->identity() != run.identity || run.nativePublication->path() != run.filePath) {
+    if (run.nativePublication->identity() != run.identity
+        || run.nativePublication->path() != run.filePath) {
         if (bindings_.publicationMismatch)
             bindings_.publicationMismatch(*run.nativePublication, run.identity, run.filePath);
-        fail(strings::get("reader_controller.native_publication_does_not_match_the_opening_request"));
+        fail(strings::get(
+                "reader_controller.native_publication_does_not_match_the_opening_request"));
         return;
     }
     run.openingTimings["prepare_ms"] = run.openingTimer.elapsed();
     run.layoutStarted = run.openingTimer.elapsed();
-    const auto stored = kobalt::storage::readBookState(environment_.paths, run.identity, run.statePath);
-    if (stored.status != kobalt::storage::ReadStatus::Ok && stored.status != kobalt::storage::ReadStatus::Missing) {
+    const auto stored =
+            kobalt::storage::readBookState(environment_.paths, run.identity, run.statePath);
+    if (stored.status != kobalt::storage::ReadStatus::Ok
+        && stored.status != kobalt::storage::ReadStatus::Missing) {
         fail(strings::get("error.saved_data_unavailable"));
         return;
     }
@@ -791,7 +905,8 @@ void ReaderCoordinator::load() {
         saved = {};
     run.nativeProgress = std::make_unique<kobalt::NativeProgress>(run.identity);
     run.diskBaseline = run.nativeProgress->read();
-    const auto savedBaseline = kobalt::ReadingProgress::fromJson(saved.value("nickel_progress").toObject());
+    const auto savedBaseline =
+            kobalt::ReadingProgress::fromJson(saved.value("nickel_progress").toObject());
     const bool unread = kobalt::resetNativeUnread(saved, run.diskBaseline);
     const bool useNative = unread || kobalt::preferNativeProgress(run.diskBaseline, savedBaseline);
     run.baseline = run.diskBaseline.valid ? run.diskBaseline : savedBaseline;
@@ -799,8 +914,9 @@ void ReaderCoordinator::load() {
         saved.remove("position");
         saved.remove("finished_position");
     }
-    if (!run.model)
-        run.model = std::make_unique<kobalt::ReaderSession>(environment_.fonts(), environment_.placeholderFamily());
+    if (!run.session)
+        run.session = std::make_unique<kobalt::ReaderSession>(environment_.fonts(),
+                                                              environment_.placeholderFamily());
     run.sourceLease = std::make_shared<kobalt::SourceLease>();
     const auto originalAppearance = saved;
     QJsonObject temporaryAppearance;
@@ -808,44 +924,60 @@ void ReaderCoordinator::load() {
     if (benchmarkTypographyEnabled)
         temporaryAppearance = kobalt::appearance::benchmarkTypography(run.identity);
 #endif
-    const auto preferences = kobalt::appearance::readerPreferences(kobalt::storage::readPreferences(environment_.paths.preferences()).object, saved);
+    const auto preferences = kobalt::appearance::readerPreferences(
+            kobalt::storage::readPreferences(environment_.paths.preferences()).object, saved);
     run.orientation->configure(preferences);
     saved["dark_mode"] = preferences.value("dark_mode").toBool(false);
     saved["bold_reading"] = preferences.value("bold_reading").toString("off");
     saved["avoid_wasteful_styling"] = preferences.value("avoid_wasteful_styling").toBool(true);
-    const auto size = run.interface->readingViewport(QGuiApplication::primaryScreen()->size(), preferences);
-    const auto nativeLocation =
-        unread ? QString() : (useNative ? run.diskBaseline.location : run.nativePublication->location());
-    run.model->open(
-        {run.identity, run.filePath, size, saved, nativeLocation, environment_.paths.layoutCache(),
-         run.sourceLease, run.nativePublication->resources(run.sourceLease), positionCodec(),
-         environment_.paths.documentCache(), temporaryAppearance, originalAppearance,
-         environment_.paths.directory + "/userstyle.css", kobalt::appearance::bookDefaults(preferences), {},
-         run.diskBaseline.valid && run.diskBaseline.status == 2, run.nativePublication->coverPath()},
-        [this](const kobalt::OpeningResult &outcome) {
-            run.openingTimings["load_and_layout_ms"] = run.openingTimer.elapsed() - run.layoutStarted;
-            if (!outcome.ready()) {
-                fail(kobalt::openingMessage(outcome), kobalt::OpeningFallback::Failure, outcome.rememberRejection());
-                return;
-            }
-            if (!sameBook()) {
-                fail(strings::get("reader_controller.native_publication_service_closed"));
-                return;
-            }
-            run.expectedHash = run.model->sourceHash();
-            run.openingTimings["resource_cache"] = run.model->resourceStats();
-            showReader();
-        },
-        [this](kobalt::OpeningStage stage, int percent) {
-            updateOpening(stage, percent);
-        },
-        [this](QImage cover) {
-            if (run.loading)
-                run.loading->setCover(std::move(cover));
-        });
+    const auto size =
+            run.interface->readingViewport(QGuiApplication::primaryScreen()->size(), preferences);
+    const auto nativeLocation = unread
+            ? QString()
+            : (useNative ? run.diskBaseline.location : run.nativePublication->location());
+    run.session->open(
+            { run.identity,
+              run.filePath,
+              size,
+              saved,
+              nativeLocation,
+              environment_.paths.layoutCache(),
+              run.sourceLease,
+              run.nativePublication->resources(run.sourceLease),
+              positionCodec(),
+              environment_.paths.documentCache(),
+              temporaryAppearance,
+              originalAppearance,
+              environment_.paths.directory + "/userstyle.css",
+              kobalt::appearance::bookDefaults(preferences),
+              {},
+              run.diskBaseline.valid && run.diskBaseline.status == 2,
+              run.nativePublication->coverPath() },
+            [this](const kobalt::OpeningResult &outcome) {
+                run.openingTimings["load_and_layout_ms"] =
+                        run.openingTimer.elapsed() - run.layoutStarted;
+                if (!outcome.ready()) {
+                    fail(kobalt::openingMessage(outcome), kobalt::OpeningFallback::Failure,
+                         outcome.rememberRejection());
+                    return;
+                }
+                if (!sameBook()) {
+                    fail(strings::get("reader_controller.native_publication_service_closed"));
+                    return;
+                }
+                run.expectedHash = run.session->sourceHash();
+                run.openingTimings["resource_cache"] = run.session->resourceStats();
+                showReader();
+            },
+            [this](kobalt::OpeningStage stage, int percent) { updateOpening(stage, percent); },
+            [this](QImage cover) {
+                if (run.loading)
+                    run.loading->setCover(std::move(cover));
+            });
 }
 
-void ReaderCoordinator::showReader() {
+void ReaderCoordinator::showReader()
+{
     if (kobalt::NativeLifecycle::suspended()) {
         cancelOpening();
         return;
@@ -855,24 +987,33 @@ void ReaderCoordinator::showReader() {
         scenarioOpening = run.opening->copy();
 #endif
     run.opening.reset();
+    run.nativeProgress->changeAvailable = [this] { checkProgressSoon(); };
+    if (!run.nativeProgress->signalsChanges())
+        kobalt::diagnostic("native-progress-signals-unavailable", {},
+                           kobalt::DiagnosticSeverity::Warning);
     auto book = std::make_unique<kobalt::ReadingBook>(
-        std::move(run.model), run.statePath, environment_.paths, run.identity, run.expectedHash,
-        kobalt::nickel::makeReadingBridge(run.identity, std::move(run.nativeProgress)), run.baseline, run.diskBaseline);
+            std::move(run.session), run.statePath, environment_.paths, run.identity,
+            run.expectedHash,
+            kobalt::nickel::makeReadingBridge(run.identity, std::move(run.nativeProgress)),
+            run.baseline, run.diskBaseline);
     auto services = readerHostServices();
     const auto identity = run.identity;
     services.presentation = [this, identity](QWidget *reader) {
-        return makeWindowPresentation(reader, nativeReaderSleepScreenAvailable(),
-            [this, identity](const sleep::Snapshot &snapshot) {
-                if ((!lifecycle->blocked() && !NativeLifecycle::suspended()) || NativeLifecycle::usbSaveAllowed()) {
-                    homeSleep->remember(snapshot, identity);
-                    // USB export unmounts this storage after the reader's
-                    // final save. Write the file before that continues.
-                    if (lifecycle->blocked())
-                        homeSleep->finishSave();
-                }
-            });
+        return makeWindowPresentation(
+                reader, nativeReaderSleepScreenAvailable(),
+                [this, identity](const sleep::Snapshot &snapshot) {
+                    if ((!lifecycle->blocked() && !NativeLifecycle::suspended())
+                        || NativeLifecycle::usbSaveAllowed()) {
+                        homeSleep->remember(snapshot, identity);
+                        // USB export unmounts this storage after the reader's
+                        // final save. Write the file before that continues.
+                        if (lifecycle->blocked())
+                            homeSleep->finishSave();
+                    }
+                });
     };
-    services.coverImagePath = run.nativePublication ? run.nativePublication->coverPath() : QString();
+    services.coverImagePath =
+            run.nativePublication ? run.nativePublication->coverPath() : QString();
     services.startupNotice = std::exchange(pendingNotice, kobalt::ReaderNotice{});
     services.automaticBookOpening = bindings_.automaticBookOpening;
     services.setAutomaticBookOpening = bindings_.setAutomaticBookOpening;
@@ -884,20 +1025,29 @@ void ReaderCoordinator::showReader() {
     creating.start();
     {
         NativeFontScaleScope building;
-        run.reader = run.interface->createWindow(std::move(book), run.orientation.get(), std::move(services));
+        run.reader = run.interface->createWindow(std::move(book), run.orientation.get(),
+                                                 std::move(services));
         ignoreNativeFontScale(run.reader);
     }
     const double created = creating.nsecsElapsed() / 1e6;
+    // While the reader is visible and awake, its clock tick runs this check, so
+    // the device wakes once a minute. The timer then only covers a reader that
+    // is hidden or asleep, and the tick keeps pushing it back.
+    run.reader->minuteTicked = [this] {
+        if (!lifecycle->blocked())
+            timer.start();
+        kobalt::qt::later(0, this, [this] { poll(); });
+    };
     run.reader->finished = [this](std::unique_ptr<kobalt::ReaderSession> retained) {
         auto closing = run.reader ? run.reader->closingTiming() : kobalt::ActionTiming{};
         // closeEvent has accepted this close. Do not let the visibility
         // poll show the reader again before Qt processes deleteLater().
         run.reader.clear();
         if (!retained || lifecycle->blocked() || kobalt::NativeLifecycle::suspended()) {
-            disposeForTransition([] {});
+            disposeForTransition([] { });
             return;
         }
-        run.model = std::move(retained);
+        run.session = std::move(retained);
         if (run.sourceLease)
             run.sourceLease->cancel();
         // The old facade dies with the window. Drain its last jobs before
@@ -905,8 +1055,8 @@ void ReaderCoordinator::showReader() {
         lifecycle->draining = true;
         ++generation;
         drainReadingJobs([this, closing] {
-            if (run.model)
-                run.model->cancelSource();
+            if (run.session)
+                run.session->cancelSource();
             run.nativePublication.reset();
             run.opening.reset();
             run.orientation.reset();
@@ -925,7 +1075,7 @@ void ReaderCoordinator::showReader() {
                 finishHomeNavigation();
                 // USB or revocation may have arrived during the barrier.
                 if (!cleanupCallbacks.isEmpty()) {
-                    disposeForTransition([] {});
+                    disposeForTransition([] { });
                     return;
                 }
                 if (lifecycle->blocked() && !lifecycle->storageBlocked())
@@ -944,22 +1094,23 @@ void ReaderCoordinator::showReader() {
     QElapsedTimer waiting;
     waiting.start();
     reader->preparePresentation([guard, reader, epoch, lease, created, waiting](bool ready) {
-        if (!guard || !reader || guard->generation != epoch || guard->run.reader != reader ||
-            guard->run.sourceLease != lease) {
+        if (!guard || !reader || guard->generation != epoch || guard->run.reader != reader
+            || guard->run.sourceLease != lease) {
             return;
         }
-        if (!ready || guard->lifecycle->blocked() || kobalt::NativeLifecycle::suspended() || !lease ||
-            lease->revoked() || !guard->sameBook()) {
-            guard->disposeForTransition([] {});
+        if (!ready || guard->lifecycle->blocked() || kobalt::NativeLifecycle::suspended() || !lease
+            || lease->revoked() || !guard->sameBook()) {
+            guard->disposeForTransition([] { });
             return;
         }
         guard->busy = false;
         const auto &timings = guard->run.openingTimings;
-        reader->setOpeningTiming(guard->run.openingTimer,
-                                 kobalt::qt::object({{"prepare_ms", timings.value("prepare_ms")},
-                                                     {"engine_ms", timings.value("load_and_layout_ms")},
-                                                     {"window_ms", created},
-                                                     {"wait_ms", waiting.nsecsElapsed() / 1e6}}));
+        reader->setOpeningTiming(
+                guard->run.openingTimer,
+                kobalt::qt::object({ { "prepare_ms", timings.value("prepare_ms") },
+                                     { "engine_ms", timings.value("load_and_layout_ms") },
+                                     { "window_ms", created },
+                                     { "wait_ms", waiting.nsecsElapsed() / 1e6 } }));
         reader->showFullScreen();
         // Finish deferred widget paints before removing the opening view.
         for (auto *widget : reader->findChildren<QWidget *>()) {
@@ -970,6 +1121,8 @@ void ReaderCoordinator::showReader() {
         guard->hideLoading();
         guard->run.openingTimings["total_ms"] = guard->run.openingTimer.elapsed();
         guard->status("reading");
+        // A sync can finish while the book opens.
+        guard->checkProgressSoon();
 #ifdef KOBALT_SCENARIO_PLAYER
         guard->startScenarios();
 #endif
@@ -977,7 +1130,8 @@ void ReaderCoordinator::showReader() {
 }
 
 #ifdef KOBALT_SCENARIO_PLAYER
-void ReaderCoordinator::startScenarios() {
+void ReaderCoordinator::startScenarios()
+{
     const auto path = environment_.paths.directory + "/scenarios/scenarios.json";
     if (scenariosStarted || !kobalt::diagnosticsActive() || !QFile::exists(path))
         return;
@@ -989,36 +1143,106 @@ void ReaderCoordinator::startScenarios() {
             guard->runScenarios(path);
     });
 }
-void ReaderCoordinator::runScenarios(const QString &path) {
+
+void ReaderCoordinator::runScenarios(const QString &path)
+{
     QFile source(path);
-    const auto file =
-        source.open(QIODevice::ReadOnly) ? QJsonDocument::fromJson(source.readAll()).object() : QJsonObject();
+    const auto file = source.open(QIODevice::ReadOnly)
+            ? QJsonDocument::fromJson(source.readAll()).object()
+            : QJsonObject();
     kobalt::scenario::Options options;
     options.filter = file.value("filter").toString();
+    // A check that only needs to see each scenario work can run fewer repetitions.
+    if (file.value("repeat_scale").toDouble() > 0)
+        options.repeatScale = file.value("repeat_scale").toDouble();
     const auto books = file.value("books").toObject();
     for (auto it = books.begin(); it != books.end(); ++it)
-        if (QFileInfo(it.value().toObject().value("file").toString()).fileName() == QFileInfo(run.filePath).fileName())
+        if (QFileInfo(it.value().toObject().value("file").toString()).fileName()
+            == QFileInfo(run.filePath).fileName())
             options.openBook = it.key();
     // Books open from Nickel's library. The host can open the first book again
     // from a copy of its opening request, but no other book.
     kobalt::scenario::Host host;
     const auto openKey = options.openBook;
-    host.opens = [this, openKey](const QString &key) {
-        return key == openKey && scenarioOpening;
-    };
+    host.opens = [this, openKey](const QString &key) { return key == openKey && scenarioOpening; };
     host.open = [this, openKey](const QString &key) {
         if (key != openKey || !scenarioOpening)
             return false;
         homeSleep->finishSave();
         auto opening = std::make_shared<std::unique_ptr<NativeOpening>>(scenarioOpening->copy());
-        return *opening && begin([opening] {
-            return std::move(*opening);
-        });
+        return *opening && begin([opening] { return std::move(*opening); });
     };
     host.reader = [this]() -> QWidget * { return run.reader.data(); };
-    host.busy = [this] { return run.reader && (run.reader->busy() ||
-                                             run.reader->property("eval_sleep_cover_pending").toBool()); };
+    host.busy = [this] {
+        return run.reader
+                && (run.reader->busy()
+                    || run.reader->property("eval_sleep_cover_pending").toBool());
+    };
     host.idle = [this] { return idleForBenchmark(); };
+    host.wifiControl = [] { return NativeSyncNetwork::canTurnOff(); };
+    host.nativeSync = [this]() -> QString {
+        static const NativeSync native;
+        auto *manager = native.manager();
+        if (!manager)
+            return QStringLiteral("this firmware has no N3SyncManager::sync()");
+        QElapsedTimer call;
+        call.start();
+        native.sync(manager);
+        const double callMs = call.nsecsElapsed() / 1e6;
+        const bool started = native.syncing(manager);
+        kobalt::diagnostic("native-sync-start",
+                           kobalt::qt::object({ { "call_ms", callMs }, { "syncing", started } }),
+                           false);
+        if (!started)
+            return QStringLiteral("Nickel did not start a sync");
+        // Log the end, so samples can be matched to the sync they overlap.
+        // The Wi-Fi power saver reads isSyncing() on this thread too.
+        auto *poll = new QTimer(this);
+        auto elapsed = std::make_shared<QElapsedTimer>();
+        elapsed->start();
+        connect(poll, &QTimer::timeout, this, [poll, elapsed] {
+            auto *current = native.manager();
+            const bool running = current && native.syncing(current);
+            if (running && elapsed->elapsed() < 600000)
+                return;
+            poll->stop();
+            poll->deleteLater();
+            kobalt::diagnostic("native-sync-end",
+                               kobalt::qt::object({ { "elapsed_ms", elapsed->nsecsElapsed() / 1e6 },
+                                                    { "ended", !running } }),
+                               false);
+        });
+        poll->start(100);
+        return {};
+    };
+    host.nativeSyncing = [] {
+        static const NativeSync native;
+        auto *manager = native.manager();
+        return manager && native.syncing(manager);
+    };
+    host.wifiOff = []() -> QString {
+        static const NativeRadio radio;
+        auto *manager = radio.manager();
+        if (!manager)
+            return QStringLiteral("this firmware has no WirelessManager::off()");
+        // Its own name, so this harness call neither uses up the one-time
+        // main-thread report for KOSync's wifi-off nor looks like it in the log.
+        mainthread::AllowBlocking allow("scenario wifi step");
+        mainthread::BlockingOperation wait("scenario-wifi-off");
+        radio.off(manager);
+        return {};
+    };
+    host.wifiUp = [] {
+        static const NativeRadio radio;
+        auto *manager = radio.manager();
+        return manager && radio.up(manager);
+    };
+    host.realMilliseconds = ReadingTimer::platformClock();
+    // Nickel asks canSuspend before each standby, so a refusal keeps the
+    // device awake. A kernel wake lock does not work here: Nickel reads
+    // wakeup_count on the GUI thread before it suspends, and that read waits
+    // while a lock is held, which freezes the reader and the run with it.
+    host.keepAwake = [](bool awake) { NativeLifecycle::holdAwake(awake); };
     host.sleepPersistence = [this](const QJsonObject &request) {
         auto &options = scenario::sleepPersistenceOptions();
         const auto action = request.value("action").toString();
@@ -1027,25 +1251,29 @@ void ReaderCoordinator::runScenarios(const QString &path) {
             options = {};
             return QJsonObject();
         }
-        const auto error = [](const QString &message) { return qt::object({{"error", message}}); };
+        const auto error = [](const QString &message) {
+            return qt::object({ { "error", message } });
+        };
         if (action == "configure") {
             homeSleep->takeSaveMeasurement();
             const auto mode = request.value("mode").toString();
             if (mode != "stock" && mode != "page" && mode != "cover")
                 return error("invalid sleep persistence configuration");
-            options.mode = int(mode == "stock" ? sleep::Mode::Stock :
-                               mode == "cover" ? sleep::Mode::Cover : sleep::Mode::Page);
+            options.mode = int(mode == "stock"           ? sleep::Mode::Stock
+                                       : mode == "cover" ? sleep::Mode::Cover
+                                                         : sleep::Mode::Page);
             return QJsonObject();
         }
         if (action == "drain") {
             auto result = homeSleep->takeSaveMeasurement();
             result["mode"] = sleep::value(sleep::Mode(options.mode));
-            if (options.mode != int(sleep::Mode::Stock) && !result.value("saved").toBool() && !result.contains("error"))
+            if (options.mode != int(sleep::Mode::Stock) && !result.value("saved").toBool()
+                && !result.contains("error"))
                 result["error"] = QStringLiteral("the close did not persist a sleep snapshot");
             return result;
         }
-        if (options.mode == int(sleep::Mode::Cover) &&
-            (!run.reader || !run.reader->property("eval_sleep_cover_ready").toBool()))
+        if (options.mode == int(sleep::Mode::Cover)
+            && (!run.reader || !run.reader->property("eval_sleep_cover_ready").toBool()))
             return error("the cover did not decode; refusing to measure a fallback page");
         if (action == "ready")
             return QJsonObject();
@@ -1058,7 +1286,7 @@ void ReaderCoordinator::runScenarios(const QString &path) {
     };
     host.locate = [](QWidget *widget, const QPoint &point) -> QPair<QWindow *, QPointF> {
         auto *window = widget->window();
-        return {window->windowHandle(), QPointF(widget->mapTo(window, point))};
+        return { window->windowHandle(), QPointF(widget->mapTo(window, point)) };
     };
     // Kobalt's touch filter takes a spontaneous mouse press in its windows as
     // a sign that Qt synthesizes mouse events, and stops translating touch.
@@ -1073,18 +1301,20 @@ void ReaderCoordinator::runScenarios(const QString &path) {
         }
         pressed = press ? target : nullptr;
         const QPoint local = target == widget ? point : target->mapFrom(widget, point);
-        QMouseEvent event(press ? QEvent::MouseButtonPress : QEvent::MouseButtonRelease, QPointF(local),
-                          QPointF(widget->mapToGlobal(point)), Qt::LeftButton, press ? Qt::LeftButton : Qt::NoButton,
-                          Qt::NoModifier);
+        QMouseEvent event(press ? QEvent::MouseButtonPress : QEvent::MouseButtonRelease,
+                          QPointF(local), QPointF(widget->mapToGlobal(point)), Qt::LeftButton,
+                          press ? Qt::LeftButton : Qt::NoButton, Qt::NoModifier);
         QApplication::sendEvent(target, &event);
     };
-    kobalt::diagnostic("scenario-run-start",
-                       kobalt::qt::object({{"scenarios", file.value("scenarios").toArray().size()}}), false);
+    kobalt::diagnostic(
+            "scenario-run-start",
+            kobalt::qt::object({ { "scenarios", file.value("scenarios").toArray().size() } }),
+            false);
     const auto results = kobalt::scenario::run(file, host, options);
-    auto header = kobalt::qt::object({{"kind", "kobalt-device-run"},
-                                      {"target", QString("qt%1").arg(QT_VERSION >> 16)},
-                                      {"version", QString::fromLatin1(KOBALT_VERSION)},
-                                      {"qt", QString::fromLatin1(qVersion())}});
+    auto header = kobalt::qt::object({ { "kind", "kobalt-device-run" },
+                                       { "target", QString("qt%1").arg(QT_VERSION >> 16) },
+                                       { "version", QString::fromLatin1(KOBALT_VERSION) },
+                                       { "qt", QString::fromLatin1(qVersion()) } });
     QFile version("/mnt/onboard/.kobo/version");
     if (version.open(QIODevice::ReadOnly)) {
         const auto device = kobalt::diagnosticDeviceFields(version.read(512));
@@ -1100,14 +1330,16 @@ void ReaderCoordinator::runScenarios(const QString &path) {
             output.write(QJsonDocument(result).toJson(QJsonDocument::Compact) + '\n');
         saved = output.commit();
     }
-    kobalt::diagnostic("scenario-run-end", kobalt::qt::object({{"results", results.size()}, {"saved", saved}}));
+    kobalt::diagnostic("scenario-run-end",
+                       kobalt::qt::object({ { "results", results.size() }, { "saved", saved } }));
     // Tell whoever started the run that it ended. When the run lost its
     // reader, the next opening shows the notice instead.
-    const auto notice = kobalt::benchmarkNotice(results, saved, usbPath(environment_.paths.directory + "/diagnostics"));
+    const auto notice = kobalt::benchmarkNotice(
+            results, saved, usbPath(environment_.paths.directory + "/diagnostics"));
     if (!run.reader || !run.reader->showNotice(notice))
         pendingNotice = notice;
 }
 #endif
 
 ReaderCoordinator::~ReaderCoordinator() = default;
-}
+} // namespace kobalt::nickel

@@ -720,6 +720,40 @@ schedule's 84 there after a manual 89), so the brightness does not move. While l
 (`light.standby` "auto") are unchanged; `setAutomaticBrightness()` (a brightness swipe, the
 panel option, the standby darkening) ends the lift. Diego: as responsive as on Kobo.
 
+### Upstream develop 898f831 (2026-11-05): v1.0-beta.6 nightly 2
+
+117 commits past nightly 1, 679 files: hanging punctuation (with a CREngine render-overflow
+patch and a reworked vertical-justification patch), the page spacing controls in one panel, a
+dark mode toggle in the Light panel, the font picker's previews on a worker with a bounded cache
+and a 100 MiB font budget, reading progress counted as Nickel does, 100 % on the sleep screen for
+finished books, KOSync syncing while reading without a timer and turning Wi-Fi off after a sync
+it turned on, an Automatic sync sheet, Unpin bookmark. Most of the diff is Kobo, test and CI
+work. The tree was reorganised and reformatted on top: `src/interfaces` became `src/app` and
+`src/ui`, the Android host moved to `platforms/standalone` (namespace `kobalt::standalone`),
+`ReaderModel` became `EngineDocument`, short namespace aliases went, and every C++ file was
+reformatted in the Qt style.
+
+The merge conflicted in 12 files, all ones the fork had touched and upstream had moved and
+reformatted; each was resolved by taking upstream's text and putting the fork's change back
+(the loading-bar and sleep-image hooks, the warmth step, the PocketBook sleep-screen label, the
+cover-decode diagnostics, libpng for PocketBook, the dictionary manager's parent). The light
+panel change was redone on the moved file. The port's own sources needed only the new include
+paths, the namespace and the class name.
+
+The build system changed more: `dependencies/` is no longer a sub-project but a configure-time
+dependency cache (`dependencies/cache.cmake`, `kobalt_dependencies()`), keyed by the toolchain
+and the recipes. The port keeps its prebuilt prefix (`KOBALT_DEPS`, which the static Qt was
+linked against): `tools/kobalt-check` now calls `kobalt_dependencies()` with the cache at
+`/work/dependency-cache` and `tools/rebuild-deps.sh` copies the published set into
+`/work/kobalt-deps`. `cache.cmake` learnt `KOBALT_POCKETBOOK` (libpng built into the set as for
+Android, instead of `find_package(PNG)`). Prefix headers unchanged, so Qt was kept. The loopback
+repair for the resource server moved from `src/publication` to `platforms/kobo/common/loopback.cpp`
+(plain Linux ioctls); the port compiles that file. Build clean, no warnings.
+
+Not wired yet: upstream's new host hooks `turnOffWifi` and `holdWifiOff` (the Smart Wi-Fi power
+saving, hidden until beta 7) and `kosyncHttp`; the port's `syncNetwork` connection handling stays
+as it was.
+
 ## Name and icon on the PocketBook home screen (manual firmware files)
 
 These live in the firmware's user config, not in the app package, so a plain copy of the zip

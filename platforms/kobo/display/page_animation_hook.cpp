@@ -2,43 +2,27 @@
 #include "page_animation.h"
 #include "support/diagnostics.h"
 #include <dlfcn.h>
-#include <linux/fb.h>
-#include <fcntl.h>
-#include <sys/ioctl.h>
-#include <unistd.h>
-#include <cstring>
+#include "framebuffer_driver.h"
 
 extern "C" void *nh_dlhook(void *handle, const char *symbol, void *target);
 
 namespace kobalt {
-namespace {
-const QByteArray &animationDriver() {
-    static const QByteArray driver = [] {
-        QByteArray result;
-        const int fd = ::open("/dev/fb0", O_RDONLY | O_CLOEXEC);
-        if (fd >= 0) {
-            fb_fix_screeninfo info{};
-            if (::ioctl(fd, FBIOGET_FSCREENINFO, &info) == 0)
-                result = QByteArray(info.id, int(strnlen(info.id, sizeof(info.id))));
-            ::close(fd);
-        }
-        return result;
-    }();
-    return driver;
+AnimationPanel pageAnimationPanel()
+{
+    return animationPanel(qgetenv("PRODUCT"), framebufferDriver());
 }
-}
-AnimationPanel pageAnimationPanel() {
-    return animationPanel(qgetenv("PRODUCT"), animationDriver());
-}
-PageAnimationSupport pageAnimationSupport() {
+
+PageAnimationSupport pageAnimationSupport()
+{
 #ifdef KOBALT_PAGE_ANIMATIONS
-    return animationSupport(animationDriver(), true, nextAnimationIoctl != nullptr);
+    return animationSupport(framebufferDriver(), true, nextAnimationIoctl != nullptr);
 #else
     return PageAnimationSupport::Unavailable;
 #endif
 }
 
-void installPageAnimationHook() {
+void installPageAnimationHook()
+{
 #ifdef KOBALT_PAGE_ANIMATIONS
     // Older NickelHook mods, including released NickelDissolve builds, replace
     // a GOT entry without keeping its previous hook. Installing during plugin
@@ -55,10 +39,10 @@ void installPageAnimationHook() {
     void *library = dlopen("/usr/local/Kobo/platforms/libkobo.so", RTLD_LAZY | RTLD_NOLOAD);
     if (library) {
         nextAnimationIoctl = reinterpret_cast<PageAnimation::Ioctl>(
-            nh_dlhook(library, "ioctl", reinterpret_cast<void *>(kobalt_animation_ioctl)));
+                nh_dlhook(library, "ioctl", reinterpret_cast<void *>(kobalt_animation_ioctl)));
         dlclose(library);
     }
-    diagnostic("animation-hook", {{"installed", bool(nextAnimationIoctl)}}, false);
+    diagnostic("animation-hook", { { "installed", bool(nextAnimationIoctl) } }, false);
 #endif
 }
-}
+} // namespace kobalt

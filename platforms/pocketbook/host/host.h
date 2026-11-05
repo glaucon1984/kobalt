@@ -1,5 +1,5 @@
 #pragma once
-#include "platforms/android/reader.h"
+#include "platforms/standalone/reader.h"
 #include "reading/sleep_screen.h"
 #include <QStackedWidget>
 #include <QElapsedTimer>
@@ -106,7 +106,7 @@ protected:
     bool eventFilter(QObject *object, QEvent *event) override;
 
 private:
-    android::ReaderController controller;
+    standalone::ReaderController controller;
     std::unique_ptr<ReaderOpeningView> opening;
     QWidget *openingPage;
     QLabel *message;

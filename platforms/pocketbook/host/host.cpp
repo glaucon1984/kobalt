@@ -1,9 +1,9 @@
 #include "host.h"
 #include "boot_page.h"
 #include "services.h"
-#include "interfaces/reader/views/opening.h"
+#include "app/reader/views/opening.h"
 #include "platform/api/kobo_refresh.h"
-#include "interfaces/reader/views/reading_page.h"
+#include "app/reader/views/reading_page.h"
 #include "dictionaries/manager.h"
 #include "sleep_screen_files.h"
 #include "firmware_power.h"
@@ -83,18 +83,18 @@ Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
     connect(opening->window(), &QDialog::rejected, this, &QWidget::close);
     addWidget(openingPage);
 
-    connect(&controller, &android::ReaderController::openingProgress, this, [this](int percent) {
+    connect(&controller, &standalone::ReaderController::openingProgress, this, [this](int percent) {
         if (currentWidget() == openingPage)
             opening->setProgress(percent);
         else if (currentWidget() == bootPage)
             bootPage->setProgress(percent);
     });
-    connect(&controller, &android::ReaderController::openingCover, this, [this](QImage cover) {
+    connect(&controller, &standalone::ReaderController::openingCover, this, [this](QImage cover) {
         bookCover = cover;
         if (currentWidget() == openingPage)
             opening->setCover(std::move(cover));
     });
-    connect(&controller, &android::ReaderController::opened, this, [this] {
+    connect(&controller, &standalone::ReaderController::opened, this, [this] {
         openingBusy = false;
         updateKeepAwake();
         auto *reader = controller.window();
@@ -122,7 +122,7 @@ Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
         holdAwakeForRefresh();
         QTimer::singleShot(3000, this, &Host::primeSleepScreen);
     });
-    connect(&controller, &android::ReaderController::failed, this, [this](const QString &error) {
+    connect(&controller, &standalone::ReaderController::failed, this, [this](const QString &error) {
         openingBusy = false;
         updateKeepAwake();
         qWarning("kobalt-pb: opening failed: %s", qPrintable(error));
@@ -130,14 +130,14 @@ Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
     });
     // The reader is going away: nothing of this host must be painted any more (the opening page
     // would flash, rotated back to the start orientation by Kobalt's orientation restore).
-    connect(&controller, &android::ReaderController::retiring, this, [this] {
+    connect(&controller, &standalone::ReaderController::retiring, this, [this] {
         downloadBusy = openingBusy = false;
         updateKeepAwake();
         quitting = true;
         setUpdatesEnabled(false);
         markCurrentBook({});
     });
-    connect(&controller, &android::ReaderController::closed, this, [this] {
+    connect(&controller, &standalone::ReaderController::closed, this, [this] {
         qInfo("kobalt-pb: book closed");
         quitting = true;
         setUpdatesEnabled(false);

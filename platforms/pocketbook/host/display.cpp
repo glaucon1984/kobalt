@@ -41,4 +41,4 @@ void pageRefresh(QWidget *widget, bool clean, bool) {
 }
 void setReaderRefreshWindow(QWidget *) {}
 }
-// nickel4::configureLoopback comes from src/publication/loopback.cpp, as on Kobo.
+// platform::configureLoopback comes from platforms/kobo/common/loopback.cpp (plain Linux ioctls).

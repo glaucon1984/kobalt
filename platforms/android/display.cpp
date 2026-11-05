@@ -1,11 +1,15 @@
 #include "platform/api/kobo_refresh.h"
+#include "platform/api/loopback.h"
 #include <cerrno>
 #include <QWidget>
 #include <QVariant>
+
 namespace kobalt::platform {
 // The canvas attaches these requests to the Surface before painting and flushing.
-void textRefresh(QWidget *) {}
-void pageRefresh(QWidget *widget, bool clean, bool partialText) {
+void textRefresh(QWidget *) { }
+
+void pageRefresh(QWidget *widget, bool clean, bool partialText)
+{
     if (!widget)
         return;
     // Reader maintenance runs again before the proxy's queued canvas paint.
@@ -18,13 +22,16 @@ void pageRefresh(QWidget *widget, bool clean, bool partialText) {
         widget->update();
     }
 }
-void setReaderRefreshWindow(QWidget *) {}
-}
-namespace kobalt::nickel4 {
+
+void setReaderRefreshWindow(QWidget *) { }
+} // namespace kobalt::platform
+
+namespace kobalt::platform {
 // Android provides loopback. Never attempt Kobo's privileged interface repair.
-bool configureLoopback(int *error) {
+bool configureLoopback(int *error)
+{
     if (error)
         *error = ENOTSUP;
     return false;
 }
-}
+} // namespace kobalt::platform

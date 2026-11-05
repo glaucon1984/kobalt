@@ -14,7 +14,8 @@ namespace kobalt::scenario {
 // What a platform supplies so the player can drive its reader. The player
 // itself only presses widgets by name, sends keys and waits for widgets and
 // diagnostics events, so the same scenario file runs on every platform.
-struct Host {
+struct Host
+{
     // The open reader window, or null.
     std::function<QWidget *()> reader;
     // Starts opening the book with this key from the scenario file's `books`.
@@ -43,8 +44,35 @@ struct Host {
     // Evaluation-only sleep persistence benchmark. Returns measurements, or an
     // `error`. An empty request restores overrides and drains pending writes.
     std::function<QJsonObject(const QJsonObject &)> sleepPersistence;
+    // Whether KOSync can turn Wi-Fi on and off on this host. Optional;
+    // scenarios that need it are skipped without it.
+    std::function<bool()> wifiControl;
+    // Starts the host's own sync with its store, as the host's sync button
+    // does, and returns without waiting for the sync to end. Returns an empty
+    // string or why the sync did not start. Optional; scenarios that need it
+    // are skipped without it.
+    std::function<QString()> nativeSync;
+    // Whether that sync is still running. Optional.
+    std::function<bool()> nativeSyncing;
+    // Turns Wi-Fi off and returns an empty string, or why it could not. It
+    // may return before the radio is down. Optional; a `wifi` step without it
+    // skips the scenario.
+    std::function<QString()> wifiOff;
+    // Whether the radio is up. Optional; without it a `wifi` step does not
+    // wait for the radio to go down.
+    std::function<bool()> wifiUp;
+    // Real time in milliseconds, including time the device spent suspended.
+    // Optional; without it `wait_ms` counts the process's elapsed time, which
+    // stops while a Kobo is in standby.
+    std::function<qint64()> realMilliseconds;
+    // Keeps the device awake (true) or lets it suspend again (false). The
+    // player keeps it awake for the whole run, except for a scenario that sets
+    // `"standby": true`. Optional.
+    std::function<void(bool)> keepAwake;
 };
-struct Options {
+
+struct Options
+{
     // Runs only scenarios whose id starts with this, or that this starts with.
     QString filter;
     // Multiplies each scenario's repetitions. Warm-up runs stay as they are.
@@ -54,9 +82,10 @@ struct Options {
     // Called as each scenario starts, for a run that someone watches.
     std::function<void(const QString &id)> started;
 };
+
 // Runs the scenarios in `file`, a parsed scenario file, and returns one result
 // per scenario: its id, kind, paths, unit, fixture, status (`completed`,
 // `skipped` or `failed`), reason, samples and stages. Diagnostics must be
 // active, because samples come from diagnostics events.
 QVector<QJsonObject> run(const QJsonObject &file, const Host &host, const Options &options = {});
-}
+} // namespace kobalt::scenario

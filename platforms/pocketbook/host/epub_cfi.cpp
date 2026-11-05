@@ -1,6 +1,6 @@
 #include "epub_cfi.h"
 #include "engine/crengine/column_view.h"
-#include "engine/crengine/reader_model.h"
+#include "engine/crengine/engine_document.h"
 #include "support/strings.h"
 #include <lvdocview.h>
 #include <lvtinydom.h>
@@ -149,7 +149,7 @@ QString pointer(ldomNode *node, int offset) {
 }
 }
 
-QString PocketBookPositionCodec::encode(const ReaderModel &model, QString *error) {
+QString PocketBookPositionCodec::encode(const EngineDocument &model, QString *error) {
     auto fail = [error](const QString &message) {
         if (error)
             *error = message;
@@ -207,7 +207,7 @@ QString PocketBookPositionCodec::encode(const ReaderModel &model, QString *error
     return locationPrefix + cfi + ')';
 }
 
-QString PocketBookPositionCodec::decode(const ReaderModel &model, const QString &location, QString *error) {
+QString PocketBookPositionCodec::decode(const EngineDocument &model, const QString &location, QString *error) {
     auto fail = [error](const QString &message) {
         if (error)
             *error = message;

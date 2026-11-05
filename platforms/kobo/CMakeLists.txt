@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 get_filename_component(KOBALT_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
-foreach(retired KOBALT_DEPENDENCIES KOBALT_DEPENDENCY_CACHE KOBALT_ASSETS)
+foreach(retired KOBALT_DEPENDENCIES KOBALT_ASSETS)
     unset(${retired} CACHE)
 endforeach()
 set(KOBALT_QT_MAJOR "6" CACHE STRING "Kobo Qt ABI: 5 or 6")
@@ -28,7 +28,8 @@ else()
     set(KOBALT_SYSTEM_FONT_DIRECTORY "/usr/share/fonts")
 endif()
 
-add_subdirectory("${KOBALT_ROOT}/dependencies" "${CMAKE_CURRENT_BINARY_DIR}/dependencies")
+include("${KOBALT_ROOT}/dependencies/cache.cmake")
+kobalt_dependencies()
 add_subdirectory("${KOBALT_ROOT}/assets" "${CMAKE_CURRENT_BINARY_DIR}/assets")
 set(source "${KOBALT_ROOT}/src")
 
@@ -79,11 +80,13 @@ endforeach()
 string(APPEND embedded "{NULL, NULL, 0}};\n")
 file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/embedded_resources.h" CONTENT "${embedded}" @ONLY)
 
+# syntax.cmake repeats the source selection, compile flags and definitions
+# below, also for the evaluation package. Change both files together.
 file(GLOB_RECURSE shared CONFIGURE_DEPENDS "${source}/*.cpp" "${source}/*.h")
 # The scenario player is built only into evaluation packages.
 list(FILTER shared EXCLUDE REGEX "/src/scenario/")
-list(FILTER shared EXCLUDE REGEX "/(library|interfaces/library)/")
-file(GLOB adapters CONFIGURE_DEPENDS "common/*.cpp" "common/*.h" "qt${KOBALT_QT_MAJOR}/*.cpp" "qt${KOBALT_QT_MAJOR}/*.h" "display/*.cpp")
+list(FILTER shared EXCLUDE REGEX "/(library|app/library)/")
+file(GLOB adapters CONFIGURE_DEPENDS "common/*.cpp" "common/*.h" "nickel-qt${KOBALT_QT_MAJOR}/*.cpp" "nickel-qt${KOBALT_QT_MAJOR}/*.h" "display/*.cpp")
 add_library(kobalt MODULE ${shared} ${adapters} common/install.c common/startup_recovery.c "${hooks}/nh.c" "${hooks}/resources.c"
     "${CMAKE_CURRENT_BINARY_DIR}/nhplugin.h")
 set_source_files_properties("${source}/reading/reading_timer.cpp" PROPERTIES
@@ -96,8 +99,7 @@ else()
     set_source_files_properties("${source}/storage/annotation_database.cpp" PROPERTIES
         COMPILE_DEFINITIONS KOBALT_SQLITE_ANNOTATIONS_DEFAULT=0)
 endif()
-target_include_directories(kobalt PRIVATE "${hooks}" "${CMAKE_CURRENT_BINARY_DIR}"
-    "${source}/interfaces/reader/ui/controls")
+target_include_directories(kobalt PRIVATE "${hooks}" "${CMAKE_CURRENT_BINARY_DIR}")
 target_include_directories(kobalt SYSTEM PRIVATE "${CRENGINE_SOURCE}/crengine/include" "${CRENGINE_BUILD}"
     "${prefix}/include" "${prefix}/include/harfbuzz" "${prefix}/include/freetype2" "${prefix}/include/fribidi")
 target_compile_options(kobalt PRIVATE -Wall -Wextra -Werror -Wno-missing-field-initializers -fvisibility=hidden
@@ -117,7 +119,6 @@ add_custom_command(OUTPUT "${engine}"
         --redefine-sym FT_Render_Glyph=kobalt_font_render_glyph "${CRENGINE_BUILD}/libcrengine.a" "${engine}"
     DEPENDS "${CRENGINE_BUILD}/libcrengine.a" VERBATIM)
 add_custom_target(reader-engine DEPENDS "${engine}")
-add_dependencies(reader-engine kobalt-dependencies)
 add_dependencies(kobalt reader-engine)
 target_link_libraries(kobalt PRIVATE Qt${KOBALT_QT_MAJOR}::Widgets Qt${KOBALT_QT_MAJOR}::GuiPrivate
     Qt${KOBALT_QT_MAJOR}::Network Qt${KOBALT_QT_MAJOR}::Sensors Qt${KOBALT_QT_MAJOR}::Sql Qt${KOBALT_QT_MAJOR}::DBus
@@ -149,7 +150,8 @@ set(resources "${KOBALT_ROOT}/assets")
 file(GLOB notices CONFIGURE_DEPENDS "${resources}/notices/*")
 set(qrc "<RCC><qresource prefix=\"/kobalt\">")
 foreach(path "${resources}/acknowledgments.json" ${notices}
-        "${resources}/samples/words-and-letters.html" "${resources}/samples/layout.html")
+        "${resources}/samples/words-and-letters.html" "${resources}/samples/layout.html"
+        "${resources}/samples/hanging-punctuation.html")
     file(RELATIVE_PATH alias "${resources}" "${path}")
     string(APPEND qrc "<file alias=\"${alias}\">${path}</file>")
 endforeach()
@@ -174,3 +176,14 @@ add_custom_target(package DEPENDS "${package_file}")
 add_custom_target(check-package
     COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/check-package.sh" "${package_file}" "qt${KOBALT_QT_MAJOR}"
     DEPENDS package VERBATIM)
+
+option(KOBALT_BUILD_DISPLAY_TESTS "Build focused Kobo display adapter checks" OFF)
+if(KOBALT_BUILD_DISPLAY_TESTS AND KOBALT_QT_MAJOR EQUAL 5)
+    add_executable(kobalt-qt5-refresh-tests "${KOBALT_ROOT}/tests/model/qt5_refresh.cpp"
+        nickel-qt5/refresh.cpp display/page_animation.cpp)
+    target_include_directories(kobalt-qt5-refresh-tests PRIVATE "${KOBALT_ROOT}" "${source}"
+        "${KOBALT_ROOT}/tests/support")
+    target_compile_definitions(kobalt-qt5-refresh-tests PRIVATE KOBALT_PAGE_ANIMATIONS)
+    target_compile_options(kobalt-qt5-refresh-tests PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(kobalt-qt5-refresh-tests PRIVATE Qt5::Widgets ${CMAKE_DL_LIBS} pthread)
+endif()

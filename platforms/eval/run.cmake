@@ -92,6 +92,9 @@ endif()
 if(NOT EXISTS "${QT_PREFIX}/lib/cmake/Qt6" AND NOT EXISTS "${QT_PREFIX}/Qt6Config.cmake")
     message(FATAL_ERROR "Configure the ${desktop_platform} preset first, or pass QT_PREFIX")
 endif()
+# One evaluation at a time in all worktrees. Kobo builds wait while it runs.
+include("${CMAKE_CURRENT_LIST_DIR}/../load-lock.cmake")
+kobalt_lock_evaluation("${root}")
 
 # Resolve the subject. A worktree subject is measured in place. A revision is
 # exported with git archive, so no checkout or branch is created.
@@ -158,10 +161,38 @@ else()
                 COMMAND_ERROR_IS_FATAL ANY)
         endif()
         # Verified dependency archives and screenshot books from this checkout
-        # keep the export offline.
-        file(GLOB archives "${root}/build/desktop-${desktop_platform}/downloads/*")
-        foreach(directory desktop-${desktop_platform} desktop-${desktop_platform}-perf)
-            file(COPY ${archives} DESTINATION "${source}/build/${directory}/downloads")
+        # keep the export offline. The export builds its dependencies in its
+        # own cache, so a run never depends on the shared cache's state.
+        # Revisions from before the shared cache read their archives from each
+        # build directory.
+        include("${root}/dependencies/cache.cmake")
+        kobalt_dependency_cache_root("${root}" "$ENV{KOBALT_DEPENDENCY_CACHE}" shared)
+        if(EXISTS "${source}/dependencies/cache.cmake")
+            set(destinations dependency-cache)
+        else()
+            set(destinations desktop-${desktop_platform} desktop-${desktop_platform}-perf)
+            foreach(target IN LISTS DEVICE_TARGETS)
+                list(APPEND destinations kobo-${target}-eval)
+            endforeach()
+        endif()
+        file(READ "${source}/dependencies/manifest.json" pins)
+        string(JSON count LENGTH "${pins}")
+        math(EXPR last "${count} - 1")
+        foreach(index RANGE ${last})
+            string(JSON name MEMBER "${pins}" ${index})
+            string(JSON hash GET "${pins}" "${name}" sha256)
+            foreach(archive "${shared}/downloads/${name}-${hash}.tar"
+                    "${root}/build/desktop-${desktop_platform}/downloads/${name}-${hash}.tar")
+                if(EXISTS "${archive}")
+                    file(SHA256 "${archive}" actual)
+                    if(actual STREQUAL hash)
+                        foreach(directory IN LISTS destinations)
+                            file(COPY "${archive}" DESTINATION "${source}/build/${directory}/downloads")
+                        endforeach()
+                        break()
+                    endif()
+                endif()
+            endforeach()
         endforeach()
         # A copy, not a link: the Kobo build container mounts only the export,
         # and evaluation packages include War and Peace from here.
@@ -188,9 +219,15 @@ set(has_perf OFF)
 if(presets MATCHES "\"${desktop_platform}-perf\"")
     set(has_perf ON)
 endif()
+# An exported revision uses its own dependency cache; see the export above.
+set(cache_environment)
+if(NOT source STREQUAL root)
+    set(cache_environment "KOBALT_DEPENDENCY_CACHE=${source}/build/dependency-cache")
+endif()
 function(configure preset directory)
     if(NOT EXISTS "${source}/build/${directory}/CMakeCache.txt")
-        execute_process(COMMAND "${CMAKE_COMMAND}" --preset ${preset} "-DCMAKE_PREFIX_PATH=${QT_PREFIX}"
+        execute_process(COMMAND "${CMAKE_COMMAND}" -E env ${cache_environment}
+            "${CMAKE_COMMAND}" --preset ${preset} "-DCMAKE_PREFIX_PATH=${QT_PREFIX}"
             WORKING_DIRECTORY "${desktop}" COMMAND_ERROR_IS_FATAL ANY)
     endif()
 endfunction()
@@ -245,21 +282,33 @@ if("perf" IN_LIST PARTS)
 endif()
 if("device" IN_LIST PARTS)
     foreach(target IN LISTS DEVICE_TARGETS)
-        # The checkout's verified archives keep the evaluation build offline.
-        file(GLOB archives "${root}/build/kobo-${target}/downloads/*" "${root}/build/kobo-${target}-eval/downloads/*")
-        if(archives)
-            file(COPY ${archives} DESTINATION "${source}/build/kobo-${target}-eval/downloads")
-        endif()
-        execute_process(COMMAND bash platforms/kobo/build.sh ${target}-eval WORKING_DIRECTORY "${source}"
+        # The export copied the checkout's verified archives, which keeps the
+        # evaluation build offline.
+        execute_process(COMMAND "${CMAKE_COMMAND}" -E env ${cache_environment}
+            bash platforms/kobo/build.sh ${target}-eval WORKING_DIRECTORY "${source}"
             COMMAND_ERROR_IS_FATAL ANY)
     endforeach()
 endif()
 finish(build)
+# A Kobo build that started before this evaluation must end before the measured steps.
+kobalt_wait_for_builds("${root}")
 
 set(tests_exit "")
 if("tests" IN_LIST PARTS)
     step(tests)
-    execute_process(COMMAND ctest --preset ${test_preset} --output-junit "${partial}/tests.xml"
+    # The release profile repeats the desktop checks at every gallery variant.
+    set(test_environment "")
+    if(PROFILE STREQUAL "release")
+        set(test_environment KOBALT_TEST_ALL_VARIANTS=1)
+    endif()
+    # The full suite runs through the subject's validation record, so a pass
+    # counts for the validation guard. An older subject without it runs CTest.
+    set(tests_command ctest --preset ${test_preset} --output-junit "${partial}/tests.xml")
+    if(test_preset STREQUAL desktop_platform AND EXISTS "${source}/platforms/validation-record.cmake")
+        set(tests_command "${CMAKE_COMMAND}" -DPRESET=${test_preset} "-DJUNIT=${partial}/tests.xml"
+            -P "${source}/platforms/validation-record.cmake")
+    endif()
+    execute_process(COMMAND "${CMAKE_COMMAND}" -E env ${test_environment} ${tests_command}
         WORKING_DIRECTORY "${desktop}" RESULT_VARIABLE tests_exit OUTPUT_FILE "${partial}/tests.log"
         ERROR_FILE "${partial}/tests.log")
     finish(tests)
