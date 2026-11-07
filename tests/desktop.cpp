@@ -25,6 +25,7 @@
 #include "platforms/android/boox_frame_queue.h"
 #include "app/library/library_view.h"
 #include "library/library_store.h"
+#include "library/book_metadata.h"
 #include "reading/reading_density.h"
 #include "reading/appearance_settings.h"
 #include "storage/profile_database.h"
@@ -10213,12 +10214,25 @@ private slots:
             QVERIFY(hint->font().pixelSize() >= int(ui::px(22)));
         QVERIFY(capture(fixture, name + "-loading-cover-slow", view));
         view->hide();
+        QFile source(book);
+        QVERIFY(source.open(QIODevice::ReadOnly));
+        const auto metadata = library::readBookMetadata(source);
+        QVERIFY(!metadata.cover.isNull());
+        auto handoff = createEmbeddedOpening(reader, desktop::readerHostServices().presentation);
+        handoff->window()->setGeometry(reader->rect());
+        handoff->setCover(metadata.cover);
+        handoff->showFallback(OpeningFallback::Protected);
+        handoff->window()->show();
+        handoff->window()->raise();
+        QVERIFY(capture(fixture, name + "-loading-handoff-cover", handoff->window()));
+        handoff.reset();
         auto baseline = createEmbeddedOpening(reader, desktop::readerHostServices().presentation);
         baseline->window()->setGeometry(reader->rect());
         baseline->setCover({});
         baseline->setProgress(45);
         baseline->window()->show();
         baseline->window()->raise();
+        QVERIFY(baseline->window()->findChild<QLabel *>("rrOpeningBrand")->isVisible());
         QVERIFY(capture(fixture, name + "-loading-no-cover", baseline->window()));
     }
 
@@ -10239,30 +10253,6 @@ private slots:
         openPrologueBody(fixture);
         auto *reader = fixture.window.readerWindow();
         QTRY_VERIFY(reader->readyForPresentation());
-        const auto page = reader->grab().toImage();
-        auto saving = std::make_unique<SavingView>(reader);
-        saving->setGeometry(reader->rect());
-        saving->setProgress(50);
-        saving->show();
-        saving->raise();
-        QVERIFY(saving->isVisible());
-        QVERIFY2(!saving->isWindow(), "Saving must be embedded in the reader");
-        QVERIFY(!saving->graphicsProxyWidget());
-        QVERIFY(saving->inputBarrier());
-        QVERIFY(saving->card()->width() < reader->width());
-        QVERIFY(saving->card()->height() < reader->height() / 2);
-        QVERIFY(saving->findChild<QLabel *>("rrSavingHint")->isVisible());
-        QTest::mouseClick(saving.get(), Qt::LeftButton, Qt::NoModifier, QPoint(1, 1));
-        QTest::keyClick(saving.get(), Qt::Key_Escape);
-        QVERIFY(saving->isVisible());
-        const auto composed = reader->grab().toImage();
-        const auto card = saving->card()->geometry();
-        QVERIFY(composed.copy(card) != page.copy(card));
-        const QRect exposed(0, 0, reader->width(), card.top());
-        QVERIFY(!exposed.isEmpty());
-        QCOMPARE(composed.copy(exposed), page.copy(exposed));
-        QVERIFY(capture(fixture, name + "-saving"));
-        saving.reset();
         for (bool retried : { false, true }) {
             auto failure = std::make_unique<SaveErrorView>(reader, QString(), retried);
             failure->setGeometry(reader->rect());

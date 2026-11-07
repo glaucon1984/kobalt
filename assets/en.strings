@@ -109,7 +109,7 @@
 "kosync.wifi_wake_picture" = "Turn on Wi-Fi, sync, then turn it off again";
 "kosync.wifi_wake_outcome" = "Other devices stay up to date";
 "kosync.sync_now" = "Sync now";
-"kosync.manual_prompt" = "Would you like to sync progress with KOsync?";
+"kosync.manual_prompt" = "Would you like to sync progress with KOSync?";
 "kosync.manual_prompt_description" = "This button syncs progress when you choose. Automatic sync is disabled, so Kobalt will not sync on open, close, sleep or wake. Later taps sync immediately.";
 "kosync.show_password" = "Show";
 "kosync.hide_password" = "Hide";
@@ -136,7 +136,8 @@
 "kosync.connecting" = "Connecting to Wi-Fi…";
 "kosync.invalid_response" = "The sync server returned invalid progress. Your reading position was kept.";
 "kosync.invalid_account" = "Enter an HTTPS server URL, username and password. The URL cannot contain credentials, a query or a fragment.";
-"kosync.native_sync" = "This book uses Kobo’s built-in sync system. KOsync is unavailable for this copy.";
+"kosync.native_sync" = "This book uses Kobo’s built-in sync system. KOSync is unavailable for this copy.";
+"kosync.kobo_cloud" = "This book uses Kobo Cloud to sync reading progress. KOSync is unavailable for this copy.";
 "kosync.unavailable" = "Sync is unavailable for this book or account.";
 "kosync.position_error" = "This synced position could not be opened. Your position was kept and automatic sync was disabled.";
 "kosync.resume_title" = "Resume synced reading?";
@@ -547,8 +548,6 @@
 /* opening */
 "opening.loading" = "Opening your book";
 "opening.may_take_a_while" = "This may take a while";
-"closing.saving" = "Saving your progress…";
-"closing.may_take_a_while" = "This may take a few moments.";
 "closing.failed" = "Couldn't save your progress";
 "closing.failed_detail" = "Your progress couldn’t be saved, so the book is still open. Please try again. If this keeps happening, back up your data.";
 "closing.retry" = "Retry save and close";
@@ -735,7 +734,7 @@
 "settings.system" = "System";
 "settings.automatic_book_opening" = "Open books automatically in Kobalt";
 "settings.automatic_book_opening_description" = "Use Kobalt when opening supported books from your library. This is the same setting as in Kobo's Reading settings.";
-"settings.sleep_screen" = "Sleep screen";
+"settings.sleep_screen" = "Sleep screen while reading";
 "settings.session_timeout" = "New session after sleep";
 "settings.session_timeout_description" = "Waking your device after this amount of time starts a new reading session. You do not need to close and reopen your book, this is automatic.";
 "settings.session_timeout_15" = "15 minutes";
@@ -795,17 +794,21 @@
 "settings.navigation_buttons_only_description" = "Use the page buttons to turn pages.";
 "settings.navigation_menu_hint" = "Tap the middle of the page to open the menu in any mode.";
 "settings.sleep_stock" = "Kobo's built-in sleep screen";
-"settings.sleep_stock_description" = "Default";
+"settings.sleep_stock_description" = "Uses Kobo’s normal sleep screen.";
 "settings.sleep_stock_pocketbook" = "PocketBook's built-in sleep screen";
+"settings.sleep_stock_pocketbook_description" = "Uses the PocketBook’s own standby picture; the power-off logo follows the PocketBook’s Logos setting.";
+"settings.sleep_overlay_description_pocketbook" = "Dims the page and draws your PNG below the sleep indicator. Add transparent PNGs to applications/kobalt/screensaver.";
 "settings.sleep_cover" = "Kobalt with book cover";
-"settings.sleep_cover_description" = "Shows the book cover with reading progress and battery status.";
+"settings.sleep_cover_description" = "Shows the book cover and your selected sleep indicator.";
 "settings.sleep_page" = "Kobalt with reading page";
-"settings.sleep_page_description" = "Dims the current page and shows reading progress and battery status.";
-"settings.sleep_tile" = "Sleep screen style";
+"settings.sleep_page_description" = "Dims the current page and shows your selected sleep indicator.";
+"settings.sleep_overlay" = "Kobalt with PNG over text";
+"settings.sleep_overlay_description" = "Dims the page and draws your PNG below the sleep indicator. Add transparent PNGs to .adds/kobalt/screensaver or .adds/screensaver.";
+"settings.sleep_tile" = "Sleep indicator";
+"settings.sleep_tile_none" = "None";
+"settings.sleep_tile_none_description" = "Shows the sleep image without a status indicator.";
 "settings.sleep_tile_card" = "Card";
-"settings.sleep_tile_card_description" = "Default. A card in the lower-left corner.";
-"settings.sleep_tile_band" = "Footer band";
-"settings.sleep_tile_band_description" = "A strip along the bottom edge. Its top line shows how much you have read.";
+"settings.sleep_tile_card_description" = "A card in the lower-left corner.";
 "settings.sleep_tile_bookmark" = "Bookmark";
 "settings.sleep_tile_bookmark_description" = "A ribbon that hangs from the top edge and shows the percentage read.";
 "sleep.sleeping" = "Sleeping";
@@ -1227,10 +1230,10 @@
 "kosync.last_synced" = "Last synced: %1";
 "kosync.never" = "Never";
 
-"kosync.sideload_copy" = "To use KOsync, download a DRM-free copy of the book and add it to your device separately.";
+"kosync.sideload_copy" = "To use KOSync, download a DRM-free copy of the book and add it to your device separately.";
 "kosync.learn_more" = "Learn More";
-"kosync.learn_more_title" = "Kobo sync and KOsync";
-"kosync.learn_more_description" = "Kobo-managed books use Kobo’s built-in sync, even when the file has no DRM. Kobalt leaves their progress syncing to Kobo.\n\nKOsync is a separate service for KOReader and Kobalt. To use it for this title, add a DRM-free copy to your device as a separate sideloaded book and open that copy.\n\nUse the same book file on every device. Only reading progress is synced; books, bookmarks and annotations are not transferred.";
+"kosync.learn_more_title" = "Kobo sync and KOSync";
+"kosync.learn_more_description" = "Kobo-managed books use Kobo’s built-in sync, even when the file has no DRM. Kobalt leaves their progress syncing to Kobo.\n\nKOSync is a separate service for KOReader and Kobalt. To use it for this title, add a DRM-free copy to your device as a separate sideloaded book and open that copy.\n\nUse the same book file on every device. Only reading progress is synced; books, bookmarks and annotations are not transferred.";
 
 "kosync.device_name" = "Device name";
 "kosync.device_name_saved" = "Device name saved.";

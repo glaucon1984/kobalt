@@ -334,6 +334,10 @@ int main(int argc, char **argv)
                 "success automatically dismisses after at least 1.5 seconds");
         QCoreApplication::processEvents();
         require(notice.isVisible() && completions == 0, "success does not disappear immediately");
+        host.hide();
+        host.show();
+        require(notice.isVisible() && dismissal->isActive(),
+                "a restored parent keeps the success notice dismissal armed");
         dismissal->stop();
         QMetaObject::invokeMethod(dismissal, "timeout", Qt::DirectConnection);
         require(completions == 1 && !notice.isVisible(),
@@ -766,6 +770,15 @@ int main(int argc, char **argv)
     panel.settingsPages->setCurrentIndex(int(reader::SettingsPage::Display));
     require(!reopenedHelp || !reopenedHelp->isVisible(), "leaving Sync dismisses its explanation");
     tab->click();
+    page->setNativeCloudSync(true, true);
+    panel.fitContent(window.size());
+    QApplication::processEvents();
+    require(disclaimer->isVisible() && disclaimer->text().contains("Kobo Cloud")
+                    && disclaimer->text().contains("KOSync") && !sync->isVisible()
+                    && !automatic->isVisible(),
+            "Kobo Cloud books explain why KOSync is unavailable");
+    require(disclaimer->visibleRegion().boundingRect() == disclaimer->rect(),
+            "Kobo Cloud explanation fits on one page");
     page->setNativeCloudSync(false);
     page->setAccount("https://sync.example/prefix", "reader", true, true);
     require(server->isVisible() && sync->isVisible() && automatic->isVisible(),

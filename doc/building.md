@@ -35,13 +35,15 @@ A build from a linked Git worktree is a variant named after the worktree's folde
 
 ### Kobo compatibility checks
 
-Run `cmake --build --preset mac-kobo-checks` from `platforms/desktop/` to check both Kobo SDKs. This optional target uses the prepared Qt5 and Qt6 images, compiles changed production objects and links the mod library. It skips installation ZIP creation and package checks. Ordinary Mac app and test builds do not run it. Workers can use it when their change needs Kobo checks. Run both targets before integration; the ordinary edit/build/test loop does not require them.
+Run `cmake --build --preset mac-kobo-checks` from `platforms/desktop/` to check both Kobo SDKs. This optional target uses the prepared Qt5 and Qt6 images, compiles changed production objects and links the mod library. It also builds the Kobo adapter tests and runs them under `qemu-arm` against the firmware Qt libraries of each image; see [Pewter](validation/kobo.md#pewter-the-fake-nickel). It skips installation ZIP creation and package checks. Ordinary Mac app and test builds do not run it. Workers can use it when their change needs Kobo checks. Run both targets before integration; the ordinary edit/build/test loop does not require them.
 
-From the repository root, use `bash platforms/kobo/build.sh qt5 --check` or `qt6 --check` for one SDK. Set `KOBALT_CHECK_SOURCE_ROOT` only when using a newer check runner against another explicitly selected checkout. Checks reuse the selected checkout's incremental Kobo build directories and the shared dependency cache. A first check in a new worktree still compiles the application objects; later checks rebuild only stale inputs. The checks use the real SDKs and catch compile and link errors, including code hidden behind platform conditionals. They do not replace package or runtime validation. Missing Docker access or a prepared image fails the check without downloading or building an SDK.
+From the repository root, use `bash platforms/kobo/build.sh qt5 --check` or `qt6 --check` for one SDK. Set `KOBALT_CHECK_SOURCE_ROOT` only when using a newer check runner against another explicitly selected checkout. Checks reuse the selected checkout's incremental Kobo build directories and the shared dependency cache. A first check in a new worktree still compiles the application objects; later checks rebuild only stale inputs. The checks use the real SDKs and catch compile and link errors, including code hidden behind platform conditionals and in the test programs. The mod library and the tests share one compiled set of application objects. The tests check what the firmware adapters ask Nickel to do; they do not replace package or device validation. Missing Docker access or a prepared image fails the check without downloading or building an SDK.
 
 ### Kobo syntax check
 
-Run `cmake -P platforms/kobo/syntax.cmake` from the repository root to find Kobo compile errors on the Mac in seconds. It checks every source that the Kobo Qt5 and Qt6 builds compile, including the C files and the Qt5 refresh check program. The Mac's clang reads each source in syntax-only mode against the headers of the prepared images. Each lane uses the flags, definitions and warnings of its Kobo build.
+The syntax check uses empty placeholders for generated `.moc` and `moc_*.cpp` includes. The SDK builds generate and compile the real meta-object code.
+
+Run `cmake -P platforms/kobo/syntax.cmake` from the repository root to find Kobo compile errors on the Mac in seconds. It checks every source that the Kobo Qt5 and Qt6 builds compile, including the C files and the Kobo test programs. The Mac's clang reads each source in syntax-only mode against the headers of the prepared images. Each lane uses the flags, definitions and warnings of its Kobo build.
 
 | Lane | Headers |
 | --- | --- |
@@ -76,7 +78,7 @@ cmake --build --preset mac-screenshots
 
 To build, run and record a full suite pass in one step, run `cmake -DPRESET=mac -P platforms/validation-record.cmake` from the repository root. The launcher's full-suite action, the release evaluation, the full gallery and Kobo packages record their own passes. A Claude Code hook refuses to repeat these runs on an unchanged tree. See [Validation guard](validation.md#validation-guard).
 
-The Mac test presets run six tests at a time. Desktop checks that follow the gallery's screen sizes run one row per size, both themes and 150% interface text, not every combination. Set `KOBALT_TEST_ALL_VARIANTS=1` to run every combination; the release evaluation profile does this. Gallery captures always use every combination.
+The Mac test presets run six tests at a time. Desktop checks that follow the gallery's screen sizes run one row per size, both themes and 150% interface text, not every combination. Set `KOBALT_TEST_ALL_VARIANTS=1` to run every combination; release approval requires this pass, and the release evaluation profile selects it. Validation records keep representative and all-variant passes separate. Gallery captures always use every combination.
 
 For routine UI changes, use `cmake --build --preset mac-light-tests` and `ctest --preset mac-light`. Add `cmake --build --preset mac-light-screenshots` for the primary-view gallery in `build/screenshots/mac-light/`. The full commands above remain the release validation lane. Gallery workers run in isolated processes; set `KOBALT_GALLERY_JOBS` to control their parallelism. To capture only some gallery cards, run `KOBALT_GALLERY_SCENE=about cmake --build --preset mac-screenshots`; separate several names with commas. The images go to `build/screenshots/mac-scenes/`, and the full gallery stays as it is. Filtered captures include all current pages of each selected screen, even when a layout change adds or removes pages. See [Native validation](validation.md#everyday-commands) for coverage and limits. To review the captures screen by screen and collect notes, use [Screen review](screen-review.md).
 
@@ -102,7 +104,7 @@ The additional native integration groups reuse the same production objects. Run 
 
 ## Linux
 
-Use a prepared native Qt 6.11 or newer Qt 6 SDK with Core, Gui, Widgets, Network and Sql. Headless checks also need Test, matching GuiPrivate headers, and the minimal platform plugin. Desktop builds use sensorless orientation by default. Set `-DKOBALT_DESKTOP_SENSORS=ON` with a matching Qt Sensors module to run the real sensor adapter and sensor-specific integration assertions. Manual rotation and sensorless lifecycle checks run in the default build. Kobo and Android keep real sensor support. Install CMake 3.22 or later, Ninja, a C/C++ compiler, make, patch, pkg-config, Git, zip, and libpng/zlib development packages. Never build Qt modules as part of the application build. Distribution Qt packages are supported when they meet these requirements; keep all Qt components from the same SDK.
+Use a prepared native Qt 6.11 or newer Qt 6 SDK with Core, Gui, Widgets, Network and Sql. The kobuild Linux image provides one; [GitHub builds](#github-builds-and-tagged-releases) describes how to run the suite in it. Headless checks also need Test, matching GuiPrivate headers, and the minimal platform plugin. Desktop builds use sensorless orientation by default. Set `-DKOBALT_DESKTOP_SENSORS=ON` with a matching Qt Sensors module to run the real sensor adapter and sensor-specific integration assertions. Manual rotation and sensorless lifecycle checks run in the default build. Kobo and Android keep real sensor support. Install CMake 3.22 or later, Ninja, a C/C++ compiler, make, patch, pkg-config, Git, zip, and libpng/zlib development packages. Never build Qt modules as part of the application build. Distribution Qt packages are supported when they meet these requirements; keep all Qt components from the same SDK.
 
 Run from `platforms/desktop/`:
 
@@ -139,8 +141,8 @@ The Kobo target selects the suspend-inclusive boot clock for reading duration on
 The `qt5` and `qt6` presets consume prepared kobuild SDKs, including Sensors. Compiler, sysroot and Qt repairs belong in kobuild. Pull the selected SDK images before building:
 
 ```sh
-docker pull ghcr.io/nicoverbruggen/kobuild:qt5-v0.3.1
-docker pull ghcr.io/nicoverbruggen/kobuild:qt6-v0.2.2
+docker pull ghcr.io/nicoverbruggen/kobuild:qt5-v0.5.0
+docker pull ghcr.io/nicoverbruggen/kobuild:qt6-v0.5.0
 bash platforms/kobo/build.sh qt5
 bash platforms/kobo/build.sh qt6
 ```
@@ -162,7 +164,7 @@ Run `bash platforms/kobo/build.sh qt5-diagnostic` for firmware 4, or `qt6-diagno
 The Android project builds a signed debug APK through Qt's standard CMake `apk` target. It uses the prepared multi-architecture kobuild image; Docker selects its native host variant. Both variants target Android `arm64-v8a`.
 
 ```sh
-docker pull ghcr.io/nicoverbruggen/kobuild:android-v0.3.2
+docker pull ghcr.io/nicoverbruggen/kobuild:android-v0.5.0
 bash platforms/android/build.sh
 ```
 
@@ -235,7 +237,9 @@ Stop and reap run-owned helper processes and remove temporary profiles, staging 
 
 ## GitHub builds and tagged releases
 
-`.github/workflows/ci.yml` builds Qt5, Qt6 and a signed Android release APK on branch pushes and tags. Helper checks validate version inputs, source pins and missing-key failures. Kobo jobs check the system archive member, numeric root ownership and executable permissions. Desktop application builds, native tests and screenshot galleries run locally through the Mac or Linux presets; they are not CI jobs.
+`.github/workflows/ci.yml` builds Qt5, Qt6 and a signed Android release APK on branch pushes and tags. Helper checks validate version inputs, source pins and missing-key failures. Before the package builds, the `native-tests` job builds and runs the full native suite on Linux with `platforms/ci/native-tests.sh`, in the pinned kobuild Linux image `linux-v0.5.0`. Branch runs use representative variants. Tagged runs, including a manual run on a tag, require all variants in the same job. The Kobo and Android jobs wait for it. Each Kobo job then runs the [Kobo adapter tests](validation/kobo.md#pewter-the-fake-nickel) before it builds its package, and checks the system archive member, numeric root ownership and executable permissions. Desktop application builds and screenshot galleries run locally through the Mac or Linux presets; they are not CI jobs.
+
+To run the CI suite locally in the same image, run `bash platforms/ci/native-tests.sh` from the repository root. It pulls the pinned image. Set `KOBALT_LINUX_IMAGE` to use another prepared image without pulling, such as a local kobuild build, and `JOBS` to set the parallelism. Outside GitHub, set `KOBALT_TEST_ALL_VARIANTS=1` to measure the tagged-release coverage locally. Outputs go to `build/desktop-linux/` and dependencies to the shared dependency cache.
 
 A tag such as `v1.0-beta.4` supplies the displayed version and Android version name. Package filenames stay fixed across releases so download links remain compatible: `Kobalt-qt5.zip`, `Kobalt-qt6.zip`, `Kobalt-android-arm64.apk` and `Kobalt-sources.tar.gz`. Branch builds use the version in `assets/manifest.json`. CI checks that a triggering tag identifies the checked-out commit. Local builds can set `KOBALT_RELEASE_VERSION` to test the same path without editing the tracked asset manifest.
 
@@ -296,4 +300,4 @@ Successful tag builds assemble a draft GitHub release with the three packages, s
 
 ## Widget keyboard
 
-Kobo and desktop hosts use `ui::makeWidgetKeyboard` from `src/ui/controls/keyboard.h`. It implements the existing `KeyboardFactory` interface. The supplied parent determines placement, the supplied editor receives text, and the controller owns its panel. It selects a Latin layout from the host's default Qt locale: German uses QWERTZ, French uses AZERTY except in Canada, and Dutch and other languages use QWERTY. On Kobo, Nickel sets that locale from the selected system language. It provides printable ASCII symbols, Space, Delete and submission. Tap Shift for one uppercase letter or accented character. Double-tap Shift to enable Caps Lock; its arrow gains a bar underneath. Tap Shift again to return to lowercase. Space consumes one-shot Shift. Delete and the symbol page preserve the letter case. A new editor starts in lowercase. Hold a Latin letter to choose an accented variant or a ligature. Shift also applies to these choices. Other writing systems and input methods are not implemented. `setSubmitText` changes the submit label. Android keeps its native system keyboard. Other adapters select this factory through their host services. The panel follows the reader theme and publishes its bounds so dictionary and account editors stay above it. Kobo keys use the existing text-refresh policy; no Nickel keyboard constructors or repaint hooks are required.
+Desktop hosts use `ui::makeWidgetKeyboard` from `src/ui/controls/keyboard.h`. It implements the existing `KeyboardFactory` interface. The supplied parent determines placement, the supplied editor receives text, and the controller owns its panel. It selects a Latin layout from the host's default Qt locale: German uses QWERTZ, French uses AZERTY except in Canada, and Dutch and other languages use QWERTY. It provides printable ASCII symbols, Space, Delete and submission. Tap Shift for one uppercase letter or accented character. Double-tap Shift to enable Caps Lock; its arrow gains a bar underneath. Tap Shift again to return to lowercase. Space consumes one-shot Shift. Delete and the symbol page preserve the letter case. A new editor starts in lowercase. Hold a Latin letter to choose an accented variant or a ligature. Shift also applies to these choices. Other writing systems and input methods are not implemented. `setSubmitText` changes the submit label. Android keeps its native system keyboard. Other adapters select this factory through their host services. The panel follows the reader theme and publishes its bounds so dictionary and account editors stay above it. Kobo uses the native keyboard adapter in `platforms/kobo/common/native_keyboard.h` and the selected Nickel adapter. It retains Nickel’s key layout, input receiver and language switching. The optional key-repaint hook keeps its rendering compatible with the reader theme.

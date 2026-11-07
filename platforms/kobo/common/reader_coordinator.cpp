@@ -178,18 +178,13 @@ ReaderCoordinator::ReaderCoordinator(ReaderEnvironment &environment, Coordinator
                 run.reader->checkpoint();
             else
                 run.reader->sleepReader();
-        } else if (busy || run.fallbackAlert)
+        } else if (run.fallbackAlert) {
             disposeForTransition([] { });
-        else if (!lifecycle->storageBlocked() && !lifecycle->shuttingDown()
-                 && ui::initializeInterfaceFonts(environment_.assets))
-            homeSleep->prepare(bindings_.enabled());
+        }
     };
     lifecycle->sleepViewReady = [this] {
-        if (run.reader && !busy) {
+        if (run.reader && !busy)
             run.reader->sleepViewReady();
-        } else if (!run.reader && !busy && !lifecycle->storageBlocked()) {
-            homeSleep->present();
-        }
     };
     lifecycle->beforeWake = [this] {
         homeSleep->clear();
@@ -220,7 +215,8 @@ ReaderCoordinator::ReaderCoordinator(ReaderEnvironment &environment, Coordinator
                 // reader holding Nickel's backing store indefinitely.
                 kobalt::diagnostic("resume-authorization-unavailable", {},
                                    kobalt::DiagnosticSeverity::Warning);
-                disposeForTransition([this] { status("authorization-unavailable"); });
+                // An unverified account must not receive native progress or time writes.
+                disposeForTransition([this] { status("authorization-unavailable"); }, false);
             }
         }
     };
@@ -244,11 +240,9 @@ ReaderCoordinator::ReaderCoordinator(ReaderEnvironment &environment, Coordinator
         homeSleep->clear();
         if (mode == NativeLifecycle::Shutdown::Reboot)
             return;
-        if (run.reader && !busy && !BrowserHandoff::activeFor(run.reader))
+        if (run.reader && run.reader->isVisible() && !busy
+            && !BrowserHandoff::activeFor(run.reader))
             homeSleep->preparePowerOff(run.reader->powerScreenSnapshot());
-        else if (!run.reader && !busy && !run.fallbackAlert
-                 && ui::initializeInterfaceFonts(environment_.assets))
-            homeSleep->prepare(bindings_.enabled(), true);
     };
     lifecycle->prepareShutdown = [this](std::function<void()> ready) {
         homeAfterClose = false;
@@ -262,12 +256,8 @@ ReaderCoordinator::ReaderCoordinator(ReaderEnvironment &environment, Coordinator
             ready();
         });
         if (run.reader && !busy)
-            run.reader->prepareShutdown(
-                    [this] {
-                        homeSleep->persistPowerOff(run.identity);
-                        disposeForTransition([] { });
-                    },
-                    lifecycle->batteryLowShutdown());
+            run.reader->prepareShutdown([this] { disposeForTransition([] { }); },
+                                        lifecycle->batteryLowShutdown());
         else
             disposeForTransition([] { });
     };
@@ -433,6 +423,9 @@ bool ReaderCoordinator::begin(const RetainOpening &retainOpening)
                                                    readerHostServices().presentation);
         ignoreNativeFontScale(run.loading->window());
     }
+    // The cached image belongs to Nickel and needs no publication service.
+    // Start before eligibility checks so a handoff can keep the same cover.
+    run.loading->loadCover(nativeReaderCoverPath(run.opening->volume()));
     run.openingStage = kobalt::OpeningStage::Content;
     run.openingPercent = -1;
     run.progressPainted = -1000;
@@ -986,6 +979,7 @@ void ReaderCoordinator::showReader()
     if (!scenarioOpening && run.opening)
         scenarioOpening = run.opening->copy();
 #endif
+    const bool koboCloud = run.opening && kobalt::isKoboCloudBook(run.opening->volume());
     run.opening.reset();
     run.nativeProgress->changeAvailable = [this] { checkProgressSoon(); };
     if (!run.nativeProgress->signalsChanges())
@@ -995,7 +989,8 @@ void ReaderCoordinator::showReader()
             std::move(run.session), run.statePath, environment_.paths, run.identity,
             run.expectedHash,
             kobalt::nickel::makeReadingBridge(run.identity, std::move(run.nativeProgress)),
-            run.baseline, run.diskBaseline);
+            run.baseline, run.diskBaseline, QString(), kobalt::ReadingHistory::UtcClock(),
+            koboCloud);
     auto services = readerHostServices();
     const auto identity = run.identity;
     services.presentation = [this, identity](QWidget *reader) {

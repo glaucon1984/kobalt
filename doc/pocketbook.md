@@ -28,7 +28,8 @@ page covers installing and using it. [Building](building.md#pocketbook) covers t
   frontlight settings, each with its own option; a manual change of that value turns its
   schedule off, as on Kobo.
 - The sleep screen shows the current page or the cover with progress and battery, in the
-  orientation the device is held in. The power-off screen shows the same page or cover marked
+  orientation the device is held in; the "PNG over text" option draws a transparent PNG of
+  yours from `applications/kobalt/screensaver` over the dimmed page. The power-off screen shows the same page or cover marked
   "Powered off" (as on Kobo, so a switched-off device is told from a sleeping one at a glance),
   and the boot screen shows the page as it was, when the PocketBook's Power-off logo and Boot
   logo settings (Settings → Personalize → Logos) are the book cover.

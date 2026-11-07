@@ -412,6 +412,8 @@ Reader::Reader(std::unique_ptr<kobalt::ReadingBook> openedBook,
             });
     resize(QGuiApplication::primaryScreen()->size());
     prepareSleepCover();
+    if (sleep::mode(preferences) == sleep::Mode::Overlay)
+        prepareSleepOverlay();
     const auto battery = services.battery();
     lowBattery = !battery.charging && !battery.fullyCharged && battery.percent >= 0
             && battery.percent <= 5;
@@ -534,6 +536,7 @@ void Reader::buildReadingPage()
         observeReading();
         page->cleanRefresh(true);
         updateOrientationBlock();
+        progressTick();
     };
     page->imageHeld = [this](QPoint point) {
         if (session->busy() || lifecycleHidden || closing || exitPending || exportRunning
@@ -1847,9 +1850,10 @@ void Reader::connectPageInput()
         const auto action = tapZones::action(layout, x, y);
         const bool menuTap = action == tapZones::Action::Menu;
         if (topControls->isVisible() || choices->isVisible()) {
-            // An open Text or Layout panel can cover the middle of a device
-            // preview, so any tap on the page that stays visible closes it.
-            if (!devicePreview || menuTap || appearanceEdit.panelOpen()) {
+            // Panels can cover the middle of a device preview. Any tap on
+            // the exposed page closes the panel and returns to reading.
+            if (!devicePreview || menuTap || appearanceEdit.panelOpen() || chapterGraph->isVisible()
+                || lightPopup->isVisible()) {
                 flashAfterMenu = true;
                 dismissControls();
             }

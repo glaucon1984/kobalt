@@ -167,12 +167,22 @@ int main(int argc, char **argv)
 #ifdef Q_OS_LINUX
     // Noto Sans Math may be installed system-wide. This fixture must begin
     // without it in Qt, then prove the private face is registered on demand.
+    // The configuration has no font folders. It keeps fontconfig's rule that
+    // names sans-serif as the default family: without a default family, Qt's
+    // fixed system font has no family, and rich text with <pre> crashes.
     QTemporaryDir fontEnvironment;
     require(fontEnvironment.isValid(), "Cannot isolate the component font environment");
     const auto fontConfig = fontEnvironment.filePath("fonts.conf");
     QFile config(fontConfig);
     require(config.open(QIODevice::WriteOnly), "Cannot create the component font configuration");
-    require(config.write("<fontconfig></fontconfig>\n") > 0,
+    require(config.write(
+                    "<fontconfig><match target=\"pattern\">"
+                    "<test qual=\"all\" name=\"family\" compare=\"not_eq\"><string>sans-serif</string></test>"
+                    "<test qual=\"all\" name=\"family\" compare=\"not_eq\"><string>serif</string></test>"
+                    "<test qual=\"all\" name=\"family\" compare=\"not_eq\"><string>monospace</string></test>"
+                    "<edit name=\"family\" mode=\"append_last\"><string>sans-serif</string></edit>"
+                    "</match></fontconfig>\n")
+                    > 0,
             "Cannot write the component font configuration");
     config.close();
     qputenv("FONTCONFIG_FILE", fontConfig.toUtf8());
@@ -1023,7 +1033,8 @@ int main(int argc, char **argv)
         require(graph.findChild<QLabel *>("rrGraphChapterCaption")->text() == "stats.chapter",
                 "Chapter caption does not expose its catalog key");
         graph.setProgress("Title", 4, 10, 12, 25, 100);
-        require(graph.findChild<QLabel *>("rrGraphChapterPercent")->text() == "common.percent [33]",
+        // Nickel's count: chapter page 4 of 10 is 40%.
+        require(graph.findChild<QLabel *>("rrGraphChapterPercent")->text() == "common.percent [40]",
                 "Key mode lost the formatting argument");
         ui::PageNavigation navigation(&host, "keyTest");
         require(navigation.back->text() == "common.back", "Navigation bypasses the string catalog");
@@ -1686,7 +1697,8 @@ int main(int argc, char **argv)
         require(barPaints.paints > 0, "Changed chapter word count did not repaint the bars");
         graph.setData(chapters, { 20, -1, 1, 1 }, true, {});
         require(title->text() == "The Second Voyage", "The chapter title is missing");
-        require(text("rrGraphChapterPercent") == get("common.percent").arg(33)
+        // Nickel's count: chapter page 4 of 10 is 40%, book page 26 of 100 is 26%.
+        require(text("rrGraphChapterPercent") == get("common.percent").arg(40)
                         && text("rrGraphChapterFigure") == "7"
                         && text("rrGraphChapterUnit") == get("stats.pages_left"),
                 "Chapter progress differs from the shared display rule");
@@ -1695,7 +1707,7 @@ int main(int argc, char **argv)
         require(text("rrGraphNextChapter")
                         == get("chapter_graph.next_chapter").arg(12).arg(get("common.pages")),
                 "Next chapter length is missing");
-        require(text("rrGraphBookPercent") == get("common.percent").arg(25),
+        require(text("rrGraphBookPercent") == get("common.percent").arg(26),
                 "Book progress disagrees with the current page");
         require(text("rrGraphBookFigure") == "75", "Book pages remaining omit the displayed page");
         graph.setChapterNumber(13, 24);
@@ -3837,6 +3849,17 @@ int main(int argc, char **argv)
     }
     {
         const QRect keyboard(0, 900, 1072, 548), key(927, 1235, 95, 95), query(0, 0, 595, 112);
+        require(kobalt::keyboardEditDamage(QRegion(key) + query, keyboard, query)
+                        && kobalt::keyboardEditDamage(key, keyboard, query)
+                        && kobalt::keyboardEditDamage(query, keyboard, query),
+                "Key and field edits must share one partial keyboard update");
+        require(!kobalt::keyboardEditDamage(QRegion(key).united(query).boundingRect(), keyboard,
+                                            query)
+                        && !kobalt::keyboardEditDamage(keyboard, keyboard, query)
+                        && !kobalt::keyboardEditDamage(key, {}, query)
+                        && !kobalt::keyboardEditDamage(QRegion(key) + QRect(0, 400, 20, 20),
+                                                       keyboard, query),
+                "Keyboard opening and unrelated panel damage must keep the original refresh policy");
         constexpr quint64 modes = 2 | 4 | 8, ordinary = (quint64(1) << 38) | 8;
         using kobalt::completeKeyboardWaveform;
         require(completeKeyboardWaveform(key, keyboard, 8, ordinary, modes) == ordinary,

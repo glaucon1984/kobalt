@@ -374,6 +374,9 @@ ReaderHostServices readerServices() {
     result.annotationExportDirectory = [] {
         return QStringLiteral("/mnt/ext1/Kobalt/Annotations");
     };
+    // Transparent PNGs for the "PNG over text" sleep screen, next to the profile (the installer
+    // leaves the folder alone; the user reaches it over USB).
+    result.sleepOverlayDirectories = QStringList{ QStringLiteral("/mnt/ext1/applications/kobalt/screensaver") };
     result.colorDisplay = [] {
         return false;
     };

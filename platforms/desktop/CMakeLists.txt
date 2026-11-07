@@ -221,6 +221,10 @@ add_executable(kobalt-eval-compare EXCLUDE_FROM_ALL "${KOBALT_ROOT}/platforms/ev
 target_link_libraries(kobalt-eval-compare PRIVATE Qt6::Gui)
 
 if(BUILD_TESTING)
+    add_test(NAME build.validationRecord COMMAND "${CMAKE_COMMAND}"
+        "-DTEST_TMP_ROOT=${CMAKE_CURRENT_BINARY_DIR}"
+        -P "${KOBALT_ROOT}/platforms/test-validation-record.cmake")
+    set_tests_properties(build.validationRecord PROPERTIES LABELS "fast;build" TIMEOUT 60)
     add_test(NAME build.cachePolicy COMMAND "${CMAKE_COMMAND}"
         "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/cache-policy-test"
         "-DPOLICY_FILE=${KOBALT_ROOT}/platforms/cache-policy.cmake"
@@ -367,7 +371,7 @@ if(BUILD_TESTING)
         KOBALT_FONT_DIRECTORY="${KOBALT_ASSETS}/fonts" KOBALT_INSTALLED_FONTS)
     add_dependencies(kobalt-tests kobalt-reader-lifecycle-tests)
     foreach(check teardownRemovesApplicationFilter shutdownFinalSaveTimesOut
-            backgroundWriteFailureRetriesWithoutCountingPause backgroundCheckpointStopsBeforeOtherCallbacks standaloneReadingHistory uneditedPanelTransitions lightReplacesDefaultMenu appearanceApplyOnNavigation appearanceRelayoutPreservesPassage
+            backgroundWriteFailureRetriesWithoutCountingPause backgroundCheckpointStopsBeforeOtherCallbacks standaloneReadingHistory navigationDismissalWaitsForPanel uneditedPanelTransitions lightReplacesDefaultMenu appearanceApplyOnNavigation appearanceRelayoutPreservesPassage
             overflowClosesCurrentPanel appearanceSettingsRetainsDraft appearanceWriteFailureRetainsDraft
             appearanceSleepRetainsDraft appearanceFailedPreviewDismisses appearanceApplyFailureCanExit
             appearanceCloseDuringPreview appearanceSleepDuringFirstEdit appearanceDragsDuringPreview
@@ -376,13 +380,13 @@ if(BUILD_TESTING)
             pageTurnTimingIgnoresNoopNavigation pageButtonsAfterTouchUseDeliveryTime pageGestureBurstIgnoresRapidTurns exitThroughReaderAndReopen exitGuardUsesTapTime staleSearchReplyIgnored searchSurvivesReflow
             searchHighlightClearsOnReflow
             sleepRequestFreezesOrientationBeforeHandoff closePublishesHeldOrientationBeforeBackgroundPaint
-            closeRestoresOrientationBeforeBackgroundPaint rotationOwnership customSleepScreenIsOptIn
-            closedReaderRetainsSleepScreen usbRetainsBackdropBeforeReleasingReader persistedSleepScreenRejectsStaleAndDamagedFrames
+            closeRestoresOrientationBeforeBackgroundPaint rotationOwnership readerUsesSelectedSleepScreen
+            closedReaderDoesNotSaveSleepScreen usbDoesNotSaveSleepScreen persistedSleepScreenRejectsStaleAndDamagedFrames
             homeSleepScreenRequiresUnambiguousLastBook nativeOpeningStatus
             sleepScreenUpdatesWhilePluggedIn sleepScreenDimsOnlyItsOwnedPage sleepTilesRepaintOnlyTheirArea
             sleepSnapshotMatchesTheDisplayedPage
             sleepSnapshotReplacesEachClockWithoutChangingTheReadingPage sleepTimeLeftUsesHoursAboveTwoHours sleepTimeLeftApproximate timeRemainingFormatShared
-            sleepScreenModesKeepTheStockDefaultAndMigrateTheOptIn sleepCoverFitsWithoutCroppingOrDimming
+            sleepScreenDefaultsMigrateOnce sleepPngOverlaysUseEitherFolder sleepSettingsShowWhereToAddPngs sleepOverlayUsesTheDimmedPage sleepCoverFitsWithoutCroppingOrDimming
             sleepCoverDecodingIsBoundedAndHonorsSourceCancellation wifiStatus readingTimeStatus remoteKeyActivityRequiresActiveReading
             finishChoiceSurvivesSleepAndRequiresActiveReader finishPromptPersistence progressPercentagesAgree kosyncAccountGating kosyncOpening kosyncNetwork kosyncBackgroundWifi kosyncWifiRelease kosyncMoments minuteClock idleTimers wifiPowerSaver wifiPowerSaverAtSleep kosyncManualToolbar kosyncManualConnection kosyncPasswordSleep kosyncSleepSavesSyncTime kosyncFinal nativeProgressWaitsForSleep appearanceRetryCooldown closeWithUnusableSettings recoveryNoticeAfterFirstPage benchmarkNoticeAfterRun activityBatchesAndLowBattery usbFinalSave
             progressChoiceKeepAndGo progressChoiceWaitsForSettings finishedSyncWithoutPositionKeepsLocalReading
@@ -511,6 +515,8 @@ if(BUILD_TESTING)
             openingCoverLayout
             openingFirstPaintCallback
             readingStripChangesLeaveBodyUnpainted
+            navigationPressKeepsDamageInItsTab
+            navigationRefreshKeepsOverlayAndPanelPolicies
             chapterPageSurvivesLongTitles
             batteryTextAlignment
             annotationPaintPreservesText
@@ -670,7 +676,7 @@ if(BUILD_TESTING)
         library kosync chapter_progress)
     kobalt_regressions(model font_axes touch_rotation)
     kobalt_regressions(platform reader_orientation font_sources system_fonts nickel_dictionary_selection
-        nickel_reading_pace_cache nickel_reading_save nickel_event_save nickel_session_calls nickel_session_volume nickel_book_menu nickel_font_scale native_progress native_sync_network native_dialog_overlay native_lifecycle standby_input standby_diagnostics usb_removal page_transition_native page_animation)
+        nickel_reading_pace_cache nickel_reading_save nickel_event_save nickel_account nickel_session_calls nickel_session_volume nickel_book_menu nickel_font_scale native_progress native_sync_network native_dialog_overlay native_lifecycle standby_input standby_diagnostics usb_removal page_transition_native page_animation)
     kobalt_regressions(engine vertical_spacing source_index columns advanced_text paragraph_spacing beautifier alignment indentation page_layout vertical_writing mathml line_breaking
         fallback_styles svg_limits image_proportions whitespace links search word_selection reader publisher_markup local_reader document_word_count document_cache alternate_layout)
     kobalt_regressions(component ui acknowledgments kosync_ui)
@@ -701,7 +707,7 @@ if(BUILD_TESTING)
         "dictionary:^(desktop\\.dictionary.*|model\\.dictionary-store|platform\\.nickel-dictionary-selection)$"
         "images:^(desktop\\.imageViewer|engine\\.(image-proportions|svg-limits)|resource\\.image-policy)$"
         "viewport:^(platform\\.reader-orientation|desktop\\.(viewport.*|bookmarkRibbonSafeArea|fullWidthPanels)|engine\\.alternate-layout|lifecycle\\.(rotationOwnership|sleepRequestFreezesOrientationBeforeHandoff|close.*Orientation.*)|ui\\.libraryCanvasFollowsViewport|model\\.touch-rotation)$"
-        "display:^(platform\\.page-(animation|transition-native)|desktop\\.(pageAnimationCompatibility|androidPageAnimations|boox.*)|ui\\.(pageTurnFrames|boox.*|libraryThemeSurface|.*Paints.*|openingFirstPaintCallback|continuationHintClears|hidingSelectionMenuKeepsDamageCompact)|model\\.(screen-refresh|page-refresh-regions|image-damage|page-pixels)|lifecycle\\.appearanceOpeningDoesNotRepaintToolbar)$"
+        "display:^(platform\\.page-(animation|transition-native)|desktop\\.(pageAnimationCompatibility|androidPageAnimations|boox.*)|ui\\.(pageTurnFrames|boox.*|libraryThemeSurface|.*Paints.*|openingFirstPaintCallback|continuationHintClears|hidingSelectionMenuKeepsDamageCompact|navigationPressKeepsDamageInItsTab|navigationRefreshKeepsOverlayAndPanelPolicies)|model\\.(screen-refresh|page-refresh-regions|image-damage|page-pixels)|lifecycle\\.(appearanceOpeningDoesNotRepaintToolbar|navigationDismissalWaitsForPanel))$"
         "chrome:^(lifecycle\\.(readingTimeStatus|clock.*|minuteClock|idleTimers|timeRemainingFormatShared|exit.*)|model\\.header-footer|desktop\\.(headerFooter.*|batteryPercentageOnly|largeInterfaceScale.*|desktopControls)|ui\\.(chapterPageSurvivesLongTitles|batteryTextAlignment|readingStripChangesLeaveBodyUnpainted))$"
         "library:^(desktop\\.(library.*|restartFinishedBooks)|ui\\.library.*|model\\.library)$"
         "input:^(ui\\.(paged.*|pageTurnTapFilter|pageTurnFilterSeparatesInputClocks|hold.*|fontHoldCancellation|canvas.*|cancelledCanvasTouchRestoresSlider|listPressFeedback|optionAndSwatchPressFeedback)|desktop\\.(navigation|hardwarePageButtons\\..*|wordSelection\\..*|touchCursor.*|annotationTwoFingerTapConsumesWholeSequence|annotationRightClickRejectsChords)|lifecycle\\.(pageTurnTimingIgnoresNoopNavigation|pageButtonsAfterTouchUseDeliveryTime|pageGestureBurstIgnoresRapidTurns|remoteKeyActivityRequiresActiveReading))$"
@@ -710,7 +716,7 @@ if(BUILD_TESTING)
         "fonts:^(desktop\\.(publisherFontDefault|fontPagingClearsCaptions|kfFontVariants|opticalSize)|ui\\.fontSelectionDoesNotToggle|model\\.font-axes|platform\\.(font-sources|system-fonts)|resource\\.resource-provider)$"
         "progress:^(lifecycle\\.(progress.*|finish.*|nativeProgressWaitsForSleep)|model\\.(reading-pace|reading-speed|reading-progress|chapter-progress|logical-word-counter)|engine\\.document-word-count|platform\\.(native-progress|nickel-reading-pace-cache))$"
         "storage:^(model\\.(storage-assets|android-assets|profile-storage|record-writer|main-thread|reading-history)|session\\.reading-book|lifecycle\\.(closeWaitsFor.*|closeRetriesRequiredNativeSaves|closeWithUnusableSettings|sleepWaitsForNativeTimeBeforePosition|background.*|standaloneReadingHistory|revokedNativeDrainRetainsLocalSave|quitAfterFailedLocalSaveRetry|appearanceRetryCooldown|recoveryNoticeAfterFirstPage|activityBatchesAndLowBattery)|desktop\\.(sameProcessReadersDoNotRecoverEachOther|standaloneHistorySourceKeys)|platform\\.nickel-(event|reading)-save)$"
-        "sleep:^(lifecycle\\.(sleep.*|customSleepScreenIsOptIn|closedReaderRetainsSleepScreen|usb.*|persistedSleepScreen.*|homeSleepScreen.*|pageTurnsResumeWhenReaderIsShownAfterSleep|shutdownFinalSaveTimesOut|teardownRemovesApplicationFilter)|platform\\.(shutdown|sleep-persistence|kobo-power-screen|usb-removal|native-lifecycle)|desktop\\.deviceEmulation|model\\.engine-activity)$"
+        "sleep:^(lifecycle\\.(sleep.*|readerUsesSelectedSleepScreen|closedReaderDoesNotSaveSleepScreen|usb.*|persistedSleepScreen.*|homeSleepScreen.*|pageTurnsResumeWhenReaderIsShownAfterSleep|shutdownFinalSaveTimesOut|teardownRemovesApplicationFilter)|platform\\.(shutdown|sleep-persistence|kobo-power-screen|usb-removal|native-lifecycle)|desktop\\.deviceEmulation|model\\.engine-activity)$"
         "diagnostics:^(model\\.(diagnostics|crash-reports)|desktop\\.(diagnostics|storageDiagnostics)|platform\\.standby-(input|diagnostics))$"
         "kobo:^(platform\\.(startup-recovery|native-startup-wait|screensaver-loader|native-dialog-overlay|nickel-.*)|lifecycle\\.nativeOpeningStatus|model\\.qt-compat)$"
         "settings:^(desktop\\.(settings|lightDarkModeShortcut)|lifecycle\\.(appearance.*|uneditedPanelTransitions|overflowClosesCurrentPanel)|model\\.appearance-settings|component\\.(ui|acknowledgments)|ui\\.(regularIconWeight|connectedModalFooter))$"

@@ -340,7 +340,9 @@ private:
     bool progressCheckDeferred = false;
     bool exitPending = false, exportRunning = false;
     bool lifecycleHidden = false;
-    QImage sleepImage, sleepCover;
+    QImage sleepImage, sleepCover, sleepOverlay;
+    bool sleepOverlayLoading = false;
+    sleep::Tile activeSleepTile = sleep::Tile::Bookmark;
     QFileInfo sleepCoverSource;
     sleep::Snapshot exitSleepSnapshot;
     QString sleepProgress, sleepRemaining;
@@ -551,6 +553,8 @@ private:
     void applyDarkMode(bool enabled);
     void applyBoldReading(bool enabled);
     void prepareSleepCover();
+    void prepareSleepOverlay();
+    void updateSleepOverlayOption();
     sleep::Snapshot captureSleepScreen();
     void updateSleepBattery();
     void showSleepScreen();
@@ -561,6 +565,7 @@ private:
     struct SleepOption
     {
         QString value, label, explanation;
+        bool enabled = true;
     };
 
     // Sleep and session choices share one popup.
@@ -697,6 +702,8 @@ private:
     bool showNotice(const ReaderNotice &notice) override;
     void showFormattingWarning();
     bool flashAfterMenu = false, flashAfterPagePreview = false;
+    int navigationActive = -1;
+    bool navigationPanelPainted = false;
     void requestFlash(const char *reason);
     bool turnPainted = false;
     // Reading activity queues a due batch without a periodic wake timer.
@@ -731,13 +738,9 @@ private:
     void transitionSaveError(std::function<void()> retry, std::function<void()> discard);
     void failExit(quint64 request, const QString &error = {});
     void cancelExit();
-    void showSaving(int progress);
-    void hideSaving();
     bool closeSaveRetried = false, closeWithoutSaving = false;
     quint64 closeRequest = 0;
     QElapsedTimer closeStage;
-    int closeSaveProgress = 0;
-    std::unique_ptr<SavingView> savingView;
     QPointer<kobalt::ui::ChoiceModal> closeSaveError;
     std::unique_ptr<storage::RecordWriter> reportWriter, preferencesWriter;
     void saveSoon();

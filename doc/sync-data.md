@@ -33,7 +33,7 @@ The page turn must never wait for storage. All writes to Nickel's database use N
 
 `NativeProgress` (`platforms/kobo/common/native_progress.h`, `nickel-qt5/native_progress.cpp`, `nickel-qt6/native_progress.cpp`) reads the book row on a separate read-only SQLite connection with a 100 ms busy timeout: `ContentID`, `ChapterIDBookmarked`, `DateLastRead`, `ReadStatus`, `___PercentRead`, `ReadStateSynced`, `FirstTimeReading`, `RestOfBookEstimate`, `CurrentChapterEstimate`, `CurrentChapterProgress` and, on Qt 6, `___NumPages`.
 
-It checks for a newer position after Nickel's signals: the sync manager's `finished()` and `userProfileUpdated()`, and USB `doneProcessing()` and unplug. A signal that arrives while the device sleeps is checked at wake. Only when these signals cannot be connected does a one-minute check repeat it, and Kobalt logs `native-progress-signals-unavailable`. If another device moved the position, the reader asks before it moves (see [Progress sync](reader/sync.md)).
+It checks for a changed committed position after Nickel's signals: the sync manager's `finished()` and `userProfileUpdated()`, and USB `doneProcessing()` and unplug. A signal that arrives while the device sleeps is checked at wake. Only when these signals cannot be connected does a one-minute check repeat it, and Kobalt logs `native-progress-signals-unavailable`. If another device moved the position, the reader asks before it moves (see [Progress sync](reader/sync.md)).
 
 ## What Kobalt writes to Nickel
 
@@ -82,7 +82,7 @@ On Qt 5, step 5 also writes the current chapter's own row for a KEPUB book, as N
 
 Nickel turns the start and end into the analytics events `OpenContent` and `LeaveContent`. `LeaveContent` carries the progress at the end of the session, `SecondsRead`, `PagesTurned` and `IdleTime`. Nickel adds title, author, content type and format, `Origin`, `Monetization` and `ViewType`.
 
-Nickel keeps these events in memory until `EventEngine::savePendingEvents` writes them to the `AnalyticsEvents` table. That function clears its buffer even when the save fails, and on firmware 4.46 it saves nothing unless it runs on the event engine's own thread. Kobalt calls it on that thread after a session starts and after it ends. It first takes Nickel's default-database transaction, waiting at most 2 seconds, and skips the save if it cannot, so the buffer survives until the next save (`saveNativeEvents` in `platforms/kobo/common/native_event_save.h`). Nickel also saves the buffer on a timer and at shutdown.
+Nickel keeps these events in memory until `EventEngine::savePendingEvents` writes them to the `AnalyticsEvents` table. That function clears its buffer even when the save fails, and on firmware 4.46 it saves nothing unless it runs on the event engine's own thread. Kobalt calls it on that thread after a session starts and after it ends. It first takes Nickel's default-database transaction, waiting at most 2 seconds, and skips the save if it cannot, so the buffer survives until the next save (`saveNativeEvents` in `platforms/kobo/common/native_event_save.h`). If the outer commit fails, Kobalt rolls back its own transaction so later native saves can begin. This cleanup cannot restore events that Nickel already removed from its buffer. Nickel also saves the buffer on a timer and at shutdown.
 
 ## What Nickel uploads
 
@@ -165,7 +165,7 @@ These tables compare what Nickel's own reader and Kobalt write and send for the 
 
 ## Books that Nickel's sync carries
 
-A book whose Nickel content ID is not a `file:///` path came through Nickel's sync: a Kobo store book, or a book from a replacement server such as BookOrbit or Grimmory. `ReadingBook::usesNativeCloudSync` is true for it. Kobalt then leaves the position exchange to Nickel's sync and does not use KOSync for that book.
+A book whose Nickel content ID is not a `file:///` path came through Nickel's sync: a Kobo store book, a Kobo Cloud upload or a book from a replacement server such as BookOrbit or Grimmory. `ReadingBook::usesNativeCloudSync` is true for it. Kobalt leaves the position exchange to Nickel for these books. On Qt6, the native Kobo Cloud volume flag identifies the copy for the Sync tab and excludes it from KOSync. USB-sideloaded copies keep their local file identity and remain eligible for KOSync.
 
 ## Verification
 
@@ -173,7 +173,8 @@ A book whose Nickel content ID is not a `file:///` path came through Nickel's sy
 - `platform.native-progress` and `model.reading-progress`: progress signals and position rules.
 - `platform.nickel-event-save`: the event save under a competing writer.
 - `platform.nickel-reading-save`, `lifecycle.closeWaitsForNativeTimeBeforePosition` and `lifecycle.sleepWaitsForNativeTimeBeforePosition`: the order and failure handling of time and position writes.
-- Firmware behavior, such as the upload format and the analytics conditions, cannot be checked by the native tests. Check it on a device or an emulated Nickel after a firmware or code change, against a local sync server: the stored row after sleep and close, the `PUT .../state` body, and the `AnalyticsEvents` rows and their upload.
+- `pewter.progress`, in both Kobo SDKs: the status at opening, the position and progress write, the recent book at close, and their failure paths, as described above. It runs the firmware adapters against [pewter](validation/kobo.md#pewter-the-fake-nickel), a fake Nickel, with `bash platforms/kobo/build.sh qt5 --check` and `qt6 --check`.
+- Firmware behavior, such as the upload format and the analytics conditions, cannot be checked by the native tests or pewter. Check it on a device or an emulated Nickel after a firmware or code change, against a local sync server: the stored row after sleep and close, the `PUT .../state` body, and the `AnalyticsEvents` rows and their upload.
 
 When a Nickel symbol that Kobalt resolves at run time is missing on a new firmware, the matching write is skipped or refused. The required ones are listed in each `Api::ready()` in the native files. Optional ones, such as `Volume::setCurrentChapterProgress`, are checked where they are used.
 
