@@ -754,6 +754,21 @@ Not wired yet: upstream's new host hooks `turnOffWifi` and `holdWifiOff` (the Sm
 saving, hidden until beta 7) and `kosyncHttp`; the port's `syncNetwork` connection handling stays
 as it was.
 
+### Upstream v1.0-beta.6 (2026-11-07): the release tag
+
+25 commits past nightly 2, the beta 6 release (`7ff437e`, main = develop = tag): sleep screens
+reworked for beta 6 (a new "PNG over text" mode that draws a transparent PNG of the user's over
+the dimmed page, the Bookmark tile as the default, the Band tile gone, a None tile), a light
+sleep bookmark in light mode, embedded fonts budgeted smallest first (a CREngine patch,
+`crengine-embedded-font-limit.patch`, so the dependencies were rebuilt; prefix headers unchanged,
+Qt kept), cached covers shown early, Nickel progress reconciliation fixes, and Kobo test work
+(pewter, a fake Nickel). Two conflicts: the strings file (the stock sleep screen's description now
+says "Kobo's normal sleep screen", so the PocketBook label got a description of its own, looked up
+as the label key plus `_description`) and the sleep screen choice (upstream's tile visibility and
+overlay enablement, with the fork's host-named stock label kept). The overlay mode's folder on
+PocketBook is `applications/kobalt/screensaver` (`sleepOverlayDirectories`; the installer leaves
+it alone), named in a PocketBook description string behind `KOBALT_POCKETBOOK`.
+
 ## Name and icon on the PocketBook home screen (manual firmware files)
 
 These live in the firmware's user config, not in the app package, so a plain copy of the zip
