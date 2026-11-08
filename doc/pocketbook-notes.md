@@ -769,6 +769,38 @@ overlay enablement, with the fork's host-named stock label kept). The overlay mo
 PocketBook is `applications/kobalt/screensaver` (`sleepOverlayDirectories`; the installer leaves
 it alone), named in a PocketBook description string behind `KOBALT_POCKETBOOK`.
 
+### Upstream v1.0-beta.7 (2026-11-08): the release tag
+
+36 commits past beta 6, the beta 7 release (`e86533c`, main = develop = tag). A clean merge, no
+conflicts, and `dependencies/` untouched, so the prebuilt libraries were kept (no deps rebuild;
+only the app was built). What it brings: collapsible chapter groups in Contents (a setting under
+Chapter List: expand the current section, all, or off), hardware button mapping (Settings →
+Controls → Hardware buttons: previous, next or nothing per button), a "disable standby while
+reading" option, a live appearance preview while adjusting margins and text (`AppearancePreview`,
+the margin preview renamed and widened), the reading link indicator removed and link settings
+grouped, About Kobalt reachable from the Library, dictionary size labels that fit the screen,
+explained KOSync failures (one string per cause), the Light panel kept below the toolbar, and long
+presses no longer turning the page during frame updates. The fork's hunks all survived the
+auto-merge (checked with `git diff origin/main` on the touched files).
+
+Port decisions, both in `host/services.cpp`:
+
+- `buttonControls` returns the two page buttons with the keys the pbink plugin delivers (PageUp
+  upper, PageDown lower; `pbinkevents.cpp` maps `IV_KEY_PREV`/`IV_KEY_NEXT` to them). The reader
+  compares the pressed key with the list (`Reader::pageButton`), so Kobo's `pageButtons::paging()`
+  with F23/F24 would never match here. The default direction of each entry is recomputed through
+  `pageButtonDirection`, so the upside-down swap still applies to an unmapped button. The ids
+  (`page_upper`, `page_lower`) select the e-reader diagram in the mapping sheet.
+- `readerStandbySupported` stays false, which hides the "Disable standby" option: on Kobo the hook
+  lets the reader veto a standby the host is about to request; on PocketBook the automatic standby
+  is the firmware's own timer and inkview has no documented call to postpone it. Noted in
+  `doc/pocketbook.md`.
+
+Also upstream: `.gitignore` now lists `/.claude/`, and `.claude/settings.json` (a validation hook)
+is gone. New sources (`app/about/about_page.cpp`, `settings/button_controls.cpp`,
+`views/appearance_preview.cpp`, `platform/api/page_buttons.h`) are picked up by the port's glob;
+`app/library/about_screen.cpp` is excluded with the rest of the library.
+
 ## Name and icon on the PocketBook home screen (manual firmware files)
 
 These live in the firmware's user config, not in the app package, so a plain copy of the zip

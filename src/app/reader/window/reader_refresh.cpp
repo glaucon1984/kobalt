@@ -2,6 +2,7 @@
 #include "ui/controls/text.h"
 #include "ui/panel_timing.h"
 #include "reader_p.h"
+#include "app/reader/settings/settings_panel.h"
 #include "reading/appearance_settings.h"
 #include "reading/page_navigation.h"
 #include "support/strings.h"
@@ -57,6 +58,9 @@ void Reader::refresh()
     if (kosyncReaderReady && !kosyncReaderRetry.isActive() && isVisible() && !services.suspended())
         continueKosyncWhenReady(std::move(kosyncReaderReady));
     const bool darkReady = publishPendingDarkMode();
+    if (general->isVisible())
+        static_cast<SettingsPanel *>(general)->updateButtonControls(
+                buttonControls(), preferences, savingButtonControls || savingDarkMode >= 0);
     const bool dark = savingDarkMode >= 0 ? bool(savingDarkMode)
             : pendingDarkMode >= 0        ? bool(pendingDarkMode)
                                           : session->state().value("dark_mode").toBool(false);
@@ -108,6 +112,7 @@ void Reader::refresh()
     const auto nextImage = session->image();
     const auto previousPageImage = page->image.cacheKey();
     showPageImage(nextImage);
+    syncAppearancePreview();
     syncLinkDiscovery();
     bookmarkList->setExcerptFont(bookFace());
     syncAnnotations();
@@ -198,10 +203,10 @@ void Reader::syncFrameState()
     }
     // A preview has a different frame from the book and cannot start a
     // lookup. Do not cancel its panel-dismiss gesture when that frame updates.
-    // A new frame, such as a loaded image, must not look up the old text.
-    // It must not drop a tap or swipe in progress either.
+    // A new page or layout invalidates the held text, but not the gesture.
+    // A decoded image keeps the text geometry and its pending lookup.
     if (!appearanceEdit.panelOpen()
-        && (session->busy() || session->image().cacheKey() != page->image.cacheKey()))
+        && (session->busy() || annotationViewportFrame != annotationViewportKey()))
         dismissLookup(true);
     if (!session->busy() && !pendingPassage.position.isEmpty()) {
         // Accept the visit only after the engine confirms a different passage.
@@ -272,6 +277,102 @@ void Reader::showChapterText()
     const auto text = page->headerText();
     header->setText(text.isEmpty() ? values.chapter : text);
     header->setAccessibleName(header->text());
+}
+
+QRect Reader::appearancePreviewSpace() const
+{
+    const int top = topControls->geometry().bottom() + 1;
+    return { 0, top, width(), menu->geometry().top() - top };
+}
+
+bool Reader::appearancePreviewFits() const
+{
+    // A short space, such as a phone in landscape, gives a page too small to read.
+    constexpr int minimumHeight = 200;
+    return appearancePreviewSpace().height() >= ui::px(minimumHeight);
+}
+
+void Reader::syncAppearancePreview()
+{
+    using Axis = kobalt::reader::AppearancePreview::Axis;
+    const bool layoutOpen = menu->isVisible()
+            && panels->currentIndex() == int(kobalt::reader::AppearancePage::Layout);
+    const bool textOpen = menu->isVisible()
+            && panels->currentIndex() == int(kobalt::reader::AppearancePage::Typography);
+    if (!layoutOpen)
+        appearancePreviewAxis = Axis::None;
+    if ((!layoutOpen && !textOpen) || !appearancePreviewFits()) {
+        // Navigation can cancel this request without changing the reading image.
+        previewPageRequested = 0;
+        appearancePreview->hide();
+        return;
+    }
+    // Each kind of preview draws its own bookmark page.
+    if (previewPageForText != textOpen) {
+        previewPageForText = textOpen;
+        previewPageKey = previewPageRequested = 0;
+        previewPage = {};
+    }
+    auto *settings =
+            appearanceEdit.edited() && appearanceEdit.ready() ? appearanceEdit.preview() : session;
+    const int side = kobalt::readingPixels(marginSlider->value());
+    const int vertical = kobalt::readingPixels(verticalMarginSlider->value());
+    kobalt::reader::AppearancePreview::Content content;
+    content.page = page->size();
+    content.bodyTop = page->topHeight();
+    content.bodyHeight = bodySize().height();
+    if (!textOpen) {
+        content.header = page->showHeader() ? page->headerImage() : QImage();
+        content.footer =
+                page->showFooter() || page->showProgress() ? page->footerImage() : QImage();
+    }
+    content.horizontalMargin = side;
+    content.verticalMargin = vertical;
+    content.axis = appearancePreviewAxis;
+    content.text = textOpen;
+    content.cropTop = qMax(0, settings->topMargin() - int(ui::px(16)));
+    appearancePreview->setGeometry(appearancePreviewSpace());
+    if (!appearancePreview->isVisible())
+        appearancePreview->stackUnder(menu);
+    const bool dragging = marginSlider->interacting() || verticalMarginSlider->interacting();
+    // An edit that waits for its preview session has not reached these settings yet.
+    const bool settled = !dragging && !settings->busy() && settings->margin() == side
+            && settings->topMargin() == vertical && settings->bottomMargin() == vertical
+            && settings->image().size() == bodySize()
+            && (!appearanceEdit.edited() || appearanceEdit.ready());
+    if (!settled)
+        previewPageRequested = 0;
+    // An unedited page already starts at the reading position. A short page has too little
+    // text to judge, so the Text preview continues with the text that follows it.
+    const bool usePage = settled && !appearanceEdit.edited()
+            && (!textOpen || appearancePreview->fillsTextCrop(settings->image(), content.cropTop));
+    // One change is one screen update. The picture stays during a drag and while
+    // a layout runs, so that nothing draws an in-between state.
+    if (usePage) {
+        content.body = settings->image();
+    } else if (settled && previewPageKey == settings->image().cacheKey()) {
+        content.body = previewPage;
+    } else {
+        if (settled && previewPageRequested != settings->image().cacheKey()) {
+            const qint64 key = settings->image().cacheKey();
+            previewPageRequested = key;
+            const QPointer<Reader> guard(this);
+            // The page starts at the bookmark, so the same text stays in place at every
+            // setting. Real page breaks would move it.
+            settings->anchoredPage(!textOpen, [guard, key](QImage image) {
+                if (!guard || guard->previewPageRequested != key)
+                    return;
+                guard->previewPageKey = key;
+                guard->previewPage = std::move(image);
+                guard->syncAppearancePreview();
+            });
+        }
+        if (appearancePreview->isVisible() && appearancePreview->showsText() == textOpen)
+            return;
+        content.body = settings->image();
+    }
+    appearancePreview->setContent(std::move(content));
+    appearancePreview->show();
 }
 
 void Reader::showPageImage(const QImage &nextImage)

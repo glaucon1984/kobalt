@@ -1,12 +1,18 @@
 # Storage compatibility
 
+`disable_reader_standby` is an optional global Boolean. Missing or invalid values use false. True prevents automatic reader standby on supported Kobo hosts while the reader is visible and active. Explicit sleep, closing, USB export and shutdown retain their normal behavior. Other hosts preserve the preference but do not apply it. This keeps settings schema 1.
+
 Kobalt separates saved reading data from disposable rendering caches. Storage formats are versioned independently of application releases. Hosts choose the storage directory; `storage::Paths` owns the shared filenames. JSON uses UTF-8. Writes use `QSaveFile` to replace a complete file atomically.
 
 ## Saved reading data
 
+`chapter_groups` is an optional global string with values `current`, `all` and `off`. Missing or invalid values use Current section. The choice controls whether chapter groups can collapse and which groups open expanded. It does not change book layout, chapter statistics or reading positions. Settings schema 1 stays unchanged.
+
 `reader-settings.json` holds global preferences with `schema: 1`. Unversioned settings are upgraded atomically. Recognized retired settings are converted or removed, invalid known values fall back to their defaults, and unknown keys are preserved. Unsupported future versions block writes until profile preparation moves them aside, as described in [Unusable saved data](#unusable-saved-data). `config.json` remains the small Kobo enable/disable configuration.
 
 The retired `native_hide_status_bar` preference is removed when settings are normalized. The Mac screen preset controls status visibility. This keeps settings schema 1.
+
+The retired `show_link_indicator` preference is ignored. Existing saved values remain in the settings record. Settings schema 1 stays unchanged.
 
 `tappable_links` is an optional global setting with values `off`, `footnotes` and `all`. Missing or invalid values use Footnotes only. Saved choices are preserved. The value `off` is shown as Always require long press. It does not change the settings schema or parsed-book cache format.
 
@@ -49,6 +55,8 @@ Each book supports up to 2,000 bookmarks and 2,000 annotations. Bookmark files a
 The diagnostic JSON bookmark backend rejects the complete list when any row has an invalid position or the list exceeds its count limit. It does not keep a partial list. A failed load or changed-file adoption blocks saves and preserves the original bytes. SQLite imports retain their version, schema and full-list checks.
 
 Add compatible optional fields within version 1. A change to required fields, their meaning or location needs an explicit format version and migration. Do not tie data versions to release names. This is the current format contract, not a promise that older builds preserve arbitrary unknown fields. Book-state imports reject unsupported schemas without replacing the source. Database record formats are versioned separately and unsupported formats block updates.
+
+`button_actions` is an optional global object in settings schema 1. Stable physical control IDs map to `previous`, `next` or `none`. Missing and invalid actions use the host's native direction. Unknown control IDs and values remain in the object when a known button is edited, so a profile can move between hardware layouts without losing its other mappings. No book data or cache format changes.
 
 `header_footer` also accepts `phone`. The Phone preset has no header and retains the usual chapter-pages-left and book-percentage footer. It is offered on phone screens, whose short edge is under 3.4 inches, and is the default only when no header/footer choice, legacy setting, custom layout or text sizing has been saved. Explicit choices survive device detection and rotation. This keeps settings schema 1 and book-record format 1. Older builds do not recognize `phone` and can use their default preset when loading it.
 

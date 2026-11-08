@@ -278,11 +278,15 @@ Window::Window(storage::Paths paths, EngineFontInputs fonts, QString placeholder
                   auto services = readerHostServices();
                   services.nativeDialogParent = [this] { return this; };
                   services.devicePreview = [this] { return screenPreset != 0; };
+                  services.readerStandbySupported = screenPreset != 0;
                   // An emulated sleep or power-off suspends the reader as on Kobo.
                   services.suspended = [this, host = services.suspended] {
                       return deviceAsleep || poweredOff || (host && host());
                   };
                   services.pageButtons = [this] { return screenPreset == 2; };
+                  services.buttonControls = [this] {
+                      return screenPreset == 2 ? pageButtons::paging() : pageButtons::Buttons{};
+                  };
                   services.clock = [this] {
                       return clockSource     ? clockSource()
                               : screenPreset ? QStringLiteral("09:00")
@@ -862,7 +866,7 @@ void Window::turnPage(int direction, bool hardware)
     if (!reader->isVisible() || !reader->isEnabled())
         return;
     if (hardware) {
-        reader->pageButton(direction);
+        reader->physicalPageButton(direction < 0 ? Qt::Key_F23 : Qt::Key_F24, direction);
         return;
     }
     // Only turn from the reading surface. The same keys must remain available
@@ -947,6 +951,17 @@ void Window::setTouchCursor(bool visible, bool pressed)
 bool Window::eventFilter(QObject *object, QEvent *event)
 {
     const auto type = event->type();
+    if (type == QEvent::ToolTip && screenPreset) {
+        auto *widget = qobject_cast<QWidget *>(object);
+        auto *reader = controller.window();
+        if (widget
+            && (widget->window() == this || widget == start || start->isAncestorOf(widget)
+                || (reader && (widget == reader || reader->isAncestorOf(widget))))) {
+            QToolTip::hideText();
+            event->ignore();
+            return true;
+        }
+    }
     if (type == QEvent::Enter || type == QEvent::Leave || type == QEvent::MouseMove
         || type == QEvent::MouseButtonPress || type == QEvent::MouseButtonRelease
         || (type == QEvent::Hide && object == this)) {

@@ -1,5 +1,6 @@
 #include "sync/kosync.h"
 #include "support/strings.h"
+#include "support/diagnostics.h"
 #include "check.h"
 #include "kosync_reply.h"
 #include <QBuffer>
@@ -8,10 +9,12 @@
 #include <QEventLoop>
 #include <QFile>
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QNetworkReply>
 #include <QHostAddress>
 #include <QSemaphore>
 #include <QSslCertificate>
+#include <QSslError>
 #include <QSslConfiguration>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -30,6 +33,7 @@ class Network final : public QNetworkAccessManager
 public:
     QByteArray response = "{}", payload;
     int status = 200, calls = 0, failures = 0;
+    bool held = false, hostile = false;
     QNetworkReply::NetworkError transportError = QNetworkReply::ConnectionRefusedError;
     QNetworkRequest last;
     QPointer<QNetworkReply> lastReply;
@@ -44,7 +48,10 @@ protected:
         operation = op;
         payload = data ? data->readAll() : QByteArray();
         const auto error = failures > 0 ? (--failures, transportError) : QNetworkReply::NoError;
-        lastReply = new Reply(request, response, status, error, this);
+        auto *reply = new Reply(request, response, status, error, this, held);
+        if (hostile)
+            reply->hostileMetadata();
+        lastReply = reply;
         return lastReply;
     }
 };
@@ -376,6 +383,160 @@ int liveServer(const QString &server, const QString &certificate)
 }
 } // namespace
 
+// Failure categories and guidance must survive hostile network text without disclosing it.
+void failureChecks(const QString &path)
+{
+    Network network;
+    network.response = R"({"authorized":"OK"})";
+    kosync::Client client(path, nullptr, &network);
+    QString error;
+    auto done = [&](QString value) { error = value; };
+    client.login("https://fixture.invalid/private-prefix", "PRIVATE-SENTINEL", "PRIVATE-SENTINEL",
+                 done);
+    wait(client);
+    require(error.isEmpty(), "diagnostic fixture signs in");
+    const QByteArray document(32, 'b');
+    const kosync::Progress progress{ "PRIVATE-SENTINEL", "PRIVATE-SENTINEL", "PRIVATE-SENTINEL",
+                                     0.5 };
+    QByteArray records;
+    QJsonObject lastFailure, tlsFailure;
+    setDiagnosticObserver([&](const QJsonObject &entry) {
+        records += QJsonDocument(entry).toJson(QJsonDocument::Compact);
+        if (entry.value("event") == "kosync-failure")
+            lastFailure = entry;
+        if (entry.value("event") == "kosync-tls-errors")
+            tlsFailure = entry;
+    });
+    network.hostile = true;
+    const auto check = [&](const char *code, const char *phase) {
+        require(error == strings::get(code),
+                "failure gives the appropriate troubleshooting message");
+        require(lastFailure.value("code").toString() == code
+                        && lastFailure.value("phase").toString() == phase,
+                "failure logs its stable category and safe request phase");
+        require(lastFailure.value("guidance").toString() == error,
+                "failure log includes actionable fixed guidance");
+        require(!records.contains("PRIVATE-SENTINEL") && !records.contains("private-prefix")
+                        && !records.contains(document)
+                        && !records.contains(client.deviceId().toUtf8())
+                        && !records.contains("fixture.invalid")
+                        && !records.contains("elsewhere.invalid")
+                        && !records.contains(QCryptographicHash::hash("PRIVATE-SENTINEL",
+                                                                      QCryptographicHash::Md5)
+                                                     .toHex()),
+                "diagnostics omit credentials, hashes, paths, redirects, bodies and identities");
+    };
+    for (const auto &pair :
+         { std::make_pair(QNetworkReply::HostNotFoundError, "kosync.dns_error"),
+           std::make_pair(QNetworkReply::ConnectionRefusedError, "kosync.connection_refused"),
+           std::make_pair(QNetworkReply::RemoteHostClosedError, "kosync.connection_closed"),
+           std::make_pair(QNetworkReply::SslHandshakeFailedError, "kosync.tls_error"),
+           std::make_pair(QNetworkReply::TimeoutError, "kosync.timeout_error"),
+           std::make_pair(QNetworkReply::OperationCanceledError, "kosync.interrupted"),
+           std::make_pair(QNetworkReply::UnknownNetworkError, "kosync.network_error") }) {
+        network.transportError = pair.first;
+        network.failures = 1;
+        client.pull(
+                document,
+                [&](kosync::Progress value, QString failure) {
+                    require(!value.found, "transport failure cannot supply progress");
+                    done(failure);
+                },
+                false);
+        wait(client);
+        check(pair.second, "read-position");
+    }
+    for (const auto &pair :
+         { std::make_pair(401, "kosync.auth_error"), std::make_pair(403, "kosync.forbidden"),
+           std::make_pair(404, "kosync.route_error"), std::make_pair(405, "kosync.route_error"),
+           std::make_pair(302, "kosync.redirect_error"), std::make_pair(429, "kosync.rate_limited"),
+           std::make_pair(503, "kosync.server_error"), std::make_pair(204, "kosync.http_error") }) {
+        network.status = pair.first;
+        network.response = "PRIVATE-SENTINEL";
+        // Qt reports both HTTP status and a network error for server rejection.
+        network.transportError = QNetworkReply::ContentAccessDenied;
+        network.failures = pair.first >= 400 ? 1 : 0;
+        const int before = network.calls;
+        client.push(document, progress, done);
+        wait(client);
+        require(network.calls == before + 1,
+                "HTTP failures never replay an upload or redirect credentials");
+        check(pair.second, "upload-position");
+    }
+    network.status = 404;
+    network.response = R"({"status":"not found","secret":"PRIVATE-SENTINEL"})";
+    client.pull(document, [&](kosync::Progress, QString value) { done(value); });
+    wait(client);
+    check("kosync.route_error", "read-position");
+    network.status = 200;
+    for (const auto &body : { QByteArray("<html>PRIVATE-SENTINEL</html>"),
+                              QByteArray(R"({"authorized":123,"secret":"PRIVATE-SENTINEL"})") }) {
+        network.response = body;
+        client.login("https://fixture.invalid/private-prefix", "PRIVATE-SENTINEL",
+                     "PRIVATE-SENTINEL", done);
+        wait(client);
+        check("kosync.invalid_response", "sign-in");
+    }
+    network.response = R"({"authorized":"PRIVATE-SENTINEL"})";
+    client.login("https://fixture.invalid/private-prefix", "PRIVATE-SENTINEL", "PRIVATE-SENTINEL",
+                 done);
+    wait(client);
+    check("kosync.invalid_response", "sign-in");
+    network.status = 401;
+    network.response = QByteArray(17000, 'x') + "PRIVATE-SENTINEL";
+    client.login("https://fixture.invalid/private-prefix", "PRIVATE-SENTINEL", "PRIVATE-SENTINEL",
+                 done);
+    wait(client);
+    check("kosync.auth_error", "sign-in");
+    network.status = 200;
+    network.response = R"({"document":"PRIVATE-SENTINEL"})";
+    client.push(document, progress, done);
+    wait(client);
+    check("kosync.invalid_response", "upload-position");
+    {
+        kosync::HostLookup lookup([](const QString &) {
+            QHostInfo result;
+            result.setError(QHostInfo::HostNotFound);
+            result.setErrorString("PRIVATE-SENTINEL");
+            return result;
+        });
+        Network resolverNetwork;
+        kosync::Client resolving(path, nullptr, &resolverNetwork, &lookup);
+        resolving.pull(document, [&](kosync::Progress, QString value) { done(value); }, false);
+        wait(resolving);
+        check("kosync.dns_error", "read-position");
+        require(resolverNetwork.calls == 0 && !lookup.timedOut(),
+                "a resolver error stays distinct from a lookup deadline and sends no credentials");
+    }
+    network.response = QByteArray(17000, 'x') + "PRIVATE-SENTINEL";
+    client.push(document, progress, done);
+    wait(client);
+    check("kosync.response_too_large", "upload-position");
+    network.response = "{}";
+    network.held = true;
+    client.push(document, progress, done);
+    QList<QSslError> certificateErrors;
+    for (int i = 0; i < 40; ++i)
+        certificateErrors.append(QSslError(QSslError::HostNameMismatch));
+    network.lastReply->sslErrors(certificateErrors);
+    require(tlsFailure.value("codes").toArray().size() == 16
+                    && tlsFailure.value("omitted").toInt() == 24
+                    && tlsFailure.value("phase").toString() == "upload-position",
+            "TLS diagnostics retain bounded numeric codes and the safe request phase");
+    const auto timers = network.lastReply->findChildren<QTimer *>();
+    require(timers.size() == 1, "request has one bounded deadline timer");
+    QMetaObject::invokeMethod(timers.first(), "timeout", Qt::DirectConnection);
+    check("kosync.timeout_error", "upload-position");
+    error = "unchanged";
+    lastFailure = {};
+    client.push(document, progress, done);
+    client.cancel();
+    drainEvents();
+    require(error == "unchanged" && lastFailure.isEmpty() && !client.busy(),
+            "intentional cancellation has no failure callback or failure event");
+    setDiagnosticObserver({});
+}
+
 // Checks progress reconciliation, document identity, matching modes, accounts, the schedule, responses, read retries and hostname lookups.
 int main(int argc, char **argv)
 {
@@ -422,6 +583,8 @@ int main(int argc, char **argv)
     }
     QTemporaryDir directory;
     require(directory.isValid(), "create profile");
+    initializeDiagnostics(directory.path() + "/diagnostics");
+    failureChecks(directory.path() + "/failures.json");
     lookupChecks(directory.path() + "/lookup.json");
     const auto path = directory.path() + "/kosync.json";
     QBuffer small;
@@ -659,8 +822,14 @@ int main(int argc, char **argv)
         ++completed;
     };
     const kosync::Progress local{ "/body/DocFragment[2]/body/p[3]/text().0", {}, {}, 0.42 };
-    for (const auto &body : { QByteArray("{}"), QByteArray("[]"), QByteArray(" \n[ \n ]\t") }) {
-        network.response = body;
+    for (const auto &response :
+         { std::make_pair(200, QByteArray("{}")), std::make_pair(200, QByteArray("[]")),
+           std::make_pair(200, QByteArray(" \n[ \n ]\t")),
+           std::make_pair(404, QByteArray(R"({"status":"not found"})")) }) {
+        network.status = response.first;
+        network.response = response.second;
+        network.failures = network.status == 404 ? 1 : 0;
+        network.transportError = QNetworkReply::ContentNotFoundError;
         const int before = network.calls;
         bool uploaded = false;
         client.pull(digest, [&](kosync::Progress remote, QString failure) {
@@ -671,6 +840,7 @@ int main(int argc, char **argv)
             if (sync.observe(remote, local.position, client.deviceId())
                 != kosync::Reconciler::Action::Upload)
                 return;
+            network.status = 200;
             network.response = "{\"document\":\"" + digest + "\",\"timestamp\":124}";
             client.push(digest, local, [&](QString failure) {
                 uploaded = failure.isEmpty();
@@ -680,8 +850,64 @@ int main(int argc, char **argv)
         wait(client);
         require(error.isEmpty() && !received.found && uploaded && network.calls == before + 2
                         && network.operation == QNetworkAccessManager::PutOperation,
-                "an empty object or array permits the first progress upload");
+                "empty progress or the structured missing-progress 404 permits the first upload");
     }
+    const auto uploadedProgress = network.payload;
+    {
+        Network peerNetwork;
+        peerNetwork.response = R"({"authorized":"OK"})";
+        kosync::Client peer(path + ".peer", nullptr, &peerNetwork);
+        peer.login("https://sync.example/prefix", "reader", "secret", done);
+        wait(peer);
+        require(error.isEmpty() && peer.deviceId() != client.deviceId(),
+                "a second reader has its own device identity");
+        peerNetwork.response = uploadedProgress;
+        peer.pull(digest, pulled);
+        wait(peer);
+        require(error.isEmpty() && received.found && received.position == local.position
+                        && received.deviceId == client.deviceId(),
+                "a second reader retrieves the first uploaded position unchanged");
+        kosync::Reconciler sync;
+        require(sync.observe(received, "different-local", peer.deviceId())
+                        == kosync::Reconciler::Action::Choose,
+                "progress created after a 404 still requires a remote conflict choice");
+        peerNetwork.status = 404;
+        peerNetwork.response = R"({"status":"not found"})";
+        peer.pull(digest, pulled);
+        wait(peer);
+        require(error.isEmpty() && !received.found
+                        && sync.observe(received, "different-local", peer.deviceId())
+                                == kosync::Reconciler::Action::Choose,
+                "a missing-progress response without a Qt error cannot clear a pending conflict");
+    }
+    network.status = 404;
+    for (const auto &body :
+         { QByteArray("{}"), QByteArray("[]"), QByteArray("not found"),
+           QByteArray("<html>Not Found</html>"), QByteArray(R"({"error":"not found"})"),
+           QByteArray(R"({"status":"Not Found"})"),
+           QByteArray(R"({"status":"not found","progress":"private"})"),
+           QByteArray(R"({"status":"not found"})") + QByteArray(17000, ' '),
+           QByteArray(R"({"status":"not found"} trailing)") }) {
+        network.response = body;
+        const int before = network.calls;
+        client.pull(digest, pulled);
+        wait(client);
+        require(!error.isEmpty() && !received.found && network.calls == before + 1,
+                "an unrecognized or oversized 404 remains a failed read without retries");
+    }
+    network.response = R"({"status":"not found"})";
+    client.login("https://another.example", "reader", "secret", done);
+    wait(client);
+    require(!error.isEmpty(), "missing-progress JSON cannot authenticate an account");
+    client.push(digest, local, done);
+    wait(client);
+    require(!error.isEmpty(), "missing-progress JSON cannot acknowledge an upload");
+    network.failures = 1;
+    network.transportError = QNetworkReply::SslHandshakeFailedError;
+    client.pull(digest, pulled);
+    wait(client);
+    require(!error.isEmpty(), "a transport failure cannot become missing progress");
+    network.status = 200;
     network.response =
             R"({"progress":"/body/DocFragment[2]/body/p[3]/text().0","percentage":0.42,"device":"KOReader","device_id":"other","timestamp":123})";
     client.pull(digest, pulled);

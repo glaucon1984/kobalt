@@ -131,10 +131,26 @@
 "kosync.retry_later" = "The reader is busy. Sync will retry later.";
 "kosync.busy" = "A sync request is already running.";
 "kosync.storage_error" = "Could not read or save the sync account. Existing account data was kept.";
-"kosync.auth_error" = "Sign-in failed. Check your username and password.";
-"kosync.network_error" = "Could not reach the sync server. Check Wi-Fi or your internet connection and the server URL.";
+"kosync.auth_error" = "The server rejected the sync credentials. Check your username, password and that the account exists on this server. It must support KOSync x-auth authentication.";
+"kosync.network_error" = "Could not complete the sync request. Check the server URL and network connection, then try again.";
+"kosync.no_connection" = "No network connection is available for sync. Connect to Wi-Fi and try again. Your position is saved locally.";
+"kosync.connection_timeout" = "No network connection became available before sync timed out. Connect to Wi-Fi and try again. Your position is saved locally.";
+"kosync.dns_error" = "Could not resolve the sync server name. Check the server URL and your network DNS connection.";
+"kosync.connection_refused" = "The sync server refused the connection. Check the server URL, port and whether the service is running.";
+"kosync.connection_closed" = "The connection closed before sync finished. Check the server and network, then try again.";
+"kosync.tls_error" = "Could not establish a trusted secure connection. Check the server certificate, hostname and device date. Keep certificate verification enabled.";
+"kosync.timeout_error" = "Sync timed out. Check the server and network connection, then try again. Your reading position was kept.";
+"kosync.interrupted" = "The sync connection was interrupted. Try again. Your reading position was kept.";
+"kosync.forbidden" = "The server denied access to sync. Check account permissions and whether this endpoint supports KOSync x-auth authentication.";
+"kosync.redirect_error" = "The sync server redirected the request. Credentials were not forwarded. Check the configured KOSync URL and path prefix.";
+"kosync.route_error" = "The server does not provide this KOSync route. Check the URL and path prefix, and whether the endpoint supports KOSync x-auth authentication.";
+"kosync.rate_limited" = "The sync server is limiting requests. Wait before trying again.";
+"kosync.server_error" = "The sync server reported an error. Try again later or ask the server administrator to check its logs.";
+"kosync.http_error" = "The sync server returned an unexpected HTTP status. Check the URL and whether the endpoint is a compatible KOSync service.";
+"kosync.response_too_large" = "The server response exceeds the sync size limit. Check the URL and whether the endpoint is a compatible KOSync service.";
+"kosync.reader_timeout" = "Sync could not finish while the reader was busy. Try again after the current operation finishes. Your reading position was kept.";
 "kosync.connecting" = "Connecting to Wi-Fi…";
-"kosync.invalid_response" = "The sync server returned invalid progress. Your reading position was kept.";
+"kosync.invalid_response" = "The server response is not compatible with KOSync. Check the server URL and path prefix. Your reading position was kept.";
 "kosync.invalid_account" = "Enter an HTTPS server URL, username and password. The URL cannot contain credentials, a query or a fragment.";
 "kosync.native_sync" = "This book uses Kobo’s built-in sync system. KOSync is unavailable for this copy.";
 "kosync.kobo_cloud" = "This book uses Kobo Cloud to sync reading progress. KOSync is unavailable for this copy.";
@@ -156,6 +172,7 @@
 
 /* library */
 "library.title" = "Library";
+"library.about" = "About Kobalt";
 /* Arguments: %1 */
 "library.count" = "%1 books";
 "library.count_one" = "1 book";
@@ -228,6 +245,10 @@
 /* chapter_contents */
 "chapter_contents.chapter_destination_unavailable" = "Chapter destination unavailable";
 "chapter_contents.current_chapter" = "Current chapter";
+"chapter_contents.collapse_group" = "Collapse %1";
+"chapter_contents.expand_group" = "Expand %1";
+"chapter_contents.expanded" = "Expanded";
+"chapter_contents.collapsed" = "Collapsed";
 "chapter_contents.next_chapters" = "Next chapters";
 "chapter_contents.no_chapters_available" = "No chapters available";
 "chapter_contents.previous_chapters" = "Previous chapters";
@@ -645,6 +666,7 @@
 "settings.paragraph_gap" = "Spacing";
 "settings.paragraph_indent" = "First-line indent";
 "settings.paragraph_adjustments_value" = "Gap %1 · Indent %2";
+"reader.appearance_preview" = "Preview";
 "reader.margins" = "Horizontal margins: ";
 "reader.vertical_margins" = "Vertical margins: ";
 /* Arguments: %1, %2 */
@@ -763,6 +785,16 @@
 "settings.section_appearance" = "Appearance";
 "settings.section_screen" = "Screen refresh";
 "settings.section_navigation" = "Navigation";
+"settings.section_links" = "Links";
+"settings.section_chapter_list" = "Chapter List";
+"settings.chapter_groups" = "Collapsible chapters";
+"settings.chapter_groups_hint" = "Choose whether chapter groups can collapse and how they open.";
+"settings.chapter_groups_current" = "Current section";
+"settings.chapter_groups_current_description" = "Expand the current chapter's parent groups. Default.";
+"settings.chapter_groups_all" = "All chapters";
+"settings.chapter_groups_all_description" = "Expand every group to show the full chapter list.";
+"settings.chapter_groups_off" = "Off";
+"settings.chapter_groups_off_description" = "Show every chapter without expand or collapse buttons.";
 "settings.section_frontlight" = "Frontlight";
 "settings.section_new_books" = "New Book";
 "settings.section_book_content" = "Book content";
@@ -1000,8 +1032,6 @@
 /* Arguments: %1 */
 "dictionary_panel.for_language" = "For %1";
 
-"reader.show_link_indicator" = "Show link indicator while reading";
-"reader.link_indicator_description" = "Show an indicator on pages containing links. Tap it to reveal the links.";
 /* Arguments: %1 = number of links */
 "reader.highlight_links" = "Highlight links · %1";
 "reader.long_press_link" = "Long press a link to see its options.";
@@ -1116,6 +1146,11 @@
 "settings.section_default_global_font" = "Default global font";
 "settings.section_user_interface" = "User Interface";
 "settings.section_dictionary_ui" = "Dictionary UI";
+"settings.section_advanced" = "Advanced";
+"settings.disable_reader_standby" = "Disable standby";
+"settings.disable_reader_standby_description" = "Keeps the device awake while reading. Uses more battery power.";
+"settings.disable_reader_standby_title" = "Disable standby while reading?";
+"settings.disable_reader_standby_warning" = "Disabling standby can significantly reduce battery life. It may help with intermittent freezes or missed page turns on some devices, but is generally not recommended. You can still put the device to sleep. Are you sure you want to disable standby?";
 "settings.dictionary_font" = "Dictionary font";
 "settings.dictionary_font_size" = "Dictionary font size";
 "settings.dictionary_font_small" = "Small";
@@ -1123,6 +1158,10 @@
 "settings.dictionary_font_large" = "Large";
 "settings.dictionary_font_extra_large" = "Extra large";
 "settings.dictionary_font_sample" = "A short definition.";
+"settings.dictionary_font_small_short" = "S";
+"settings.dictionary_font_standard_short" = "M";
+"settings.dictionary_font_large_short" = "L";
+"settings.dictionary_font_extra_large_short" = "XL";
 "settings.ui_font" = "Sans-serif UI typeface";
 "settings.header_footer_font" = "Header & footer UI typeface";
 "settings.ui_mono_font" = "Monospaced UI typeface";
@@ -1305,3 +1344,22 @@
 "settings.hanging_punctuation_off_description" = "Keep punctuation within the text edges.";
 "settings.hanging_punctuation_on_description" = "Let punctuation and line-ending hyphens extend beyond the text edges.";
 "settings.hanging_punctuation_description" = "The dashed lines mark the text edges. The sample uses justified text. This preference affects all books.";
+
+/* Physical button controls */
+"buttons.title" = "Button controls";
+"buttons.upper" = "Upper button";
+"buttons.lower" = "Lower button";
+"buttons.volume_up" = "Volume up (+)";
+"buttons.volume_down" = "Volume down (−)";
+"buttons.description" = "Choose what each page button does while reading.";
+"buttons.volume_description" = "Choose what the volume buttons do while reading.";
+"buttons.navigation_hint" = "Menus, lists and page previews keep their usual button directions.";
+"buttons.previous" = "Previous page";
+"buttons.next" = "Next page";
+"buttons.none" = "Do nothing";
+"buttons.none_description" = "Ignore this button while reading.";
+"buttons.volume_title" = "Volume button controls";
+"buttons.volume_note" = "On Android, these mappings use the physical volume buttons.";
+"buttons.while_reading" = "Decide what this hardware button should do when you're reading.";
+
+"buttons.hardware_title" = "Hardware buttons";

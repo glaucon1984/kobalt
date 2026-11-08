@@ -872,12 +872,7 @@ void Reader::openScreenRefresh()
     refreshPopup->setGeometry(rect());
     refreshPopup->installEventFilter(this);
     auto *card = refreshPopup->card();
-    card->rows()->setContentsMargins(2, 2, 2, 2);
-    card->rows()->setSpacing(0);
-    card->rows()->addSpacing(metrics::notice::cardMargins.top());
-    auto *title = card->title(strings::get("reader.refresh_the_screen"), "rrScreenRefreshTitle");
-    title->setContentsMargins(chrome::inset, 0, chrome::inset, 0);
-    card->rows()->addSpacing(metrics::notice::cardMargins.bottom());
+    card->heading(strings::get("reader.refresh_the_screen"), {}, "rrScreenRefreshTitle");
     const int cardWidth =
             qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance);
     // The shared pick-one list: rows share the tallest height a choice needs.
@@ -1103,18 +1098,7 @@ void Reader::openSleepChoice(const QString &name, const QString &optionPrefix,
     sleepPopup->installEventFilter(this);
     sleepPopup->dismissed = [this] { closeSleepScreen(); };
     auto *card = sleepPopup->card();
-    card->rows()->setContentsMargins(2, 2, 2, 2);
-    card->rows()->setSpacing(0);
-    card->rows()->addSpacing(metrics::notice::cardMargins.top());
-    auto *title = card->title(heading, name + "Title");
-    title->setContentsMargins(chrome::inset, 0, chrome::inset, 0);
-    if (!description.isEmpty()) {
-        card->rows()->addSpacing(metrics::spacing::row);
-        auto *hint = card->message(description, name + "Hint");
-        readerStyle(hint, styles::font(chrome::descriptionText));
-        hint->setContentsMargins(chrome::inset, 0, chrome::inset, 0);
-    }
-    card->rows()->addSpacing(metrics::notice::cardMargins.bottom());
+    card->heading(heading, description, name + "Title", name + "Hint");
     const int cardWidth =
             qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance);
     auto *choices = new ui::RadioList(card);
@@ -1263,12 +1247,10 @@ void Reader::openTapZones()
     tapZonesPopup->installEventFilter(this);
     tapZonesPopup->dismissed = [this] { closeTapZones(); };
     auto *card = tapZonesPopup->card();
-    card->rows()->setContentsMargins(chrome::inset, metrics::notice::cardMargins.top(),
-                                     chrome::inset, metrics::notice::cardMargins.bottom());
-    card->title(strings::get("settings.tap_zones"), "rrTapZonesTitle");
-    card->message(strings::get("settings.tap_zones_hint"), "rrTapZonesHint");
+    card->heading(strings::get("settings.tap_zones"), strings::get("settings.tap_zones_hint"),
+                  "rrTapZonesTitle", "rrTapZonesHint");
     auto *grid = new QGridLayout;
-    grid->setContentsMargins(0, 0, 0, 0);
+    grid->setContentsMargins(chrome::inset, 0, chrome::inset, 0);
     grid->setSpacing(metrics::control::itemGap);
     card->rows()->addLayout(grid);
     auto *group = new QButtonGroup(card);
@@ -1303,7 +1285,10 @@ void Reader::openTapZones()
             closeTapZones();
         });
     }
-    card->message(strings::get("settings.tap_one_handed_hint"), "rrTapZonesOneHandedHint");
+    auto *note =
+            card->message(strings::get("settings.tap_one_handed_hint"), "rrTapZonesOneHandedHint");
+    note->setContentsMargins(chrome::inset, metrics::notice::cardGap, chrome::inset,
+                             metrics::notice::cardMargins.bottom());
     card->fitToWidth(
             qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance));
     tapZonesPopup->centerCard();
@@ -1344,15 +1329,9 @@ void Reader::openPageNavigation()
     pageNavigationPopup->installEventFilter(this);
     pageNavigationPopup->dismissed = [this] { closePageNavigation(); };
     auto *card = pageNavigationPopup->card();
-    card->rows()->setContentsMargins(2, 2, 2, 2);
-    card->rows()->setSpacing(0);
-    card->rows()->addSpacing(metrics::notice::cardMargins.top());
-    auto *title = card->title(strings::get("settings.page_navigation"), "rrPageNavigationTitle");
-    title->setContentsMargins(chrome::inset, 0, chrome::inset, 0);
-    auto *hint =
-            card->message(strings::get("settings.navigation_menu_hint"), "rrPageNavigationHint");
-    hint->setContentsMargins(chrome::inset, 0, chrome::inset, 0);
-    card->rows()->addSpacing(metrics::notice::cardMargins.bottom());
+    card->heading(strings::get("settings.page_navigation"),
+                  strings::get("settings.navigation_menu_hint"), "rrPageNavigationTitle",
+                  "rrPageNavigationHint");
     const int cardWidth =
             qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance);
     auto *choices = new ui::RadioList(card);
@@ -1402,6 +1381,90 @@ void Reader::openPageNavigation()
     pageNavigationPopup->setFocus();
 }
 
+void Reader::showChapterGroups()
+{
+    chapterGroupsButton->setCaption(
+            strings::get(preferences.value("chapter_groups").toString() == "off"
+                                 ? "settings.chapter_groups_off"
+                                 : preferences.value("chapter_groups").toString() == "all"
+                                 ? "settings.chapter_groups_all"
+                                 : "settings.chapter_groups_current")
+                    .toUpper());
+}
+
+void Reader::closeChapterGroups()
+{
+    if (!chapterGroupsPopup) {
+        return;
+    }
+    chapterGroupsPopup->hide();
+    chapterGroupsPopup->deleteLater();
+    chapterGroupsPopup.clear();
+}
+
+void Reader::openChapterGroups()
+{
+    if (chapterGroupsPopup) {
+        return;
+    }
+    namespace chrome = metrics::chrome;
+    chapterGroupsPopup = new ui::ModalOverlay(this);
+    chapterGroupsPopup->setObjectName("rrChapterGroupsPopup");
+    chapterGroupsPopup->setDimmed(true);
+    chapterGroupsPopup->setGeometry(rect());
+    chapterGroupsPopup->installEventFilter(this);
+    chapterGroupsPopup->dismissed = [this] { closeChapterGroups(); };
+    auto *card = chapterGroupsPopup->card();
+    card->heading(strings::get("settings.chapter_groups"),
+                  strings::get("settings.chapter_groups_hint"), "rrChapterGroupsTitle",
+                  "rrChapterGroupsHint");
+    const int cardWidth =
+            qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance);
+    auto *choices = new ui::RadioList(card);
+    choices->setObjectName("rrChapterGroupsChoices");
+    choices->setMinimumRowHeight(chrome::listActionHeight);
+    choices->setTopDivider(true);
+    const QStringList modes{ "current", "all", "off" };
+    const auto current = preferences.value("chapter_groups").toString("current");
+    for (const auto &mode : modes) {
+        choices->add("rrChapterGroups_" + mode,
+                     strings::get(mode == "off"           ? "settings.chapter_groups_off"
+                                          : mode == "all" ? "settings.chapter_groups_all"
+                                                          : "settings.chapter_groups_current"),
+                     strings::get(mode == "off" ? "settings.chapter_groups_off_description"
+                                          : mode == "all"
+                                          ? "settings.chapter_groups_all_description"
+                                          : "settings.chapter_groups_current_description"));
+        if (mode == current)
+            choices->setCurrent(choices->options().size() - 1);
+    }
+    choices->chosen = [this, modes](int index) {
+        auto next = preferences;
+        next["chapter_groups"] = modes[index];
+        if (writePreferences(next)) {
+            preferences = next;
+            showChapterGroups();
+            settingsError->clear();
+            settingsError->hide();
+        } else {
+            settingsError->setText(strings::get("reader.could_not_save_reader_settings"));
+            settingsError->show();
+        }
+        closeChapterGroups();
+    };
+    card->rows()->addWidget(choices);
+    choices->setFixedHeight(choices->heightForWidth(cardWidth - 4));
+    card->fitToWidth(cardWidth);
+    chapterGroupsPopup->centerCard();
+    for (auto *widget : chapterGroupsPopup->findChildren<QWidget *>()) {
+        textRefresh(widget);
+    }
+    textRefresh(chapterGroupsPopup);
+    chapterGroupsPopup->show();
+    chapterGroupsPopup->raise();
+    chapterGroupsPopup->setFocus();
+}
+
 void Reader::showNavigationBarButtons()
 {
     const auto mode = pageNavigation::barButtons(preferences);
@@ -1432,15 +1495,9 @@ void Reader::openNavigationBarButtons()
     navigationBarPopup->installEventFilter(this);
     navigationBarPopup->dismissed = [this] { closeNavigationBarButtons(); };
     auto *card = navigationBarPopup->card();
-    card->rows()->setContentsMargins(2, 2, 2, 2);
-    card->rows()->setSpacing(0);
-    card->rows()->addSpacing(metrics::notice::cardMargins.top());
-    auto *title =
-            card->title(strings::get("settings.navigation_bar_buttons"), "rrNavigationBarTitle");
-    title->setContentsMargins(chrome::inset, 0, chrome::inset, 0);
-    auto *hint = card->message(strings::get("settings.navigation_bar_hint"), "rrNavigationBarHint");
-    hint->setContentsMargins(chrome::inset, 0, chrome::inset, 0);
-    card->rows()->addSpacing(metrics::notice::cardMargins.bottom());
+    card->heading(strings::get("settings.navigation_bar_buttons"),
+                  strings::get("settings.navigation_bar_hint"), "rrNavigationBarTitle",
+                  "rrNavigationBarHint");
     const int cardWidth =
             qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance);
     auto *choices = new ui::RadioList(card);
@@ -1544,17 +1601,9 @@ void Reader::openTappableLinks()
     tappableLinksPopup->installEventFilter(this);
     tappableLinksPopup->dismissed = [this] { closeTappableLinks(); };
     auto *card = tappableLinksPopup->card();
-    card->rows()->setContentsMargins(2, 2, 2, 2);
-    card->rows()->setSpacing(0);
-    card->rows()->addSpacing(metrics::notice::cardMargins.top());
-    auto *title = card->title(strings::get("settings.tappable_links"), "rrTappableLinksTitle");
-    title->setContentsMargins(chrome::inset, 0, chrome::inset, 0);
-    card->rows()->addSpacing(metrics::spacing::row);
-    auto *hint = card->message(strings::get("settings.tappable_links_description"),
-                               "rrTappableLinksHint");
-    readerStyle(hint, styles::font(chrome::descriptionText));
-    hint->setContentsMargins(chrome::inset, 0, chrome::inset, 0);
-    card->rows()->addSpacing(metrics::notice::cardMargins.bottom());
+    card->heading(strings::get("settings.tappable_links"),
+                  strings::get("settings.tappable_links_description"), "rrTappableLinksTitle",
+                  "rrTappableLinksHint");
     const int cardWidth =
             qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance);
     auto *choices = new ui::RadioList(card);
@@ -1626,17 +1675,9 @@ void Reader::openMenuView()
     menuViewPopup->installEventFilter(this);
     menuViewPopup->dismissed = [this] { closeMenuView(); };
     auto *card = menuViewPopup->card();
-    card->rows()->setContentsMargins(2, 2, 2, 2);
-    card->rows()->setSpacing(0);
-    card->rows()->addSpacing(metrics::notice::cardMargins.top());
-    auto *title = card->title(strings::get("settings.default_menu_view"), "rrMenuViewTitle");
-    title->setContentsMargins(chrome::inset, 0, chrome::inset, 0);
-    card->rows()->addSpacing(metrics::spacing::row);
-    auto *hint =
-            card->message(strings::get("settings.default_menu_view_description"), "rrMenuViewHint");
-    readerStyle(hint, styles::font(chrome::descriptionText));
-    hint->setContentsMargins(chrome::inset, 0, chrome::inset, 0);
-    card->rows()->addSpacing(metrics::notice::cardMargins.bottom());
+    card->heading(strings::get("settings.default_menu_view"),
+                  strings::get("settings.default_menu_view_description"), "rrMenuViewTitle",
+                  "rrMenuViewHint");
     const int cardWidth =
             qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance);
     auto *choices = new ui::RadioList(card);

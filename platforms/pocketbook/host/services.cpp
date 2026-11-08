@@ -399,6 +399,14 @@ ReaderHostServices readerServices() {
     result.pageButtons = [] {
         return true;
     };
+    // The two page buttons, mappable in Settings → Controls → Hardware buttons. The reader matches
+    // the pressed key against these, so they carry the keys the pbink plugin delivers (PageUp for
+    // the upper button, PageDown for the lower one), not Kobo's F23/F24; the default directions
+    // are refined through pageButtonDirection below.
+    result.buttonControls = [] {
+        return pageButtons::Buttons{ { "page_upper", "buttons.upper", Qt::Key_PageUp, -1 },
+                                     { "page_lower", "buttons.lower", Qt::Key_PageDown, 1 } };
+    };
     result.reverseLandscapeButtons = [] {
         return false;
     };

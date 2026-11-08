@@ -23,6 +23,7 @@
 #include "storage/annotation_export.h"
 #include "app/reader/views/reading_page.h"
 #include "app/reader/views/image_viewer.h"
+#include "app/reader/views/appearance_preview.h"
 #include "app/reader/panels/choice_screen.h"
 #include "app/reader/panels/chapter_graph.h"
 #include "app/reader/settings/acknowledgments.h"
@@ -61,6 +62,7 @@ class QVBoxLayout;
 namespace kobalt::reader {
 // Global preference for the Wi-Fi power saver. Missing means on.
 inline constexpr const char *wifiPowerSaverKey = "turn_off_wifi_on_open";
+inline constexpr const char *disableReaderStandbyKey = "disable_reader_standby";
 
 // Input and accessibility target only. The cached header image supplies its
 // pixels and invalidates only the part whose text changed.
@@ -106,6 +108,7 @@ public:
     void progressTick() override;
     void refreshHostPresentation() override;
     void pageButton(int direction) override;
+    void physicalPageButton(int key, int direction) override;
     void scriptedPageButton(int direction) override;
 
     bool busy() const override
@@ -177,6 +180,7 @@ private:
     void updateAnnotationRects(bool showActions = false);
     void paintAnnotationDraft();
     void syncAnnotations();
+    QString annotationViewportKey() const;
     void syncMarkupRequest();
     void finishAnnotationPresentation();
     void editAnnotation(const QString &id, bool navigate = true);
@@ -322,6 +326,9 @@ private:
     bool syncFontPicker();
     void showChapterText();
     void showPageImage(const QImage &nextImage);
+    QRect appearancePreviewSpace() const;
+    bool appearancePreviewFits() const;
+    void syncAppearancePreview();
     void paintTurn();
     void syncAppearanceControls(bool pickingFont);
     void fitAppearance();
@@ -378,6 +385,7 @@ private:
     QCheckBox *automaticOpeningOption = nullptr, *minimalAnnotationOption = nullptr,
               *hideTabLabelsOption = nullptr;
     QCheckBox *wifiPowerSaverOption = nullptr;
+    QCheckBox *disableStandbyOption = nullptr;
     QPushButton *autoRotateOption;
     bool hideNativeStatus() const;
     QJsonObject preferences;
@@ -405,6 +413,13 @@ private:
     kobalt::Acknowledgments *acknowledgments;
     QStackedWidget *panels;
     QLabel *previewLabel;
+    kobalt::reader::AppearancePreview *appearancePreview = nullptr;
+    kobalt::reader::AppearancePreview::Axis appearancePreviewAxis =
+            kobalt::reader::AppearancePreview::Axis::None;
+    // The page drawn from the bookmark, for the frame with this image key.
+    QImage previewPage;
+    qint64 previewPageKey = 0, previewPageRequested = 0;
+    bool previewPageForText = false;
     kobalt::ui::PageScrubber *pageScrubber = nullptr;
     QPushButton *resetDefaults, *chapterButton;
     QStackedWidget *settingsPages;
@@ -497,12 +512,11 @@ private:
     quint64 linkEpoch = 0;
     bool linkPending = false, returningFromLink = false;
     bool linksActive() const;
-    QPushButton *linkIndicator = nullptr;
     kobalt::ui::Panel *linkDiscovery = nullptr;
     QLabel *linkDiscoveryIcon = nullptr, *linkDiscoveryHint = nullptr;
     QPushButton *linkDiscoveryToggle = nullptr;
     QLabel *linkDiscoveryExit = nullptr;
-    QCheckBox *linkIndicatorOption = nullptr, *hideNonlinearOption = nullptr;
+    QCheckBox *hideNonlinearOption = nullptr;
     bool revealingLinks = false;
     QString revealedPosition;
     void syncLinkDiscovery();
@@ -586,12 +600,18 @@ private:
     void showMenuView();
     void openMenuView();
     void closeMenuView();
+    void showChapterGroups();
+    void openChapterGroups();
+    void closeChapterGroups();
     void showNavigationBarButtons();
     void openNavigationBarButtons();
     void closeNavigationBarButtons();
     void applyAutomaticOpening(bool enabled);
     void applySettings();
     bool writePreferences(const QJsonObject &next);
+    pageButtons::Buttons buttonControls() const;
+    void saveButtonControls(const QJsonObject &actions);
+    bool savingButtonControls = false;
     void showSettingsWriteError();
     void selectPanel(int index);
     void openPanel(int index);
@@ -609,7 +629,7 @@ private:
     void dismissProgressChoice();
     void showProgressChoice();
     void buildProgressChoice(const kobalt::ReadingProgress &shown, int direction, bool located);
-    void pageButton(int direction, quint32 sourceTime, bool userInput = true);
+    void pageButton(int direction, quint32 sourceTime, bool userInput = true, int physicalKey = 0);
     void turnPage(int direction, quint32 sourceTime = 0, bool userInput = true,
                   ui::InputClock clock = ui::InputClock::Pointer);
     ui::TapFilter pageTurnFilter;
@@ -640,9 +660,9 @@ private:
                               *sleepTileButton = nullptr;
     QPointer<kobalt::ui::ModalOverlay> sleepPopup;
     kobalt::ui::CaptionButton *pageNavigationButton = nullptr, *tapZonesButton = nullptr,
-                              *navigationBarButton = nullptr;
+                              *navigationBarButton = nullptr, *chapterGroupsButton = nullptr;
     QPointer<kobalt::ui::ModalOverlay> pageNavigationPopup, tapZonesPopup, navigationBarPopup,
-            menuViewPopup, tappableLinksPopup;
+            menuViewPopup, tappableLinksPopup, chapterGroupsPopup;
     kobalt::ui::CaptionButton *menuViewButton = nullptr, *tappableLinksButton = nullptr;
     int settingsColumnSpacing = defaultColumnSpacingPercent;
     int settingsWordSpacing = 100;

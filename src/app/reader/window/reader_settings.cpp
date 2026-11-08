@@ -1,3 +1,4 @@
+#include <QKeyEvent>
 #include "reading/remaining_time.h"
 #include "ui/controls/buttons.h"
 #include "ui/controls/icons.h"
@@ -306,6 +307,8 @@ void Reader::openSettings()
     hideTabLabelsOption->setChecked(preferences.value("hide_tab_labels").toBool(false));
     if (wifiPowerSaverOption)
         wifiPowerSaverOption->setChecked(preferences.value(wifiPowerSaverKey).toBool(false));
+    if (disableStandbyOption)
+        disableStandbyOption->setChecked(preferences.value(disableReaderStandbyKey).toBool(false));
     for (auto *face : { &settingsUiFontFace, &settingsUiMonoFontFace, &settingsHeaderFooterFontFace,
                         &settingsDictionaryFontFace })
         if (!session->fontFaces().contains(*face))
@@ -358,7 +361,6 @@ void Reader::openSettings()
                                         ? pageTurn::selected(preferences) == pageTurn::Style::Sweep
                                         : preferences.value("page_animations").toBool(false));
     bionicOption->setChecked(session->state().value("bold_reading").toString("off") == "bold");
-    linkIndicatorOption->setChecked(preferences.value("show_link_indicator").toBool(false));
     edgeLightOption->setChecked(preferences.value("edge_light_gestures").toBool(true));
     lightGestureFeedbackOption->setChecked(
             preferences.value("show_light_gesture_feedback").toBool(true));
@@ -369,6 +371,7 @@ void Reader::openSettings()
     showTappableLinks();
     minimalAnnotationOption->setChecked(minimalAnnotationMode());
     showNavigationBarButtons();
+    showChapterGroups();
     showMenuView();
     if (services.automaticBookOpening)
         automaticOpeningOption->setChecked(services.automaticBookOpening());
@@ -549,6 +552,7 @@ void Reader::renderStylingSamples(int requested)
             request.cropOrigin = { 0, 0 };
             request.crop = { request.page.width(), samplePixels(300) };
             request.marginGuides = true;
+            request.cropRatio = ratio;
         }
         request.thumbnail = panel->stylingPageSize(request.page, vertical);
         if (vertical) {
@@ -597,10 +601,55 @@ void Reader::fitAppearance()
     menu->setGeometry(panelBounds(height));
 }
 
+pageButtons::Buttons Reader::buttonControls() const
+{
+    auto buttons = services.buttonControls ? services.buttonControls() : pageButtons::Buttons{};
+    for (auto &button : buttons) {
+        QKeyEvent event(QEvent::KeyPress, button.key, Qt::NoModifier);
+        const int nativeDirection = services.pageButtonDirection(&event);
+        if (nativeDirection)
+            button.defaultDirection = nativeDirection;
+    }
+    return buttons;
+}
+
+void Reader::saveButtonControls(const QJsonObject &actions)
+{
+    if (savingButtonControls || savingDarkMode >= 0)
+        return;
+    auto next = appearance::globalPreferences(preferences);
+    appearance::rememberTextLayout(next, session->state());
+    appearance::rememberPageMargins(next, session->state());
+    next[pageButtons::preferenceKey] = actions;
+    savingButtonControls = true;
+    static_cast<SettingsPanel *>(general)->buttonControlsButton->setEnabled(false);
+    if (!preferencesWriter)
+        preferencesWriter = std::make_unique<storage::RecordWriter>();
+    QPointer<Reader> guard(this);
+    preferencesWriter->post([path = book->paths().preferences(),
+                             next] { return storage::writePreferences(path, next); },
+                            [guard, actions](bool saved) {
+                                qt::invoke(
+                                        QCoreApplication::instance(),
+                                        [guard, actions, saved] {
+                                            if (!guard)
+                                                return;
+                                            guard->savingButtonControls = false;
+                                            if (saved)
+                                                guard->preferences[pageButtons::preferenceKey] =
+                                                        actions;
+                                            else
+                                                guard->showSettingsWriteError();
+                                            guard->refresh();
+                                        },
+                                        Qt::QueuedConnection);
+                            });
+}
+
 bool Reader::writePreferences(const QJsonObject &next)
 {
     // Do not replace a pending asynchronous dark-mode save.
-    if (savingDarkMode >= 0)
+    if (savingButtonControls || savingDarkMode >= 0)
         return false;
     // Known exception: a settings change waits for its write, so each caller
     // can undo the change when the write fails.
@@ -623,10 +672,11 @@ bool Reader::writePreferences(const QJsonObject &next)
 
 void Reader::applySettings()
 {
-    if (savingDarkMode >= 0 || session->temporaryTypography())
+    if (savingButtonControls || savingDarkMode >= 0 || session->temporaryTypography())
         return;
     // Leaving an unanswered confirmation must not select or save defaults.
     static_cast<SettingsPanel *>(general)->dismissRestore();
+    static_cast<SettingsPanel *>(general)->dismissStandbyConfirmation();
     // Edits made before the preview opened have no session yet. Apply them
     // together with these settings once the preview holds them.
     if (appearanceEdit.queued()
@@ -645,6 +695,8 @@ void Reader::applySettings()
     next["hide_tab_labels"] = hideTabLabelsOption->isChecked();
     if (wifiPowerSaverOption)
         next[wifiPowerSaverKey] = wifiPowerSaverOption->isChecked();
+    if (disableStandbyOption)
+        next[disableReaderStandbyKey] = disableStandbyOption->isChecked();
     next[remainingTime::preferenceKey] = settingsTimeRemainingFormat;
     for (const auto *key : appearance::fallbackFontKeys)
         next[key] = settingsFontFaces.value(key).toString();
@@ -676,7 +728,6 @@ void Reader::applySettings()
                 animationOption->isChecked() ? pageTurn::Style::Sweep : pageTurn::Style::Off);
     else
         next["page_animations"] = animationOption->isChecked();
-    next["show_link_indicator"] = linkIndicatorOption->isChecked();
     next["edge_light_gestures"] = edgeLightOption->isChecked();
     next["show_light_gesture_feedback"] = lightGestureFeedbackOption->isChecked();
     next["dense_stats_chart"] = denseGraphOption->isChecked();
@@ -759,7 +810,7 @@ void Reader::applySettings()
 
 void Reader::applyDarkMode(bool enabled)
 {
-    if (savingDarkMode >= 0 || pendingDarkMode >= 0 || session->busy()
+    if (savingButtonControls || savingDarkMode >= 0 || pendingDarkMode >= 0 || session->busy()
         || session->temporaryTypography()) {
         refresh();
         return;

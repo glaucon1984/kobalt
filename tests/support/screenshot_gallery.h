@@ -37,7 +37,8 @@ inline QString screenshotGroup(const QString &scene)
     if (scene.startsWith("annotation") || scene == "annotating" || scene.startsWith("bookmark")
         || scene.startsWith("pinned-bookmark"))
         return "Bookmarks and annotations";
-    if (scene.startsWith("vertical-") || scene == "layout" || scene.startsWith("header-footer"))
+    if (scene.startsWith("vertical-") || scene == "layout" || scene.startsWith("margin-preview")
+        || scene.startsWith("header-footer"))
         return "Layout";
     if (scene.startsWith("fonts") || scene.startsWith("text") || scene.startsWith("bionic")
         || scene.startsWith("embedded-"))
@@ -127,11 +128,22 @@ inline const QMap<QString, QString> &screenshotTitles()
         { "pinned-bookmark-name", "Edit the bookmark name" },
         { "pinned-bookmark-list", "Pinned and ordinary bookmarks" },
         { "pinned-bookmark-single", "Single bookmark shortcut" },
+        { "pinned-bookmark-background", "Bookmark shortcut over contrasting content" },
         { "pinned-bookmark-eight", "Eight bookmark shortcuts" },
         { "pinned-bookmark-four", "Four bookmark shortcuts" },
         { "pinned-bookmark-actions", "Bookmark actions" },
         { "pinned-bookmark-limit", "Bookmark shortcut limit" },
         { "chapters", "Chapter list" },
+        { "button-controls-settings", "Controls: button mapping entry" },
+        { "button-controls-unavailable", "Controls: no supported buttons" },
+        { "button-controls", "Button controls: physical buttons" },
+        { "button-actions", "Button controls: actions" },
+        { "button-controls-none", "Button controls: Do nothing" },
+        { "settings-chapter-navigation", "Controls: navigation and links" },
+        { "chapter-groups-preference", "Collapsible chapters preference" },
+        { "chapters-no-collapse", "Chapters: collapsing disabled" },
+        { "chapters-groups", "Chapter groups: current chapter expanded" },
+        { "chapters-groups-collapsed", "Chapter groups: collapsed" },
         { "cover", "Book cover" },
         { "image-viewer-entry", "Image page: zoom and return actions" },
         { "image-viewer-fit", "Image viewer" },
@@ -165,6 +177,8 @@ inline const QMap<QString, QString> &screenshotTitles()
         { "header-footer-large", "Headers and footers: enlarged text" },
         { "header-footer-off", "Headers and footers: disabled" },
         { "layout", "Page layout" },
+        { "margin-preview-horizontal", "Horizontal margin preview" },
+        { "margin-preview-vertical", "Vertical margin preview" },
         { "beautifier-off", "Recommended book normalization" },
         { "beautifier-rules", "Custom book normalization" },
         { "beautifier-full", "Full book normalization" },
@@ -185,6 +199,9 @@ inline const QMap<QString, QString> &screenshotTitles()
         { "library-list-next", "Book list · Next page" },
         { "library-list-series", "Books by series" },
         { "library-more", "Library options" },
+        { "library-about", "About Kobalt from the Library" },
+        { "library-acknowledgments", "Acknowledgments from the Library" },
+        { "library-license", "License from the Library" },
         { "library-new-book-menu", "New book actions" },
         { "library-opening-error", "Book could not be opened" },
         { "library-pressed", "Pressed book cover" },
@@ -221,6 +238,8 @@ inline const QMap<QString, QString> &screenshotTitles()
         { "kosync-manual-toolbar", "Manual sync toolbar" },
         { "kosync-manual-prompt", "Manual sync explanation" },
         { "kosync-manual-settings", "Manual sync settings" },
+        { "kosync-failure", "Sync failure guidance" },
+        { "kosync-no-connection", "Sync without a connection" },
         { "kosync-automatic-off", "Automatic sync off" },
         { "kosync-automatic", "Automatic sync" },
         { "kosync-interval", "Sync while reading" },
@@ -236,6 +255,7 @@ inline const QMap<QString, QString> &screenshotTitles()
         { "styling-hanging-punctuation", "Hanging punctuation: off" },
         { "styling-hanging-punctuation-on", "Hanging punctuation: on" },
         { "settings-system", "System settings" },
+        { "settings-standby-confirmation", "Disable reader standby confirmation" },
         { "session-timeout", "New session after sleep" },
         { "settings-time-remaining-format", "Time remaining format" },
         { "stats", "Reading statistics" },

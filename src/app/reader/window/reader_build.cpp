@@ -20,7 +20,6 @@
 #include "ui/panel_timing.h"
 #include "storage/reader_storage.h"
 #include "app/reader/settings/settings_panel.h"
-#include "build_info.h"
 #include "render/page_refresh_regions.h"
 #include "reading/appearance_settings.h"
 #include "reading/page_navigation.h"
@@ -76,7 +75,7 @@ protected:
                     QRectF(content.adjusted(-padding, -2 * padding, padding, 2 * padding))
                             .adjusted(inset, inset, -inset, -inset);
             painter.setPen(QPen(palette().color(QPalette::WindowText), metrics::control::border));
-            painter.setBrush(palette().color(QPalette::Window));
+            painter.setBrush(ui::themeColors(this).paper);
             painter.drawRoundedRect(bounds, bounds.width() / 2, bounds.width() / 2);
             painter.setPen(QPen(ui::dividerColor(this), metrics::control::border));
             const qreal dividerInset = bounds.width() / 4;
@@ -898,9 +897,6 @@ void Reader::buildOverlays()
 {
     // Link discovery takes its styles in syncLinkDiscovery: they follow the
     // place it occupies and the reading strip's text size.
-    linkIndicator = new kobalt::ui::Button({}, this);
-    linkIndicator->setObjectName("rrLinkIndicator");
-    linkIndicator->hide();
     linkDiscovery = new kobalt::ui::Panel(this);
     linkDiscovery->setObjectName("rrLinkDiscovery");
     linkDiscovery->setEdgeWidth(metrics::chrome::heavyRule);
@@ -923,10 +919,6 @@ void Reader::buildOverlays()
     linkDiscoveryExit->setObjectName("rrLinkDiscoveryExit");
     linkRow->addWidget(linkDiscoveryExit);
     linkDiscovery->hide();
-    connect(linkIndicator, &QPushButton::clicked, this, [this] {
-        showControls();
-        showRevealedLinks();
-    });
     chapterGraph = new kobalt::ChapterGraph(this);
     chapterGraph->changed = [this] { saveSoon(); };
     chapterGraph->setDense(preferences.value("dense_stats_chart").toBool(false));
@@ -1051,6 +1043,17 @@ void Reader::buildAppearance(const kobalt::reader::AppearanceLayout &layout)
     spacingSlider = appearance.spacingSlider;
     marginSlider = appearance.marginSlider;
     verticalMarginSlider = appearance.verticalMarginSlider;
+    appearancePreview = new kobalt::reader::AppearancePreview(this);
+    appearancePreview->followPanel(menu, [this] { syncAppearancePreview(); });
+    connect(panels, &QStackedWidget::currentChanged, this, [this] { syncAppearancePreview(); });
+    const auto previewMargins = [this](kobalt::ui::SettingSlider *slider,
+                                       kobalt::reader::AppearancePreview::Axis axis) {
+        // The guides appear with the next page. A drag or a press draws once, when it is ready.
+        slider->adjusting = [this, axis] { appearancePreviewAxis = axis; };
+        connect(slider, &QSlider::valueChanged, this, [this] { syncAppearancePreview(); });
+    };
+    previewMargins(marginSlider, kobalt::reader::AppearancePreview::Axis::Horizontal);
+    previewMargins(verticalMarginSlider, kobalt::reader::AppearancePreview::Axis::Vertical);
     alignmentButtons = appearance.alignmentButtons;
     hyphenButtons = appearance.hyphenButtons;
     rotationButtons = appearance.rotationButtons;
@@ -1308,11 +1311,6 @@ void Reader::buildSettings()
 {
     kobalt::reader::SettingsPanelInputs settingsInputs;
     settingsInputs.keyboard = services.keyboard;
-    const auto release = QStringLiteral(KOBALT_VERSION);
-    settingsInputs.release = release.mid(release.startsWith('v') ? 1 : 0);
-    settingsInputs.commit = QString::fromLatin1(kobaltCommit) + (KOBALT_COMMIT_MODIFIED ? "*" : "");
-    settingsInputs.commitVisible = kobaltCommit[0] != '\0';
-    settingsInputs.qtMajor = QT_VERSION >> 16;
     settingsInputs.downloadableDictionaries = services.downloadableDictionaries;
     settingsInputs.animationSupport = services.animationSupport();
     settingsInputs.lightSupported = services.lightAvailable();
@@ -1321,6 +1319,7 @@ void Reader::buildSettings()
     settingsInputs.automaticBookOpeningSupported =
             services.automaticBookOpening && services.setAutomaticBookOpening;
     settingsInputs.wifiPowerSaverSupported = bool(services.turnOffWifi);
+    settingsInputs.readerStandbySupported = services.readerStandbySupported;
 #ifndef KOBALT_READER_HARDWARE
     settingsInputs.debugProgressAvailable = true;
 #endif
@@ -1397,15 +1396,16 @@ void Reader::buildSettings()
     tapZonesButton = settings->tapZonesButton;
     tappableLinksButton = settings->tappableLinksButton;
     navigationBarButton = settings->navigationBarButton;
+    chapterGroupsButton = settings->chapterGroupsButton;
     menuViewButton = settings->menuViewButton;
     connect(menuViewButton, &QPushButton::clicked, this, [this] { openMenuView(); });
     minimalAnnotationOption = settings->minimalAnnotationOption;
     automaticOpeningOption = settings->automaticOpeningOption;
     hideTabLabelsOption = settings->hideTabLabelsOption;
     wifiPowerSaverOption = settings->wifiPowerSaverOption;
+    disableStandbyOption = settings->disableStandbyOption;
     settings->showPowerManagement(wifiPowerSaverVisible());
     hideTabLabelsOption->setVisible(!services.phoneLayout);
-    linkIndicatorOption = settings->linkIndicatorOption;
     hideNonlinearOption = settings->hideNonlinearOption;
     connect(settings->columnSpacingButton, &QPushButton::clicked, this, [this, settings] {
         settings->showColumnSpacingChoices(settingsColumnSpacing, [this, settings](int percent) {
@@ -1541,9 +1541,26 @@ void Reader::buildSettings()
     connect(sleepTileButton, &QPushButton::clicked, this, [this] { openSleepTile(); });
     connect(tappableLinksButton, &QPushButton::clicked, this, [this] { openTappableLinks(); });
     connect(tapZonesButton, &QPushButton::clicked, this, [this] { openTapZones(); });
+    connect(chapterGroupsButton, &QPushButton::clicked, this, [this] { openChapterGroups(); });
     connect(navigationBarButton, &QPushButton::clicked, this,
             [this] { openNavigationBarButtons(); });
     connect(pageNavigationButton, &QPushButton::clicked, this, [this] { openPageNavigation(); });
+    settings->updateButtonControls(buttonControls(), preferences, false);
+    connect(settings->buttonControlsButton, &QPushButton::clicked, this, [this, settings] {
+        const auto buttons = buttonControls();
+        if (buttons.isEmpty())
+            return;
+        settings->showButtonControls(buttons, preferences, [this](const QJsonObject &actions) {
+            saveButtonControls(actions);
+        });
+        settingsFontPopup = settings->fontDialog;
+        if (settingsFontPopup) {
+            settingsFontPopup->installEventFilter(this);
+            for (auto *widget : settingsFontPopup->findChildren<QWidget *>())
+                textRefresh(widget);
+            textRefresh(settingsFontPopup);
+        }
+    });
     connect(automaticOpeningOption, &QCheckBox::clicked, this,
             [this](bool enabled) { applyAutomaticOpening(enabled); });
     connect(refreshButton, &QPushButton::clicked, this, [this] { openScreenRefresh(); });
@@ -1627,7 +1644,8 @@ void Reader::buildNotices()
     brightnessNotice->hide();
     brightnessHide.setObjectName("rrBrightnessHideTimer");
     brightnessHide.setSingleShot(true);
-    brightnessHide.setInterval(metrics::lightSwipe::hideMilliseconds);
+    brightnessHide.setTimerType(Qt::PreciseTimer);
+    brightnessHide.setInterval(metrics::lightSwipe::finalPercentageMilliseconds);
     connect(&brightnessHide, &QTimer::timeout, brightnessNotice, &QWidget::hide);
     annotationModeNotice = new ui::AnnotationModeNotice(this);
     annotationModeNotice->setObjectName("rrAnnotationModeNotice");

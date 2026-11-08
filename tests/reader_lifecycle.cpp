@@ -13,6 +13,7 @@
 #include "app/reader_interface.h"
 #include "app/reader_window.h"
 #include "ui/controls/page_scrubber.h"
+#include <QtGui/private/qeventpoint_p.h>
 #include "ui/dialogs/modals.h"
 #include "ui/style/fonts.h"
 #include "ui/style/metrics.h"
@@ -186,7 +187,9 @@ private:
 // replies wait in `held` until the test finishes them.
 struct KosyncHttpState
 {
-    int requests = 0;
+    int requests = 0, uploads = 0;
+    int readStatus = 200, uploadStatus = 200;
+    QByteArray readBody = "{}";
     bool hold = false;
     QList<QPointer<test::KosyncReply>> held;
 };
@@ -201,16 +204,21 @@ protected:
                                  QIODevice *data) override
     {
         ++state->requests;
-        QByteArray body = "{}";
+        QByteArray body = state->readBody;
         if (operation == PutOperation) {
+            ++state->uploads;
             const auto upload =
                     QJsonDocument::fromJson(data ? data->readAll() : QByteArray()).object();
             body = QJsonDocument(QJsonObject{ { "document", upload.value("document") },
                                               { "timestamp", 1 } })
                            .toJson(QJsonDocument::Compact);
         }
-        auto *reply = new test::KosyncReply(request, body, 200, QNetworkReply::NoError, this,
-                                            state->hold);
+        auto *reply = new test::KosyncReply(
+                request, body, operation == PutOperation ? state->uploadStatus : state->readStatus,
+                operation != PutOperation && state->readStatus == 404
+                        ? QNetworkReply::ContentNotFoundError
+                        : QNetworkReply::NoError,
+                this, state->hold);
         if (state->hold)
             state->held.append(reply);
         return reply;
@@ -2505,6 +2513,313 @@ private slots:
         test::skipPageTurnWindow();
         host.window()->pageButton(1);
         QTRY_VERIFY(!host.session()->busy() && host.session()->page() == 3);
+    }
+
+    // Checks both page navigation and reflow while a contact is held.
+    void pageFrameDuringHold_data()
+    {
+        QTest::addColumn<bool>("reflow");
+        QTest::addColumn<bool>("samePosition");
+        QTest::addColumn<bool>("backward");
+        QTest::addColumn<bool>("touch");
+        for (bool touch : { false, true }) {
+            const QByteArray prefix = touch ? "touch-" : "mouse-";
+            QTest::newRow((prefix + "page").constData()) << false << false << false << touch;
+            QTest::newRow((prefix + "layout").constData()) << true << false << false << touch;
+            QTest::newRow((prefix + "same-position-forward").constData())
+                    << false << true << false << touch;
+            QTest::newRow((prefix + "same-position-backward").constData())
+                    << false << true << true << touch;
+        }
+    }
+
+    // Checks that a new page or layout cannot turn an overlapping long hold into another page turn.
+    void pageFrameDuringHold()
+    {
+        QFETCH(bool, reflow);
+        QFETCH(bool, samePosition);
+        QFETCH(bool, backward);
+        QFETCH(bool, touch);
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        if (samePosition) {
+            auto files = test::engineBook();
+            files["OEBPS/c1.xhtml"] =
+                    test::publisherHtml("<p>" + QByteArray("alpha ").repeated(20)
+                                        + "</p><div style=\"padding-bottom:4000px\">t</div><p>"
+                                        + QByteArray("reader ").repeated(60) + "</p>");
+            QVERIFY(test::writeBook(directory.path(), "same-position.epub", files));
+        }
+        ReaderFixture host(testPaths(), testFonts, testPlaceholder);
+        CloseHost cleanup{ host };
+        QSignalSpy opened(&host, &ReaderFixture::opened);
+        host.open(samePosition ? directory.filePath("same-position.epub") : fixture(), nativeSize);
+        QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 30000);
+        Canvas canvas(host.window(), nativeSize);
+        canvas.resize(900, 900);
+        canvas.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&canvas));
+        QTRY_VERIFY(!host.session()->busy());
+        auto *page = static_cast<ReadingPage *>(host.window()->findChild<QWidget *>("rrPage"));
+        QVERIFY(page);
+        QVERIFY(host.session()->pages() > 4);
+        const int origin = samePosition && !backward ? 1 : 2;
+        QVERIFY(host.session()->go(origin));
+        QTRY_VERIFY(!host.session()->busy());
+        const QPoint point(page->width() * 9 / 10, page->height() / 2);
+        auto *device = QTest::createTouchDevice();
+        const auto send = [&](QEvent::Type type, ulong timestamp) {
+            if (touch) {
+                const bool down = type == QEvent::MouseButtonPress;
+                QEventPoint contact(0, down ? QEventPoint::Pressed : QEventPoint::Released, point,
+                                    page->mapToGlobal(point));
+                QMutableEventPoint::setPosition(contact, point);
+                QTouchEvent event(down ? QEvent::TouchBegin : QEvent::TouchEnd, device,
+                                  Qt::NoModifier, { contact });
+                event.setTimestamp(timestamp);
+                QApplication::sendEvent(page, &event);
+                return;
+            }
+            QMouseEvent event(type, point, page->mapToGlobal(point), Qt::LeftButton,
+                              type == QEvent::MouseButtonRelease ? Qt::NoButton : Qt::LeftButton,
+                              Qt::NoModifier);
+            event.setTimestamp(timestamp);
+            QApplication::sendEvent(page, &event);
+        };
+        int imageLookups = 0;
+        const auto imageHeld = page->imageHeld;
+        page->imageHeld = [&](QPoint point) {
+            ++imageLookups;
+            return imageHeld(point);
+        };
+        const auto position = host.session()->state().value("position");
+        const auto image = page->image.cacheKey();
+        const auto layout = host.session()->layoutRevision();
+        if (reflow) {
+            auto appearance = host.session()->state();
+            appearance["font_pixels"] = appearance.value("font_pixels").toInt() + 4;
+            host.session()->apply(appearance);
+        } else {
+            QVERIFY(host.session()->go(samePosition ? (backward ? 1 : 2) : 3));
+        }
+        // The worker's new frame cannot be delivered until after this press.
+        send(QEvent::MouseButtonPress, 1000);
+        QTRY_VERIFY(!host.session()->busy() && page->image.cacheKey() != image);
+        QCOMPARE(host.session()->layoutRevision() != layout, reflow);
+        const auto destination = host.session()->page();
+        if (!reflow)
+            QCOMPARE(destination, samePosition ? (backward ? 1 : 2) : 3);
+        if (samePosition)
+            QCOMPARE(host.session()->state().value("position"), position);
+        send(QEvent::MouseButtonRelease, 1709);
+        QVERIFY(!host.session()->busy());
+        QCOMPARE(imageLookups, 0);
+        QCOMPARE(host.session()->page(), destination);
+        QVERIFY(!host.window()->findChild<QWidget *>("rrDictionary")->isVisible());
+        // A fresh short tap still turns the page, with no duplicate-filter masking.
+        send(QEvent::MouseButtonPress, 2000);
+        send(QEvent::MouseButtonRelease, 2085);
+        QTRY_VERIFY(!host.session()->busy() && host.session()->page() == destination + 1);
+    }
+
+    // Checks decoded-image frames both before hold recognition and while the word-selection reply is queued.
+    void pageImageDuringHold_data()
+    {
+        QTest::addColumn<QString>("stage");
+        for (const auto *stage : { "before-threshold", "token-pending", "geometry-pending",
+                                   "dictionary-open", "selection-open" })
+            QTest::newRow(stage) << QString(stage);
+    }
+
+    // Checks that a deferred image keeps the first lookup on unchanged text and never navigates.
+    void pageImageDuringHold()
+    {
+        QFETCH(QString, stage);
+        const bool pendingSelection = stage == "token-pending";
+        const bool delayedPublication = stage == "geometry-pending" || stage == "dictionary-open"
+                || stage == "selection-open";
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        auto files = test::engineBook(true);
+        files["OEBPS/c1.xhtml"] = test::publisherHtml(
+                "<p style=\"margin:0;text-indent:0\">" + QByteArray("reader ").repeated(35)
+                + "</p><p><img src=\"colors.png\" width=\"128\" height=\"64\"/></p>");
+        // Local resources defer images above 256 KiB. Noise keeps this PNG
+        // above that threshold without a network service or a sleep.
+        QImage image(400, 400, QImage::Format_RGB32);
+        quint32 noise = 1;
+        for (int y = 0; y < image.height(); ++y)
+            for (int x = 0; x < image.width(); ++x) {
+                noise = noise * 1664525u + 1013904223u;
+                image.setPixel(x, y, 0xff000000u | (noise & 0xffffffu));
+            }
+        files["OEBPS/colors.png"].clear();
+        QBuffer buffer(&files["OEBPS/colors.png"]);
+        QVERIFY(buffer.open(QIODevice::WriteOnly));
+        QVERIFY(image.save(&buffer, "PNG"));
+        QVERIFY(files["OEBPS/colors.png"].size() > 256 * 1024);
+        QVERIFY(test::writeBook(directory.path(), "hold-image.epub", files));
+        const auto paths = testPaths();
+        QVERIFY(storage::writeJson(paths.preferences(), { { "highlight_help_seen", true } }));
+        ReaderFixture host(paths, testFonts, testPlaceholder);
+        CloseHost cleanup{ host };
+
+        struct ResumeEngine
+        {
+            ~ResumeEngine() { engineActivity().pause(false); }
+        } resume;
+
+        host.configureServices = [](ReaderHostServices &) { engineActivity().pause(true); };
+        QSignalSpy opened(&host, &ReaderFixture::opened);
+        host.open(directory.filePath("hold-image.epub"), nativeSize);
+        QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 30000);
+        Canvas canvas(host.window(), nativeSize);
+        canvas.resize(900, 900);
+        canvas.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&canvas));
+        auto *page = static_cast<ReadingPage *>(host.window()->findChild<QWidget *>("rrPage"));
+        QVERIFY(page);
+        QVERIFY(!host.session()->busy());
+        QVERIFY(host.session()->resourceStats().value("pending_images").toInt() > 0);
+        const auto imageKey = page->image.cacheKey();
+        const auto layout = host.session()->layoutRevision();
+        const auto position = host.session()->state().value("position");
+        const QPoint point(page->width() / 2, page->topHeight() + 100);
+        const auto send = [&](QEvent::Type type, ulong timestamp) {
+            QMouseEvent event(type, point, page->mapToGlobal(point), Qt::LeftButton,
+                              type == QEvent::MouseButtonRelease ? Qt::NoButton : Qt::LeftButton,
+                              Qt::NoModifier);
+            event.setTimestamp(timestamp);
+            QApplication::sendEvent(page, &event);
+        };
+        auto *dictionary = host.window()->findChild<QWidget *>("rrDictionary");
+        QVERIFY(dictionary);
+        bool started = false;
+        const auto drag = page->annotationDragStarted;
+        page->annotationDragStarted = [&](QPoint point, int boundary) {
+            started = true;
+            return drag(point, boundary);
+        };
+        const auto publish = host.session()->updated;
+
+        struct RestoreNotification
+        {
+            ReaderSession *session;
+            std::function<void()> previous;
+
+            ~RestoreNotification() { session->updated = previous; }
+        } restoreNotification{ host.session(), publish };
+
+        bool tokenBoundaryReached = false, imageBeforeToken = false;
+        if (pendingSelection) {
+            host.session()->updated = [&] {
+                imageBeforeToken = !tokenBoundaryReached;
+                publish();
+            };
+            // This marker is queued before the held contact requests its token.
+            // Publishing before the marker therefore proves the token is pending.
+            host.session()->annotationTokenAt(
+                    {}, [&](AnnotationToken) { tokenBoundaryReached = true; });
+        }
+        QRect sheet, firstHandle, lastHandle;
+        if (delayedPublication) {
+            if (stage == "selection-open")
+                page->annotationRequested();
+            // Hold back only the image's GUI notification. The engine can resolve
+            // text against its unchanged layout while the old pixels stay visible.
+            bool captured = false;
+            host.session()->updated = [&] { captured = true; };
+            engineActivity().pause(false);
+            QTRY_VERIFY(captured);
+            QCOMPARE(page->image.cacheKey(), imageKey);
+            host.session()->updated = publish;
+            engineActivity().pause(true);
+            send(QEvent::MouseButtonPress, 1000);
+            send(QEvent::MouseButtonRelease, 1709);
+            QVERIFY(started);
+            if (stage == "geometry-pending") {
+                // A new draft changes the markup generation before its geometry
+                // reply installs handles. Probe successive worker/GUI boundaries
+                // until that observable state is reached, rather than counting replies.
+                const auto generation = host.session()->markupGeneration();
+                bool probed = false, geometryPending = false;
+                const auto probe = [&](const auto &next, int remaining) -> void {
+                    host.session()->annotationTokenAt({}, [&, next, remaining](AnnotationToken) {
+                        if (host.session()->markupGeneration() == generation && remaining > 0) {
+                            next(next, remaining - 1);
+                            return;
+                        }
+                        geometryPending = host.session()->markupGeneration() > generation
+                                && page->annotationHandleRect(true).isEmpty()
+                                && page->annotationHandleRect(false).isEmpty()
+                                && !page->annotationContains(point - QPoint(0, page->topHeight()))
+                                && !dictionary->isVisible();
+                        if (geometryPending)
+                            publish();
+                        probed = true;
+                    });
+                };
+                probe(probe, 8);
+                engineActivity().pause(false);
+                QTRY_VERIFY(probed);
+                QVERIFY2(geometryPending,
+                         "Image must arrive after draft creation and before geometry");
+            } else {
+                engineActivity().pause(false);
+                if (stage == "dictionary-open") {
+                    QTRY_VERIFY(dictionary->isVisible());
+                    sheet = dictionary->geometry();
+                } else {
+                    QTRY_VERIFY(!page->annotationHandleRect(true).isEmpty());
+                    page->tapped(point);
+                    auto *actions = host.window()->findChild<QWidget *>("rrAnnotationPopover");
+                    QVERIFY(actions);
+                    QTRY_VERIFY(actions->isVisible());
+                    auto *card = actions->findChild<QWidget *>("rrModalCard");
+                    QVERIFY(card);
+                    sheet = card->geometry();
+                }
+                firstHandle = page->annotationHandleRect(true);
+                lastHandle = page->annotationHandleRect(false);
+                QVERIFY(!firstHandle.isEmpty() && !lastHandle.isEmpty());
+                QCOMPARE(page->image.cacheKey(), imageKey);
+                publish();
+            }
+        } else {
+            send(QEvent::MouseButtonPress, 1000);
+            if (pendingSelection) {
+                QTRY_VERIFY(started);
+                send(QEvent::MouseButtonRelease, 1709);
+            }
+            engineActivity().pause(false);
+        }
+        QTRY_VERIFY(page->image.cacheKey() != imageKey);
+        if (pendingSelection) {
+            QTRY_VERIFY(tokenBoundaryReached);
+            QVERIFY2(imageBeforeToken, "Image must arrive before the queued token boundary");
+        }
+        QCOMPARE(host.session()->layoutRevision(), layout);
+        QCOMPARE(host.session()->state().value("position"), position);
+        if (!delayedPublication && !pendingSelection)
+            send(QEvent::MouseButtonRelease, 1709);
+        if (stage == "selection-open") {
+            auto *actions = host.window()->findChild<QWidget *>("rrAnnotationPopover");
+            QVERIFY(actions->isVisible());
+            auto *card = actions->findChild<QWidget *>("rrModalCard");
+            QVERIFY(card);
+            QCOMPARE(card->geometry(), sheet);
+        } else {
+            QTRY_VERIFY(dictionary->isVisible());
+            QCOMPARE(host.window()->findChild<QLabel *>("rrDictionaryWord")->text(),
+                     QString("reader"));
+            if (stage == "dictionary-open")
+                QCOMPARE(dictionary->geometry(), sheet);
+        }
+        if (!firstHandle.isEmpty()) {
+            QCOMPARE(page->annotationHandleRect(true), firstHandle);
+            QCOMPARE(page->annotationHandleRect(false), lastHandle);
+        }
+        QCOMPARE(host.session()->state().value("position"), position);
     }
 
     void pageGestureBurstIgnoresRapidTurns()
@@ -4953,7 +5268,7 @@ private slots:
         complete(false);
         QVERIFY(manual->isEnabled());
         auto *page = static_cast<ReadingPage *>(window->findChild<QWidget *>("rrPage"));
-        QCOMPARE(page->notice, strings::get("kosync.network_error"));
+        QCOMPARE(page->notice, strings::get("kosync.no_connection"));
         QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
         manual->click();
         QCOMPARE(network->requests, 2);
@@ -4963,6 +5278,126 @@ private slots:
         window->sleepReader();
         QCOMPARE(network->requests, 2);
         QVERIFY(!kosync::Client(paths.syncAccount()).manualExplanation());
+    }
+
+    void kosyncMissingProgress_data()
+    {
+        QTest::addColumn<int>("statusCode");
+        QTest::addColumn<QByteArray>("body");
+        QTest::addColumn<bool>("missing");
+        QTest::newRow("empty-object") << 200 << QByteArray("{}") << true;
+        QTest::newRow("empty-array") << 200 << QByteArray("[]") << true;
+        QTest::newRow("missing-progress") << 404 << QByteArray(R"({"status":"not found"})") << true;
+        QTest::newRow("missing-route") << 404 << QByteArray("<html>Not Found</html>") << false;
+        QTest::newRow("ambiguous-404") << 404 << QByteArray("{}") << false;
+        QTest::newRow("auth-failure") << 401 << QByteArray(R"({"status":"not found"})") << false;
+        QTest::newRow("server-failure") << 500 << QByteArray(R"({"status":"not found"})") << false;
+    }
+
+    void kosyncMissingProgress()
+    {
+        QFETCH(int, statusCode);
+        QFETCH(QByteArray, body);
+        QFETCH(bool, missing);
+        auto paths = testPaths();
+        QVERIFY(storage::writeJson(paths.syncAccount(),
+                                   { { "schema", 1 },
+                                     { "server", "https://fixture.invalid" },
+                                     { "username", "reader" },
+                                     { "key", QString(32, 'a') },
+                                     { "device_id", "fixture" },
+                                     { "automatic", false } }));
+        auto http = std::make_shared<KosyncHttpState>();
+        http->readStatus = statusCode;
+        http->readBody = body;
+        ReaderFixture host(paths, testFonts, testPlaceholder);
+        host.configureServices = [http](ReaderHostServices &services) {
+            services.kosyncHttp = [http] { return std::make_unique<KosyncHttp>(http); };
+        };
+        CloseHost cleanup{ host };
+        QSignalSpy opened(&host, &ReaderFixture::opened);
+        host.open(textBook, nativeSize);
+        QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 30000);
+        Canvas canvas(host.window(), nativeSize);
+        canvas.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&canvas));
+        QTRY_VERIFY(!host.session()->busy());
+        const auto position = host.session()->state().value("position");
+        host.window()->findChild<QPushButton *>("rrSettings")->click();
+        host.window()->findChild<QPushButton *>("rrSettingsKosync")->click();
+        host.window()->findChild<QPushButton *>("rrKosyncNow")->click();
+        if (missing) {
+            QTRY_VERIFY(showsSyncTime(host.window()));
+            QCOMPARE(http->uploads, 1);
+            QCOMPARE(http->requests, 2);
+        } else {
+            auto *status = host.window()->findChild<QLabel *>("rrKosyncStatus");
+            QVERIFY(status);
+            QTRY_COMPARE(status->text(),
+                         strings::get(statusCode == 401           ? "kosync.auth_error"
+                                              : statusCode == 500 ? "kosync.server_error"
+                                                                  : "kosync.route_error"));
+            QCOMPARE(http->uploads, 0);
+            QCOMPARE(http->requests, 1);
+            QVERIFY(!showsSyncTime(host.window()));
+        }
+        QCOMPARE(host.session()->state().value("position"), position);
+    }
+
+    void kosyncFailure_data()
+    {
+        QTest::addColumn<bool>("upload");
+        QTest::newRow("read") << false;
+        QTest::newRow("upload") << true;
+    }
+
+    // A failed read or upload keeps its explanation visible and leaves progress unchanged.
+    void kosyncFailure()
+    {
+        QFETCH(bool, upload);
+        auto paths = testPaths();
+        QVERIFY(storage::writeJson(paths.syncAccount(),
+                                   { { "schema", 1 },
+                                     { "server", "https://fixture.invalid" },
+                                     { "username", "reader" },
+                                     { "key", QString(32, 'a') },
+                                     { "device_id", "fixture" },
+                                     { "automatic", false } }));
+        auto http = std::make_shared<KosyncHttpState>();
+        http->readStatus = upload ? 200 : 401;
+        http->uploadStatus = 401;
+        ReaderFixture host(paths, testFonts, testPlaceholder);
+        host.configureServices = [http](ReaderHostServices &services) {
+            services.kosyncHttp = [http] { return std::make_unique<KosyncHttp>(http); };
+        };
+        CloseHost cleanup{ host };
+        QSignalSpy opened(&host, &ReaderFixture::opened);
+        host.open(textBook, nativeSize);
+        QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 30000);
+        Canvas canvas(host.window(), nativeSize);
+        canvas.resize(900, 900);
+        canvas.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&canvas));
+        QTRY_VERIFY(!host.session()->busy());
+        const auto position = host.session()->state().value("position");
+        host.window()->findChild<QPushButton *>("rrSettings")->click();
+        host.window()->findChild<QPushButton *>("rrSettingsKosync")->click();
+        auto *status = host.window()->findChild<QLabel *>("rrKosyncStatus");
+        QVERIFY(status);
+        host.window()->findChild<QPushButton *>("rrKosyncNow")->click();
+        QTRY_COMPARE(status->text(), strings::get("kosync.auth_error"));
+        QCOMPARE(http->requests, upload ? 2 : 1);
+        QCOMPARE(host.session()->state().value("position"), position);
+        QVERIFY(!showsSyncTime(host.window()));
+        auto *next = host.window()->findChild<QPushButton *>("rrSettingsOptionsNext");
+        for (int page = 0; page < 10 && next && next->isVisible() && next->isEnabled()
+             && status->visibleRegion().boundingRect() != status->rect();
+             ++page) {
+            next->click();
+            QCoreApplication::processEvents();
+        }
+        QTRY_COMPARE(status->visibleRegion().boundingRect(), status->rect());
+        QVERIFY(status->height() >= status->heightForWidth(status->width()));
     }
 
     // Checks Sync now in Settings: no deadline while a connection waits for permission, then the Syncing notice and its Cancel.
@@ -5038,6 +5473,9 @@ private slots:
             network->completed = {};
             network->connected = connection == "connected";
             completed(network->connected);
+            if (!network->connected)
+                QCOMPARE(host.window()->findChild<QLabel *>("rrKosyncStatus")->text(),
+                         strings::get("kosync.no_connection"));
         }
         if (connection != "permission") {
             QPointer<QWidget> popup = host.window()->findChild<QWidget *>("rrKosyncOpening");
@@ -5173,7 +5611,7 @@ private slots:
         // counts from the skipped opening sync, and Wait keeps the sync local.
         readOn(15);
         QCOMPARE(status->text(),
-                 minutes < 0 ? QString("unchanged") : strings::get("kosync.saved_locally"));
+                 minutes < 0 ? QString("unchanged") : strings::get("kosync.no_connection"));
         QCOMPARE(network->requests, 0);
         host.window()->sleepReader();
         host.window()->wakeReader();
@@ -5294,6 +5732,58 @@ private slots:
         events.seen.removeDuplicates();
         QVERIFY2(events.seen.isEmpty(),
                  qPrintable("Timer events while idle: " + events.seen.join(", ")));
+    }
+
+    void readerStandbySetting_data()
+    {
+        QTest::addColumn<QJsonValue>("saved");
+        QTest::addColumn<bool>("supported");
+        QTest::addColumn<bool>("disabled");
+        QTest::newRow("default") << QJsonValue() << true << false;
+        QTest::newRow("enabled") << QJsonValue(false) << true << false;
+        QTest::newRow("disabled") << QJsonValue(true) << true << true;
+        QTest::newRow("invalid") << QJsonValue("true") << true << false;
+        QTest::newRow("unsupported") << QJsonValue(true) << false << false;
+    }
+
+    void readerStandbySetting()
+    {
+        QFETCH(QJsonValue, saved);
+        QFETCH(bool, supported);
+        QFETCH(bool, disabled);
+        auto paths = testPaths();
+        QJsonObject preferences{ { "schema", 1 } };
+        if (!saved.isNull())
+            preferences["disable_reader_standby"] = saved;
+        QVERIFY(storage::writeJson(paths.preferences(), preferences));
+        bool suspended = false;
+        ReaderFixture host(paths, testFonts, testPlaceholder);
+        CloseHost cleanup{ host };
+        host.configureServices = [&](ReaderHostServices &services) {
+            services.readerStandbySupported = supported;
+            services.suspended = [&] { return suspended; };
+        };
+        QSignalSpy opened(&host, &ReaderFixture::opened);
+        host.open(fixture(), nativeSize);
+        QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 30000);
+        Canvas canvas(host.window(), nativeSize);
+        canvas.resize(900, 900);
+        canvas.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&canvas));
+        QTRY_VERIFY(host.window()->readyForPresentation());
+        QTRY_VERIFY(!host.book()->savesPending());
+        QTRY_COMPARE(host.window()->flushBeforeStandby(), !disabled);
+        // Explicit sleep must still reach the native suspend path.
+        suspended = true;
+        QTRY_VERIFY(host.window()->flushBeforeStandby());
+        suspended = false;
+        QTRY_COMPARE(host.window()->flushBeforeStandby(), !disabled);
+        host.window()->hide();
+        QTRY_VERIFY(host.window()->flushBeforeStandby());
+        host.window()->show();
+        QTRY_COMPARE(host.window()->flushBeforeStandby(), !disabled);
+        host.shutdown();
+        QTRY_VERIFY(host.idle());
     }
 
     // Checks when opening a book asks the host to turn Wi-Fi off: each account and schedule, the saver setting and Bluetooth.
@@ -5507,7 +5997,7 @@ private slots:
         status->setText("unchanged");
         readOn(5);
         QCOMPARE(network->requests, requests);
-        QCOMPARE(status->text(), strings::get("kosync.saved_locally"));
+        QCOMPARE(status->text(), strings::get("kosync.no_connection"));
         // Time alone does not sync: a refresh long after the interval, without
         // a new position, does nothing.
         status->setText("unchanged");
@@ -5526,12 +6016,12 @@ private slots:
         sheet->findChild<QPushButton *>("rrKosyncAutomaticClose")->click();
         QCOMPARE(kosync::Client(paths.syncAccount()).schedule().minutes, 0);
         readOn(1);
-        QCOMPARE(status->text(), strings::get("kosync.saved_locally"));
+        QCOMPARE(status->text(), strings::get("kosync.no_connection"));
         status->setText("unchanged");
         readOn(0.4);
         QCOMPARE(status->text(), QString("unchanged"));
         readOn(0.2);
-        QCOMPARE(status->text(), strings::get("kosync.saved_locally"));
+        QCOMPARE(status->text(), strings::get("kosync.no_connection"));
         QCOMPARE(network->requests, requests);
     }
 
@@ -5742,7 +6232,7 @@ private slots:
         // at its budget.
         QVERIFY(host.window()->pendingNetworkSync());
         QCOMPARE(requests, 0);
-        QTRY_COMPARE_WITH_TIMEOUT(status->text(), strings::get("kosync.saved_locally"), 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(status->text(), strings::get("kosync.timeout_error"), 3000);
         QCOMPARE(requests, 0);
         QCOMPARE(network->requests, 0);
         QCOMPARE(network->releases, 0);
@@ -7913,7 +8403,7 @@ private:
         QPointer<QWidget> popup = host.window()->findChild<QWidget *>("rrKosyncOpening");
         QVERIFY(popup);
         if (state == "deadline") {
-            QTRY_COMPARE_WITH_TIMEOUT(status->text(), strings::get("kosync.saved_locally"), 11000);
+            QTRY_COMPARE_WITH_TIMEOUT(status->text(), strings::get("kosync.reader_timeout"), 11000);
         } else if (state == "cancel") {
             host.window()->show();
             QVERIFY(click(canvas, popup->findChild<QPushButton *>("rrKosyncCancel")));
@@ -8025,6 +8515,8 @@ private:
             QTRY_VERIFY(!popup || !popup->isVisible());
             QCOMPARE(network->cancellations, 1);
             QCOMPARE(attempts.count(), 0);
+            QCOMPARE(host.window()->findChild<QLabel *>("rrKosyncStatus")->text(),
+                     strings::get("kosync.connection_timeout"));
         } else {
             QVERIFY(click(canvas, popup->findChild<QPushButton *>("rrKosyncCancel")));
             QCOMPARE(network->cancellations, 1);
@@ -8042,7 +8534,7 @@ private:
             QTRY_VERIFY(!host.session()->busy());
             QCoreApplication::processEvents();
             QCOMPARE(network->requests, 1);
-            QCOMPARE(status->text(), strings::get("kosync.saved_locally"));
+            QCOMPARE(status->text(), strings::get("kosync.no_connection"));
             QCOMPARE(attempts.count(), 0);
             if (scenario == "login") {
                 // Editing credentials exposes Sign in even for the saved account.

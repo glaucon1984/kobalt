@@ -9,6 +9,8 @@
 #include <QDynamicPropertyChangeEvent>
 #include "assets/bundled_fonts.h"
 #include "app/library/library_view.h"
+#include "app/about/about_page.h"
+#include "app/reader/settings/acknowledgments.h"
 #include "ui/controls/buttons.h"
 #include "ui/controls/highlight_palette.h"
 #include "ui/controls/options.h"
@@ -44,6 +46,7 @@
 #include "support/strings.h"
 #include "engine/crengine/engine_document.h"
 #include <QApplication>
+#include <QtGui/private/qeventpoint_p.h>
 #include <QFontDatabase>
 #include <QLocale>
 #include <QScopeGuard>
@@ -351,6 +354,68 @@ private slots:
         QCOMPARE(selected, 1);
     }
 
+    // Checks that disclosure taps toggle groups and disclosure swipes only page the list.
+    void pagedChapterGroups_data() { variants(); }
+
+    void pagedChapterGroups()
+    {
+        QFETCH(bool, dark);
+        QFETCH(int, ppi);
+        ui::setDensity(ppi);
+        auto *chapters = new ChapterContents(nullptr);
+        chapters->setProperty("reader_dark", dark);
+        Canvas canvas(chapters, QSize(ui::px(1072), ui::px(1448)));
+        canvas.resize(536, 724);
+        canvas.show();
+        QVector<Choice> choices;
+        for (int i = 0; i < 60; ++i)
+            choices.append({ QString::number(i),
+                             QString::number(i),
+                             QString("chapter%1").arg(i),
+                             {},
+                             i % 2,
+                             i });
+        int selected = 0;
+        chapters->selected = [&](const QString &) { ++selected; };
+        chapters->showChapters("Groups", choices, "chapter0", ChapterGroups::All);
+        QCoreApplication::processEvents();
+        auto *leaf = chapters->findChild<QPushButton *>("chapter1");
+        QVERIFY(leaf);
+        QCOMPARE(leaf->x(), 0);
+        QCOMPARE(leaf->width(), chapters->width());
+        const auto leafPoint =
+                canvas.mapFromScene(leaf->mapTo(chapters, QPoint(ui::px(10), leaf->height() / 2)));
+        QTest::mousePress(canvas.viewport(), Qt::LeftButton, Qt::NoModifier, leafPoint);
+        QVERIFY(leaf->isDown());
+        const auto pressed = leaf->grab().toImage();
+        QCOMPARE(pressed.pixelColor(2, 2), ui::themeColors(leaf).pressedPaper);
+        QCOMPARE(pressed.pixelColor(leaf->width() - 3, 2), ui::themeColors(leaf).pressedPaper);
+        QTest::mouseRelease(canvas.viewport(), Qt::LeftButton, Qt::NoModifier, leafPoint);
+        QCOMPARE(selected, 1);
+        selected = 0;
+        auto disclosure = [&] { return chapters->findChild<QPushButton *>("chapter0Toggle"); };
+        QVERIFY(disclosure() && disclosure()->isChecked());
+        QVERIFY(click(canvas, disclosure()));
+        QVERIFY(!disclosure()->isChecked());
+        QCOMPARE(chapters->currentPage(), 0);
+        QCOMPARE(selected, 0);
+        QVERIFY(click(canvas, disclosure()));
+        QVERIFY(disclosure()->isChecked());
+        const auto from = canvas.mapFromScene(disclosure()->geometry().center());
+        const auto to = from + QPoint(160, 0);
+        QTest::mousePress(canvas.viewport(), Qt::LeftButton, Qt::NoModifier, from);
+        QTest::mouseMove(canvas.viewport(), to);
+        QTest::mouseRelease(canvas.viewport(), Qt::LeftButton, Qt::NoModifier, to);
+        QCoreApplication::processEvents();
+        QVERIFY(chapters->currentPage() > 0);
+        QCOMPARE(selected, 0);
+        QVERIFY(click(canvas, chapters->findChild<QPushButton *>("rrContentsNext")));
+        QCOMPARE(chapters->currentPage(), 0);
+        QVERIFY(disclosure()->isChecked());
+        QVERIFY(click(canvas, chapters->findChild<QPushButton *>("chapter0")));
+        QCOMPARE(selected, 1);
+    }
+
     // Checks that list swipes respect nested pagers, disabled arrows, small or vertical moves, held rows and gesture controls.
     void pagedSwipesRespectControls()
     {
@@ -530,6 +595,122 @@ private slots:
         timer.start(&press);
         timer.stop();
         QVERIFY(!timer.finish(&release));
+        timer.start(&press);
+        timer.stopTimeout();
+        QCOMPARE(timer.finish(&release), due);
+        timer.start(&press);
+        timer.stopTimeout();
+        timer.stop();
+        QVERIFY(!timer.finish(&release));
+    }
+
+    // Checks that invalidating a hold target preserves duration, movement and cancellation rules for both input paths.
+    void holdInvalidatedTarget_data()
+    {
+        QTest::addColumn<bool>("touch");
+        QTest::addColumn<quint32>("pressed");
+        QTest::addColumn<quint32>("released");
+        QTest::addColumn<QPoint>("travel");
+        QTest::addColumn<bool>("cancel");
+        QTest::addColumn<int>("taps");
+        QTest::addColumn<int>("swipes");
+        for (bool touch : { false, true }) {
+            const QByteArray prefix = touch ? "touch-" : "pointer-";
+            const auto row = [&](const char *name, quint32 press, quint32 release, QPoint travel,
+                                 bool cancel, int taps, int swipes) {
+                QTest::newRow((prefix + name).constData())
+                        << touch << press << release << travel << cancel << taps << swipes;
+            };
+            row("short", 1000, 1499, {}, false, 1, 0);
+            row("threshold", 1000, 1500, {}, false, 0, 0);
+            row("queued-long", 1000, 1709, {}, false, 0, 0);
+            row("wrapped", 0xfffffff0u, 0x2b5u, {}, false, 0, 0);
+            row("jitter", 1000, 1709, { 10, 10 }, false, 0, 0);
+            row("moved", 1000, 1709, { 50, 0 }, false, 0, 0);
+            row("swipe", 1000, 1709, { -180, 0 }, false, 0, 1);
+            row("cancel", 1000, 1709, {}, true, 0, 0);
+        }
+    }
+
+    // Checks that a stale long hold never navigates or selects old text and that the next hold still works.
+    void holdInvalidatedTarget()
+    {
+        QFETCH(bool, touch);
+        QFETCH(quint32, pressed);
+        QFETCH(quint32, released);
+        QFETCH(QPoint, travel);
+        QFETCH(bool, cancel);
+        QFETCH(int, taps);
+        QFETCH(int, swipes);
+        ui::setDensity(300);
+        ReadingPage page(nullptr, [] { });
+        page.resize(600, 800);
+        int actualTaps = 0, actualSwipes = 0, holds = 0, images = 0;
+        page.tapped = [&](QPoint) { ++actualTaps; };
+        page.swiped = [&](int) { ++actualSwipes; };
+        page.held = [&](QPoint) { ++holds; };
+        page.imageHeld = [&](QPoint) {
+            ++images;
+            return false;
+        };
+        auto *device = QTest::createTouchDevice();
+        const auto send = [&](bool down, quint32 timestamp, QPoint point) {
+            if (!touch) {
+                pointerEvent(&page, down ? QEvent::MouseButtonPress : QEvent::MouseButtonRelease,
+                             timestamp, point);
+                return;
+            }
+            QEventPoint contact(0, down ? QEventPoint::Pressed : QEventPoint::Released, point,
+                                page.mapToGlobal(point));
+            QMutableEventPoint::setPosition(contact, point);
+            QTouchEvent event(down ? QEvent::TouchBegin : QEvent::TouchEnd, device, Qt::NoModifier,
+                              { contact });
+            event.setTimestamp(timestamp);
+            QApplication::sendEvent(&page, &event);
+        };
+        const QPoint point(300, 400);
+        send(true, pressed, point);
+        page.invalidateHoldTarget();
+        page.invalidateHoldTarget(); // Repeated frame notifications must not change the outcome.
+        if (cancel) {
+            QTouchEvent event(QEvent::TouchCancel, device);
+            QApplication::sendEvent(&page, &event);
+        }
+        send(false, released, point + travel);
+        QCOMPARE(actualTaps, taps);
+        QCOMPARE(actualSwipes, swipes);
+        QCOMPARE(holds, 0);
+        QCOMPARE(images, 0);
+        send(true, 3000, point);
+        send(false, 3709, point);
+        QCOMPARE(holds, 1);
+        QCOMPARE(images, 1);
+        QCOMPARE(actualTaps, taps);
+        QCOMPARE(actualSwipes, swipes);
+    }
+
+    // Checks that source time, not a timeout during blocked painting, decides an invalidated hold.
+    void holdInvalidationStopsTimer()
+    {
+        ReadingPage page(nullptr, [] { });
+        page.resize(600, 800);
+        int taps = 0, holds = 0;
+        page.tapped = [&](QPoint) { ++taps; };
+        page.held = [&](QPoint) { ++holds; };
+        auto *timer = page.findChild<QTimer *>("rrHoldTimer");
+        QVERIFY(timer);
+        QSignalSpy fired(timer, &QTimer::timeout);
+        timer->setInterval(20);
+        pointerEvent(&page, QEvent::MouseButtonPress, 1000, { 300, 400 });
+        page.invalidateHoldTarget();
+        QVERIFY(!fired.wait(50));
+        pointerEvent(&page, QEvent::MouseButtonRelease, 1010, { 300, 400 });
+        QCOMPARE(taps, 1);
+        pointerEvent(&page, QEvent::MouseButtonPress, 2000, { 300, 400 });
+        page.invalidateHoldTarget();
+        pointerEvent(&page, QEvent::MouseButtonRelease, 2030, { 300, 400 });
+        QCOMPARE(taps, 1);
+        QCOMPARE(holds, 0);
     }
 
     void holdTimerDoesNotRepeatOnRelease()
@@ -1692,6 +1873,165 @@ private slots:
         QCOMPARE(rescanned, 1);
     }
 
+    // About opens without a book, keeps its metadata and controls reachable, and unwinds nested Back actions.
+    void libraryAbout_data() { variants(); }
+
+    void libraryAbout()
+    {
+        QFETCH(bool, dark);
+        QFETCH(int, ppi);
+        ui::setDensity(ppi);
+        for (qreal scale : { 1.0, 1.5 }) {
+            ui::setLargeText(scale);
+            const auto resetScale = qScopeGuard([] { ui::setLargeText(1); });
+            library::Index index;
+            library::LibraryView view(index, {});
+            view.setDark(dark);
+            view.resize(ui::px(1072), ui::px(1448));
+            view.show();
+            int opened = 0;
+            view.openBook = [&](const QString &) { ++opened; };
+            view.openFile = [&] { ++opened; };
+            const auto showAbout = [&] {
+                view.findChild<QPushButton *>("libraryMore")->click();
+                auto *menu = dynamic_cast<ui::ActionMenu *>(
+                        view.findChild<QWidget *>("libraryMoreSheet"));
+                QVERIFY(menu);
+                QCOMPARE(menu->actions().last()->objectName(), QString("libraryMoreAbout"));
+                QCOMPARE(menu->actions().last()->accessibleName(), QString("About Kobalt"));
+                menu->actions().last()->click();
+                QVERIFY(!menu->isVisible());
+            };
+            showAbout();
+            auto *about = view.findChild<QWidget *>("libraryAbout");
+            QVERIFY(about && about->isVisible());
+            const auto captureDirectory = qEnvironmentVariable("KOBALT_CAPTURE_MODALS");
+            if (!captureDirectory.isEmpty() && scale == 1 && ppi == 300) {
+                QVERIFY(QDir().mkpath(captureDirectory));
+                QVERIFY(view.grab().save(captureDirectory
+                                         + (dark ? "/about-dark.png" : "/about-light.png")));
+            }
+            AboutPage reference;
+            reference.ensurePolished();
+            for (const auto *name : { "rrAboutVersion", "rrAboutCommit" }) {
+                auto *shown = about->findChild<QLabel *>(name);
+                auto *expected = reference.findChild<QLabel *>(name);
+                QVERIFY(shown && expected);
+                QCOMPARE(shown->text(), expected->text());
+                QCOMPARE(shown->font(), expected->font());
+            }
+            for (const auto size :
+                 { QSize(1072, 1448), QSize(1448, 1072), QSize(600, 1000), QSize(1000, 600) }) {
+                view.resize(ui::px(size.width()), ui::px(size.height()));
+                QCoreApplication::processEvents();
+                QCOMPARE(about->geometry(), view.rect());
+                auto *hit = view.childAt(view.rect().center());
+                QVERIFY2(hit && (hit == about || about->isAncestorOf(hit)),
+                         "About must remain above the empty Library after resizing");
+                QCOMPARE(about->palette().color(QPalette::Window),
+                         QColor(ui::themeColors(dark).paper));
+                auto *back = about->findChild<QPushButton *>("libraryAboutBack");
+                QVERIFY(about->rect().contains(back->geometry()));
+                auto *title = about->findChild<QWidget *>("libraryAboutTitle");
+                QVERIFY(title);
+                const auto inkCenter = [dark](const QImage &image) {
+                    int top = image.height(), bottom = -1;
+                    const int paper = dark ? 0 : 255;
+                    for (int y = 0; y < image.height(); ++y)
+                        for (int x = 0; x < image.width(); ++x)
+                            if (qAbs(qGray(image.pixel(x, y)) - paper) > 96) {
+                                top = qMin(top, y);
+                                bottom = qMax(bottom, y);
+                            }
+                    return (top + bottom) / 2.0;
+                };
+                const auto arrow = back->grab().toImage();
+                // Ignore the Back cell's trailing vertical divider.
+                const auto arrowInk = arrow.copy(0, 0, arrow.width() - ui::px(8), arrow.height());
+                const qreal centerDifference =
+                        qAbs(inkCenter(title->grab().toImage()) - inkCenter(arrowInk));
+                QVERIFY2(centerDifference <= ui::px(2),
+                         qPrintable(QString("Title/arrow ink centers differ by %1 pixels")
+                                            .arg(centerDifference)));
+                auto *body = about->findChild<QWidget *>("rrAbout");
+                QVERIFY(body);
+                auto *clip = body->parentWidget();
+                const auto exposed = [clip](QWidget *widget) {
+                    return clip->rect().contains(
+                            QRect(widget->mapTo(clip, QPoint()), widget->size()));
+                };
+                auto *next = about->findChild<QPushButton *>("libraryAboutNext");
+                auto *previous = about->findChild<QPushButton *>("libraryAboutPrevious");
+                while (previous->isVisible() && previous->isEnabled())
+                    previous->click();
+                bool versionSeen = false, commitSeen = false, actionSeen = false, buildSeen = false;
+                for (int turns = 0; turns < 20; ++turns) {
+                    versionSeen |= exposed(about->findChild<QWidget *>("rrAboutVersion"));
+                    commitSeen |= exposed(about->findChild<QWidget *>("rrAboutCommit"));
+                    actionSeen |= exposed(about->findChild<QWidget *>("rrOpenAcknowledgments"));
+                    buildSeen |= exposed(about->findChild<QWidget *>("rrAboutVersion"))
+                            && exposed(about->findChild<QWidget *>("rrAboutCommit"));
+                    if (!next->isVisible() || !next->isEnabled())
+                        break;
+                    view.pageButton(1);
+                }
+                QVERIFY2(
+                        versionSeen && commitSeen && actionSeen && buildSeen,
+                        qPrintable(
+                                QString("%1x%2 scale %3: version %4, commit %5, action %6; body %7x%8, clip %9x%10")
+                                        .arg(size.width())
+                                        .arg(size.height())
+                                        .arg(scale)
+                                        .arg(versionSeen)
+                                        .arg(commitSeen)
+                                        .arg(actionSeen)
+                                        .arg(body->width())
+                                        .arg(body->height())
+                                        .arg(clip->width())
+                                        .arg(clip->height())));
+            }
+            auto *acknowledgments = dynamic_cast<Acknowledgments *>(
+                    about->findChild<QWidget *>("rrAcknowledgments"));
+            QVERIFY(acknowledgments);
+            view.resize(ui::px(1072), ui::px(1448));
+            QCoreApplication::processEvents();
+            showAbout();
+            about->findChild<QPushButton *>("rrOpenAcknowledgments")->click();
+            QVERIFY(acknowledgments->isVisible());
+            view.resize(ui::px(1000), ui::px(600));
+            QCoreApplication::processEvents();
+            auto *hint = about->findChild<QWidget *>("libraryAboutContinuationHint");
+            QVERIFY(hint && hint->isVisible());
+            const auto creditsFrame = about->grab().toImage();
+            hint->hide();
+            QCOMPARE(about->grab().toImage(), creditsFrame);
+            acknowledgments->findChild<QPushButton *>("rrAcknowledgment0")->click();
+            QVERIFY(acknowledgments->findChild<QWidget *>("rrLicenseText")->isVisible());
+            view.resize(ui::px(1072), ui::px(1448));
+            QCoreApplication::processEvents();
+            view.resize(ui::px(1000), ui::px(600));
+            QCoreApplication::processEvents();
+            QVERIFY(hint->isVisible());
+            const auto licenseFrame = about->grab().toImage();
+            hint->hide();
+            QCOMPARE(about->grab().toImage(), licenseFrame);
+            QVERIFY(view.dismiss());
+            QVERIFY(acknowledgments->isVisible());
+            QVERIFY(!acknowledgments->findChild<QWidget *>("rrLicenseText")->isVisible());
+            QVERIFY(view.dismiss());
+            QVERIFY(!acknowledgments->isVisible());
+            QVERIFY(about->isVisible());
+            QVERIFY(view.dismiss());
+            QVERIFY(!about->isVisible());
+            QVERIFY(!view.dismiss());
+            QCOMPARE(opened, 0);
+            QVERIFY(index.books.isEmpty() && index.folders.isEmpty());
+            showAbout();
+            about->findChild<QPushButton *>("libraryAboutBack")->click();
+            QVERIFY(!about->isVisible());
+        }
+    }
+
     // Checks the list layout: toolbar-to-pager bounds, even row dividers, hit targets to each row's last pixel and the pager's space as books change.
     void libraryListFillsPage_data() { variants(); }
 
@@ -2282,10 +2622,13 @@ private slots:
         auto *cancel = choice.secondaryButton();
         auto *remove = choice.primaryButton();
         auto *heading = card->findChild<QLabel *>("rrModalTitle");
-        QVERIFY(heading->height() >= QFontMetrics(heading->font()).height()
-                        + 2 * ui::metrics::notice::cardMargins.top());
-        QVERIFY(choice.descriptionLabel()->contentsMargins().left()
-                >= ui::metrics::notice::cardMargins.left());
+        auto *header = heading->parentWidget();
+        QCOMPARE(header, choice.descriptionLabel()->parentWidget());
+        QCOMPARE(header->layout()->contentsMargins().top(),
+                 int(ui::metrics::notice::cardMargins.top()));
+        QCOMPARE(header->layout()->contentsMargins().left(), int(ui::metrics::chrome::inset));
+        QCOMPARE(choice.descriptionLabel()->y() - heading->geometry().bottom() - 1,
+                 int(ui::metrics::notice::headingGap));
         QCOMPARE(cancel->y(), remove->y());
         QCOMPARE(cancel->geometry().right() + 1, remove->x());
         QCOMPARE(cancel->x(), 2);
@@ -3399,6 +3742,20 @@ private slots:
         for (const QSize screen : { QSize(1072, 1448), QSize(1448, 1072), QSize(600, 800) }) {
             QWidget owner;
             owner.resize(screen);
+            {
+                auto seeded = createEmbeddedOpening(&owner, test::makeHostPresentation);
+                auto *view = seeded->window();
+                view->setGeometry(owner.rect());
+                QImage seed(80, 120, QImage::Format_RGB32);
+                seed.fill(Qt::blue);
+                view->setProperty("kobalt_tile_cover_probe", true);
+                seeded->setCover(seed);
+                owner.show();
+                view->show();
+                QTRY_COMPARE(view->property("kobalt_first_cover_key").toString(),
+                             QString::number(seed.cacheKey()));
+                QVERIFY(!view->findChild<QLabel *>("rrOpeningBrand")->isVisible());
+            }
             auto opening = createEmbeddedOpening(&owner, test::makeHostPresentation);
             auto *view = opening->window();
             view->setGeometry(owner.rect());
@@ -3406,6 +3763,11 @@ private slots:
             view->show();
             QVERIFY(view->findChild<QLabel *>("rrOpeningBrand")->isVisible());
             for (const QSize size : { QSize(200, 300), QSize(300, 100), QSize(100, 400) }) {
+                // Each shape is a separate opening, not a lower-quality replacement.
+                opening = createEmbeddedOpening(&owner, test::makeHostPresentation);
+                view = opening->window();
+                view->setGeometry(owner.rect());
+                view->show();
                 QImage cover(size, QImage::Format_RGB32);
                 cover.fill(Qt::red);
                 opening->setCover(cover);
@@ -3477,6 +3839,40 @@ private slots:
             QCOMPARE(unavailable->window()->grab().toImage().pixelColor(center), QColor(Qt::red));
             QVERIFY(!unavailable->window()->findChild<QLabel *>("rrOpeningBrand")->isVisible());
         }
+    }
+
+    void openingCoverUpgrade()
+    {
+        QWidget owner;
+        owner.resize(600, 800);
+        const qreal scale = qMin(owner.width() / ui::metrics::opening::referenceWidth,
+                                 owner.height() / ui::metrics::opening::referenceHeight);
+        const QPoint center(
+                owner.width() / 2,
+                qRound((owner.height() - ui::metrics::opening::referenceHeight * scale) / 2
+                       + ui::metrics::opening::cover.center().y() * scale));
+        QImage thumbnail(100, 150, QImage::Format_RGB32);
+        thumbnail.fill(Qt::blue);
+        QImage full(400, 600, QImage::Format_RGB32);
+        full.fill(Qt::red);
+        auto opening = createEmbeddedOpening(&owner, test::makeHostPresentation);
+        opening->window()->setGeometry(owner.rect());
+        opening->setCover(full);
+        owner.show();
+        opening->window()->show();
+        opening->setCover(thumbnail);
+        QCOMPARE(opening->window()->grab().toImage().pixelColor(center), QColor(Qt::red));
+
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const auto path = directory.filePath("full.png");
+        QVERIFY(full.save(path));
+        auto cached = createEmbeddedOpening(&owner, test::makeHostPresentation);
+        cached->window()->setGeometry(owner.rect());
+        cached->setCover(thumbnail);
+        cached->window()->show();
+        cached->loadCover(path);
+        QTRY_COMPARE(cached->window()->grab().toImage().pixelColor(center), QColor(Qt::red));
     }
 
     void openingFirstPaintCallback()

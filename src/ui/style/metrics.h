@@ -16,6 +16,7 @@ inline constexpr Px width{ 580 }, height{ 252 }, inset{ 64 }, iconWidth{ 140 }, 
         gap{ 48 };
 inline constexpr Px percentText{ 78 }, captionText{ 32 }, captionGap{ 16 };
 inline constexpr int hideMilliseconds = 850;
+inline constexpr int finalPercentageMilliseconds = 1500;
 // Wait for a pause in the swipe before changing e-ink feedback.
 inline constexpr int feedbackMilliseconds = 150;
 } // namespace lightSwipe
@@ -133,6 +134,8 @@ inline constexpr Px optionHeight{ 116 };
 inline constexpr Px checkboxSize{ 40 }, checkboxTop{ 4 }, labelLeft{ 0 }, toggleWidth{ 80 },
         toggleHeight{ 48 }, toggleGap{ 24 };
 inline constexpr Px descriptionTop{ 48 }, descriptionBottom{ 16 };
+// Keep supporting text clear of the row edges when it sets the row's height.
+inline constexpr Px descriptionPadding{ 12 };
 } // namespace settings
 
 namespace about {
@@ -275,13 +278,13 @@ namespace headerFooter {
 // The slot map is a short page: one-line slot rows, their text at the top
 // and bottom edges as on the page, and a few lines between them.
 inline constexpr Px mapRowHeight{ list::oneLine }, mapLineHeight{ 4 };
-inline constexpr Px mapLineGap{ spacing::section }, mapLineInset{ list::inset }, mapEdgeInset{ 10 };
+inline constexpr Px mapLineGap{ 12 }, mapLineInset{ list::inset }, mapEdgeInset{ 10 };
 // Each slot is a dashed box around its text, so it reads as something to tap.
 inline constexpr Px slotGap{ 8 }, slotPadding{ 8 }, slotDash{ 4 }, mapSideInset{ 7 };
 inline constexpr TextPx valueText{ control::captionValueText }, emptyText{ chrome::captionText };
 // Preset miniatures: a page, then its name in a block as tall as a segment,
 // which grows with large text.
-inline constexpr Px miniatureWidth{ 184 }, selectedBorder{ 5 };
+inline constexpr Px miniatureWidth{ 120 }, selectedBorder{ 5 };
 inline constexpr Px miniatureTop{ spacing::section }, nameGap{ spacing::row };
 inline constexpr TextPx nameHeight{ control::segmentHeight.design() };
 inline constexpr Px namePadding{ control::segmentHorizontalPadding };
@@ -325,10 +328,12 @@ inline constexpr Px thumbnailWidth{ 112 }, thumbnailHeight{ 168 };
 } // namespace actionMenu
 
 namespace notice {
+// Card frames keep a two-pixel rule at every device density.
+inline constexpr int cardBorder = 2;
 inline constexpr Px backdropPitch{ 18 };
 inline constexpr Px cardWidth{ 760 }, height{ 144 }, sideClearance{ 32 };
 inline constexpr PxMargins cardMargins{ 32, 28, 32, 28 };
-inline constexpr Px cardGap{ 20 };
+inline constexpr Px cardGap{ 20 }, headingGap{ 12 };
 inline constexpr Px progressHeight{ 32 };
 
 inline QRect centered(const QSize &size)
@@ -363,10 +368,8 @@ inline constexpr Px choiceHeight{ 72 };
 
 namespace links {
 inline constexpr Px returnWidth{ 400 }, returnHeight{ 120 }, popupWidth{ 440 }, actionHeight{ 96 };
-// Link discovery. Above the tabs its row matches the return row. The link
-// indicator sits in the footer strip and keeps the strip's full height as its
-// touch area.
-inline constexpr Px hintGap{ 24 }, stripButtonInset{ 6 }, stripButtonPadding{ 16 };
+// Link discovery above the tabs uses the same row height as the return row.
+inline constexpr Px hintGap{ 24 };
 // Revealed links: a tint and an outline around each link rectangle. Stacked
 // links keep a gap between their outlines.
 inline constexpr Px revealPadding{ 6 }, revealGap{ 6 }, revealOutline{ 2 };

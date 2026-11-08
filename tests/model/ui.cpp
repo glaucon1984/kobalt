@@ -1427,6 +1427,33 @@ int main(int argc, char **argv)
         require(browserCalls == 0 && dismissals == 1, "No opened the browser");
         confirm->click();
         require(browserCalls == 1 && dismissals == 2, "Yes did not open and dismiss the link");
+        const auto savedScale = kobalt::ui::textScale();
+        kobalt::ui::setLargeText(1.5);
+        {
+            kobalt::WebsiteDialog large(&browserHost);
+            large.browserAvailable = [] { return true; };
+            large.secondaryButton()->setText("Keep reading without opening the browser");
+            large.open(address);
+            QApplication::processEvents();
+            auto *card = large.card();
+            auto *cancel = large.secondaryButton();
+            auto *heading = card->findChild<QLabel *>("rrBrowserPrompt");
+            auto *url = card->findChild<QLabel *>("rrBrowserUrl");
+            require(url->mapTo(card, QPoint()).y() - heading->mapTo(card, QPoint()).y()
+                                    - heading->height()
+                            == int(kobalt::ui::metrics::notice::headingGap),
+                    "Scrollable browser content changed the shared heading gap");
+            require(large.primaryButton()->y() < cancel->y(),
+                    "Large-text browser prompt did not stack its actions");
+            require(cancel->geometry().bottom() == card->height() - 3,
+                    "Scrollable browser content displaced the modal footer");
+            const auto pixels = card->grab().toImage();
+            const auto ink = card->palette().color(QPalette::WindowText);
+            require(pixels.pixelColor(0, cancel->geometry().center().y()) == ink
+                            && pixels.pixelColor(pixels.width() / 2, pixels.height() - 1) == ink,
+                    "Large-text browser prompt lost its footer frame");
+        }
+        kobalt::ui::setLargeText(savedScale);
     }
     for (bool dark : { false, true }) {
         QWidget host;
@@ -1474,6 +1501,7 @@ int main(int argc, char **argv)
         QApplication::processEvents();
         require(choices.currentPage() == 0 && previous->isEnabled(),
                 "Contents pager did not change the visible page");
+        contents->findChild<QPushButton *>("chapter0Toggle")->click();
         auto *parent = contents->findChild<QLabel *>("chapter0Title");
         auto *nested = contents->findChild<QLabel *>("chapter1Title");
         require(parent && nested
@@ -1540,7 +1568,8 @@ int main(int argc, char **argv)
         next->click();
         require(choices.currentPage() == 0, "Next did not wrap to the first contents page");
         previous->click();
-        require(currentButton->grab().toImage().pixel(4, 4) == selectedPaper,
+        require(contents->findChild<QPushButton *>("chapter34")->grab().toImage().pixel(4, 4)
+                        == selectedPaper,
                 "Wrapping changed the selected chapter highlight");
         choices.resize(1448, 1072);
         QApplication::processEvents();
@@ -1557,7 +1586,147 @@ int main(int argc, char **argv)
             require(!button->objectName().startsWith("chapter") || !button->isVisible(),
                     "Empty contents retained a navigable chapter");
     }
-    std::puts("PASS: chapter row highlights, paging and navigation in light and dark themes");
+    // Checks nested visibility, independent heading actions and source identities after filtering.
+    for (bool dark : { false, true }) {
+        QWidget host;
+        host.resize(1072, 1448);
+        host.setProperty("reader_dark", dark);
+        kobalt::ui::readerStyle(&host, kobalt::ui::styles::reader());
+        host.show();
+        kobalt::ChapterContents contents(&host);
+        contents.resize(host.size());
+        const QVector<kobalt::Choice> chapters{
+            { "Part A", "part-a", "a", {}, 2, 0 },
+            { "Heading", {}, "heading", {}, 4, -1 },
+            { "Duplicate", "same", "current", {}, 8, 12 },
+            { "Duplicate", "same", "duplicate", {}, 8, 12 },
+            { "Other chapter", "other", "other", {}, 4, 20 },
+            { "Part B", "part-b", "b", {}, 2, 30 },
+            { "Last chapter", "last", "last", {}, 4, 31 },
+        };
+        auto button = [&](const QString &name) { return contents.findChild<QPushButton *>(name); };
+        auto shown = [&](const QString &name) {
+            auto *control = button(name);
+            return control && control->isVisibleTo(&contents);
+        };
+        QString selected;
+        contents.selected = [&](const QString &value) { selected = value; };
+        contents.showChapters("Nested book", chapters, "current");
+        require(shown("current") && shown("duplicate") && !shown("last"),
+                "Contents did not expand only the current chapter's ancestors");
+        require(button("current")->isChecked() && !button("duplicate")->isChecked(),
+                "Duplicate destinations confused the current chapter identity");
+        require(button("current")->x() == 0 && button("current")->width() == contents.width(),
+                "A leaf chapter does not own its full row hit area");
+        require(contents.findChild<QLabel *>("currentNumber")->mapTo(&contents, QPoint()).x()
+                        == contents.findChild<QLabel *>("aNumber")->mapTo(&contents, QPoint()).x(),
+                "Full-width chapter rows shifted the number column");
+        const auto chapterImage = contents.grab().toImage();
+        const int activeY = button("current")->geometry().center().y();
+        require(chapterImage.pixelColor(0, activeY)
+                                == contents.palette().color(QPalette::WindowText)
+                        && chapterImage.pixelColor(contents.width() - 1, activeY)
+                                == contents.palette().color(QPalette::WindowText),
+                "The current leaf chapter does not fill its empty disclosure gutter");
+        const int separator = button("duplicate")->geometry().bottom();
+        require(chapterImage.pixelColor(0, separator) == kobalt::ui::dividerColor(&contents)
+                        && chapterImage.pixelColor(contents.width() - 1, separator)
+                                == kobalt::ui::dividerColor(&contents),
+                "A leaf chapter's separator does not span the whole panel");
+        require(!button("heading")->isEnabled() && button("headingToggle")->isEnabled(),
+                "A heading without a destination cannot expand its children");
+        require(button("headingToggle")->isChecked()
+                        && button("headingToggle")->accessibleName().contains("Heading")
+                        && !shown("currentToggle"),
+                "Disclosure state, label or leaf visibility is wrong");
+        require(button("aToggle")->geometry().right() < button("a")->geometry().left(),
+                "Disclosure and title hit areas overlap");
+        button("aToggle")->click();
+        require(!shown("current") && shown("a") && shown("b") && selected.isEmpty(),
+                "Collapsing a group navigated or kept descendants visible");
+        button("aToggle")->click();
+        require(shown("current") && button("headingToggle")->isChecked(),
+                "Reopening a group forgot its nested expansion state");
+        button("headingToggle")->click();
+        require(!shown("current") && shown("other"),
+                "Collapsing an unavailable heading hid a sibling");
+        button("bToggle")->click();
+        require(shown("last") && contents.findChild<QLabel *>("lastNumber")->text() == "07"
+                        && contents.findChild<QLabel *>("lastPage")->text() == "32",
+                "Filtering changed source numbering or page captions");
+        button("last")->click();
+        require(selected == "last", "A recycled row selected its old destination");
+        button("a")->click();
+        require(selected == "part-a", "A parent title toggled instead of navigating");
+        contents.resize(720, 700);
+        require(shown("aToggle") && !button("headingToggle")->isChecked(),
+                "Resize reset chapter expansion");
+        contents.showChapters("Nested book", chapters, {}, kobalt::ChapterGroups::All);
+        require(shown("current") && button("aToggle")->isChecked()
+                        && button("headingToggle")->isChecked(),
+                "All chapters left a current-page group collapsed");
+        button("rrContentsNext")->click();
+        require(shown("last") && button("bToggle")->isChecked(),
+                "All chapters left a later-page group collapsed");
+        contents.showChapters("No collapsing", chapters, "current", kobalt::ChapterGroups::Off);
+        require(shown("current") && button("a")->x() == 0 && !shown("aToggle")
+                        && !shown("headingToggle"),
+                "Off retained disclosure controls or collapsed chapters");
+        contents.showChapters("Nested book", chapters, {});
+        require(!shown("heading") && !shown("last") && contents.currentPage() == 0,
+                "Reopening without a current entry retained expansion state");
+
+        QVector<kobalt::Choice> many;
+        for (int i = 0; i < 80; ++i)
+            many.append({ QString::number(i),
+                          QString::number(i),
+                          QString("many%1").arg(i),
+                          {},
+                          i % 2,
+                          i });
+        contents.showChapters("Paged groups", many, "many79");
+        require(shown("many79"), "The current child did not open on its visible page");
+        if (!shown("many78Toggle"))
+            button("rrContentsPrevious")->click();
+        require(shown("many78Toggle"), "The preceding page lost the current chapter's parent");
+        button("many78Toggle")->click();
+        require(shown("many78") && !shown("many79"),
+                "Last-page collapse lost its parent or left its child visible");
+        contents.resize(1448, 1072);
+        const auto caption = contents.findChild<QLabel *>("rrContentsPage")->text().split(" of ");
+        require(caption.size() == 2 && caption[0].toInt() <= caption[1].toInt(),
+                "Filtered contents resize left an invalid page");
+        contents.showChapters("One group", many.mid(0, 2), {});
+        require(!shown("rrContentsNext"), "Collapsed contents retained an unnecessary pager");
+        const int twoRows = kobalt::ui::metrics::chrome::actionHeight
+                + kobalt::ui::metrics::contents::stripHeight
+                + 2 * kobalt::ui::metrics::list::oneLine;
+        contents.resize(720, twoRows);
+        auto group = many.mid(0, 4);
+        group[2].depth = group[3].depth = 1;
+        contents.showChapters("Pager threshold", group, {});
+        button("many0Toggle")->click();
+        require(shown("rrContentsNext"), "Expanding did not reserve space for the pager");
+        button("rrContentsNext")->click();
+        require(contents.currentPage() == 1, "Expanded contents did not page");
+        button("rrContentsPrevious")->click();
+        button("many0Toggle")->click();
+        require(!shown("rrContentsNext") && contents.currentPage() == 0,
+                "Collapsing did not reclaim the pager space");
+        contents.showChapters("Empty", {}, {});
+        for (auto *control : contents.findChildren<QPushButton *>())
+            require(!control->isVisibleTo(&contents) || !control->objectName().endsWith("Toggle"),
+                    "An empty list retained a disclosure button");
+        contents.showChapters("Current group", chapters, "a");
+        const auto groupImage = contents.grab().toImage();
+        const int groupY = button("a")->geometry().center().y();
+        require(groupImage.pixelColor(0, groupY) == contents.palette().color(QPalette::Window)
+                        && groupImage.pixelColor(contents.width() - 1, groupY)
+                                == contents.palette().color(QPalette::WindowText),
+                "The current group's highlight covered its separate disclosure cell");
+    }
+    std::puts(
+            "PASS: chapter groups, row highlights, paging and navigation in light and dark themes");
     {
         namespace chapterMetrics = kobalt::ui::metrics::chapters;
         namespace chrome = kobalt::ui::metrics::chrome;
@@ -2355,6 +2524,32 @@ int main(int argc, char **argv)
         require(captionInk > 50,
                 "Back caption follows the native button palette instead of reader ink");
     }
+    {
+        using namespace kobalt::ui;
+        const auto font = interfaceFont(metrics::chrome::descriptionText);
+        const QString text = "Decide what this hardware button should do when you're reading.";
+        const int width = interfaceTextWidth(text, font) * 3 / 4;
+        const auto balanced = balancedInterfaceText(text, font, width);
+        const auto lines = balanced.split('\n');
+        require(lines.size() == 2, "Balancing added unnecessary lines");
+        require(balanced.simplified() == text.simplified(), "Balancing changed the words");
+        require(qAbs(interfaceTextWidth(lines[0], font) - interfaceTextWidth(lines[1], font))
+                        < width / 3,
+                "Balanced instructions leave a short orphan line");
+        for (const auto &line : lines)
+            require(interfaceTextWidth(line, font) <= width,
+                    "Balanced text exceeds its available width");
+        require(balancedInterfaceText(text, font, interfaceTextWidth(text, font)) == text,
+                "A single-line heading was changed");
+        require(balancedInterfaceText("First paragraph.\n\nSecond paragraph.", font, width)
+                        == "First paragraph.\n\nSecond paragraph.",
+                "Balancing removed an explicit paragraph break");
+        const QString japanese =
+                QString::fromUtf8("読書中にこのボタンで何をするか選んでください。");
+        auto wrapped = balancedInterfaceText(japanese, font, width / 2);
+        require(wrapped.remove('\n') == japanese, "Balancing changed text without word spaces");
+    }
+
     QWidget optionsHost;
     kobalt::ui::readerStyle(&optionsHost, kobalt::ui::styles::reader());
     kobalt::ui::DescribedOption option(
@@ -2363,7 +2558,7 @@ int main(int argc, char **argv)
     optionsHost.show();
     option.show();
     app.processEvents();
-    for (int width : { 900, 1250 }) {
+    for (int width : { 240, 900, 1250 }) {
         option.resize(width, option.heightForWidth(width));
         const auto reference = option.grab().toImage();
         int firstInk = -1, lastInk = -1;
@@ -2374,8 +2569,9 @@ int main(int argc, char **argv)
                         firstInk = y;
                     lastInk = y;
                 }
-        require(firstInk >= 4 && lastInk >= 0 && lastInk < reference.height() - 4,
-                "Setting description does not fit its requested height");
+        require(firstInk >= kobalt::ui::px(12) && lastInk >= 0
+                        && lastInk < reference.height() - kobalt::ui::px(12),
+                "Setting description is too close to a row edge");
     }
     {
         kobalt::ui::DescribedOption sample("Pages", "", &optionsHost);
@@ -2418,6 +2614,7 @@ int main(int argc, char **argv)
                         == qMax(look.minimumRowHeight,
                                 metrics::settings::descriptionTop
                                         + metrics::settings::descriptionBottom
+                                        + 2 * metrics::settings::descriptionPadding
                                         + kobalt::ui::wrappedInterfaceTextHeight(
                                                 option.accessibleDescription(), description,
                                                 textWidth)),
@@ -3479,6 +3676,16 @@ int main(int argc, char **argv)
             require(preview && option->rect().contains(preview->geometry()),
                     "Extra large dictionary preview escapes its row");
             for (int percent : { 80, 100, 120, 140 }) {
+                auto *choice = settings.fontDialog->findChild<QAbstractButton *>(
+                        QString("rrDictionaryFontSize%1").arg(percent));
+                require(choice
+                                && choice->text()
+                                        == kobalt::reader::SettingsPanel::dictionaryFontSizeLabel(
+                                                percent),
+                        "Standard interface text lost the dictionary size label");
+                require(choice->accessibleName()
+                                == kobalt::reader::SettingsPanel::dictionaryFontSizeLabel(percent),
+                        "Dictionary size choice lost its accessible name");
                 auto *sample = settings.fontDialog->findChild<QWidget *>(
                         QString("rrDictionaryFontPreview%1").arg(percent));
                 auto *label = sample->findChild<QLabel *>();
@@ -3506,6 +3713,34 @@ int main(int argc, char **argv)
             }
             settings.dismissFontChoices();
         }
+        const auto savedScale = kobalt::ui::textScale();
+        const auto savedSize = reader.size();
+        for (const auto &size : { QSize(1072, 1448), QSize(720, 1600), QSize(1600, 720) }) {
+            reader.resize(size);
+            const bool phone = size != QSize(1072, 1448);
+            for (qreal scale : { 1.0, 1.25, 1.5 }) {
+                kobalt::ui::setLargeText(scale);
+                settings.showDictionaryFontSizes(100, {}, false, [](int) { });
+                app.processEvents();
+                const QStringList shortNames{ "S", "M", "L", "XL" };
+                int index = 0;
+                for (int percent : { 80, 100, 120, 140 }) {
+                    auto *choice = settings.fontDialog->findChild<QAbstractButton *>(
+                            QString("rrDictionaryFontSize%1").arg(percent));
+                    const auto name =
+                            kobalt::reader::SettingsPanel::dictionaryFontSizeLabel(percent);
+                    const auto shown = scale == 1.5 ? QString() : phone ? shortNames[index] : name;
+                    require(choice && choice->text() == shown,
+                            "Dictionary size label does not match the screen and interface text size");
+                    require(choice->accessibleName() == name,
+                            "Dictionary size choice lost its full accessible name");
+                    ++index;
+                }
+                settings.dismissFontChoices();
+            }
+        }
+        reader.resize(savedSize);
+        kobalt::ui::setLargeText(savedScale);
         int paragraphCommits = 0, chosenGap = -2, chosenIndent = -2;
         settings.showParagraphAdjustments(-1, 60, [&](int gap, int indent) {
             ++paragraphCommits;

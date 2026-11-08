@@ -204,7 +204,10 @@ Getting it to run at all:
 Hardware that behaves differently:
 
 - **Physical page buttons** are forwarded to the reader and swap sides upside down; a held
-  button keeps turning pages, as in the built-in reader.
+  button keeps turning pages, as in the built-in reader. What each button does while reading
+  (previous page, next page, nothing) is chosen in Settings → Controls → Hardware buttons.
+- **Disable standby while reading** (a beta 7 option) is not offered: the PocketBook's automatic
+  standby belongs to the firmware, and Kobalt has no way to hold it off.
 - **Power and menu buttons**: a short press opens Kobalt's menu.
 - **The orientation sensor** reports tilt differently from a Kobo's; a bridge lets Kobalt see a
   real sensor, so auto-rotation works, including starting the app upside down or in landscape.

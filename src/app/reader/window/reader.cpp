@@ -763,6 +763,7 @@ QVector<QWidget *> Reader::popups() const
              pageNavigationPopup.data(),
              tapZonesPopup.data(),
              navigationBarPopup.data(),
+             chapterGroupsPopup.data(),
              menuViewPopup.data(),
              tappableLinksPopup.data(),
              marksActions.data(),
@@ -848,9 +849,13 @@ bool Reader::event(QEvent *event)
                    && !choices->isVisible()) {
             partialPanel = menu;
         }
-        setProperty("reader_partial_controls",
-                    partialPanel ? QRect(partialPanel->mapTo(this, QPoint()), partialPanel->size())
-                                 : QRect());
+        QRect partialControls = partialPanel
+                ? QRect(partialPanel->mapTo(this, QPoint()), partialPanel->size())
+                : QRect();
+        // A margin change redraws the preview above the panel without a flash.
+        if (partialPanel == menu && appearancePreview->isVisible())
+            partialControls |= appearancePreview->geometry();
+        setProperty("reader_partial_controls", partialControls);
     }
     return QWidget::event(event);
 }
@@ -936,7 +941,7 @@ bool Reader::eventFilter(QObject *watched, QEvent *event)
                 if (!closing && !book->deviceTransition() && services.remoteKeyActivity)
                     services.remoteKeyActivity(this, key);
                 if (!key->isAutoRepeat())
-                    pageButton(direction, quint32(key->timestamp()));
+                    pageButton(direction, quint32(key->timestamp()), true, key->key());
             }
             event->accept();
             return true;
@@ -1022,6 +1027,10 @@ bool Reader::eventFilter(QObject *watched, QEvent *event)
     }
     if (navigationBarPopup && watched == navigationBarPopup && type == QEvent::MouseButtonRelease) {
         closeNavigationBarButtons();
+        return true;
+    }
+    if (chapterGroupsPopup && watched == chapterGroupsPopup && type == QEvent::MouseButtonRelease) {
+        closeChapterGroups();
         return true;
     }
     if (tappableLinksPopup && watched == tappableLinksPopup && type == QEvent::MouseButtonRelease) {
@@ -1720,7 +1729,7 @@ void Reader::dismissLookup(bool keepGesture)
     ++lookupEpoch;
     lookupPending = false;
     if (keepGesture)
-        page->stopHold();
+        page->invalidateHoldTarget();
     else
         page->cancelHold();
     brightnessHide.stop();
@@ -1949,8 +1958,6 @@ void Reader::syncLinkDiscovery()
                                          ? strings::get("reader.highlight_links").arg(count)
                                          : QString());
     linkDiscovery->setVisible(linksAvailable && revealingLinks);
-    linkIndicator->setVisible(!blocked && !controls && count > 0
-                              && preferences.value("show_link_indicator").toBool(false));
     QVector<QRect> rectangles, footnotes;
     if (revealingLinks)
         for (const auto &link : session->pageLinks()) {
@@ -1974,49 +1981,11 @@ void Reader::syncLinkDiscovery()
         widget->setProperty("link_style", style);
         kobalt::ui::readerStyle(widget, style);
     };
-    // Strip buttons keep the strip's height as their touch area and draw a
-    // compact outlined box inside it, in the strip's text size.
-    const auto stripButton = [&](QPushButton *button, int strip, int text) {
-        const int box = qMin(strip - 2 * int(metrics::links::stripButtonInset),
-                             ui::interfaceLineHeight(ui::interfaceFont(text))
-                                     + 2 * int(metrics::links::stripButtonInset));
-        restyle(button,
-                styles::outlined()
-                        + QString("QPushButton{%1min-height:0;padding:0 %2px;margin:%3px 0;}")
-                                  .arg(styles::font(text))
-                                  .arg(int(metrics::links::stripButtonPadding))
-                                  .arg(qMax(0, (strip - box) / 2)));
-        button->setFixedHeight(strip);
-    };
     const auto fits = [](int strip, int text) {
         return strip >= ui::interfaceLineHeight(ui::headerFooterFont(text));
     };
 
     const QString label = strings::get("reader.highlight_links").arg(count);
-    if (linkIndicator->isVisible()) {
-        // The indicator sits at the right of the footer, level with the page
-        // number. Without a footer it stays just above the bottom edge.
-        QRect strip = page->footerTextRect();
-        if (strip.isEmpty())
-            strip = QRect(0,
-                          height() - page->bottomHeight()
-                                  - metrics::reading::stripHeight(page->chrome.footerSize),
-                          width(), metrics::reading::stripHeight(page->chrome.footerSize));
-        strip.translate(page->mapTo(this, QPoint()));
-        const int text = page->footerTextPixels();
-        linkIndicator->setText(QString::number(count));
-        linkIndicator->setAccessibleName(label);
-        linkIndicator->setToolTip(label);
-        linkIndicator->setIcon(kobalt::ui::controlIcon(kobalt::ui::ControlIcon::Link, ink));
-        linkIndicator->setIconSize(QSize(text, text));
-        stripButton(linkIndicator, strip.height(), text);
-        linkIndicator->adjustSize();
-        linkIndicator->move(strip.right() + 1 - metrics::reading::headerSide
-                                    - linkIndicator->width(),
-                            strip.y());
-        linkIndicator->raise();
-    }
-
     auto *row = static_cast<QHBoxLayout *>(linkDiscovery->layout());
     linkDiscoveryIcon->setVisible(!revealingLinks);
     linkDiscoveryToggle->setVisible(!revealingLinks);
@@ -2347,7 +2316,11 @@ void Reader::showChapters()
                          (navigation ? navigation->contentBottom(size()) : height()) - top);
     choices->setChapterPosition(
             strings::get("stats.page_of").arg(session->page() + 1).arg(session->pages()));
-    choices->showChoices(session->title(), std::move(items), current);
+    const auto groups = preferences.value("chapter_groups").toString();
+    choices->showChoices(session->title(), std::move(items), current, ChoiceScreen::Mode::Chapters,
+                         groups == "off"           ? ChapterGroups::Off
+                                 : groups == "all" ? ChapterGroups::All
+                                                   : ChapterGroups::Current);
     refresh();
 }
 
@@ -2418,12 +2391,17 @@ void Reader::pageButton(int direction)
     pageButton(direction, 0);
 }
 
+void Reader::physicalPageButton(int key, int direction)
+{
+    pageButton(direction, 0, true, key);
+}
+
 void Reader::scriptedPageButton(int direction)
 {
     pageButton(direction, 0, false);
 }
 
-void Reader::pageButton(int direction, quint32 sourceTime, bool userInput)
+void Reader::pageButton(int direction, quint32 sourceTime, bool userInput, int physicalKey)
 {
     if (resizePending)
         return;
@@ -2447,7 +2425,16 @@ void Reader::pageButton(int direction, quint32 sourceTime, bool userInput)
         || lookupPending || acknowledgments->isVisible() || bookmarkList->isVisible()
         || lightPopup->isVisible())
         return;
-    turnPage(direction, sourceTime, userInput, ui::InputClock::Key);
+    if (userInput && physicalKey && services.buttonControls) {
+        for (const auto &button : services.buttonControls()) {
+            if (button.key == physicalKey) {
+                direction = pageButtons::direction(preferences, button.id, direction);
+                break;
+            }
+        }
+    }
+    if (direction)
+        turnPage(direction, sourceTime, userInput, ui::InputClock::Key);
 }
 
 void Reader::turnPage(int direction, quint32 sourceTime, bool userInput, ui::InputClock clock)
@@ -2796,8 +2783,9 @@ void Reader::cancelExit()
 
 bool Reader::pendingStorageSave() const
 {
-    return book->savesPending() || book->readingSavePending() || bookmarks->saving()
-            || highlights->saving() || annotationSaving || (reportWriter && !reportWriter->idle());
+    return savingButtonControls || book->savesPending() || book->readingSavePending()
+            || bookmarks->saving() || highlights->saving() || annotationSaving
+            || (reportWriter && !reportWriter->idle());
 }
 
 void Reader::finishStorageSave(std::function<void(bool)> finished, bool nativeAllowed)
@@ -2910,6 +2898,11 @@ void Reader::runIdleSave(bool beforeStandby)
 
 bool Reader::flushBeforeStandby()
 {
+    // Refuse only reader standby. Sleep, USB export and closing must still
+    // drain their saves and let the host suspend or release the reader.
+    if (services.readerStandbySupported && preferences.value(disableReaderStandbyKey).toBool(false)
+        && isVisible() && !lifecycleHidden && !closing && !exportRunning && !services.suspended())
+        return false;
     // Standby pauses Qt timers. Let the visible confirmation dismiss first.
     auto *notice = dynamic_cast<KosyncNotice *>(kosyncDialog.data());
     if (!lifecycleHidden && notice && notice->completing())
@@ -3045,6 +3038,9 @@ void Reader::save(bool snapshot, bool background, bool persist)
     state["preview_settings"] =
             appearanceEdit.ready() ? appearanceEdit.preview()->state() : QJsonObject();
     state["typography_panel"] = menu->isVisible();
+    state["appearance_preview_fits"] = appearancePreviewFits();
+    state["appearance_preview_pending"] =
+            previewPageRequested != 0 && previewPageKey != previewPageRequested;
     state["annotation_dragging"] = annotationDragging;
     state["bookmarked"] = page->bookmarked;
     state["bookmark_count"] = bookmarks->available() ? int(bookmarks->bookmarks().size()) : -1;

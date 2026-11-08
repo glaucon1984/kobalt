@@ -1,5 +1,6 @@
 #pragma once
 #include "platform/api/page_animation_support.h"
+#include "platform/api/page_buttons.h"
 #include "ui/controls/buttons.h"
 #include "ui/controls/options.h"
 #include "ui/controls/panels.h"
@@ -13,6 +14,10 @@
 #include <QStackedWidget>
 #include <QVector>
 #include <QPointer>
+
+namespace kobalt {
+class AboutPage;
+}
 
 namespace kobalt::reader {
 // Settings tabs, in the order of the stacked pages.
@@ -30,9 +35,6 @@ enum class SettingsPage {
 struct SettingsPanelInputs
 {
     KeyboardFactory keyboard;
-    QString release, commit;
-    int qtMajor = 0;
-    bool commitVisible = false;
     PageAnimationSupport animationSupport = PageAnimationSupport::Unavailable;
     bool lightSupported = false, warmthSupported = false;
     bool debugProgressAvailable = false;
@@ -41,6 +43,7 @@ struct SettingsPanelInputs
     bool automaticBookOpeningSupported = false;
     // The host can turn Wi-Fi off when a book opens, or previews a host that can.
     bool wifiPowerSaverSupported = false;
+    bool readerStandbySupported = false;
 };
 
 // Qt parents own every widget. Reader installs policy callbacks after construction.
@@ -50,6 +53,7 @@ public:
     SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs);
     ~SettingsPanel() override;
     void dismissRestore();
+    void dismissStandbyConfirmation();
     void showFontChoices(const QString &title, const QVector<ReadingFont> &fonts,
                          const QString &current, const QString &emptyLabel,
                          std::function<void(const QString &)> chosen);
@@ -58,7 +62,7 @@ public:
                                  std::function<void(int)> chosen);
     void showDictionaryFontSizes(int current, const QString &family, bool customFont,
                                  std::function<void(int)> chosen);
-    static QString dictionaryFontSizeLabel(int percent);
+    static QString dictionaryFontSizeLabel(int percent, bool compact = false);
     void showTimeRemainingFormats(const QString &current,
                                   std::function<void(const QString &)> chosen);
     static QString timeRemainingFormatLabel(const QString &format);
@@ -73,6 +77,10 @@ public:
         ParagraphSpacing
     };
     static QString paragraphSpacingLabel(int percent);
+    void updateButtonControls(const pageButtons::Buttons &buttons, const QJsonObject &preferences,
+                              bool saving);
+    void showButtonControls(const pageButtons::Buttons &buttons, const QJsonObject &current,
+                            std::function<void(QJsonObject)> chosen);
     void showBeautifier(const QJsonObject &current, std::function<void(QJsonObject)> chosen);
     void showPageSpacingChoices(int mode, int scope, std::function<void(int, int)> chosen);
     void showParagraphAdjustments(int spacing, int indent, std::function<void(int, int)> chosen);
@@ -106,6 +114,7 @@ public:
     ui::DescribedOption *hideTabLabelsOption = nullptr;
     QWidget *powerSection = nullptr;
     ui::DescribedOption *wifiPowerSaverOption = nullptr;
+    ui::DescribedOption *disableStandbyOption = nullptr;
     QStackedWidget *settingsPages = nullptr;
     QVector<QPushButton *> settingsTabButtons;
     ui::DescribedOption *lightDarkModeOption = nullptr;
@@ -113,7 +122,7 @@ public:
                         *animationOption = nullptr;
     ui::DescribedOption *edgeLightOption = nullptr, *lightGestureFeedbackOption = nullptr,
                         *denseGraphOption = nullptr;
-    ui::DescribedOption *linkIndicatorOption = nullptr, *hideNonlinearOption = nullptr;
+    ui::DescribedOption *hideNonlinearOption = nullptr;
     ui::DescribedOption *automaticOpeningOption = nullptr, *minimalAnnotationOption = nullptr;
     ui::CaptionButton *defaultFontButton = nullptr, *uiFontButton = nullptr,
                       *uiMonoFontButton = nullptr, *headerFooterFontButton = nullptr,
@@ -129,8 +138,10 @@ public:
     ui::CaptionButton *paragraphSpacingButton = nullptr, *beautifierButton = nullptr;
     ui::CaptionButton *sleepScreenButton = nullptr, *sessionTimeoutButton = nullptr,
                       *sleepTileButton = nullptr, *menuViewButton = nullptr;
+    ui::CaptionButton *buttonControlsButton = nullptr;
     ui::CaptionButton *pageNavigationButton = nullptr, *tapZonesButton = nullptr,
-                      *navigationBarButton = nullptr, *tappableLinksButton = nullptr;
+                      *navigationBarButton = nullptr, *tappableLinksButton = nullptr,
+                      *chapterGroupsButton = nullptr;
     ui::DescribedOption *bionicOption = nullptr;
     ui::CaptionButton *refreshButton = nullptr, *resetDefaults = nullptr;
     QPushButton *keepDefaults = nullptr, *confirmDefaults = nullptr;
@@ -163,8 +174,9 @@ private:
     int optionPage = 0, pageHeight = 0;
     void showOptionsPage(int page);
     void fitRail(int availableHeight = 0);
-    QLabel *aboutDescription = nullptr;
+    AboutPage *aboutPage = nullptr;
     QPointer<ui::ChoiceModal> restoreDialog;
+    QPointer<ui::ChoiceModal> standbyDialog;
     QHash<int, StyleSample> stylingSamples;
     // The open styling sheet, if any, and the option its preview shows.
     QPointer<QWidget> stylingPreview;
