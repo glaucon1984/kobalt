@@ -400,19 +400,22 @@ ReaderHostServices readerServices() {
         return true;
     };
     // The two page buttons, mappable in Settings → Controls → Hardware buttons. The reader matches
-    // the pressed key against these, so they carry the keys the pbink plugin delivers (PageUp for
-    // the upper button, PageDown for the lower one), not Kobo's F23/F24; the default directions
-    // are refined through pageButtonDirection below.
+    // the pressed key against these, so they carry the keys the pbink plugin delivers, not Kobo's
+    // F23/F24. On the Era Lite the upper button is the firmware's "next" key (IV_KEY_NEXT,
+    // PageDown here) and the lower one "previous" (IV_KEY_PREV, PageUp); the default directions
+    // are recomputed through pageButtonDirection below, so an unmapped button still swaps upside
+    // down. The host forwards the keys through physicalPageButton so the mapping applies.
     result.buttonControls = [] {
-        return pageButtons::Buttons{ { "page_upper", "buttons.upper", Qt::Key_PageUp, -1 },
-                                     { "page_lower", "buttons.lower", Qt::Key_PageDown, 1 } };
+        return pageButtons::Buttons{ { "page_upper", "buttons.upper", Qt::Key_PageDown, 1 },
+                                     { "page_lower", "buttons.lower", Qt::Key_PageUp, -1 } };
     };
     result.reverseLandscapeButtons = [] {
         return false;
     };
-    // The pbink plugin maps the PocketBook's page buttons to PageDown (lower) and PageUp (upper).
-    // As on Kobo: turned upside down (or inverted landscape), the lower button is the physically
-    // upper one, so the pair swaps with the screen orientation.
+    // The pbink plugin maps the PocketBook's page buttons to PageDown (the firmware's "next", the
+    // upper button on the Era Lite) and PageUp ("previous", the lower one). As on Kobo: turned
+    // upside down (or inverted landscape), the lower button is the physically upper one, so the
+    // pair swaps with the screen orientation.
     result.pageButtonDirection = [](QKeyEvent *event) {
         int direction = 0;
         switch (event->key()) {

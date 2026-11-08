@@ -785,12 +785,20 @@ auto-merge (checked with `git diff origin/main` on the touched files).
 
 Port decisions, both in `host/services.cpp`:
 
-- `buttonControls` returns the two page buttons with the keys the pbink plugin delivers (PageUp
-  upper, PageDown lower; `pbinkevents.cpp` maps `IV_KEY_PREV`/`IV_KEY_NEXT` to them). The reader
-  compares the pressed key with the list (`Reader::pageButton`), so Kobo's `pageButtons::paging()`
-  with F23/F24 would never match here. The default direction of each entry is recomputed through
-  `pageButtonDirection`, so the upside-down swap still applies to an unmapped button. The ids
-  (`page_upper`, `page_lower`) select the e-reader diagram in the mapping sheet.
+- `buttonControls` returns the two page buttons with the keys the pbink plugin delivers
+  (`pbinkevents.cpp` maps `IV_KEY_NEXT` to PageDown and `IV_KEY_PREV` to PageUp). On the Era Lite
+  the upper button is the firmware's "next" key, so `page_upper` carries PageDown and
+  `page_lower` PageUp; the first build had them the other way round, which showed upper =
+  previous in the sheet while the button turned forward. The reader compares the pressed key with
+  the list (`Reader::pageButton`), so Kobo's `pageButtons::paging()` with F23/F24 would never
+  match here. The default direction of each entry is recomputed through `pageButtonDirection`,
+  so the upside-down swap still applies to an unmapped button. The ids (`page_upper`,
+  `page_lower`) select the e-reader diagram in the mapping sheet.
+- The host forwards the page keys itself (the reader only filters them while it is the active
+  modal widget). It used to call `pageButton(direction)`, which carries no key and so skipped the
+  mapping; it now calls `ReaderWindow::physicalPageButton(key, direction)`, upstream's entry point
+  for a hardware key (Android uses it for the volume buttons), for the first press and the held
+  repeats alike, so "Do nothing" and a swapped pair work.
 - `readerStandbySupported` stays false, which hides the "Disable standby" option: on Kobo the hook
   lets the reader veto a standby the host is about to request; on PocketBook the automatic standby
   is the firmware's own timer and inkview has no documented call to postpone it. Noted in

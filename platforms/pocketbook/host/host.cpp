@@ -822,7 +822,8 @@ bool Host::eventFilter(QObject *object, QEvent *event) {
             return true;
         }
         // The reader only handles page keys itself while it is the active modal widget (as on
-        // Kobo); here it is a child of this host, so forward the physical page buttons.
+        // Kobo); here it is a child of this host, so forward the physical page buttons, with the
+        // key, so the user's button mapping (Settings → Controls → Hardware buttons) applies.
         auto *reader = controller.window();
         if (reader && currentWidget() == reader && reader->isEnabled() && !QApplication::activeModalWidget() &&
             !qobject_cast<QLineEdit *>(QApplication::focusWidget())) {
@@ -834,11 +835,11 @@ bool Host::eventFilter(QObject *object, QEvent *event) {
                     // here). One turn per repeat, once the previous page is on screen and no
                     // sooner than the plugin's frame pacing, so turns do not pile up.
                     if (!key->isAutoRepeat()) {
-                        reader->pageButton(direction);
+                        reader->physicalPageButton(key->key(), direction);
                         heldTurnClock.start();
                     } else if (reader->readyForPresentation() && heldTurnClock.isValid() &&
                                heldTurnClock.elapsed() >= 350) {
-                        reader->pageButton(direction);
+                        reader->physicalPageButton(key->key(), direction);
                         heldTurnClock.start();
                     }
                 }
