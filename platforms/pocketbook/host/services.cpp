@@ -402,12 +402,20 @@ ReaderHostServices readerServices() {
     // The two page buttons, mappable in Settings → Controls → Hardware buttons. The reader matches
     // the pressed key against these, so they carry the keys the pbink plugin delivers, not Kobo's
     // F23/F24. On the Era Lite the upper button is the firmware's "next" key (IV_KEY_NEXT,
-    // PageDown here) and the lower one "previous" (IV_KEY_PREV, PageUp); the default directions
-    // are recomputed through pageButtonDirection below, so an unmapped button still swaps upside
-    // down. The host forwards the keys through physicalPageButton so the mapping applies.
+    // PageDown here) and the lower one "previous" (IV_KEY_PREV, PageUp). "Upper" and "lower" name
+    // the button's position as the device is held, so upside down (or in inverted landscape) the
+    // keys cross over: a mapped action then stays with the button on top, as the unmapped default
+    // does (its direction is recomputed through pageButtonDirection below, which swaps the same
+    // way). The host forwards the keys through physicalPageButton so the mapping applies.
     result.buttonControls = [] {
-        return pageButtons::Buttons{ { "page_upper", "buttons.upper", Qt::Key_PageDown, 1 },
-                                     { "page_lower", "buttons.lower", Qt::Key_PageUp, -1 } };
+        bool inverted = false;
+        if (const auto *screen = QGuiApplication::primaryScreen())
+            inverted = screen->orientation() == Qt::InvertedPortraitOrientation
+                    || screen->orientation() == Qt::InvertedLandscapeOrientation;
+        const int upperKey = inverted ? Qt::Key_PageUp : Qt::Key_PageDown;
+        const int lowerKey = inverted ? Qt::Key_PageDown : Qt::Key_PageUp;
+        return pageButtons::Buttons{ { "page_upper", "buttons.upper", upperKey, 1 },
+                                     { "page_lower", "buttons.lower", lowerKey, -1 } };
     };
     result.reverseLandscapeButtons = [] {
         return false;

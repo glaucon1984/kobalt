@@ -799,6 +799,16 @@ Port decisions, both in `host/services.cpp`:
   mapping; it now calls `ReaderWindow::physicalPageButton(key, direction)`, upstream's entry point
   for a hardware key (Android uses it for the volume buttons), for the first press and the held
   repeats alike, so "Do nothing" and a swapped pair work.
+- A mapped button stayed with the hardware button when the device was turned upside down (found
+  on the device after 0.6.1): the reader matches the pressed key against the list, and a key names
+  a hardware button, so once the preference held an explicit action (any visit to the mapping sheet
+  stores one) the upside-down swap, which only lives in `pageButtonDirection`'s native direction,
+  no longer applied. `buttonControls` now crosses the keys over when the screen is inverted
+  (`page_upper` carries PageUp, the hardware "previous" button, which is then on top), so the ids
+  name positions as the device is held and the mapped action follows the position. The sheet's
+  defaults, recomputed from the same orientation through `pageButtonDirection`, stay consistent
+  (inverted PageUp turns next). Upstream's Kobo list uses fixed F23/F24, so an explicit mapping
+  there presumably has the same behaviour.
 - `readerStandbySupported` stays false, which hides the "Disable standby" option: on Kobo the hook
   lets the reader veto a standby the host is about to request; on PocketBook the automatic standby
   is the firmware's own timer and inkview has no documented call to postpone it. Noted in

@@ -205,7 +205,9 @@ Hardware that behaves differently:
 
 - **Physical page buttons** are forwarded to the reader and swap sides upside down; a held
   button keeps turning pages, as in the built-in reader. What each button does while reading
-  (previous page, next page, nothing) is chosen in Settings → Controls → Hardware buttons.
+  (previous page, next page, nothing) is chosen in Settings → Controls → Hardware buttons; "upper"
+  and "lower" mean the button's position as the device is held, so the chosen actions swap sides
+  with the screen, like the defaults.
 - **Disable standby while reading** (a beta 7 option) is not offered: the PocketBook's automatic
   standby belongs to the firmware, and Kobalt has no way to hold it off.
 - **Power and menu buttons**: a short press opens Kobalt's menu.
