@@ -870,8 +870,10 @@ void Reader::showKosyncChoice()
                                                             ? "kosync.direction_forward"
                                                             : "kosync.direction_same");
                 auto *description = guard->descriptionLabel();
+                // The description sits in the heading row, inset from the card's border.
                 const int width = guard->card()->width()
-                        - 2 * int(ui::metrics::notice::cardMargins.left()) - 4;
+                        - 2 * (ui::metrics::notice::cardBorder + int(ui::metrics::chrome::inset))
+                        - 4;
                 const auto chapter = [&](QString value) {
                     if (value.trimmed().isEmpty())
                         value = strings::get("kosync.chapter_unavailable");

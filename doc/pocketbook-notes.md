@@ -804,6 +804,18 @@ Port decisions, both in `host/services.cpp`:
   is the firmware's own timer and inkview has no documented call to postpone it. Noted in
   `doc/pocketbook.md`.
 
+Modal description clipped (found on the device, KOSync position choice): beta 7 moved a modal's
+title and description into a nested heading row (`PopupCard::heading`), but `fitToWidth` only
+fixes the heights of the card's direct child labels and then asks the card layout for its
+height. A description set after the last fit, as the KOSync comparison does once the positions
+are compared, leaves the heading row's layout item and the card layout with the previous text's
+cached heights (Qt invalidates them only through the posted LayoutRequest chain, after the
+synchronous `fitCard()`), so the card kept the "Comparing reading positions…" height and the
+seven-line comparison was clipped, percentages included. Fixed in `src/ui/dialogs/modals.cpp` by
+invalidating the nested rows' layouts and the card layout before measuring; the comparison's
+chapter elide width now also subtracts the heading inset instead of the old card margins. Upstream
+has the same code (worth reporting to Nico).
+
 Also upstream: `.gitignore` now lists `/.claude/`, and `.claude/settings.json` (a validation hook)
 is gone. New sources (`app/about/about_page.cpp`, `settings/button_controls.cpp`,
 `views/appearance_preview.cpp`, `platform/api/page_buttons.h`) are picked up by the port's glob;
