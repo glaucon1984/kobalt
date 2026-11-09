@@ -1,4 +1,6 @@
 #include "pbinkscreen.h"
+#include <QtFbSupport/private/qfbbackingstore_p.h>
+#include <QtFbSupport/private/qfbwindow_p.h>
 #include <QPainter>
 #include <QScreen>
 #include <qpa/qwindowsysteminterface.h>
@@ -37,9 +39,18 @@ inline uint8x8_t greyPixels(const QRgb *source)
     return vshrn_n_u16(sum, 5);
 }
 
+// A page is 8.5 MB of source and the copy runs at the speed of the memory, so the source is
+// fetched ahead of the loop: sixteen pixels are one 64-byte cache line.
+const int prefetchPixels = 64;
+
 void greyRow(const QRgb *source, uchar *target, int count)
 {
     int x = 0;
+    for (; x + 16 <= count; x += 16) {
+        __builtin_prefetch(source + x + prefetchPixels);
+        vst1_u8(target + x, greyPixels(source + x));
+        vst1_u8(target + x + 8, greyPixels(source + x + 8));
+    }
     for (; x + 8 <= count; x += 8)
         vst1_u8(target + x, greyPixels(source + x));
     for (; x < count; ++x)
@@ -50,6 +61,11 @@ void greyRow(const QRgb *source, uchar *target, int count)
 void greyRowBackwards(const QRgb *source, uchar *target, int count)
 {
     int x = 0;
+    for (; x + 16 <= count; x += 16) {
+        __builtin_prefetch(source + x + prefetchPixels);
+        vst1_u8(target - x - 7, vrev64_u8(greyPixels(source + x)));
+        vst1_u8(target - x - 15, vrev64_u8(greyPixels(source + x + 8)));
+    }
     for (; x + 8 <= count; x += 8)
         vst1_u8(target - x - 7, vrev64_u8(greyPixels(source + x)));
     for (; x < count; ++x)
@@ -169,11 +185,48 @@ void PbInkScreen::setOrientation(Qt::ScreenOrientation orientation)
     }
 }
 
+// QFbScreen composes every frame into mScreenImage first: it clears the dirty area, then copies
+// each visible window's backing store over it, two more passes over a page that is already
+// complete in the window's own image (about 20 ms of an 88 ms page turn on the Era Lite, where
+// such copies run at the speed of the memory). When the topmost visible window covers the whole
+// screen with an opaque image of the screen's format, nothing below it shows and the frame is
+// that image: it goes into the panel's framebuffer directly. A dialog or any smaller window on
+// top, a cursor, or a size that does not match (in the middle of a rotation) takes the
+// compositor as before. mScreenImage is stale after a direct frame, which is safe: the
+// compositor redraws every area it is asked for and only that area is read. PBINK_DIRECT=0
+// switches the direct path off, to compare.
+QFbBackingStore *PbInkScreen::directSource() const
+{
+    static const bool enabled = !qEnvironmentVariableIsSet("PBINK_DIRECT")
+                                || qEnvironmentVariableIntValue("PBINK_DIRECT") != 0;
+    if (!enabled || mCursor)
+        return nullptr;
+    for (QFbWindow *window : mWindowStack) { // topmost first
+        if (!window->window()->isVisible())
+            continue;
+        QFbBackingStore *store = window->backingStore();
+        if (!store || window->geometry() != mGeometry)
+            return nullptr;
+        const QImage image = store->image();
+        return image.format() == mScreenImage.format() && !image.hasAlphaChannel()
+                               && image.size() == mScreenImage.size()
+                       ? store : nullptr;
+    }
+    return nullptr;
+}
+
 QRegion PbInkScreen::doRedraw()
 {
     QElapsedTimer composing;
     composing.start();
-    const QRegion touched = QFbScreen::doRedraw();
+    QFbBackingStore *const direct = directSource();
+    QRegion touched;
+    if (direct) {
+        touched = mRepaintRegion.intersected(QRect(QPoint(0, 0), mGeometry.size()));
+        mRepaintRegion = QRegion();
+    } else {
+        touched = QFbScreen::doRedraw();
+    }
     if (touched.isEmpty())
         return touched;
     const qint64 composeMs = composing.elapsed();
@@ -233,7 +286,7 @@ QRegion PbInkScreen::doRedraw()
                                  || qEnvironmentVariableIntValue("PBINK_ANIM_FAST") == 1;
         QElapsedTimer copying;
         copying.start();
-        blit(touched);
+        blit(touched, direct);
         const qint64 copyMs = copying.elapsed();
         const QRect area = touched.boundingRect();
         QElapsedTimer striping;
@@ -257,12 +310,12 @@ QRegion PbInkScreen::doRedraw()
         // Logged after the strips, not to delay them: the first strip left striping ms before
         // this line, which is what to compare with the tap's event line.
         if (mDebug)
-            qCDebug(lcPbInk, "wipe %d: composed in %lld ms, copied in %lld ms, strips took %lld ms", sweep,
-                    static_cast<long long>(composeMs), static_cast<long long>(copyMs),
+            qCDebug(lcPbInk, "wipe %d: %s in %lld ms, copied in %lld ms, strips took %lld ms", sweep,
+                    direct ? "direct" : "composed", static_cast<long long>(composeMs), static_cast<long long>(copyMs),
                     static_cast<long long>(striping.elapsed()));
         return touched;
     }
-    blit(touched);
+    blit(touched, direct);
 
     const QRect r = mToPanel.mapRect(touched.boundingRect()).intersected(QRect(0, 0, mPanelWidth, mPanelHeight));
     if (mDebug)
@@ -285,11 +338,26 @@ QRegion PbInkScreen::doRedraw()
 // The composed screen into the panel's framebuffer. QPainter's generic path took 22 ms for a page
 // on the Era Lite upright, 38 upside down and 189 sideways. A sideways frame steps a whole panel
 // line per pixel, so it goes in tiles that fit the 32 KB data cache.
-void PbInkScreen::blit(const QRegion &region)
+// The source is the composed screen, or the one window's backing store that is the whole frame
+// (directSource()); the store's image is held only for the copy, so that the window's next paint
+// does not find it shared and detach.
+void PbInkScreen::blit(const QRegion &region, QFbBackingStore *direct)
+{
+    if (direct)
+        direct->lock();
+    {
+        const QImage source = direct ? direct->image() : mScreenImage;
+        blit(region, source);
+    }
+    if (direct)
+        direct->unlock();
+}
+
+void PbInkScreen::blit(const QRegion &region, const QImage &screen)
 {
     if (mFbImage.format() != QImage::Format_Grayscale8) {
         for (const QRect &rect : region)
-            mBlitter->drawImage(rect, mScreenImage, rect);
+            mBlitter->drawImage(rect, screen, rect);
         return;
     }
     // Where logical pixel (0, 0) lands on the panel, and how far one pixel right or down moves it.
@@ -302,11 +370,11 @@ void PbInkScreen::blit(const QRegion &region)
     uchar *origin = mFbImage.bits() + qFloor(start.y()) * line + qFloor(start.x());
     static const int tile = 64;
     for (const QRect &rect : region) {
-        const QRect area = rect.intersected(mScreenImage.rect());
+        const QRect area = rect.intersected(screen.rect());
         const int bottom = area.y() + area.height(), end = area.x() + area.width();
         if (stepX == 1 || stepX == -1) {
             for (int y = area.y(); y < bottom; ++y) {
-                const QRgb *source = reinterpret_cast<const QRgb *>(mScreenImage.constScanLine(y)) + area.x();
+                const QRgb *source = reinterpret_cast<const QRgb *>(screen.constScanLine(y)) + area.x();
                 uchar *target = origin + y * stepY + area.x() * stepX;
                 if (stepX == 1)
                     greyRow(source, target, area.width());
@@ -320,7 +388,7 @@ void PbInkScreen::blit(const QRegion &region)
             for (int left = area.x(); left < end; left += tile) {
                 const int count = qMin(tile, end - left);
                 for (int y = top; y < tileBottom; ++y) {
-                    const QRgb *source = reinterpret_cast<const QRgb *>(mScreenImage.constScanLine(y)) + left;
+                    const QRgb *source = reinterpret_cast<const QRgb *>(screen.constScanLine(y)) + left;
                     uchar *target = origin + y * stepY + left * stepX;
                     for (int x = 0; x < count; ++x, target += stepX)
                         *target = uchar(qGray(source[x]));

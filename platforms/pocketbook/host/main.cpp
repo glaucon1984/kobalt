@@ -12,8 +12,14 @@
 #include <QApplication>
 #include <unistd.h>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QFontDatabase>
+#include <QMutex>
+#include <QThread>
+#include <QTime>
+#include <QWaitCondition>
+#include <cerrno>
 #include <QScreen>
 #include <QSslSocket>
 #include <QSslConfiguration>
@@ -54,16 +60,109 @@ void importDictionaries(const QString &dropFolder, const QString &dictionaryRoot
         }
     }
 }
-void logHandler(QtMsgType type, const QMessageLogContext &, const QString &msg) {
-    const char *level = type == QtDebugMsg ? "D" : type == QtInfoMsg ? "I" : type == QtWarningMsg ? "W" : "E";
-    fprintf(stderr, "%s %s %s\n", qPrintable(QTime::currentTime().toString("HH:mm:ss.zzz")), level, qPrintable(msg));
-    fflush(stderr);
+// The log is a file on the device's flash (the launcher redirects stderr), and the page turn is
+// sacred: the thread that turns pages must not write storage. Every line used to be written from
+// the thread that logged it, and every non-debug line synced there too, which on the GUI thread
+// is a wait of unknown length on the flash; the gravity sensor alone logs two such lines every
+// few seconds while the device is held. Lines are stamped where they are logged and handed to
+// this thread, which writes them in order and syncs.
+void writeLog(const QByteArray &lines, bool sync) {
+    const char *at = lines.constData();
+    qint64 left = lines.size();
+    while (left > 0) {
+        const ssize_t written = ::write(2, at, size_t(left));
+        if (written < 0 && errno == EINTR)
+            continue;
+        if (written <= 0)
+            break;
+        at += written;
+        left -= written;
+    }
     // Non-debug lines reach the flash at once: the firmware exports /mnt/ext1 over USB without
     // flushing what the apps still have in the page cache, and the tail of the log was lost.
-    if (type != QtDebugMsg)
+    if (sync)
         fdatasync(2);
-    if (type == QtFatalMsg)
+}
+class LogWriter final : public QThread {
+public:
+    void post(const QByteArray &line, bool sync) {
+        QMutexLocker lock(&mutex);
+        if (finished) {
+            writeLog(line, sync);
+            return;
+        }
+        pending += line;
+        syncPending = syncPending || sync;
+        wake.wakeOne();
+    }
+    // Returns once every line posted so far is written (a fatal message, before abort()).
+    void drain() {
+        QMutexLocker lock(&mutex);
+        while (!finished && (!pending.isEmpty() || writing))
+            idle.wait(&mutex);
+    }
+    // The last lines of a run; later ones are written by the thread that logs them.
+    void finish() {
+        {
+            QMutexLocker lock(&mutex);
+            stopping = true;
+            wake.wakeOne();
+        }
+        wait();
+    }
+
+protected:
+    void run() override {
+        QMutexLocker lock(&mutex);
+        for (;;) {
+            while (pending.isEmpty() && !stopping)
+                wake.wait(&mutex);
+            if (pending.isEmpty())
+                break;
+            QByteArray lines;
+            lines.swap(pending);
+            const bool sync = syncPending;
+            syncPending = false;
+            writing = true;
+            lock.unlock();
+            writeLog(lines, sync);
+            lock.relock();
+            writing = false;
+            idle.wakeAll();
+        }
+        finished = true;
+        idle.wakeAll();
+    }
+
+private:
+    QMutex mutex;
+    QWaitCondition wake, idle;
+    QByteArray pending;
+    bool syncPending = false, writing = false, stopping = false, finished = false;
+};
+LogWriter *logWriter = nullptr; // set in main() before any other thread exists, never deleted
+struct LogWriterScope {
+    LogWriterScope() {
+        logWriter = new LogWriter;
+        logWriter->start();
+    }
+    ~LogWriterScope() {
+        logWriter->finish();
+    }
+};
+void logHandler(QtMsgType type, const QMessageLogContext &, const QString &msg) {
+    const char *level = type == QtDebugMsg ? "D" : type == QtInfoMsg ? "I" : type == QtWarningMsg ? "W" : "E";
+    const QByteArray line = QTime::currentTime().toString("HH:mm:ss.zzz").toLatin1() + ' ' + level + ' ' +
+                            msg.toLocal8Bit() + '\n';
+    if (logWriter)
+        logWriter->post(line, type != QtDebugMsg);
+    else
+        writeLog(line, type != QtDebugMsg);
+    if (type == QtFatalMsg) {
+        if (logWriter)
+            logWriter->drain();
         abort();
+    }
 }
 }
 
@@ -75,6 +174,8 @@ int main(int argc, char **argv) {
         qputenv("QT_QPA_PLATFORM", "pbink");
     if (qEnvironmentVariableIsEmpty("QT_QPA_FONTDIR"))
         qputenv("QT_QPA_FONTDIR", (base + "/assets/fonts").toUtf8()); // flat dir of TTFs from the asset bundle
+    // Ends after the last line of main(), on every way out of it.
+    const LogWriterScope logging;
     qInstallMessageHandler(logHandler);
     qInfo("kobalt-pb %s starting from %s", KOBALT_VERSION, qPrintable(base));
 
@@ -89,8 +190,17 @@ int main(int argc, char **argv) {
     // and the rest of the start, which take several seconds the PIN screen would spend dark.
     pocketbook::restoreStandbyLight("launch");
 
+    // Every book is a new process here, and verifying the bundle reads and hashes 46 MB of fonts
+    // before the first frame (about 4 s on the Era Lite): record it, so that only a bundle that
+    // changed is read again. Next to the binary, not in the profile: it describes this install.
     AssetBundle assets(base + "/assets", QStringLiteral(KOBALT_VERSION));
-    if (!assets.available() || !ui::initializeInterfaceFonts(assets)) {
+    assets.setVerificationRecord(base + "/assets-verified.json");
+    QElapsedTimer assetClock;
+    assetClock.start();
+    const bool assetsAvailable = assets.available();
+    qInfo("kobalt-pb: assets %s in %lld ms", assetsAvailable ? "verified" : "unavailable",
+          static_cast<long long>(assetClock.elapsed()));
+    if (!assetsAvailable || !ui::initializeInterfaceFonts(assets)) {
         qCritical("kobalt-pb: bundled assets are unavailable in %s/assets", qPrintable(base));
         return 2;
     }

@@ -831,6 +831,42 @@ is gone. New sources (`app/about/about_page.cpp`, `settings/button_controls.cpp`
 `views/appearance_preview.cpp`, `platform/api/page_buttons.h`) are picked up by the port's glob;
 `app/library/about_screen.cpp` is excluded with the rest of the library.
 
+### Launch, frame path and log off the GUI thread (2026-11-09)
+
+A review of the port for speed, from the code and the 2026-11-01 log. Nothing in this section is measured on the device yet: each item says what to read in `kobalt.log` to judge it.
+
+- **Launch.** `AssetBundle::available()` reads and hashes every bundled font and hyphenation file (46 MB, 26 of them the CJK font) on the main thread before the first frame. On Kobo that is once per boot; here every book is a new process. The old log has 3.9 s between `pbink: screen` and `kobalt-pb: screen` in three of four starts, 6.3 s in the fourth. The host now gives the bundle a verification record (`applications/kobalt/assets-verified.json`): a later process accepts each asset whose size and modification time match the record under the same manifest and version, which is the rule `available()` already applies within one process, and hashes anything else. A reader that returns a font's bytes still hashes its own file. What it gives up: bytes that change under an unchanged size and time (a damaged card) are no longer caught at launch. Read `kobalt-pb: assets verified in N ms`: seconds on the first start after an install, little after.
+- **The compositor's copy.** `QFbScreen::doRedraw()` clears the dirty area in `mScreenImage` and then copies each window's backing store over it, the 20 ms "composing" of a page turn, for a page that is already whole in the reader window's own image. `PbInkScreen::directSource()` finds the topmost visible window, and when it covers the screen with an opaque image of the screen's format and size, `blit()` converts from that image straight into the panel's framebuffer. A dialog or other smaller window on top, or a size in the middle of a rotation, takes the compositor as before. `mScreenImage` is stale after a direct frame; the compositor redraws whatever area it is asked for, and only that area is read. A wipe's line says `direct in N ms` or `composed in N ms`. `PBINK_DIRECT=0` in the launcher switches it off to compare. To check on the device: all four rotations, the menu and the light pop-up over the page, a KOsync dialog, the keyboard, standby and wake.
+- **The grey copy** now fetches the source ahead (`__builtin_prefetch`, 64 pixels) and takes 16 pixels a step. Compare `copied in N ms` with the 16 ms before.
+- **The paper under the page.** `ReadingPage::paintContents()` filled the whole widget and then drew the opaque page image over most of it. It now fills only around the image. Shared code, the same pixels on every platform. Part of the 35 ms "painting"; compare `page-turn-painted` in `events.jsonl`.
+- **The log.** Every line was written from the thread that logged it, and every non-debug line synced there (`fdatasync`), on the GUI thread a wait of unknown length on the flash. The gravity sensor alone logs two such lines every few seconds while the device is held. Lines are now stamped where they are logged and written, in order, by a thread of the host's (`LogWriter` in `host/main.cpp`), which syncs as before. A fatal message waits for the writer before `abort()`. Lines of inkview itself still go straight to the file, so they can now come a few milliseconds before Kobalt's lines of the same moment. A crash by signal can lose the lines of its last milliseconds.
+- **Keep-awake.** The host asks at every change of any of its reasons, mostly for the state inkview already has: 3018 `keep awake` lines for 400 wipes in the old log. The plugin now compares with `GetSleepmode()` and returns, so only real changes call `iv_sleepmode()` and are logged. A book's opening shows one call holding for 13 s, so repeating the call was not what kept the device awake.
+- **`IsUSBconnected()`** runs at every press and key. Its cost is unknown, so the host times it and logs `IsUSBconnected() took N ms` from 2 ms up. No such lines means it is cheap; if they appear, read the state some other way.
+- **`-mtune=cortex-a7`** for Kobalt's own objects (`CMakeLists.txt`). The toolchain file is unchanged, since its flags key the dependency set and the Qt SDK. `-mcpu=cortex-a7 -mfpu=neon-vfpv4` (hardware divide, FMA) for everything is left for the next SDK rebuild, and would stop the binary running on Cortex-A8 and A9 PocketBooks.
+
+Measured on the Era Lite the same evening, from `kobalt.log` and `events.jsonl` (copies in `backups/era-lite-after-performance-20261109` and `backups/era-lite-paint-timing-20261109` beside the checkout; the "after" samples are small):
+
+| | Before | After |
+|---|---|---|
+| Start to the host's first line | 4.3 s and 6.1 s | 0.46 s and 0.42 s |
+| `assets verified` | not timed | 3741 ms on the first start after the install, then 129 and 78 ms |
+| Start to `book opened` | 22 s and 30 s | 15.8 s and 15.7 s |
+| Composing a wipe | 22 ms | 0 (all 46 wipes direct) |
+| Press to first strip, upright, not paced | 88 ms (468 turns) | 79 ms (9 turns); 63 ms (18 turns) after the strip work below |
+| The same upside down | 100 ms (161) | 68 ms (5) |
+| The same at 270 | 132 ms (55) | 104 ms (9) |
+| `keep awake` lines | 300 for 74 wipes | 38 for 46 wipes |
+
+No `IsUSBconnected() took` lines, so that call is cheap and stays. The prefetch and the paper fill show nothing outside the noise (copy 16 ms against 15, paint 33.8 ms against 35.8). The two `event pump took 200 ms` warnings around the standby are old: the log has 654 of them.
+
+### The header and footer strips (2026-11-09)
+
+Painting stayed at 34 ms for what should be one copy of the page, so `page-turn-painted` got the steps of `ReadingPage::refreshContent()` (`damage_ms`, `strips_ms`, `header_ms`, `footer_ms`, `repaint_ms`, `draw_ms`) and the text renderer's work during the strips (`text_layouts`, `text_layout_misses`, `text_glyph_misses`, `text_miss_ms`). Over 78 turns: damage 0.2 ms (the engine's prepared rectangle was used every time), repaint 16.9 ms of which 16.5 is the page's own drawing, and 15.9 ms for the strips. Both strips are rendered again at every turn, 7.5 ms each, and all 42 text layouts they ask for are found in the cache, with no glyph drawn: a third of a millisecond for each lookup that finds its answer.
+
+Three changes to that path in `src/ui/style/private_text.cpp`, on a reading of the code, not a profile: the layout no longer builds three fonts to compare family names (`interfaceTextFamily()`), the font's part of the cache key is built once for each font (`Fonts::layoutKey()`) instead of formatting seven numbers at every call, and text drawn in black no longer copies its image to colour it black. The strips went from 15.4 to 11.7 ms (90 turns), painting from 33.9 to 30.4. The header and footer looked the same on the device. What is left needs the strips themselves changed, such as keeping each slot's image while its content stays the same; not done.
+
+Left alone: the sleep image is composed on the GUI thread 300 ms after a lone turn (median 43 ms, worst 256 ms in the old log), which only matters if the next turn lands in that window; `sleepMode()` reads the preferences file after each turn, about a millisecond from the page cache, and caching it by file time would risk a stale answer on FAT's 2 s times. Not looked into: the 13 to 30 s from the first frame to `book opened` in the old log, which is the engine's work and the largest part of an open.
+
 ## Name and icon on the PocketBook home screen (manual firmware files)
 
 These live in the firmware's user config, not in the app package, so a plain copy of the zip

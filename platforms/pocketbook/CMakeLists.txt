@@ -72,7 +72,9 @@ target_include_directories(kobalt-pb SYSTEM PRIVATE "${CRENGINE_SOURCE}/crengine
     ${Qt5Gui_PRIVATE_INCLUDE_DIRS} ${Qt5Core_PRIVATE_INCLUDE_DIRS} ${Qt5Widgets_PRIVATE_INCLUDE_DIRS}
     ${Qt5FbSupport_PRIVATE_INCLUDE_DIRS} ${Qt5EventDispatcherSupport_PRIVATE_INCLUDE_DIRS}
     ${Qt5ServiceSupport_PRIVATE_INCLUDE_DIRS} ${Qt5FontDatabaseSupport_PRIVATE_INCLUDE_DIRS})
-target_compile_options(kobalt-pb PRIVATE -Wall -Wextra -Wno-missing-field-initializers
+# -mtune: instruction scheduling for the B288's Cortex-A7 in Kobalt's own code, which still runs
+# on any ARMv7. The toolchain file is left alone: its flags key the dependency set and the Qt SDK.
+target_compile_options(kobalt-pb PRIVATE -Wall -Wextra -Wno-missing-field-initializers -mtune=cortex-a7
     "-iquote${KOBALT_ROOT}" "-iquote${source}")
 target_compile_definitions(kobalt-pb PRIVATE KOBALT_READER_HARDWARE KOBALT_POCKETBOOK=1 QT_STATICPLUGIN
     KOBALT_VERSION="${KOBALT_VERSION}"

@@ -8,6 +8,7 @@
 
 struct icanvas_s;
 class QPainter;
+class QFbBackingStore;
 
 class PbInkScreen : public QFbScreen
 {
@@ -43,7 +44,10 @@ public:
     QPoint toLogical(const QPoint &panel) const { return mToLogical.map(panel); }
 
 private:
-    void blit(const QRegion &region);
+    // The backing store that is the whole frame by itself, if there is one (see doRedraw()).
+    QFbBackingStore *directSource() const;
+    void blit(const QRegion &region, QFbBackingStore *direct);
+    void blit(const QRegion &region, const QImage &screen);
 
     QStringList mArgs;
     icanvas_s *mFb = nullptr;

@@ -191,9 +191,15 @@ void PbInkIntegration::animateNextStatic(int direction)
 // inkview suspends the device a few seconds after the last input (sleep mode 1), regardless of
 // work in progress: a book opening without touches stalled until the next tap. Keep-awake turns
 // that off (sleep mode 0) while the app is busy, and back on afterwards for idle reading.
+// The host asks again at every change of any of its reasons (a press, a page paint, a release),
+// mostly for the state inkview already has: 3018 calls for 400 page turns in one evening's log.
+// Those are answered from inkview's own state, which also holds if the firmware changed it.
 void PbInkIntegration::setKeepAwakeStatic(int keep)
 {
-    iv_sleepmode(keep ? 0 : 1);
+    const int mode = keep ? 0 : 1;
+    if (GetSleepmode() == mode)
+        return;
+    iv_sleepmode(mode);
     qDebug("pbink: keep awake %s (inkview sleep mode %d)", keep ? "on" : "off", GetSleepmode());
 }
 

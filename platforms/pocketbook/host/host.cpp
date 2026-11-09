@@ -34,6 +34,18 @@ void animateNextFrame(int direction);
 }
 
 namespace kobalt::pocketbook {
+namespace {
+// Asked at every press and key, on the way to a page turn. What the firmware does for it is not
+// known, so a slow answer is logged: if these lines appear, read the state some other way.
+bool usbConnectedAtInput() {
+    QElapsedTimer clock;
+    clock.start();
+    const bool connected = IsUSBconnected() > 0;
+    if (clock.nsecsElapsed() >= 2000000)
+        qInfo("kobalt-pb: IsUSBconnected() took %.1f ms", clock.nsecsElapsed() / 1e6);
+    return connected;
+}
+}
 bool Host::quitting = false;
 Host *Host::current = nullptr;
 QElapsedTimer Host::rotationClock;
@@ -788,7 +800,7 @@ bool Host::eventFilter(QObject *object, QEvent *event) {
         finishWake("input"); // a press after all, not the timed power-off
     if (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonRelease) {
         if (event->type() == QEvent::MouseButtonPress) {
-            usbAtLastInput = IsUSBconnected() > 0;
+            usbAtLastInput = usbConnectedAtInput();
             inputSettle.stop();
             if (!inputBusy) {
                 inputBusy = true;
@@ -810,7 +822,7 @@ bool Host::eventFilter(QObject *object, QEvent *event) {
     if (event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease) {
         auto *key = static_cast<QKeyEvent *>(event);
         if (event->type() == QEvent::KeyPress)
-            usbAtLastInput = IsUSBconnected() > 0;
+            usbAtLastInput = usbConnectedAtInput();
         if (key->key() == Qt::Key_Home || key->key() == Qt::Key_Back) {
             if (event->type() == QEvent::KeyPress)
                 close();
