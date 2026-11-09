@@ -109,6 +109,15 @@ int fittingTextEnd(const QVector<int> &ends, int start, int limit, int width,
 QString elidePrivateText(const QString &text, const QFont &font, int width,
                          const QVector<QPair<int, int>> &boldRanges = {});
 int interfaceTextWidth(const QString &text, const QFont &font);
+// Work of the text renderer since the last call, for timing diagnostics:
+// layouts asked for, layouts not found in the cache with the time they took,
+// and glyphs that had to be drawn.
+struct PrivateTextWork
+{
+    int layouts = 0, layoutMisses = 0, glyphMisses = 0;
+    double missMs = 0;
+};
+PrivateTextWork takePrivateTextWork();
 int interfaceLineHeight(const QFont &font);
 int interfaceLineAscent(const QFont &font);
 QRect interfaceInkBounds(const QString &text, const QFont &font);

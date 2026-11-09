@@ -51,6 +51,10 @@ QFont brandFont(int pixels, bool italic = false);
 // Uppercase, spaced monospace for notes, counts and section captions.
 QFont captionFont(int pixels = metrics::chrome::captionText);
 
+// Whether `family` is the interface, chrome or header and footer family,
+// without building their fonts: the text renderer asks for every layout.
+bool interfaceTextFamily(const QString &family);
+
 inline QString interfaceFontFamily()
 {
     return interfaceFont().family();

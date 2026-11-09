@@ -464,7 +464,19 @@ void Reader::paintTurn()
                              { "page", session->page() },
                              { "elapsed_ms", turnStarted.nsecsElapsed() / 1e6 },
                              { "render_ms", rendered },
-                             { "paint_ms", painting.nsecsElapsed() / 1e6 } },
+                             { "paint_ms", painting.nsecsElapsed() / 1e6 },
+                             { "damage_ms", page->refreshTiming.damageMs },
+                             { "damage_prepared", page->refreshTiming.damagePrepared },
+                             { "strips_ms", page->refreshTiming.stripsMs },
+                             { "strips_rendered", page->refreshTiming.stripsRendered },
+                             { "header_ms", page->refreshTiming.headerMs },
+                             { "footer_ms", page->refreshTiming.footerMs },
+                             { "text_layouts", page->refreshTiming.textLayouts },
+                             { "text_layout_misses", page->refreshTiming.textLayoutMisses },
+                             { "text_glyph_misses", page->refreshTiming.textGlyphMisses },
+                             { "text_miss_ms", page->refreshTiming.textMissMs },
+                             { "repaint_ms", page->refreshTiming.repaintMs },
+                             { "draw_ms", page->refreshTiming.drawMs } },
                            false);
         turnStarted.invalidate();
     }

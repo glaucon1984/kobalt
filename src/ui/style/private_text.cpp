@@ -8,6 +8,7 @@
 #include "assets/bundled_fonts.h"
 #include "support/diagnostics.h"
 
+#include <QElapsedTimer>
 #include <QCache>
 #include <QFontMetrics>
 #include <QFile>
@@ -146,6 +147,7 @@ struct Fonts
     // Rendered glyphs by face, size, glyph and synthetic emboldening or slant.
     QCache<QByteArray, GlyphMask> glyphs{ 4096 };
     QVector<QPair<QFont, QString>> descriptions;
+    QVector<QPair<QFont, QString>> layoutKeys;
     QMap<QString, QVector<RegisteredFace>> registered;
     // Registrations already made, by path and expected family.
     QSet<QString> registrations;
@@ -260,6 +262,30 @@ struct Fonts
         return owner->shaper;
     }
 
+    // The font's part of a layout's cache key. Equal fonts share it, and a
+    // page turn asks for dozens of layouts in a handful of fonts, so the
+    // number formatting is done once for each.
+    QString layoutKey(const QFont &font)
+    {
+        for (const auto &entry : layoutKeys) {
+            if (entry.first == font) {
+                return entry.second;
+            }
+        }
+        if (layoutKeys.size() >= 16) {
+            layoutKeys.removeLast();
+        }
+        layoutKeys.prepend(
+                { font,
+                  description(font) + ':' + QString::number(font.capitalization()) + ':'
+                          + QString::number(font.letterSpacingType()) + ':'
+                          + QString::number(font.letterSpacing(), 'g', 16) + ':'
+                          + QString::number(font.wordSpacing(), 'g', 16) + ':'
+                          + QString::number(font.stretch()) + ':'
+                          + QString::number(font.kerning()) });
+        return layoutKeys.first().second;
+    }
+
     QString description(const QFont &font)
     {
         for (const auto &entry : descriptions) {
@@ -292,6 +318,9 @@ Fonts &fonts()
 
 // The same glyph at the same size renders the same mask on every line, so
 // each one is loaded and rendered by FreeType once.
+PrivateTextWork textWork;
+int textMissDepth = 0;
+
 GlyphMask glyphMask(FT_Face face, uint glyph, FT_Pos strength, bool slant)
 {
     struct
@@ -313,6 +342,7 @@ GlyphMask glyphMask(FT_Face face, uint glyph, FT_Pos strength, bool slant)
     if (const auto *cached = fonts().glyphs.object(key)) {
         return *cached;
     }
+    ++textWork.glyphMisses;
     GlyphMask result;
     if (FT_Load_Glyph(face, glyph, FT_LOAD_NO_HINTING | FT_LOAD_NO_BITMAP)) {
         result.missing = true;
@@ -742,17 +772,11 @@ static PrivateText layoutPrivateText(const QString &input, const QFont &font, in
     if (text.isEmpty() || !fonts().library) {
         return result;
     }
-    const bool interface = !previewFonts
-            && (interfaceFamily(font) || font.family() == interfaceFont().family()
-                || font.family() == chromeFont().family()
-                || font.family() == headerFooterFont().family());
+    const bool interface =
+            !previewFonts && (interfaceFamily(font) || interfaceTextFamily(font.family()));
     const int steps = weight < 0 ? (interface ? interfaceWeight() : 0) : qBound(0, weight, 12);
-    QString cacheKey = fonts().description(font) + ':' + QString::number(steps) + ':'
-            + QString::number(rasterize) + ':' + QString::number(font.capitalization()) + ':'
-            + QString::number(font.letterSpacingType()) + ':'
-            + QString::number(font.letterSpacing(), 'g', 16) + ':'
-            + QString::number(font.wordSpacing(), 'g', 16) + ':' + QString::number(font.stretch())
-            + ':' + QString::number(font.kerning());
+    QString cacheKey = fonts().layoutKey(font) + ':' + QString::number(steps) + ':'
+            + QString::number(rasterize);
     for (const auto &range : boldRanges) {
         cacheKey += ':' + QString::number(range.first) + ',' + QString::number(range.second);
     }
@@ -770,9 +794,28 @@ static PrivateText layoutPrivateText(const QString &input, const QFont &font, in
             cacheKey += ":background:" + style.background.name(QColor::HexArgb);
     }
     cacheKey += ':' + text;
+    ++textWork.layouts;
     if (const auto *cached = fonts().layouts.object(cacheKey)) {
         return *cached;
     }
+    ++textWork.layoutMisses;
+    struct MissTime
+    {
+        QElapsedTimer clock;
+
+        MissTime()
+        {
+            ++textMissDepth;
+            clock.start();
+        }
+
+        // A layout that measures another (a tab stop) counts its time once.
+        ~MissTime()
+        {
+            if (!--textMissDepth)
+                textWork.missMs += clock.nsecsElapsed() / 1e6;
+        }
+    } missTime;
     const auto characters = text.toUcs4();
     const int count = characters.size();
     QVector<int> utf16Offsets;
@@ -1137,6 +1180,13 @@ static PrivateText layoutPrivateText(const QString &input, const QFont &font, in
     return result;
 }
 
+PrivateTextWork takePrivateTextWork()
+{
+    const auto work = textWork;
+    textWork = {};
+    return work;
+}
+
 PrivateText renderPrivateText(const QString &text, const QFont &font, int weight,
                               const QVector<QPair<int, int>> &boldRanges,
                               const QVector<QPair<int, int>> &underlineRanges,
@@ -1439,10 +1489,12 @@ void drawPrivateText(QPainter &painter, const QRect &area, const QString &text,
     if (rendered.image.isNull()) {
         return;
     }
-    QPainter color(&rendered.image);
-    color.setCompositionMode(QPainter::CompositionMode_SourceIn);
-    color.fillRect(rendered.image.rect(), painter.pen().color());
-    color.end();
+    // The layout is black ink already; only another colour needs its own copy.
+    if (painter.pen().color() != QColor(Qt::black)) {
+        QPainter color(&rendered.image);
+        color.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        color.fillRect(rendered.image.rect(), painter.pen().color());
+    }
     const int x = alignment.testFlag(Qt::AlignRight) ? area.right() + 1 - rendered.advance
             : alignment.testFlag(Qt::AlignHCenter)
             ? area.left() + (area.width() - rendered.advance) / 2

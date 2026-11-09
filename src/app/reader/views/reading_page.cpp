@@ -768,6 +768,11 @@ void ReadingPage::setPageAnimationStyle(pageTurn::Style style)
 
 void ReadingPage::refreshContent(bool reading, bool now)
 {
+    QElapsedTimer stage;
+    stage.start();
+    refreshTiming = {};
+    refreshTiming.damagePrepared = preparedFrom && preparedFrom == renderedBody.cacheKey()
+            && renderedBody.size() == image.size();
     const auto colors = palette();
     const bool geometryChanged = renderedSize != size() || renderedTop != topHeight()
             || renderedBottom != bottomHeight();
@@ -819,11 +824,17 @@ void ReadingPage::refreshContent(bool reading, bool now)
                                       && image.text("kobalt.colour_regions") != "[]"
                                       && image.text("kobalt.animation_text_only") != "true"));
     renderedBody = image;
+    refreshTiming.damageMs = stage.nsecsElapsed() / 1e6;
+    stage.start();
+    refreshTiming.stripsRendered =
+            geometryChanged || nextHeader != headerState || nextFooter != footerState;
+    ui::takePrivateTextWork();
     if (geometryChanged || nextHeader != headerState) {
         auto next = renderStrip(topHeight(), [this](QPainter &p) { paintHeader(p); });
         dirty += kobalt::render::imageDamage(headerPixels, next);
         headerPixels = next;
         headerState = nextHeader;
+        refreshTiming.headerMs = stage.nsecsElapsed() / 1e6;
     }
     if (geometryChanged || nextFooter != footerState) {
         auto next = renderStrip(bottomHeight(), [this](QPainter &p) { paintFooter(p); });
@@ -831,7 +842,14 @@ void ReadingPage::refreshContent(bool reading, bool now)
                          .translated(0, height() - bottomHeight());
         footerPixels = next;
         footerState = nextFooter;
+        refreshTiming.footerMs = stage.nsecsElapsed() / 1e6 - refreshTiming.headerMs;
     }
+    const auto textWork = ui::takePrivateTextWork();
+    refreshTiming.textLayouts = textWork.layouts;
+    refreshTiming.textLayoutMisses = textWork.layoutMisses;
+    refreshTiming.textGlyphMisses = textWork.glyphMisses;
+    refreshTiming.textMissMs = textWork.missMs;
+    refreshTiming.stripsMs = stage.nsecsElapsed() / 1e6;
     const QRect ribbon = bookmarked ? ribbonRect() : QRect();
     if (ribbon != renderedRibbon) {
         dirty += ribbon;
@@ -870,6 +888,7 @@ void ReadingPage::refreshContent(bool reading, bool now)
         }
     }
     // `now` paints and flushes before returning, without a trip through the event loop.
+    stage.start();
     if (geometryChanged) {
         if (now)
             repaint();
@@ -881,13 +900,17 @@ void ReadingPage::refreshContent(bool reading, bool now)
         else
             update(dirty);
     }
+    refreshTiming.repaintMs = stage.nsecsElapsed() / 1e6;
 }
 
 void ReadingPage::paintEvent(QPaintEvent *)
 {
     QPainter painter(this);
     if (pageTurnAnimation.state() == QTimeLine::NotRunning) {
+        QElapsedTimer drawing;
+        drawing.start();
         paintContents(painter);
+        refreshTiming.drawMs = drawing.nsecsElapsed() / 1e6;
         return;
     }
     const QRect body(0, topHeight(), width(), renderedBody.height());
@@ -1069,7 +1092,23 @@ void ReadingPage::paintBody(QPainter &painter) const
 
 void ReadingPage::paintContents(QPainter &painter, bool sleeping) const
 {
-    painter.fillRect(rect(), palette().color(QPalette::Window));
+    // The opaque page image covers its part of the paper, so that part is not
+    // filled first: on a reader's memory a second pass over the page costs
+    // several milliseconds of every turn.
+    const QColor paper = palette().color(QPalette::Window);
+    const QRect body =
+            QRect(0, topHeight(), renderedBody.width(), renderedBody.height()).intersected(rect());
+    if (changingViewport || body.isEmpty() || renderedBody.hasAlphaChannel()) {
+        painter.fillRect(rect(), paper);
+    } else {
+        // Above, below, left and right of the page image; an empty one fills nothing.
+        painter.fillRect(QRect(0, 0, width(), body.top()), paper);
+        painter.fillRect(QRect(0, body.bottom() + 1, width(), height() - body.bottom() - 1), paper);
+        painter.fillRect(QRect(0, body.top(), body.left(), body.height()), paper);
+        painter.fillRect(QRect(body.right() + 1, body.top(), width() - body.right() - 1,
+                               body.height()),
+                         paper);
+    }
     paintBody(painter);
     if (sleeping) {
         painter.save();

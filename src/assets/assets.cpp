@@ -1,12 +1,16 @@
 #include "support/diagnostics.h"
 #include "assets.h"
+#include "support/main_thread.h"
+#include "support/qt_compat.h"
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
 #include <QDirIterator>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -85,11 +89,66 @@ bool restoreRecoveredAsset(const QString &root, const QString &path, qint64 size
     return false;
 }
 
+// The verification record: what a full verification found, keyed by the
+// manifest it was made against.
+struct Recorded
+{
+    qint64 size;
+    qint64 modified;
+};
+
+QByteArray manifestDigest(const QByteArray &manifest)
+{
+    return QCryptographicHash::hash(manifest, QCryptographicHash::Sha256).toHex();
+}
+
+QHash<QString, Recorded> readRecord(const QString &path, const QString &version,
+                                    const QByteArray &manifest)
+{
+    QHash<QString, Recorded> result;
+    QFile file(path);
+    if (path.isEmpty() || !file.open(QIODevice::ReadOnly) || file.size() > 262144)
+        return result;
+    const auto record = QJsonDocument::fromJson(file.readAll()).object();
+    if (record.value("schema").toInt() != 1 || record.value("version").toString() != version
+        || record.value("manifest_sha256").toString().toLatin1() != manifestDigest(manifest))
+        return result;
+    for (const auto &value : record.value("files").toArray()) {
+        const auto entry = value.toObject();
+        result.insert(entry.value("path").toString(),
+                      Recorded{ qint64(entry.value("size").toDouble(-1)),
+                                qint64(entry.value("modified").toDouble(-1)) });
+    }
+    return result;
+}
+
+void writeRecord(const QString &path, const QString &root, const QString &version,
+                 const QByteArray &manifest, const QList<Entry> &verified)
+{
+    QJsonArray files;
+    for (const auto &entry : verified)
+        files.append(kobalt::qt::object(
+                { { "path", entry.path.mid(root.size() + 1) },
+                  { "size", double(entry.size) },
+                  { "modified", double(entry.modified.toMSecsSinceEpoch()) } }));
+    const auto record = kobalt::qt::object(
+            { { "schema", 1 },
+              { "version", version },
+              { "manifest_sha256", QString::fromLatin1(manifestDigest(manifest)) },
+              { "files", files } });
+    kobalt::mainthread::blocking("asset-verification-record");
+    QSaveFile file(path);
+    if (file.open(QIODevice::WriteOnly)) {
+        file.write(QJsonDocument(record).toJson(QJsonDocument::Compact));
+        file.commit();
+    }
+}
+
 } // namespace
 
 struct AssetBundle::Data
 {
-    QString root, version;
+    QString root, version, record;
     QMutex mutex;
     QList<Entry> checked;
 };
@@ -105,6 +164,12 @@ AssetBundle::~AssetBundle() = default;
 const QString &AssetBundle::root() const
 {
     return data->root;
+}
+
+void AssetBundle::setVerificationRecord(QString path)
+{
+    QMutexLocker lock(&data->mutex);
+    data->record = std::move(path);
 }
 
 void AssetBundle::invalidate()
@@ -165,6 +230,8 @@ bool AssetBundle::available() const
     const auto entries = document.value("files").toArray();
     if (entries.isEmpty() || entries.size() > 256)
         return false;
+    const auto recorded = readRecord(data->record, data->version, manifestBytes);
+    bool hashed = false;
     QList<Entry> verified;
     for (const auto &value : entries) {
         const auto entry = value.toObject();
@@ -184,10 +251,19 @@ bool AssetBundle::available() const
             reportDescriptorExhaustion("asset-open");
             return false;
         }
-        if (file.size() != size || digest(file) != hash)
+        if (file.size() != size)
             return false;
+        const auto known = recorded.constFind(name);
+        if (known == recorded.cend() || known->size != size
+            || known->modified != info.lastModified().toMSecsSinceEpoch()) {
+            if (digest(file) != hash)
+                return false;
+            hashed = true;
+        }
         verified.append({ path, size, info.lastModified(), hash });
     }
+    if (hashed && !data->record.isEmpty())
+        writeRecord(data->record, data->root, data->version, manifestBytes, verified);
     verified.append(
             { manifest.fileName(), manifestBytes.size(), QFileInfo(manifest).lastModified(), {} });
     checked = verified;

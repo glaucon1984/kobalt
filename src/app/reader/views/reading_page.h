@@ -154,6 +154,17 @@ public:
     // from the image with this cache key to `image`. 0 means not prepared.
     QRect preparedDamage;
     qint64 preparedFrom = 0;
+    // Where the last refreshContent spent its time, for the page-turn
+    // diagnostic: the damage and refresh regions, the header and footer
+    // strips, the repaint with its flush, and within it the page's own paint.
+    struct RefreshTiming
+    {
+        double damageMs = 0, stripsMs = 0, repaintMs = 0, drawMs = 0;
+        double headerMs = 0, footerMs = 0, textMissMs = 0;
+        int textLayouts = 0, textLayoutMisses = 0, textGlyphMisses = 0;
+        bool damagePrepared = false, stripsRendered = false;
+    };
+    RefreshTiming refreshTiming;
 
 protected:
     void paintEvent(QPaintEvent *) override;

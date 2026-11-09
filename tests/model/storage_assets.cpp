@@ -5,7 +5,9 @@
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
+#include <QDateTime>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QTemporaryDir>
@@ -196,6 +198,47 @@ int main(int argc, char **argv)
     write(first + "/fonts/unlisted.ttf", "not in the verified manifest");
     expect(a.available() && a.fontData("unlisted.ttf").isEmpty(),
            "unlisted font bytes are never returned");
+    {
+        // A host that starts a process for every book records a full
+        // verification. A later process trusts size and modification time
+        // under the same manifest, as one process already does.
+        const QString root = temporary.path() + "/recorded";
+        const QString record = temporary.path() + "/recorded.json";
+        const QString font = root + "/fonts/test.ttf";
+        bundle(root, "recorded synthetic font");
+        const auto later = [&] {
+            AssetBundle process(root, "asset-test");
+            process.setVerificationRecord(record);
+            return process.available();
+        };
+        expect(later() && QFile::exists(record), "a full verification writes its record");
+        const auto verifiedTime = QFileInfo(font).lastModified();
+        const auto setTime = [&](const QDateTime &time) {
+            QFile file(font);
+            expect(file.open(QIODevice::ReadWrite)
+                           && file.setFileTime(time, QFileDevice::FileModificationTime),
+                   "set fixture time");
+        };
+        expect(later(), "an unchanged bundle verifies from its record");
+        write(font, "recorded synthetic FONT");
+        setTime(verifiedTime.addSecs(10));
+        expect(!later(), "same-size bytes with a new time are hashed and rejected");
+        setTime(verifiedTime);
+        {
+            AssetBundle process(root, "asset-test");
+            process.setVerificationRecord(record);
+            expect(process.available() && process.fontData("test.ttf").isEmpty(),
+                   "a recorded file is still hashed by the reader that returns its bytes");
+        }
+        expect(!AssetBundle(root, "asset-test").available(),
+               "without a record every file is hashed");
+        write(font, "a longer recorded synthetic font");
+        expect(!later(), "a changed size is rejected whatever the record says");
+        write(font, "recorded synthetic font");
+        write(record, "{}");
+        expect(later() && QFile(record).size() > 2,
+               "a record that does not match is ignored and replaced");
+    }
     {
         // The opening view reads its fonts before the whole bundle is checked.
         // One damaged member must not hide the others, nor be returned itself.

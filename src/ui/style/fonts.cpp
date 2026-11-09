@@ -508,6 +508,16 @@ QFont headerFooterFont(int pixels)
                      pixels);
 }
 
+bool interfaceTextFamily(const QString &name)
+{
+    return name == (selectedInterfaceFamily.isEmpty() ? family(FamilyIndex::Sans)
+                                                      : selectedInterfaceFamily)
+            || name == (selectedInterfaceMonoFamily.isEmpty() ? family(FamilyIndex::Mono)
+                                                              : selectedInterfaceMonoFamily)
+            || name == (selectedHeaderFooterFamily.isEmpty() ? family(FamilyIndex::Mono)
+                                                             : selectedHeaderFooterFamily);
+}
+
 QFont interfaceFont(int pixels)
 {
     return sizedFont(selectedInterfaceFamily.isEmpty() ? family(FamilyIndex::Sans)

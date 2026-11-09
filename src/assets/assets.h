@@ -15,6 +15,13 @@ public:
     AssetBundle(const AssetBundle &) = delete;
     AssetBundle &operator=(const AssetBundle &) = delete;
     bool available() const;
+    // A file in which a full verification is recorded, for hosts that start a
+    // new process for every book. A later process accepts each asset whose
+    // size and modification time still match the record, under the same
+    // manifest and version, without reading it; anything else is read and
+    // hashed as before. This is the rule available() already applies within
+    // one process. Without a record every process verifies in full.
+    void setVerificationRecord(QString path);
     bool hasFilesystemRecoveryFiles() const;
     void invalidate();
     QString file(const QString &name) const;
