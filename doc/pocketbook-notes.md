@@ -923,6 +923,21 @@ Checked on the device after that: the book without a row logs `no row yet`, clos
 
 Not known: whether a PocketBook Cloud account syncs these rows. Not exercised on the device: the chapter-only fallback.
 
+### A dictionary of one's own (2026-11-11)
+
+Kobalt has no way to add a dictionary that is not in its catalogue, and replacing the files of an installed one by hand does not work. What its reader needs (`src/dictionaries/stardict.cpp`, v1.0-beta.7):
+
+- The `.ifo` must say `version=2.4.2` and `sametypesequence=h`, with `wordcount` and an `idxfilesize` equal to the index's size. The definition is handed to Qt's rich text as HTML.
+- The body is `<id>.dict.dz` only: gzip with the `RA` extra field (version 1, chunk length, chunk count, 16-bit compressed sizes), each chunk inflated on its own, at least one byte of stream after the last chunk, and a length in the trailer that fits the table. A definition over 4 MiB is refused.
+- The index must be in the order of its `compare()`: ASCII letters folded first, then the bytes. Headwords are at most 255 bytes of valid UTF-8.
+- Beside the index it keeps `<id>.idx.kobalt` (and `<id>.syn.kobalt`): one big-endian 32-bit offset per entry. `StarDict::prepare()` writes them at install and `open()` only maps them, so without them the dictionary is "damaged", and with another dictionary's they point at the wrong words.
+- A lookup tries the word as written, then case-folded, then the same two in the `.syn` table of inflected forms. Nothing else: a dictionary without `.syn` does not find a plural.
+- A slot is installed when `installed.json` in its folder names its id. The archive's checksum is checked at install only, which is also why the drop folder (`applications/kobalt/dictionaries/<id>.zip`) rejects anything but the catalogue's own zips.
+
+`tools/convert-dictionary.py` writes a slot folder in that form from a StarDict dictionary with HTML, XDXF or plain-text definitions, reads it back by the same rules (its `check()` is the reader's `Body::open()`, `index()` and `find()` again), copies the catalogue dictionary to a backup and installs. XDXF becomes one block per source line, indented by the depth of its blockquotes, coloured labels in dark grey; text labelled `m` that is really HTML is taken as HTML; several entries under one headword are joined with a rule; identical definitions are stored once. Inflected forms come from the dictionary's own `.syn` and from the catalogue dictionary of the slot, for the base words the new dictionary has. It keeps `installed.json`, marks its `.ifo` with `author=convert-dictionary.py` (so a second run takes the catalogue's forms from the backup, not from its own output), and writes an `ATTRIBUTION` whose source line names the dictionary.
+
+Tried on the Era Lite with two dictionaries: one of 65 thousand headwords in XDXF with an uncompressed 145 MB body and no inflections (15 MB installed, 148 thousand forms taken from the catalogue's `en-en`), one of 600 thousand headwords labelled plain text but in HTML (30 MB installed). Conversion takes about ten seconds each on a PC. Lookups, inflected forms and the look of the entries were checked in Kobalt. The plain-text path and a dictionary with its own `.syn` were only run against a made-up dictionary on the PC.
+
 ## Name and icon on the PocketBook home screen (manual firmware files)
 
 These live in the firmware's user config, not in the app package, so a plain copy of the zip

@@ -140,6 +140,7 @@ would for the built-in reader; a copy from before Kobalt's first write is
 - **Dictionaries**: Settings → Dictionaries lists Kobalt's catalogue and downloads inside the
   app (Wi-Fi is turned on for it). Without Wi-Fi, download the `<id>.zip` on a computer and put
   it in `applications/kobalt/dictionaries/`; it is installed at the next start.
+- **A dictionary of your own**: see [Your own dictionaries](#your-own-dictionaries) below.
 - **KOsync**: Settings → Sync. Signing in and syncing bring Wi-Fi up through the firmware,
   which may show its network dialog the first time. Automatic sync checks the server when a
   book opens and when the device wakes, using a known network silently.
@@ -191,6 +192,48 @@ would for the built-in reader; a copy from before Kobalt's first write is
   after a power-off. Closing the book in Kobalt clears that, and the device boots to its home
   screen as usual.
 - **Logs**: `applications/kobalt/kobalt.log` on the device. Attach it when reporting a problem.
+
+### Your own dictionaries
+
+Kobalt looks words up in one dictionary per language pair (`en-en`, `es-es`, `en-es`…), from
+its own catalogue, and it only loads dictionaries in the exact form its installer produces, so
+copying another dictionary's files over one of them does not work. `convert-dictionary.py`
+converts a StarDict dictionary of yours on a computer and installs it in place of the catalogue
+dictionary of one language pair. It needs Python 3.8 or later and nothing else.
+
+1. In Kobalt, install the catalogue dictionary for the language pair you want to replace
+   (Settings → Dictionaries). Its place is what your dictionary takes.
+2. Connect the device over USB and run, from a checkout or the ZIP of this branch, with the
+   device's drive or mount point, the language pair, and the dictionary's folder or `.ifo` file:
+
+   ```sh
+   python platforms/pocketbook/tools/convert-dictionary.py L: en-en path/to/my-dictionary
+   ```
+
+   Words after the dictionary are looked up in the result, as a check:
+   `… en-en path/to/my-dictionary harbour harbours`.
+3. Eject the device. Lookups in books of that language now use your dictionary.
+
+What to expect:
+
+- **Formats**: StarDict dictionaries whose definitions are HTML, XDXF or plain text (the
+  `sametypesequence` line of the `.ifo` says `h`, `x` or `m`), with a `.dict` or `.dict.dz`
+  body. Other kinds are refused with a message. `--format html|xdxf|text` overrides the guess.
+- **Inflected forms**: a plural or a verb form finds its base word when the dictionary lists it
+  in its own `.syn` file, or when the catalogue dictionary it replaces knows the form and your
+  dictionary has the base word. `--no-forms` leaves the catalogue's forms out.
+- **One dictionary per language pair.** Kobalt keeps showing the catalogue's name for it; the
+  source line under a definition names yours (`--name "…"` sets that text).
+- **Going back**: the catalogue dictionary is copied to `kobalt-dictionary-backup/` in the
+  folder you ran the command from (`--backup` chooses another), and the same command with
+  `--restore` instead of a dictionary puts it back. Removing the dictionary in Kobalt and
+  downloading it again does the same.
+- `--output <folder>` writes the converted dictionary there and leaves the device alone;
+  `--check <folder> <pair> [word…]` reads such a folder back by the rules of Kobalt's reader.
+
+The tool was written against Kobalt v1.0-beta.7 and depends on how that version stores an
+installed dictionary; it checks its own output by the reader's rules before it installs.
+Use it with dictionaries you have the right to use.
 
 ## What had to change for PocketBook
 
