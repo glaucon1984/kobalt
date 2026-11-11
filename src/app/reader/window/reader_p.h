@@ -98,6 +98,11 @@ public:
         return kosyncFinishing && kosyncFinishingElapsed.elapsed() < kosyncFinishBudget;
     }
 
+    void positionPages(QStringList positions, std::function<void(QVector<int>)> finished) override
+    {
+        session->bookmarkPages(std::move(positions), std::move(finished));
+    }
+
     void prepareWake() override;
     void cancelWake() override;
     void sleepViewReady() override;

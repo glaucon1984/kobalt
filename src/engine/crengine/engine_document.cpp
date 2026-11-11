@@ -728,7 +728,10 @@ QString EngineDocument::title() const
 
 QString EngineDocument::author() const
 {
-    return engine_ ? qstring(engine_->getAuthors()) : QString();
+    // CREngine joins several <dc:creator> entries with a line break, which a one-line label
+    // draws as a missing glyph.
+    return engine_ ? qstring(engine_->getAuthors()).replace(QLatin1Char('\n'), QLatin1String(", "))
+                   : QString();
 }
 
 QImage EngineDocument::coverImage(QSize maximumSize, const QString &preferredPath,

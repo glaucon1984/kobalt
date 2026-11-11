@@ -1,5 +1,7 @@
 #pragma once
 #include <QImage>
+#include <QStringList>
+#include <QVector>
 #include <QWidget>
 #include "reading/sleep_screen.h"
 #include "reader_timing.h"
@@ -76,6 +78,13 @@ public:
     // the sleep image it presented (cheap), otherwise it captures the page as above.
     virtual QImage composePowerOffImage() {
         return {};
+    }
+    // The page of each position in the current layout, -1 where one does not resolve, or an
+    // empty list while the layout is not ready. For hosts that list annotations natively.
+    virtual void positionPages(QStringList positions, std::function<void(QVector<int>)> finished)
+    {
+        (void)positions;
+        finished({});
     }
     virtual void progressTick() = 0;
     // Called on the reader's minute tick, while it is visible and awake, so a
