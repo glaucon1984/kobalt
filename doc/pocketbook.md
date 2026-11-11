@@ -38,6 +38,13 @@ page covers installing and using it. [Building](building.md#pocketbook) covers t
   book at startup" setting is on.
 - Reading progress shared with the built-in reader: the home screen shows Kobalt's progress
   and the built-in reader opens where Kobalt left off, and vice versa.
+- Highlights in the PocketBook's **Notes**: what is highlighted in Kobalt is listed there under
+  its book, also for a book the built-in reader never opened. They are written when the device
+  sleeps and when the book is closed. One way only: Kobalt does not show the notes made in the
+  built-in reader, and a Kobalt highlight deleted in Notes stays in Kobalt. The page Notes
+  shows is Kobalt's page number at the last time the book was open, so it follows Kobalt's
+  font and layout settings, not the built-in reader's. The built-in reader lists these
+  highlights but does not always draw them on the page: that needs its own page numbers.
 - KOsync progress sync (Settings → Sync), with Wi-Fi brought up automatically when needed. The
   sync at book open and at wake connects in the background: when the home network is out of
   reach (travel, a router down), the reader stays usable while the firmware gives up.
@@ -243,6 +250,8 @@ Reading and the library:
   PocketBook lacks, so a strip-by-strip wipe was written, paced so quick turns do not tear.
 - **Progress shared with the built-in reader**, through the library's own database and the
   built-in reader's position format.
+- **Highlights in Notes**, written into the database the built-in reader keeps its notes in,
+  with the book's entry made from the library's record when the built-in reader never opened it.
 - **Fonts** from a dedicated folder, since the firmware's font folder is laid out differently.
 
 Network:

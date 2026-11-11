@@ -7,6 +7,8 @@
 #include "dictionaries/manager.h"
 #include "sleep_screen_files.h"
 #include "firmware_power.h"
+#include "notes_mirror.h"
+#include "support/main_thread.h"
 #include "storage/reader_storage.h"
 #include <QJsonObject>
 #include <qpa/qplatformnativeinterface.h>
@@ -27,6 +29,7 @@
 #include <QLineEdit>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <utility>
 
 namespace kobalt::platform {
 void flashNextFrame();
@@ -55,6 +58,7 @@ Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
           paths, std::move(fonts), std::move(placeholder), [] { return readerServices(); }, &Host::rotateScreen) {
     setObjectName("pocketbookHost");
     preferencesPath = paths.preferences();
+    profileDirectory = paths.directory;
     // Kobalt's font setup creates a hidden window before this one, so the platform plugin does not
     // force this window to the screen size on its own: take the whole panel explicitly.
     setGeometry(QGuiApplication::primaryScreen()->geometry());
@@ -154,6 +158,12 @@ Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
         quitting = true;
         setUpdatesEnabled(false);
         markCurrentBook({});
+        // The highlights made in this session into the firmware's Notes: the home screen is next.
+        // Their pages were asked for when the reader was told to close (eventFilter).
+        {
+            mainthread::AllowBlocking allow("closing");
+            mirrorHighlights(profileDirectory, "close", bookPath, notePages);
+        }
         // Standby and power-off from the library are the firmware's business: its own screens
         // from here on, whatever Kobalt showed while the book was open.
         leaveFirmwareScreens(bookCover, "close");
@@ -349,6 +359,22 @@ void Host::taskBackground() {
             writePowerOffImage(reader->composePowerOffImage());
         updateBootLogo(page, "standby");
     }
+    // Highlights into the firmware's Notes while the lock screen is up. Their pages come from
+    // the engine first (a few milliseconds, a second and a half at most), so the device stays
+    // awake until the mirror has run, and what it wrote is flushed like the rest below.
+    notesBusy = true;
+    updateKeepAwake();
+    collectNotePages([this, usbPlug] {
+        bool wrote = false;
+        {
+            mainthread::AllowBlocking allow("standby");
+            wrote = mirrorHighlights(profileDirectory, usbPlug ? "USB" : "standby", bookPath, notePages);
+        }
+        if (wrote)
+            ::sync();
+        notesBusy = false;
+        updateKeepAwake();
+    });
     // EVT_BACKGROUND precedes every standby and every USB export. The firmware's PC Link export
     // was seen to drop what the apps had written since the last sync(2) (a standby's suspend
     // syncs, fdatasync alone did not survive), so flush everything now; ~0.1-0.3 s.
@@ -600,7 +626,42 @@ void Host::usbEvent(int type) {
 
 void Host::updateKeepAwake() {
     keepAwake(openingBusy || downloadBusy || syncBusy || bootLogoBusy || inputBusy || powerOffWakeHold ||
-              sleepRefreshHolds > 0);
+              notesBusy || sleepRefreshHolds > 0);
+}
+
+// Asks the reader's engine for the page of each highlight of the open book and keeps the answers
+// (notePages); `then` runs once they are in, or after a second and a half without them (a layout
+// in progress, a reader on its way out), or at once when there is nothing to ask.
+void Host::collectNotePages(std::function<void()> then) {
+    auto *reader = controller.window();
+    QStringList positions;
+    if (reader && !bookPath.isEmpty()) {
+        mainthread::AllowBlocking allow("annotation pages at standby or close");
+        positions = highlightPositions(profileDirectory, bookPath);
+    }
+    if (positions.isEmpty()) {
+        if (then)
+            then();
+        return;
+    }
+    notePagesAsked.start();
+    auto pending = std::make_shared<bool>(true);
+    QPointer<Host> self(this);
+    auto finish = [pending, then] {
+        if (std::exchange(*pending, false) && then)
+            then();
+    };
+    reader->positionPages(positions, [self, positions, finish](QVector<int> pages) {
+        if (!self)
+            return;
+        if (pages.size() == positions.size())
+            for (int i = 0; i < pages.size(); ++i)
+                if (pages[i] >= 0)
+                    self->notePages.insert(positions[i], pages[i]);
+        finish();
+    });
+    if (then)
+        QTimer::singleShot(1500, this, finish);
 }
 
 void Host::updateBootLogo(const QImage &panel, const char *reason) {
@@ -761,6 +822,12 @@ void Host::closeEvent(QCloseEvent *event) {
 }
 
 bool Host::eventFilter(QObject *object, QEvent *event) {
+    // The reader is told to close: it saves and gives its engine up within a second. The pages
+    // of its highlights are asked for now, for the mirror that runs once the book is closed (a
+    // highlight made just before leaving would otherwise be listed on page 1).
+    if (event->type() == QEvent::Close && !quitting && object == controller.window() &&
+        (!notePagesAsked.isValid() || notePagesAsked.elapsed() > 3000))
+        collectNotePages({});
     // Kobalt's dictionaries page downloads from GitHub: bring Wi-Fi up as it opens (the firmware
     // keeps Wi-Fi off until something asks for it).
     if (event->type() == QEvent::Show && object->objectName() == "rrDictionaries")

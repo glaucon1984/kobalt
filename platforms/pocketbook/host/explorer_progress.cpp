@@ -112,14 +112,19 @@ Row readRow(QSqlDatabase &db, qint64 book, int profile, QString *error) {
     return row;
 }
 
+// What the library holds for a book it lists. A book without a row yet (the firmware makes one
+// when it first opens a book, but not always: seen missing for a book that already had an entry
+// in books.db) is a state like any other: no position, not completed. It must be a valid record,
+// since Kobalt's save compares the row with the one it saw at open and two invalid records
+// never compare equal ("progress changed before exit" at every close of such a book).
 ReadingProgress snapshot(const QString &identity, const Row &row) {
     ReadingProgress progress;
     progress.book = identity;
-    progress.valid = row.exists;
+    progress.valid = true;
     if (row.position.startsWith(cfiPrefix))
         progress.location = row.position;
     progress.modified = row.positionTs * 1000;
-    progress.status = row.exists ? (row.completed ? 2 : 1) : 0;
+    progress.status = row.completed ? 2 : 1;
     return progress;
 }
 
@@ -350,9 +355,10 @@ ReadingProgress readLibraryProgress(const QString &identity, const QString &book
         return {};
     }
     const auto progress = snapshot(identity, row);
-    qInfo("kobalt-pb: library progress read: book %lld profile %d page %d/%d%s, position %s (ts %lld)",
+    qInfo("kobalt-pb: library progress read: book %lld profile %d page %d/%d%s%s, position %s (ts %lld)",
           static_cast<long long>(book), profile, row.cpage + 1, row.npage, row.completed ? ", completed" : "",
-          row.position.isEmpty() ? "none" : qPrintable(row.position), static_cast<long long>(row.positionTs));
+          row.exists ? "" : ", no row yet", row.position.isEmpty() ? "none" : qPrintable(row.position),
+          static_cast<long long>(row.positionTs));
     return progress;
 }
 

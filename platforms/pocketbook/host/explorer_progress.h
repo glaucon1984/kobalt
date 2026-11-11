@@ -16,8 +16,9 @@ namespace kobalt::pocketbook {
 //
 // What the library knows: PBReader's position as `location` (only its EPUB CFI form, another
 // format is left out so it never pulls the reader elsewhere), position_ts as `modified` (ms),
-// status 2 when completed else 1; invalid when the library has no row for the book. `book` is
-// Kobalt's identity, as its checkpoints expect.
+// status 2 when completed else 1; invalid only when the library does not list the book (a
+// listed book without a row yet reads as not completed, without position). `book` is Kobalt's
+// identity, as its checkpoints expect.
 ReadingProgress readLibraryProgress(const QString &identity, const QString &bookPath);
 // The bridge Kobalt's reader saves through at open, standby/USB and close, and polls for a
 // position PBReader moved (then it offers the choice, as on Kobo). Null when the library does

@@ -3,7 +3,10 @@
 #include "reading/sleep_screen.h"
 #include <QStackedWidget>
 #include <QElapsedTimer>
+#include <QHash>
+#include <QString>
 #include <QTimer>
+#include <functional>
 #include <memory>
 
 class QLabel;
@@ -37,6 +40,16 @@ public:
     // ReaderOrientation::permits does with a sensor), else the axis's upright orientation.
     Qt::ScreenOrientation startOrientation(int inkviewOrientation) const;
     QString preferencesPath;
+    // Kobalt's profile, for the highlights mirrored into the firmware's Notes (notes_mirror.h).
+    QString profileDirectory;
+    // The open book's highlights by start position, with the page Kobalt shows them on (zero-
+    // based, current layout): asked of the reader's engine while it is there, at standby and when
+    // the reader is told to close, for the mirror that runs then or once the book is closed.
+    QHash<QString, int> notePages;
+    QElapsedTimer notePagesAsked;
+    // Awake from a standby until the pages have come back and the mirror has run.
+    bool notesBusy = false;
+    void collectNotePages(std::function<void()> then);
     // Started by rotateScreen(); the first page paint with the reader ready gets a full flash.
     static QElapsedTimer rotationClock;
     // Started when a KOsync dialog hides; the page paint that restores the page gets a full flash.

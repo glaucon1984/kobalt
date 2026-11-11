@@ -57,6 +57,7 @@ add_executable(kobalt-pb ${shared}
     "${host}/orientation_sensor.cpp" "${host}/orientation_sensor.h"
     "${host}/sleep_screen_files.cpp" "${host}/sleep_screen_files.h"
     "${host}/explorer_progress.cpp" "${host}/explorer_progress.h" "${host}/epub_cfi.cpp" "${host}/epub_cfi.h"
+    "${host}/notes_mirror.cpp" "${host}/notes_mirror.h"
     "${host}/futex_compat.cpp" "${host}/firmware_power.cpp" "${host}/firmware_power.h"
     "${plugin}/main.cpp" "${plugin}/pbinkintegration.cpp" "${plugin}/pbinkintegration.h"
     "${plugin}/pbinkscreen.cpp" "${plugin}/pbinkscreen.h" "${plugin}/pbinkevents.cpp" "${plugin}/pbinkevents.h")

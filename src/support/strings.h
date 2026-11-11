@@ -50,7 +50,13 @@ inline QString get(const char *key)
             });
     if (entry == begin + count || std::strcmp(entry->key, key) != 0)
         return QString::fromLatin1(key);
-    const QString value = QString::fromUtf8(entry->value);
+    QString value = QString::fromUtf8(entry->value);
+#ifdef KOBALT_POCKETBOOK
+    // The firmware's library database plays Nickel's part on PocketBook (platforms/pocketbook):
+    // the progress errors name it instead.
+    if (std::strncmp(key, "error.", 6) == 0)
+        value.replace(QLatin1String("Nickel"), QLatin1String("PocketBook library"));
+#endif
     if (!keyDisplay().load())
         return value;
     QString result = QString::fromLatin1(key);

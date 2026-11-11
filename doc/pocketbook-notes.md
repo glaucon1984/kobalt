@@ -867,6 +867,62 @@ Three changes to that path in `src/ui/style/private_text.cpp`, on a reading of t
 
 Left alone: the sleep image is composed on the GUI thread 300 ms after a lone turn (median 43 ms, worst 256 ms in the old log), which only matters if the next turn lands in that window; `sleepMode()` reads the preferences file after each turn, about a millisecond from the page cache, and caching it by file time would risk a stale answer on FAT's 2 s times. Not looked into: the 13 to 30 s from the first frame to `book opened` in the old log, which is the engine's work and the largest part of an open.
 
+### Highlights in the firmware's Notes (2026-11-10)
+
+The firmware's Notes section lists what PBReader keeps in `system/config/books.db` (SQLite, WAL, `user_version` 42 on U710.6.11). It shows the notes of a book as text; it does not open the book. Kobalt's highlights are mirrored into it by `host/notes_mirror.cpp`, at standby, at a USB plug and at close.
+
+What the database holds, read from the Era Lite after making a highlight, a typed note, a pencil drawing and a bookmark in PBReader:
+
+- `Items(OID, ParentID, TypeID, State, TimeAlt, HashUUID)`: a book is a row of type `type.book` (0) without parent, a note a row of type `obj.book_mark` (4) under it, `State` 0, `TimeAlt` its creation time. `Books(OID, Title, Authors, TimeAdd)`, `Files(BookID, PathID, Name, Len)` and `Paths(StorID, Path)` (the folder with a trailing slash, storage `stor.local_fs`, 10) describe the book; `FTSBooks` is an FTS5 index over `Books` without triggers.
+- A note's content is in `Tags(ItemID, TagID, Val, TimeEdt)`, the tag ids named in `TagNames`: `bm.type` (102) `highlight`, `note`, `bookmark` or `draws`; `bm.quotation` (104) `{"begin":…,"end":…,"text":…}`; `bm.book_mark` (101) `{"anchor":…,"created":…}`; `bm.color` (106) `cian`; `bm.note` (105) `{"text":…}` for a typed note; `bm.draws` (110) an SVG. A bookmark has the quotation `{"text":"Bookmark"}` and is not listed in Notes.
+- A position is `pbr:/word?page=11&offs=884#epubcfi(/6/16!/4/42/1)` at the beginning and `pbr:/char?page=11&over=997#epubcfi(/6/16!/4/42/1:114)` at the end: PBReader's own page and offset, then a standard EPUB CFI (checked against the EPUB: the 21st element of the chapter's body, characters 0 to 114 of its text). An offset of zero is left out at the beginning.
+- A book's `HashUUID` is 32 hex digits: `files.fast_hash` of the library database (`explorer-3.db`, a 16-byte blob there), which the cover cache uses for its file names too. It is not the MD5 of the file, its path or its title. The library has it for every book on the device; `books.db` only has a row for a book PBReader opened.
+- A note's `HashUUID` is a name-based (version 5) UUID whose name was not found (some nine thousand combinations of the note's fields tried). Nothing checks it: the sync tables are empty without a PocketBook Cloud account.
+
+Tried by hand before any code, on a copy of `books.db` put back over USB: a highlight row for a book PBReader had opened, with page and offset zero and a UUID of our own, shows in Notes like PBReader's. So the page hint is not needed, and the id is ours to choose.
+
+What the mirror does:
+
+- It reads every highlight list from Kobalt's profile database (`lists`, `entries`, `books`, through `storage::profileTransaction`, so behind the writer thread's waiting saves) and looks again at a book only when its list's revision changed since the last run in this process. The first run of a process looks at every book, which is also how the highlights made before this build get there.
+- The book is found in `books.db` by the library's `fast_hash` (the row in `explorer-3.db` is found by folder and file name, as for the progress), else by its file. When there is none it is made from the library's record: `Items`, `Books`, `FTSBooks`, `Paths`, `Files` and the tags `ro.authors`, `ro.mime-type`, `ro.time-added`, `doc.book-title`, `doc.mime-type`. The static Qt's SQLite has FTS5 (`qtbase/src/3rdparty/sqlite.pri`); without it the index would be left out and logged.
+- Its own rows are told by their `HashUUID`: the bytes `KOBALT`, the version nibble 5, then a hash of the highlight's id, range and text (`4B4F4241-4C54-5…`). A row whose id is still wanted is left alone, apart from its colour and typed note; a wanted id without a row is added; a row whose id is no longer wanted is deleted. PBReader's rows are never read or written. Type and tag ids are read from `TypeNames` and `TagNames`, not assumed.
+- The position comes from the EPUB itself, not from the engine: the highlight's XPointers (`/body[1]/DocFragment[8]/body[1]/p[20]/text()[1].0`) are walked in the chapter's XHTML (one DocFragment per XHTML spine item; the same elements by name and number; text as the chunks between elements), the offset mapped from the engine's text (code points, whitespace runs as one space) to the source's (UTF-16, as written). The result is kept only when the text it delimits is the highlight's text; otherwise the note gets its chapter (`/6/16!/4`) as both ends and still shows with the right text. The log line counts those (`by chapter only`).
+- Colours: `yellow` stays, every other one is `cian`, the only value seen. A typed note would be written as `bm.note` with the type `note`; Kobalt has no note editor yet.
+- `books.db` is copied to `books.db.before-kobalt` (`VACUUM INTO`) before the first write. A failure rolls the run back and every book is tried again at the next one.
+
+Read in `kobalt.log`: `notes mirror (standby): 4 added (0 by chapter only), 0 updated, 0 removed, 0 not placed, 2 book(s), 0 new book row(s), 35 ms`, or `N list(s) checked, nothing to write`. No line at all means no list changed.
+
+On the Era Lite the same evening: the first close after the install wrote `notes mirror (close): 5 added (0 by chapter only), 0 updated, 0 removed, 0 not placed, 3 book(s), 1 new book row(s), 266 ms`, about half of it the one-time backup. The five are the four highlights made before this build (three in one book, one in another, both known to PBReader) and one made in a book PBReader never opened, whose row the mirror made, search index included. Notes lists all of them under their books, beside PBReader's own notes, which are unchanged; `integrity_check` and `foreign_key_check` are clean. The positions are the ones a separate walk of the same EPUBs gives (`/6/34!/4/84/1:1` to `:51`, `/6/52!/4/6/1:291` to `:332`).
+
+A second round the same night, every path this time: a highlight with italics in it (`/6/14!/4/30/1` to `/4/30/3:41`, the text after the `<i>`), one across two paragraphs and two pages (`/4/156/1` to `/4/158/1:114`), an edited one (the old row deleted, a new one added), a deleted one, the standby run (`1 added, 0 updated, 2 removed`, 182 ms), the USB run (119 ms) and closes with nothing to write (about 90 ms for eleven lists, since every launch is a new process and looks at them all). All placed exactly.
+
+What that round showed about the firmware:
+
+- **Deleting a note in Notes sets `State` to 2** and keeps the row. So a Kobalt highlight deleted there stays deleted in Notes: its row still has the id the mirror looks for, and the highlight stays in Kobalt. PBReader does the same with its own.
+- **The page Notes shows is `page` + 1 of the position.** Every Kobalt row says page 1.
+- **`offs` counts characters from the start of PBReader's page**, not of the chapter: a word at character 193 of the first paragraph of a chapter is `page=6&offs=215`.
+- **PBReader lists these rows in its own notes panel but draws them only when it lays the chapter out anew.** In a book it had not opened before, the highlight appeared after going to the cover and back; in a book whose layout it had cached, never. It does not rewrite the zeros. Its own page and offset are what it draws from, and Kobalt cannot know them (they are PBReader's pagination under PBReader's font settings).
+
+Two faults of the port found on the way, neither in the mirror:
+
+- **A book without a row in `books_settings` could not be closed** ("Couldn't save your progress… progress changed before exit", again at every retry). Upstream's save now writes only when the row read at exit equals the one seen at open, and two invalid records never compare equal (`ReadingProgress::operator==`). The firmware usually makes the row when a book is first opened from the library (`completed_ts` set two seconds before Kobalt's first read), which is why this had not shown; the book in question already had an entry in `books.db`, the hand-made one, and got no row. `snapshot()` in `explorer_progress.cpp` now gives a listed book without a row a valid record (no position, not completed), and the log says `no row yet`.
+- **The save errors said "Nickel".** On PocketBook `strings::get()` now names the PocketBook library in the `error.` strings (`src/support/strings.h`, guarded). The sync dialog's other Kobo wording is untouched.
+
+A third fault, in Kobalt's own code: the annotations panel said "Saved annotations could not be read. Editing is disabled" three times after a highlight was added (one across two pages, one underlined, one dotted), and read them again after the book was reopened. Each time it was before the mirror had run in that process, and the mirror only reads Kobalt's database. The cause is the excerpt cache in `HighlightSession::excerpts()` (`src/reading/highlight_session.cpp`): a highlight saved in this session has given its text back to storage and is known only to that cache, and a list page that showed it beside rows not read yet rebuilt the cache from the rows with loaded details, dropped it, and then reported `missing-highlight`. The requested rows are now kept, and a failed read writes a `highlights-read` event with the operation and the error. Not specific to PocketBook. On the device the panel now lists a highlight right after it is made, shaded, underlined or dotted.
+
+Checked on the device after that: the book without a row logs `no row yet`, closes, and has its row (`library progress written: book 536 … page 6/839`).
+
+**Kobalt's page in Notes (2026-11-11).** The `page` of a mirrored row is now the page Kobalt shows the highlight on, zero-based, so Notes says the number Kobalt's footer says. `offs` and `over` stay zero.
+
+- The pages come from the engine, through the call Kobalt's own bookmark list uses (`ReaderSession::bookmarkPages`), reached by one new virtual on the reader window, `ReaderWindow::positionPages()` (`src/app/reader_window.h`, implemented in `reader_p.h`). That is the only shared code the mirror needs.
+- They are asked for while the engine is there: at standby and USB (`taskBackground`, the mirror then runs in the answer, the device kept awake meanwhile, a second `sync()` only when something was written), and when the reader window gets its close event (the host's event filter), since the reader has given its engine up by the time the book is closed and the mirror runs. Without an answer within 1.5 s the mirror runs without pages.
+- Only the open book has pages. Its rows are compared at every run, and a row whose page differs is rewritten in place (`bm.quotation` and `bm.book_mark`, same id), so a new font size moves the numbers at the next standby or close. A highlight whose page is not known yet is written with page zero and corrected the next time its book is open at a run; the rows written before this build get their pages the same way.
+- On the device: the first close with the book open rewrote its seven rows (`0 added, 7 updated`, 150 ms), and a highlight made just before closing was listed with its page. Kobalt's page numbers are not PBReader's, which is expected. No stray mark was seen in PBReader at the top of its own page of the same number (it trusts `page` and `offs` when it has a cached layout; with offset zero that would be one character), though not every such page was looked at.
+
+**Several authors (2026-11-11).** A book with two `<dc:creator>` entries showed a square between the names in Kobalt's header: CREngine joins the entries with a line break (`epubfmt.cpp`). `EngineDocument::author()` now joins them with a comma. Shared code, any platform.
+
+Not known: whether a PocketBook Cloud account syncs these rows. Not exercised on the device: the chapter-only fallback.
+
 ## Name and icon on the PocketBook home screen (manual firmware files)
 
 These live in the firmware's user config, not in the app package, so a plain copy of the zip
