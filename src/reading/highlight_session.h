@@ -85,6 +85,7 @@ private:
     void finishSave(quint64 id, bool ok, const QString &error, quint64 before,
                     const QVector<Highlight> &highlights);
     void adoptSaved();
+    void readFailed(const char *operation) const;
     void remember(const QVector<Highlight> &highlights);
     ReaderSession &session_;
     std::function<QString()> layout;

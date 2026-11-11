@@ -52,6 +52,14 @@ const QVector<Highlight> &HighlightSession::highlights() const
     return store_ ? store_->highlights() : none;
 }
 
+// Names the reason in the event log; the reader shows one message for all.
+void HighlightSession::readFailed(const char *operation) const
+{
+    diagnostic("highlights-read",
+               { { "operation", QString::fromLatin1(operation) }, { "error", error_ } },
+               DiagnosticSeverity::Error);
+}
+
 bool HighlightSession::excerpts(const QStringList &ids, QVector<HighlightExcerpt> *rows)
 {
     // Known exception: annotation lists, the editor and export read saved
@@ -69,6 +77,7 @@ bool HighlightSession::excerpts(const QStringList &ids, QVector<HighlightExcerpt
         if (!store_->excerpts(missing, &loaded, &error_)) {
             ++errors_;
             loadFailed_ = true;
+            readFailed("excerpts");
             return false;
         }
         // Keep the newest rows read, so a refresh after an edit is served here.
@@ -76,6 +85,11 @@ bool HighlightSession::excerpts(const QStringList &ids, QVector<HighlightExcerpt
         for (const auto &h : store_->highlights())
             if (h.detailsLoaded && known_.contains(h.id))
                 kept.insert(h.id, known_.value(h.id));
+        // A saved edit has dropped its details and is known only here. Keep
+        // every requested row, or a page that mixes it with unread rows fails.
+        for (const auto &id : ids)
+            if (known_.contains(id))
+                kept.insert(id, known_.value(id));
         known_ = std::move(kept);
         for (const auto &row : loaded)
             known_.insert(row.id, row);
@@ -85,6 +99,7 @@ bool HighlightSession::excerpts(const QStringList &ids, QVector<HighlightExcerpt
         if (!known_.contains(id)) {
             error_ = QStringLiteral("missing-highlight");
             ++errors_;
+            readFailed("excerpt-cache");
             return false;
         }
         result.append(known_.value(id));
@@ -111,6 +126,7 @@ bool HighlightSession::detail(const QString &id, Highlight *row)
     if (!store_->details({ id }, &loaded, &error_) || loaded.size() != 1) {
         ++errors_;
         loadFailed_ = true;
+        readFailed("detail");
         return false;
     }
     *row = std::move(loaded.first());
@@ -132,6 +148,7 @@ bool HighlightSession::exportDetails(QVector<Highlight> *rows)
     QVector<Highlight> loaded;
     if (!store_->details(ids, &loaded, &error_)) {
         ++errors_;
+        readFailed("export");
         return false;
     }
     QHash<QString, Highlight> stored;

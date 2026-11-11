@@ -728,6 +728,29 @@ int main(int argc, char **argv)
                     "Compact deletion changed the remaining note");
             waitUntil([&] { return !compact.saving(); });
             isCompact();
+            // A list page can show a passage added in this session next to
+            // rows that were not read yet. It must load after the save too.
+            HighlightSession reread(model, layout, compactRoot.path(), "compact-session",
+                                    model.sourceHash(), "Book");
+            require(reread.writable() && reread.highlights().size() == 1,
+                    "Cannot reopen compact session storage");
+            bool added = false;
+            reread.save(last.start, last.end, {}, [&](bool ok) {
+                require(ok, "Cannot add a highlight to a compact session");
+                added = true;
+            });
+            waitUntil([&] { return added && !reread.saving(); });
+            require(reread.highlights().size() == 2 && !reread.highlights().last().detailsLoaded,
+                    "A saved new highlight kept its payload");
+            const QString addedId = reread.highlights().last().id;
+            QVector<HighlightExcerpt> mixed;
+            require(reread.excerpts({ a.id, addedId }, &mixed) && mixed.size() == 2
+                            && mixed[0].id == a.id && !mixed[0].text.isEmpty()
+                            && mixed[1].id == addedId && !mixed[1].text.isEmpty(),
+                    "A saved new highlight could not be listed with unread rows");
+            require(reread.excerpts({ addedId, a.id }, &mixed) && mixed.size() == 2
+                            && mixed[0].id == addedId && mixed[1].id == a.id && reread.writable(),
+                    "Listing a saved new highlight again failed");
         }
         if (sqlite) {
             QTemporaryDir closingRoot;
