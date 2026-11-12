@@ -12,6 +12,14 @@ namespace kobalt::pocketbook {
 // checked for plausibility); INT_MIN when unreadable, implausible, or the timed power-off is off.
 // At a wake the firmware's timer caused, it is zero or less; at a press it is far off.
 int secondsToTimedPowerOff();
+// The same figure as a moment on the firmware's clock (hw_boottime seconds, which count the
+// time asleep), to be taken at the standby, and the seconds left to such a moment at a later
+// wake. The figure itself cannot be trusted at that wake: the last activity is shared with the
+// rest of the firmware, and something moves it some ten minutes into a standby without arming
+// the timer again (seen with the one-hour timeout: the timer fired an hour after the standby as
+// armed, while the figure read 610 to 615 s). LONG_MIN and INT_MIN when not known.
+long timedPowerOffMoment();
+int secondsToMoment(long moment);
 // The frontlight is switched by the firmware's monitor from a shared "enabled" flag and level
 // (SetFrontlightEnabled / SetFrontlightState send it the message; the flag's message goes only
 // when the flag changes, the level's always). Whether it is on now, and its level (0..100).

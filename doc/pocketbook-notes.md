@@ -1057,3 +1057,29 @@ versions; Qt uses nothing of FriBidi). `kobalt-pb-build` was wiped for a fresh c
 
 Not wired, as before: `turnOffWifi`, `holdWifiOff`, `kosyncHttp`, `nativeSleepPreview`,
 `monotonicMilliseconds` (KOSync's interval clock stays the process clock).
+
+### The timed power-off wake missed with the one-hour timeout (2026-11-12)
+
+Diego, after the beta 8 install: the light came on again between the standby and the timed
+power-off. Not the merge: `kobalt.log` has the same miss twice under beta 7 (01:41 and 16:42),
+all three with the power-off timeout at one hour. At the wake the timer caused, the firmware's
+figure read `due in 615 s`, `614 s`, `610 s` instead of about zero, so the wake was taken for a
+press: page repainted, light restored, silent connection started, and the power-off's
+EVT_BACKGROUND 1.5 s later ran the standby sequence (`frontlight off`). The timer itself fired an
+hour after the standby, as armed. What moved is the last activity shared behind `ivmpc`: the
+device wakes by itself during a standby (`inkview event pump took …` at a whole second, 5 s after
+the standby in one case, 614 s after it in two) and the shared value follows, without the hard
+timer being armed again. With the 10-minute timeout the power-off came before the ten-minute
+wake, and a wake a few seconds into the standby only moved the figure by as much (the `6 s` and
+`5 s` readings of earlier power-off wakes), inside the 15 s margin; two one-hour standbys without
+the ten-minute wake read `-1 s` and `6 s` and stayed dark. What the ten-minute wake is has not
+been read out of the firmware (it is not in every standby).
+
+Fix: the standby sequence takes the moment the power-off is due (`timedPowerOffMoment`, the
+firmware's figure on its own `hw_boottime` clock, which the earlier readings show counting the
+time asleep) and logs it (`sleep sequence done (standby), timed power-off in N s`);
+`quietForeground` holds the wake when either the firmware's figure or that moment says the timer
+is due (the moment within 15 s before to 60 s after; the timer was seen from 6 s early to 4 s
+late), and logs both (`due in 610 s (-3 s by the standby's reckoning): staying asleep`). A press
+inside that window is held like the power-off's wake and wakes by its own input or the 4 s
+fallback, as before.

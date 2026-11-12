@@ -69,6 +69,18 @@ int secondsToTimedPowerOff() {
     return int(qBound(long(INT_MIN + 1), remaining, long(INT_MAX)));
 }
 
+long timedPowerOffMoment() {
+    const int due = secondsToTimedPowerOff();
+    return due == INT_MIN ? LONG_MIN : symbols().bootTime() + due;
+}
+
+int secondsToMoment(long moment) {
+    const Symbols &s = symbols();
+    if (moment == LONG_MIN || !s.bootTime)
+        return INT_MIN;
+    return int(qBound(long(INT_MIN + 1), moment - s.bootTime(), long(INT_MAX)));
+}
+
 bool frontlightEnabled() {
     return GetFrontlightEnabled() > 0;
 }

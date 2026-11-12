@@ -428,7 +428,14 @@ void Host::taskBackground() {
     // (finishWake) and the power-off wake leaves it off (quietForeground). Not for a PC plug,
     // which ends the app under the firmware's prompt.
     standbyLightOff = !usbPlug && darkenForStandby() >= 0;
-    qInfo("kobalt-pb: sleep sequence done (standby)%s", standbyLightOff ? ", frontlight off" : "");
+    // When the timed power-off is due, taken now: by the wake it causes the firmware's figure
+    // may be minutes off (quietForeground).
+    powerOffDueAt = timedPowerOffMoment();
+    const int due = secondsToMoment(powerOffDueAt);
+    const QByteArray timed = due == INT_MIN ? QByteArray()
+                                            : ", timed power-off in " + QByteArray::number(due) + " s";
+    qInfo("kobalt-pb: sleep sequence done (standby)%s%s", standbyLightOff ? ", frontlight off" : "",
+          timed.constData());
 }
 
 // Asked by the platform plugin at EVT_FOREGROUND, before it repaints the panel: a wake that
@@ -440,9 +447,21 @@ int Host::quietForeground() {
     if (!self || quitting || !self->asleep || self->powerOffWakeHold)
         return 0;
     const int due = secondsToTimedPowerOff();
-    self->powerOffWakeExpected = due != INT_MIN && due <= 15;
+    // The firmware's figure alone missed power-off wakes: with the one-hour timeout it read 610
+    // to 615 s at the wake the timer caused (the shared last activity had moved some ten minutes
+    // into the standby, the armed timer had not), so the wake was shown as a press, light and
+    // all, two seconds before the power-off. The moment taken at the standby decides as well;
+    // the timer was seen to fire from 6 s before it to 4 s after. A press that falls in the
+    // window is held like the power-off's wake, and wakes by its own input or the fallback.
+    const int reckoned = secondsToMoment(self->powerOffDueAt);
+    const bool byFirmware = due != INT_MIN && due <= 15;
+    const bool byStandby = due != INT_MIN && reckoned != INT_MIN && reckoned <= 15 && reckoned >= -60;
+    self->powerOffWakeExpected = byFirmware || byStandby;
+    const QByteArray standby = reckoned == INT_MIN
+        ? QByteArray()
+        : " (" + QByteArray::number(reckoned) + " s by the standby's reckoning)";
     if (due != INT_MIN)
-        qInfo("kobalt-pb: wake with the timed power-off due in %d s%s", due,
+        qInfo("kobalt-pb: wake with the timed power-off due in %d s%s%s", due, standby.constData(),
               self->powerOffWakeExpected ? ": staying asleep" : "");
     return self->powerOffWakeExpected ? 1 : 0;
 }
@@ -472,6 +491,7 @@ void Host::finishWake(const char *how) {
     powerOffWakeHold = false;
     powerOffWakeFallback.stop();
     asleep = false;
+    powerOffDueAt = LONG_MIN;
     if (standbyLightOff) {
         standbyLightOff = false;
         restoreStandbyLight(how);

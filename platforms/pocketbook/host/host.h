@@ -6,6 +6,7 @@
 #include <QHash>
 #include <QString>
 #include <QTimer>
+#include <climits>
 #include <functional>
 #include <memory>
 
@@ -91,6 +92,9 @@ public:
     // a press or the fallback timer wakes it for real instead.
     bool powerOffWakeExpected = false, powerOffWakeHold = false;
     QTimer powerOffWakeFallback;
+    // When the firmware's timed power-off is due, as it stood at the standby
+    // (timedPowerOffMoment): the firmware's own figure may have moved by the wake.
+    long powerOffDueAt = LONG_MIN;
     static int quietForeground();
     void finishWake(const char *how);
     // Boot logo from a capture of the panel: once after the book's first lock image, then at
