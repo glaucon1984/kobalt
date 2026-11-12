@@ -462,6 +462,22 @@ bool InterfaceLabel::event(QEvent *event)
     return handled;
 }
 
+void InterfaceLabel::setSecondaryInk(bool enabled)
+{
+    if (secondaryInk == enabled)
+        return;
+    secondaryInk = enabled;
+    update();
+}
+
+void InterfaceLabel::setOpticalCentering(bool enabled)
+{
+    if (opticalCentering == enabled)
+        return;
+    opticalCentering = enabled;
+    update();
+}
+
 void InterfaceLabel::paintEvent(QPaintEvent *event)
 {
     if ((!usesBalancedWrapping() && !needsPrivateText(text(), font())) || text().isEmpty()) {
@@ -470,7 +486,9 @@ void InterfaceLabel::paintEvent(QPaintEvent *event)
     }
     QPainter painter(this);
     painter.setFont(font());
-    painter.setPen(palette().color(isEnabled() ? QPalette::WindowText : QPalette::Mid));
+    painter.setPen(!isEnabled()           ? palette().color(QPalette::Mid)
+                           : secondaryInk ? themeColors(this).secondaryInk
+                                          : palette().color(QPalette::WindowText));
     const QRect bounds = contentsRect().adjusted(margin(), margin(), -margin(), -margin());
     if (textFormat() == Qt::RichText
         || (textFormat() == Qt::AutoText && Qt::mightBeRichText(text()))) {
@@ -482,6 +500,10 @@ void InterfaceLabel::paintEvent(QPaintEvent *event)
                 alignment() & Qt::AlignVCenter ? (bounds.height() - document.height()) / 2 : 0;
         painter.translate(bounds.x(), bounds.y() + offset);
         document.draw(painter, QRectF(0, -offset, bounds.width(), bounds.height()), palette());
+        return;
+    }
+    if (opticalCentering && !wordWrap()) {
+        drawOpticalPrivateText(painter, bounds, text(), alignment() & Qt::AlignHorizontal_Mask);
         return;
     }
     if (wordWrap())

@@ -1,3 +1,5 @@
+#include "app/reader/views/annotation_exporter.h"
+#include "clocks.h"
 #include <QKeyEvent>
 #include "reader_host_services.h"
 #include "native_dictionary.h"
@@ -10,8 +12,13 @@
 #include "native_wifi_power.h"
 #include "platforms/kobo/display/page_animation.h"
 #include "window_presentation.h"
-#include "reading/reading_timer.h"
 #include <QPointer>
+#include <QSettings>
+#ifndef KOBALT_READER_HARDWARE
+#  include <QDateTime>
+#  include "support/qt_compat.h"
+#  include "support/strings.h"
+#endif
 #include <dlfcn.h>
 #include <utility>
 
@@ -229,14 +236,16 @@ ReaderHostServices readerHostServices()
 {
     ReaderHostServices result;
     result.readerStandbySupported = true;
-    result.annotationExportDirectory = [] {
-        return QStringLiteral("/mnt/onboard/Kobalt/Annotations");
+    result.annotationExporter = [](QWidget *reader) {
+        return reader::directoryAnnotationExporter(
+                reader, QStringLiteral("/mnt/onboard/Kobalt/Annotations"));
     };
 
     result.sleepOverlayDirectories = QStringList{
         QStringLiteral(KOBALT_CONFIG_DIR "/screensaver"),
         QStringLiteral("/mnt/onboard/.adds/screensaver"),
     };
+    result.nativeSleepPreview = nativeSleepPreview;
     result.deviceName = syncDeviceModel();
     result.colorDisplay = [] { return pageAnimationPanel() == AnimationPanel::Color; };
     result.downloadableDictionaries = false;
@@ -246,7 +255,7 @@ ReaderHostServices readerHostServices()
     // Nickel suspends the device between interactions. Count KOSync's
     // intervals in real time, including that standby, as the reading
     // duration does.
-    result.monotonicMilliseconds = ReadingTimer::platformClock();
+    result.monotonicMilliseconds = nickel::bootTimeClock();
     result.battery = [] {
         const auto status = nativeReaderBattery();
         return BatteryStatus{ status.percent, status.charging, status.fullyCharged };
@@ -263,6 +272,7 @@ ReaderHostServices readerHostServices()
     };
     result.reverseLandscapeButtons = nativeReaderReverseLandscapeButtons;
     result.pageButtonDirection = nativePageButtonDirection;
+    result.pageButtonsRotated = nativePageButtonsRotated;
     result.fontFamilies = nativeReaderFontFamilies;
     result.uiFont = nativeReaderUiFont;
     result.suspended = NativeLifecycle::suspended;
@@ -288,8 +298,59 @@ ReaderHostServices readerHostServices()
         return makeWindowPresentation(reader, nativeReaderSleepScreenAvailable());
     };
 #ifndef KOBALT_READER_HARDWARE
-    result.debugProgressAction = NativeProgress::testAction;
+    result.development.continuousStateReports = true;
+    result.development.detailedStateReports = true;
+    result.development.progressDescription = strings::get(
+            "reader.simulate_nickel_progress_these_controls_change_only_the_synthetic");
+    result.development.progressAvailable = [](const QString &identity) {
+        return identity == QStringLiteral("file:///mnt/onboard/progress-integration.kepub.epub");
+    };
+    result.development.simulateProgress = [](ProgressSimulation kind,
+                                             const ReadingProgress &current) {
+        QJsonObject command =
+                qt::object({ { "book", current.book }, { "action", "fail-next-save" } });
+        if (kind != ProgressSimulation::SaveFailure) {
+            const bool duplicate = kind == ProgressSimulation::Duplicate;
+            const bool stale = kind == ProgressSimulation::OlderPosition;
+            const QString next = current.location.startsWith("OEBPS/c2.xhtml")
+                    ? "OEBPS/c3.xhtml#kobo.9.1:9"
+                    : "OEBPS/c2.xhtml#kobo.8.1:7";
+            const qint64 stamp = duplicate ? current.modified
+                    : stale
+                    ? current.modified - 1000
+                    : qMax(current.modified, QDateTime::currentMSecsSinceEpoch() / 1000 * 1000)
+                            + 1000;
+            command["action"] = QStringLiteral("persist");
+            command["location"] = duplicate ? current.location : next;
+            command["modified"] = QString::number(stamp);
+            command["status"] = kind == ProgressSimulation::Finished ? 2
+                    : duplicate                                      ? current.status
+                                                                     : 1;
+        }
+        return NativeProgress::testAction(command).value("ok").toBool();
+    };
 #endif
     return result;
 }
 } // namespace kobalt::nickel
+
+namespace kobalt {
+namespace {
+int invertedPageButtons = -1;
+} // namespace
+
+bool nativeInvertedPageButtons()
+{
+    if (invertedPageButtons < 0) {
+        QSettings settings("/mnt/onboard/.kobo/Kobo/Kobo eReader.conf", QSettings::IniFormat);
+        invertedPageButtons =
+                settings.value("Reading/invertPageTurnButtons", false).toBool() ? 1 : 0;
+    }
+    return invertedPageButtons == 1;
+}
+
+void forgetNativeInvertedPageButtons()
+{
+    invertedPageButtons = -1;
+}
+} // namespace kobalt

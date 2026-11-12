@@ -1,5 +1,6 @@
 #include "support/qt_compat.h"
 #include "reading/reading_progress.h"
+#include "platforms/kobo/common/progress_policy.h"
 #include "platforms/kobo/common/native_location.h"
 #include "platforms/kobo/common/local_book_path.h"
 #include "platforms/kobo/nickel-qt5/native_location.h"
@@ -164,6 +165,10 @@ int main(int argc, char **argv)
                     && reset == QJsonObject({ { "book", first.book } }),
             "An unread book without a Kobalt checkpoint reused Nickel's old location");
     reset = checkpoint;
+    reset["hide_book_on_sleep_screen"] = true;
+    require(resetNativeUnread(reset, unread) && reset.value("hide_book_on_sleep_screen").toBool(),
+            "Mark as unread lost the book's privacy choice");
+    reset = checkpoint;
     require(!resetNativeUnread(reset, {}) && reset == checkpoint,
             "Failed native read reset the local checkpoint");
     require(!resetNativeUnread(reset, second) && reset == checkpoint,
@@ -176,7 +181,7 @@ int main(int argc, char **argv)
     const auto acknowledgedUnread = reset;
     require(!resetNativeUnread(reset, unread) && reset == acknowledgedUnread,
             "Unchanged unread baseline repeatedly reset local progress");
-    ProgressReconciler choices(first);
+    ProgressReconciler choices(first, nickel::acceptsPositionNormalization);
     second.modified = 2000;
     choices.observe(second);
     require(choices.pending() && !choices.mayWrite(first), "Unanswered update allowed writeback");
@@ -222,7 +227,7 @@ int main(int argc, char **argv)
     require(choices.mayWrite(third),
             "An older current position remained unwritable after a choice");
     // The displayed position can stay the same while its committed date moves back.
-    ProgressReconciler redatedChoice(first);
+    ProgressReconciler redatedChoice(first, nickel::acceptsPositionNormalization);
     auto shown = second;
     shown.modified = 2000;
     redatedChoice.observe(shown);
@@ -237,7 +242,7 @@ int main(int argc, char **argv)
     exact.location = "chapter.xhtml#kobo.50.2:105";
     auto normalized = exact;
     normalized.location = "chapter.xhtml#kobo.50.2:17";
-    ProgressReconciler equalTime(exact);
+    ProgressReconciler equalTime(exact, nickel::acceptsPositionNormalization);
     equalTime.observe(normalized);
     require(equalTime.pending() && !equalTime.mayWrite(normalized),
             "Equal-time position change did not offer a conflict choice");
@@ -249,12 +254,19 @@ int main(int argc, char **argv)
             "Acknowledged equal-time position remained unwritable");
     equalTime.observe(normalized);
     require(!equalTime.pending(), "Equal-time duplicate reopened the conflict");
+    {
+        auto collapsed = exact;
+        collapsed.location = "chapter.xhtml#kobo.50.2:0";
+        ProgressReconciler portable(exact);
+        portable.observe(collapsed);
+        require(portable.pending(), "A host without normalization silently accepted a change");
+    }
     // Nickel can return a saved KEPUB span without its character offset.
     for (const auto &location : { QStringLiteral("chapter.xhtml#kobo.50.2:0"),
                                   QStringLiteral("chapter.xhtml#kobo.50.2") }) {
         auto collapsed = exact;
         collapsed.location = location;
-        ProgressReconciler roundTrip(exact);
+        ProgressReconciler roundTrip(exact, nickel::acceptsPositionNormalization);
         roundTrip.observe(collapsed);
         require(!roundTrip.pending() && roundTrip.mayWrite(collapsed)
                         && roundTrip.baseline() == collapsed,
@@ -269,7 +281,7 @@ int main(int argc, char **argv)
     pendingOffset.location = "chapter.xhtml#kobo.51.1:9";
     auto pendingStart = pendingOffset;
     pendingStart.location = "chapter.xhtml#kobo.51.1:0";
-    ProgressReconciler unseen(exact);
+    ProgressReconciler unseen(exact, nickel::acceptsPositionNormalization);
     unseen.observe(pendingOffset);
     unseen.observe(pendingStart);
     require(unseen.pending() && !unseen.mayWrite(pendingStart),
@@ -281,7 +293,7 @@ int main(int argc, char **argv)
            QStringLiteral("chapter.xhtml#kobo.50.2:-1") }) {
         auto changed = exact;
         changed.location = location;
-        ProgressReconciler strict(exact);
+        ProgressReconciler strict(exact, nickel::acceptsPositionNormalization);
         strict.observe(changed);
         require(strict.pending(), "A different native location was treated as normalization");
     }
@@ -296,22 +308,22 @@ int main(int argc, char **argv)
         changed.location = location.left(location.lastIndexOf(':')) + ":0";
         if (changed.location == source.location)
             changed.location.chop(2);
-        ProgressReconciler strict(source);
+        ProgressReconciler strict(source, nickel::acceptsPositionNormalization);
         strict.observe(changed);
         require(strict.pending(), "A non-KEPUB or zero offset was silently normalized");
     }
     auto changedMetadata = exact;
     changedMetadata.location = "chapter.xhtml#kobo.50.2:0";
     ++changedMetadata.modified;
-    ProgressReconciler newerOffset(exact);
+    ProgressReconciler newerOffset(exact, nickel::acceptsPositionNormalization);
     newerOffset.observe(changedMetadata);
     require(newerOffset.pending(), "A newer span-start position was silently accepted");
     changedMetadata.modified = exact.modified;
     changedMetadata.status = 2;
-    ProgressReconciler changedStatus(exact);
+    ProgressReconciler changedStatus(exact, nickel::acceptsPositionNormalization);
     changedStatus.observe(changedMetadata);
     require(changedStatus.pending(), "A changed reading status was silently normalized");
-    ProgressReconciler resetWhileReading(first);
+    ProgressReconciler resetWhileReading(first, nickel::acceptsPositionNormalization);
     resetWhileReading.observe(unread);
     require(resetWhileReading.pending() && !resetWhileReading.mayWrite(unread),
             "An unread reset became an unrecoverable stale save failure");
@@ -321,7 +333,7 @@ int main(int argc, char **argv)
     auto stalePosition = first;
     --stalePosition.modified;
     stalePosition.location = "chapter.xhtml#p:1";
-    ProgressReconciler staleNormal(first);
+    ProgressReconciler staleNormal(first, nickel::acceptsPositionNormalization);
     staleNormal.observe(stalePosition);
     require(staleNormal.pending() && !staleNormal.mayWrite(stalePosition),
             "An older authoritative position bypassed the conflict choice");

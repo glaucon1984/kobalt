@@ -11,6 +11,7 @@
 #include <QLabel>
 #include "ui/controls/keyboard.h"
 #include <QApplication>
+#include <QCheckBox>
 #include <QLineEdit>
 #include <QLocale>
 #include <QFontInfo>
@@ -76,7 +77,7 @@ void checkKeyboardInputStaysInEditor()
             QApplication::processEvents();
             for (const char *name :
                  { "rrKosyncLogin", "rrKosyncNow", "rrKosyncLogout", "rrKosyncLearnMore" }) {
-                page.setNativeCloudSync(QString(name) == "rrKosyncLearnMore");
+                page.setNativeCloudSync({ QString(name) == "rrKosyncLearnMore", {} });
                 page.setAccount("https://sync.example", "reader", QString(name) != "rrKosyncLogin",
                                 true);
                 auto *action = page.findChild<QPushButton *>(name);
@@ -98,7 +99,7 @@ void checkKeyboardInputStaysInEditor()
                 require(action->grab().toImage() == normal,
                         "Cancelled Sync action restores its appearance");
             }
-            page.setNativeCloudSync(false);
+            page.setNativeCloudSync({});
             page.setAccount({}, {}, false, true);
             for (const auto *field : { "rrKosyncServer", "rrKosyncUsername", "rrKosyncPassword" }) {
                 page.findChild<QPushButton *>(field)->click();
@@ -278,8 +279,17 @@ void checkPhoneSettings()
                 row->click();
                 panel.fitContent(host.size());
                 QApplication::processEvents();
-                require(title->mapTo(&panel, title->contentsRect().topLeft()) == position,
-                        "Settings submenu titles keep the same text origin");
+                // The close cell sits on the right; an open section puts its
+                // back cell on the left, and the title follows it at the same
+                // distance as it keeps from the edge in the list.
+                auto *back = panel.findChild<QPushButton *>("rrSettingsBack");
+                require(back && back->isVisible(), "Settings submenus show a back cell");
+                const auto origin = title->mapTo(&panel, title->contentsRect().topLeft());
+                require(origin.y() == position.y()
+                                && origin.x()
+                                        == back->mapTo(&panel, QPoint(back->width(), 0)).x()
+                                                + position.x(),
+                        "Settings submenu titles follow the back cell at the list's inset");
                 require(baseline() == reference,
                         "Settings submenu titles keep the Settings baseline");
                 if (!out.isEmpty())
@@ -519,8 +529,15 @@ int main(int argc, char **argv)
                     && save->geometry().right() == reference.primaryButton()->geometry().right()
                     && cancel->geometry().bottom() == card->height() - 3,
             "Cancel and OK dividers meet the alert frame without outer padding");
-    require(editor->x() == cancel->x() && editor->width() == cancel->width() + save->width(),
-            "input occupies the alert content band without an inset box");
+    // Every field uses the bordered, inset input of the password field.
+    auto *inputRow = card->findChild<QWidget *>("rrKosyncInputRow");
+    require(inputRow && editor->parentWidget() == inputRow && inputRow->x() == cancel->x()
+                    && inputRow->width() == cancel->width() + save->width()
+                    && editor->x() == ui::metrics::notice::cardMargins.left()
+                    && editor->geometry().right()
+                            == inputRow->width() - 1 - ui::metrics::notice::cardMargins.right()
+                    && editor->styleSheet().contains("solid"),
+            "input sits in a bordered box inset within the alert content band");
     if (argc > 1) {
         reference.show();
         reference.raise();
@@ -676,8 +693,31 @@ int main(int argc, char **argv)
     page->setStatus(strings::get("kosync.matching_changed"), false);
     panel.fitContent(window.size());
     QApplication::processEvents();
-    require(lastSync->visibleRegion().boundingRect() == lastSync->rect(),
-            "last sync remains visible after a matching change");
+    // A small screen pages the Sync page. Turn to the first page, then forward
+    // until the control is fully on screen.
+    const auto turn = [&](const char *name) {
+        auto *button = panel.findChild<QPushButton *>(name);
+        if (!button || !button->isVisible() || !button->isEnabled())
+            return false;
+        button->click();
+        QApplication::processEvents();
+        return true;
+    };
+    const auto firstPage = [&] {
+        for (int i = 0; i < 10 && turn("rrSettingsOptionsPrevious"); ++i) { }
+    };
+    const auto reachable = [&](QWidget *control) {
+        firstPage();
+        for (int i = 0; i < 10; ++i) {
+            if (control->isVisible() && control->visibleRegion().boundingRect() == control->rect())
+                return true;
+            if (!turn("rrSettingsOptionsNext"))
+                break;
+        }
+        return false;
+    };
+    require(reachable(lastSync), "last sync can be reached after a matching change");
+    firstPage();
     matching->click();
     matchingDialog = dynamic_cast<ui::NoticeModal *>(
             window.findChildren<QWidget *>("rrKosyncMatchingDialog").last());
@@ -690,6 +730,22 @@ int main(int argc, char **argv)
     matchingDialog->findChild<QAbstractButton *>("rrKosyncBinary")->click();
     require(matchingChanges == 2 && matching->caption() == "Binary (default)",
             "binary selection can be restored");
+    // KOReader's opt-in metadata is a checkbox that starts off.
+    auto *metadata = page->findChild<QCheckBox *>("rrKosyncMetadata");
+    require(metadata && metadata->isVisible() && !metadata->isChecked()
+                    && metadata->text() == strings::get("kosync.send_metadata"),
+            "document metadata is an unchecked checkbox");
+    QVector<bool> metadataChanges;
+    page->sendMetadataChanged = [&](bool enabled) {
+        metadataChanges.append(enabled);
+        page->setSendMetadata(enabled);
+    };
+    metadata->click();
+    require(metadataChanges == QVector<bool>{ true } && metadata->isChecked(),
+            "checking document metadata reaches the owner");
+    metadata->click();
+    require(metadataChanges == (QVector<bool>{ true, false }) && !metadata->isChecked(),
+            "unchecking document metadata reaches the owner");
     matching->click();
     QPointer<QWidget> dismissedMatching =
             window.findChildren<QWidget *>("rrKosyncMatchingDialog").last();
@@ -698,7 +754,7 @@ int main(int argc, char **argv)
             "sleep cleanup dismisses matching choices");
     page->setStatus("Syncing progress…", true);
     require(!login->isEnabled() && !server->isEnabled() && !automatic->isEnabled()
-                    && !matching->isEnabled(),
+                    && !matching->isEnabled() && !metadata->isEnabled(),
             "busy state blocks overlapping edits");
     page->setStatus("Reading progress is up to date.", false);
     panel.fitContent(window.size());
@@ -708,11 +764,9 @@ int main(int argc, char **argv)
     while (logout->visibleRegion().boundingRect() != logout->rect() && settled.elapsed() < 1000)
         QApplication::processEvents(QEventLoop::AllEvents, 10);
     require(!password->isVisible() && !login->isVisible(), "signed-in page hides sign-in controls");
-    require(sync->visibleRegion().boundingRect() == sync->rect()
-                    && logout->visibleRegion().boundingRect() == logout->rect(),
-            "signed-in controls fit on one page");
-    require(lastSync->visibleRegion().boundingRect() == lastSync->rect(),
-            "last sync fits on the signed-in page");
+    require(reachable(sync) && reachable(logout), "signed-in controls can be reached");
+    require(reachable(lastSync), "last sync can be reached on the signed-in page");
+    firstPage();
     auto *status = page->findChild<QLabel *>("rrKosyncStatus");
     require(status->palette().color(QPalette::WindowText) == ui::noteColor(status)
                     && lastSync->palette().color(QPalette::WindowText) == ui::noteColor(lastSync),
@@ -720,7 +774,7 @@ int main(int argc, char **argv)
     if (argc > 1)
         require(window.grab().save(QString::fromLocal8Bit(argv[1])),
                 "save account settings capture");
-    page->setNativeCloudSync(true);
+    page->setNativeCloudSync({ true, {} });
     page->setAccount("https://sync.example/prefix", "reader", true, true);
     page->setStatus("Reading progress is up to date.", false);
     panel.fitContent(window.size());
@@ -739,6 +793,7 @@ int main(int argc, char **argv)
                                  deviceName, static_cast<QPushButton *>(matching) })
         require(control && !control->isVisible(),
                 "Kobo-managed books hide all account and sync actions");
+    require(!metadata->isVisible(), "Kobo-managed books hide the document metadata choice");
     require(!automatic->isVisible() && !lastSync->isVisible()
                     && !page->findChild<QLabel *>("rrKosyncStatus")->isVisible(),
             "Kobo-managed books hide automatic sync and account status");
@@ -770,7 +825,7 @@ int main(int argc, char **argv)
     panel.settingsPages->setCurrentIndex(int(reader::SettingsPage::Display));
     require(!reopenedHelp || !reopenedHelp->isVisible(), "leaving Sync dismisses its explanation");
     tab->click();
-    page->setNativeCloudSync(true, true);
+    page->setNativeCloudSync({ true, QStringLiteral("kosync.kobo_cloud") });
     panel.fitContent(window.size());
     QApplication::processEvents();
     require(disclaimer->isVisible() && disclaimer->text().contains("Kobo Cloud")
@@ -779,7 +834,7 @@ int main(int argc, char **argv)
             "Kobo Cloud books explain why KOSync is unavailable");
     require(disclaimer->visibleRegion().boundingRect() == disclaimer->rect(),
             "Kobo Cloud explanation fits on one page");
-    page->setNativeCloudSync(false);
+    page->setNativeCloudSync({});
     page->setAccount("https://sync.example/prefix", "reader", true, true);
     require(server->isVisible() && sync->isVisible() && automatic->isVisible(),
             "sideloaded books retain normal KOsync controls");
@@ -916,10 +971,10 @@ int main(int argc, char **argv)
     page->setAccount("https://sync.example/prefix", "reader", true, false);
     page->setStatus({}, true);
     require(!automatic->isEnabled() && !sync->isEnabled(), "busy sync blocks manual controls");
-    page->setNativeCloudSync(true);
+    page->setNativeCloudSync({ true, {} });
     require(!automatic->isVisible() && !sync->isVisible(),
             "Kobo-managed books hide manual sync controls");
-    page->setNativeCloudSync(false);
+    page->setNativeCloudSync({});
     page->setAccount({}, {}, false, false);
     panel.fitContent(window.size());
     QApplication::processEvents();

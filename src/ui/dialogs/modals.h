@@ -7,6 +7,7 @@
 #include <QRegion>
 #include <QPushButton>
 #include <QPointer>
+#include <QTimer>
 #include <functional>
 
 namespace kobalt::ui {
@@ -38,6 +39,12 @@ public:
     // fitToWidth(); a card that fits shows every row again.
     void fitToHeight(int height);
 
+protected:
+    // A tap on the card's own padding, title or text stays on the card. It
+    // does not reach the backdrop, which would close the pop-up.
+    void mousePressEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
+
 private:
     QVBoxLayout *contentRows;
     PagerBar *rowPager = nullptr;
@@ -45,6 +52,8 @@ private:
     QVector<QPointer<QWidget>> pagedRows;
     int rowPage = 0;
     void showRowPage(int page);
+    // The card joins list rows to headings and prose, including nested sections.
+    void updateListDividers();
     QBoxLayout *actionRows = nullptr;
     QVector<QPushButton *> actionButtons;
     QLabel *artwork = nullptr;
@@ -87,9 +96,14 @@ public:
     // Appearance, message and layout changes keep the modal's normal refresh.
     QRect progressUpdateRect(int percent, const QString &message = {}) const;
 
-    void anchorTo(const QRect &bounds)
+    enum class AnchorSide { Below, Above, Left };
+
+    void anchorTo(const QRect &bounds, AnchorSide side = AnchorSide::Below,
+                  const QPoint &sideOffset = {})
     {
         anchor = bounds;
+        anchorSide = side;
+        anchorOffset = sideOffset;
         centerCard();
     }
 
@@ -110,6 +124,8 @@ private:
     PopupCard *content;
     QWidget *pointer;
     QRect anchor, cardArea;
+    AnchorSide anchorSide = AnchorSide::Below;
+    QPoint anchorOffset;
     QRegion inputExclusions;
     ProgressBar *loadingProgress = nullptr;
     QLabel *loadingMessage = nullptr;
@@ -120,6 +136,8 @@ struct ModalContent
     QString description;
     QString title;
     QImage image;
+    // The object name of the title label. Empty means "rrModalTitle".
+    QString titleName = {};
 };
 
 struct ModalAction
@@ -129,17 +147,50 @@ struct ModalAction
 };
 
 QPushButton *makeModalButton(QWidget *parent, const ModalAction &action, bool primary);
+// The primary action has a bold label. A choice can move that weight to the
+// safer action, as the sync choice does when the synced position is behind.
+void setModalActionPrimary(QPushButton *button, bool primary);
+
+// Brief, nonblocking confirmation anchored to the button that caused it.
+class ButtonFeedback final : public ModalOverlay
+{
+public:
+    explicit ButtonFeedback(QWidget *parent);
+
+    struct Placement
+    {
+        AnchorSide side;
+        QRect area;
+        QPoint sideOffset;
+    };
+
+    void showFor(QWidget *button, const QString &text,
+                 const Placement &placement = { AnchorSide::Above, {}, {} });
+    void reposition();
+
+protected:
+    void hideEvent(QHideEvent *event) override;
+
+private:
+    QPointer<QWidget> target;
+    Placement placement{ AnchorSide::Above, {}, {} };
+    QLabel *label;
+    QTimer hideTimer;
+};
 
 class NoticeModal : public ModalOverlay
 {
 public:
     NoticeModal(QWidget *parent, const ModalContent &content, const ModalAction &action);
 
+    QLabel *titleLabel() const { return title; }
+
     QLabel *descriptionLabel() const { return description; }
 
     QPushButton *primaryButton() const { return primary; }
 
 private:
+    QLabel *title;
     QLabel *description;
     QPushButton *primary;
 };
@@ -150,6 +201,8 @@ public:
     ChoiceModal(QWidget *parent, const ModalContent &content, const ModalAction &secondary,
                 const ModalAction &primary);
 
+    QLabel *titleLabel() const { return title; }
+
     QLabel *descriptionLabel() const { return description; }
 
     QPushButton *primaryButton() const { return primary; }
@@ -157,6 +210,7 @@ public:
     QPushButton *secondaryButton() const { return secondary; }
 
 private:
+    QLabel *title;
     QLabel *description;
     QPushButton *primary;
     QPushButton *secondary;

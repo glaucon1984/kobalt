@@ -29,14 +29,9 @@ set(source "${KOBALT_ROOT}/src")
 file(READ "${KOBALT_ASSETS}/manifest.json" assets)
 string(JSON KOBALT_VERSION GET "${assets}" version)
 
-file(READ "${CRENGINE_SOURCE}/cr3gui/data/html5.css" READER_HTML_CSS)
-configure_file("${source}/engine/crengine/reader_styles.h.in" reader_styles.h @ONLY)
-file(GLOB patterns RELATIVE "${CRENGINE_SOURCE}/cr3gui/data/hyph" "${CRENGINE_SOURCE}/cr3gui/data/hyph/*.pattern")
-list(SORT patterns)
-list(TRANSFORM patterns PREPEND "\"")
-list(TRANSFORM patterns APPEND "\"")
-list(JOIN patterns ", " READER_HYPHENATION_PATTERNS)
-configure_file("${source}/engine/crengine/reader_hyphenation.h.in" reader_hyphenation.h @ONLY)
+# The generated engine headers, the cache policy, the annotation storage default,
+# kobalt_shared_definitions and kobalt_notice_resources, as on the other platforms.
+include("${KOBALT_ROOT}/platforms/shared-inputs.cmake")
 set(KOBALT_COMMIT "" CACHE STRING "Source commit, passed by the launcher (tools/remote-build-kobalt.sh)")
 option(KOBALT_COMMIT_MODIFIED "Source has uncommitted changes" OFF)
 configure_file("${source}/support/build_info.h.in" build_info.h @ONLY)
@@ -50,6 +45,8 @@ set(plugin "${CMAKE_CURRENT_SOURCE_DIR}/pbink")
 set(host "${CMAKE_CURRENT_SOURCE_DIR}/host")
 add_executable(kobalt-pb ${shared}
     "${KOBALT_ROOT}/platforms/standalone/reader.cpp" "${KOBALT_ROOT}/platforms/standalone/reader.h"
+    # No firmware image decoder: the resource server serves a book's images as they are.
+    "${KOBALT_ROOT}/platforms/standalone/native_image.cpp"
     # The loopback repair for the resource server (plain Linux ioctls, as on Kobo's firmware).
     "${KOBALT_ROOT}/platforms/kobo/common/loopback.cpp"
     "${host}/main.cpp" "${host}/host.cpp" "${host}/host.h" "${host}/services.cpp" "${host}/services.h"
@@ -61,11 +58,6 @@ add_executable(kobalt-pb ${shared}
     "${host}/futex_compat.cpp" "${host}/firmware_power.cpp" "${host}/firmware_power.h"
     "${plugin}/main.cpp" "${plugin}/pbinkintegration.cpp" "${plugin}/pbinkintegration.h"
     "${plugin}/pbinkscreen.cpp" "${plugin}/pbinkscreen.h" "${plugin}/pbinkevents.cpp" "${plugin}/pbinkevents.h")
-set_source_files_properties("${source}/storage/annotation_database.cpp" PROPERTIES
-    COMPILE_DEFINITIONS KOBALT_SQLITE_ANNOTATIONS_DEFAULT=1)
-# Reading time on a clock that keeps counting through the device's light sleep, as on Kobo.
-set_source_files_properties("${source}/reading/reading_timer.cpp" PROPERTIES
-    COMPILE_DEFINITIONS KOBALT_READING_CLOCK_BOOTTIME=1)
 target_include_directories(kobalt-pb PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" "${host}" "${plugin}")
 target_include_directories(kobalt-pb SYSTEM PRIVATE "${CRENGINE_SOURCE}/crengine/include" "${CRENGINE_BUILD}"
     "${prefix}/include" "${prefix}/include/harfbuzz" "${prefix}/include/freetype2" "${prefix}/include/fribidi"
@@ -77,21 +69,14 @@ target_include_directories(kobalt-pb SYSTEM PRIVATE "${CRENGINE_SOURCE}/crengine
 # on any ARMv7. The toolchain file is left alone: its flags key the dependency set and the Qt SDK.
 target_compile_options(kobalt-pb PRIVATE -Wall -Wextra -Wno-missing-field-initializers -mtune=cortex-a7
     "-iquote${KOBALT_ROOT}" "-iquote${source}")
-target_compile_definitions(kobalt-pb PRIVATE KOBALT_READER_HARDWARE KOBALT_POCKETBOOK=1 QT_STATICPLUGIN
-    KOBALT_VERSION="${KOBALT_VERSION}"
+target_compile_definitions(kobalt-pb PRIVATE ${kobalt_shared_definitions} KOBALT_POCKETBOOK=1 QT_STATICPLUGIN
     KOBALT_CONFIG_DIR="/mnt/ext1/applications/kobalt/profile"
     KOBALT_SYSTEM_FONT_DIRECTORY="/mnt/ext1/system/fonts")
-include("${KOBALT_ROOT}/platforms/cache-policy.cmake")
-target_compile_definitions(kobalt-pb PRIVATE KOBALT_LAYOUT_POLICY="${layout_policy}")
 
 # Notices, acknowledgments and the styling preview samples, as the Kobo build embeds them.
-set(resources "${KOBALT_ROOT}/assets")
-file(GLOB notices CONFIGURE_DEPENDS "${resources}/notices/*")
 set(qrc "<RCC><qresource prefix=\"/kobalt\">")
-foreach(path "${resources}/acknowledgments.json" ${notices}
-        "${resources}/samples/words-and-letters.html" "${resources}/samples/layout.html"
-        "${resources}/samples/hanging-punctuation.html")
-    file(RELATIVE_PATH alias "${resources}" "${path}")
+foreach(path IN LISTS kobalt_notice_resources)
+    file(RELATIVE_PATH alias "${kobalt_notice_base}" "${path}")
     string(APPEND qrc "<file alias=\"${alias}\">${path}</file>")
 endforeach()
 string(APPEND qrc "</qresource></RCC>")

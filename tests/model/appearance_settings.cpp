@@ -1,4 +1,9 @@
+#include <iterator>
 #include "reading/appearance_settings.h"
+#include "reading/page_navigation.h"
+#include "reading/features.h"
+#include "reading/opening_job.h"
+#include "reading/sleep_screen.h"
 #include "reading/session_timeout.h"
 #include "reading/remaining_time.h"
 #include "support/qt_compat.h"
@@ -9,9 +14,127 @@
 
 using namespace kobalt;
 
-// Checks appearance settings: defaults, invalid values, migrations, global and book precedence, new-book inheritance and which changes need a new layout.
+// Checks appearance settings: defaults, invalid values, migrations, global and book precedence, new-book inheritance, which changes need a new layout and how an opening merges the saved book state.
 int main()
 {
+    {
+        const auto original = qt::object({ { "font_pixels", 40 },
+                                           { "line_spacing", 150 },
+                                           { "position", "chapter-one" },
+                                           { "unknown", 7 } });
+        const auto request = appearance::Requested::fromResolvedState(original);
+        const auto changed = request.edited(appearance::Patch(qt::object(
+                { { "font_pixels", 45 }, { "position", "chapter-two" }, { "unknown", 9 } })));
+        require(changed.fields().value("font_pixels").toInt() == 45
+                        && changed.fields().value("line_spacing").toInt() == 150
+                        && request.fields().value("font_pixels").toInt() == 40,
+                "A partial appearance edit lost another requested field or changed its source");
+        auto checkpoint = original;
+        changed.replaceIn(checkpoint);
+        require(checkpoint.value("position").toString() == "chapter-one"
+                        && checkpoint.value("unknown").toInt() == 7,
+                "Appearance edits must not carry positions or unrelated record fields");
+        const appearance::SavedInput saved(qt::object(
+                { { "font_pixels", QJsonValue(QJsonValue::Null) }, { "position", "stored" } }));
+        saved.restoreIn(checkpoint);
+        require(checkpoint.contains("font_pixels") && checkpoint.value("font_pixels").isNull()
+                        && !checkpoint.contains("line_spacing")
+                        && checkpoint.value("position").toString() == "chapter-one"
+                        && checkpoint.value("unknown").toInt() == 7,
+                "Persisted appearance must preserve null and absent keys without moving the book");
+    }
+    require(!QJsonObject().value(pageNavigation::reverseSwipesKey).toBool(),
+            "Old profiles must retain normal swipe direction");
+    for (const bool reversed : { false, true }) {
+        const auto preferences =
+                appearance::cleanPreferences({ { pageNavigation::reverseSwipesKey, reversed },
+                                               { "page_navigation", "taps_only" },
+                                               { "future_option", 42 } });
+        require(preferences.value(pageNavigation::reverseSwipesKey).toBool() == reversed
+                        && pageNavigation::mode(preferences, true) == pageNavigation::Mode::TapsOnly
+                        && preferences.value("future_option").toInt() == 42,
+                "Swipe direction cleanup changed navigation mode or lost preferences");
+        require(appearance::same({}, preferences), "Swipe direction invalidated book layout");
+    }
+    for (const auto &invalid : { QJsonValue("true"), QJsonValue(1), QJsonValue() })
+        require(!appearance::cleanPreferences({ { pageNavigation::reverseSwipesKey, invalid } })
+                         .contains(pageNavigation::reverseSwipesKey),
+                "Invalid swipe direction did not fall back to normal");
+    require(sleep::design({}) == sleep::Design::Bookmark,
+            "Missing sleep preferences changed the default bookmark");
+    for (const auto mode : sleep::modes) {
+        for (const auto tile : sleep::tiles) {
+            const QJsonObject legacy{ { sleep::preferenceKey, sleep::value(mode) },
+                                      { sleep::tileKey, sleep::value(tile) } };
+            const auto migrated = appearance::cleanPreferences(legacy);
+            require(sleep::mode(migrated) == mode && sleep::tile(migrated) == tile,
+                    "Legacy sleep preferences changed their backdrop or indicator");
+            for (const auto design : sleep::designs) {
+                auto preferences = legacy;
+                sleep::setDesign(preferences, design);
+                preferences = appearance::cleanPreferences(preferences);
+                require(sleep::design(preferences) == design,
+                        "A gallery selection did not survive preference cleanup");
+                require(appearance::same({}, preferences),
+                        "A sleep design invalidated the reading layout");
+                // An older release knows only the backdrop and indicator keys.
+                preferences[sleep::preferenceKey] = sleep::value(mode);
+                preferences[sleep::tileKey] = sleep::value(tile);
+                const auto pair = sleep::legacyPair(design, tile);
+                const bool compatible = pair.first == mode
+                        && (design == sleep::Design::Stock || design == sleep::Design::Page
+                            || design == sleep::Design::Overlay || pair.second == tile);
+                require(sleep::design(preferences)
+                                == (compatible ? design : sleep::legacyDesign(mode, tile)),
+                        "A change made by an older release was ignored");
+            }
+        }
+    }
+    for (const auto &invalid : { QJsonValue("unknown"), QJsonValue(true), QJsonValue(1) }) {
+        const auto clean = appearance::cleanPreferences({ { sleep::designKey, invalid },
+                                                          { sleep::preferenceKey, "page" },
+                                                          { sleep::tileKey, "none" } });
+        require(!clean.contains(sleep::designKey) && sleep::design(clean) == sleep::Design::Page
+                        && sleep::tile(clean) == sleep::Tile::None,
+                "Invalid sleep design lost the legacy selection");
+    }
+    for (const int length : { 0, sleep::greetingLength, sleep::greetingLength + 1 }) {
+        const auto clean = appearance::cleanPreferences(
+                { { sleep::greetingKey, QString(length, QLatin1Char('a')) } });
+        require(clean.contains(sleep::greetingKey) == (length <= sleep::greetingLength),
+                "Sleep greeting length limit changed");
+    }
+    require(!appearance::cleanPreferences({ { sleep::greetingKey, true } })
+                     .contains(sleep::greetingKey),
+            "A non-text sleep greeting was accepted");
+
+    require(!appearance::bookDefaults({}).value("inpage_footnotes").toBool(),
+            "Page notes must be opt-in for existing profiles");
+    for (bool enabled : { false, true }) {
+        const auto preferences = appearance::cleanPreferences(
+                { { "inpage_footnotes", enabled }, { "future_option", 42 } });
+        require(preferences.value("inpage_footnotes") == QJsonValue(enabled)
+                        && preferences.value("future_option").toInt() == 42,
+                "Page-note preferences did not survive normalization");
+        auto saved = qt::object({ { "inpage_footnotes", !enabled }, { "font_pixels", 40 } });
+        appearance::applyBookDefaults(saved, appearance::bookDefaults(preferences));
+        require(saved.value("inpage_footnotes") == QJsonValue(enabled),
+                "A stale book snapshot replaced the global page-note choice");
+        auto other = saved;
+        other["inpage_footnotes"] = !enabled;
+        require(!appearance::same(saved, other), "Page-note edits reused a stale layout");
+        QJsonObject inherited;
+        appearance::rememberTextLayout(inherited, saved);
+        require(!inherited.value(appearance::lastTextLayoutKey)
+                         .toObject()
+                         .contains("inpage_footnotes"),
+                "Page notes leaked into text preset inheritance");
+    }
+    for (const auto &invalid : { QJsonValue("true"), QJsonValue(1), QJsonValue() })
+        require(!appearance::cleanPreferences({ { "inpage_footnotes", invalid } })
+                         .contains("inpage_footnotes"),
+                "Invalid page-note setting did not use the disabled default");
+
     for (const auto *mode : { "current", "all", "off" }) {
         const auto cleaned = appearance::cleanPreferences(
                 { { "chapter_groups", mode }, { "future_option", 42 } });
@@ -44,12 +167,49 @@ int main()
                 "Invalid time format did not fall back to detailed estimates");
     }
 
+    for (int i = 0; i < int(std::size(features::keys)); ++i) {
+        const auto feature = features::Feature(i);
+        require(features::enabled({}, feature), "A feature was hiddenFeatures by default");
+        for (const auto &invalid : { QJsonValue("true"), QJsonValue(1), QJsonValue() }) {
+            const auto clean = appearance::cleanPreferences({ { features::keys[i], invalid } });
+            require(features::enabled(clean, feature), "Invalid feature flag hid a feature");
+        }
+    }
+    const auto hiddenFeatures =
+            appearance::cleanPreferences({ { "disable_navigate", true },
+                                           { "disable_stats", true },
+                                           { "disable_annotations", true },
+                                           { "disable_bookmarks", true },
+                                           { "disable_words", true },
+                                           { "save_looked_up_words", false },
+                                           { "default_menu_view", "stats" },
+                                           { "dense_stats_chart", true },
+                                           { "navigation_bar_buttons", "pages" },
+                                           { "minimal_annotation_mode", true },
+                                           { "marks_sort", "newest" },
+                                           { "future_option", 42 } });
+    require(hiddenFeatures.value("default_menu_view") == "none"
+                    && !hiddenFeatures.contains("navigation_bar_buttons")
+                    && !hiddenFeatures.contains("dense_stats_chart")
+                    && !hiddenFeatures.contains("minimal_annotation_mode")
+                    && !hiddenFeatures.contains("marks_sort")
+                    && !hiddenFeatures.contains("save_looked_up_words")
+                    && hiddenFeatures.value("future_option").toInt() == 42,
+            "Hidden features retained incompatible options or lost unrelated preferences");
+    // My Words shares the bookmarks' sort order, so it keeps the order alone.
+    const auto wordsShown = appearance::cleanPreferences({ { "disable_annotations", true },
+                                                           { "disable_bookmarks", true },
+                                                           { "marks_sort", "newest" } });
+    require(wordsShown.value("marks_sort") == "newest",
+            "Hiding bookmarks and annotations dropped the order My Words still uses");
+    require(appearance::same({}, hiddenFeatures), "Hiding features invalidated book layout");
+
     for (bool shown : { false, true }) {
         const auto preferences = appearance::cleanPreferences(
                 { { "light_dark_mode_shortcut", shown }, { "optional", "keep" } });
-        require(preferences.value("light_dark_mode_shortcut").toBool() == shown
+        require(!preferences.contains("light_dark_mode_shortcut")
                         && preferences.value("optional") == "keep",
-                "Light shortcut cleanup lost a saved choice or optional field");
+                "Light shortcut cleanup kept the retired choice or lost an optional field");
         require(appearance::same({}, preferences),
                 "Light shortcut visibility invalidated the book layout");
     }
@@ -122,6 +282,28 @@ int main()
                         .toBool(true),
                 "Invalid feedback preference did not use visible feedback");
 
+    for (bool show : { false, true }) {
+        const auto cleaned = appearance::cleanPreferences(
+                { { "schema", 1 }, { "show_opening_cover", show }, { "future_option", 42 } });
+        require(cleaned.value("show_opening_cover").toBool() == show
+                        && cleaned.value("schema").toInt() == 1
+                        && cleaned.value("future_option").toInt() == 42,
+                "Opening cover cleanup lost the choice, schema or unrelated fields");
+        require(appearance::same({}, cleaned), "Opening cover choice invalidated book layout");
+        const auto merged =
+                appearance::readerPreferences(cleaned, { { "show_opening_cover", !show } });
+        require(merged.value("show_opening_cover").toBool() == show,
+                "A book snapshot overrode the global opening cover choice");
+    }
+    require(appearance::cleanPreferences({}).value("show_opening_cover").toBool(true),
+            "Old preferences no longer default to the opening cover");
+    for (const auto &invalid :
+         { QJsonValue(), QJsonValue(0), QJsonValue("false"), QJsonValue(QJsonArray{}) })
+        require(appearance::cleanPreferences({ { "show_opening_cover", invalid } })
+                        .value("show_opening_cover")
+                        .toBool(true),
+                "Invalid opening cover preference did not use the cover default");
+
     const auto dictionary =
             appearance::cleanPreferences(qt::object({ { "dictionary_font_face", "Libron" },
                                                       { "dictionary_font_size", 120 },
@@ -142,7 +324,7 @@ int main()
             "Dictionary UI preferences invalidated the book layout");
     // Appearance settings decide the layout. The list must stay complete, because a
     // missing key would let a retained layout survive a changed setting.
-    require(appearance::keys.size() == 36, "The appearance keys changed without this check");
+    require(appearance::keys.size() == 38, "The appearance keys changed without this check");
     require(appearance::bookDefaults({}).value("paragraph_indent").toInt() == -1,
             "Paragraph indentation no longer defaults to Publisher");
     for (int percent : { -1, 0, 100, 300 }) {
@@ -277,6 +459,11 @@ int main()
     require(!invalidBeautifier.value("book_beautifier").toBool()
                     && !invalidBeautifier.value("beautifier_initials").toBool(),
             "Invalid beautifier settings did not use safe defaults");
+    for (const auto &value : { QJsonValue(), QJsonValue("true"), QJsonValue(1), QJsonValue(false) })
+        require(!appearance::normalizationSettings({ { "normalize_text_colors", value } })
+                         .value("normalize_text_colors")
+                         .toBool(),
+                "Missing or invalid color normalization did not default off");
     const auto recommended = appearance::normalizationPresetSettings("recommended");
     const auto full = appearance::normalizationPresetSettings("full");
     require(appearance::normalizationPreset({}) == "recommended"
@@ -285,6 +472,12 @@ int main()
             "Recommended changed the existing defaults");
     for (const auto *key : appearance::normalizationKeys)
         require(full.value(key).toBool(), "Full did not enable every rule");
+    auto oldFull = full;
+    oldFull.remove("normalize_text_colors");
+    const auto preservedFull = appearance::cleanPreferences(oldFull);
+    require(!preservedFull.value("normalize_text_colors").toBool()
+                    && appearance::normalizationPreset(preservedFull) == "custom",
+            "An old Full selection enabled the new opt-in color rule");
     for (bool enabled : { false, true }) {
         const auto migrated = appearance::cleanPreferences({ { "avoid_wasteful_styling", enabled },
                                                              { "beautifier_spacing", true },
@@ -710,8 +903,7 @@ int main()
     require(appearance::typographyDefaults().value("font_pixels").toInt() == defaultFontPixels(),
             "Default text size did not follow the screen density");
     readingPpi.store(300);
-    const auto benchmark =
-            appearance::benchmarkTypography("file:///mnt/onboard/kobalt-benchmark.kepub.epub");
+    const auto benchmark = appearance::benchmarkTypography();
     require(benchmark.size() == 15 && benchmark.value("font_face").toString().isEmpty()
                     && benchmark.value("font_pixels").toInt() == defaultFontPixels()
                     && benchmark.value("margin_pixels").toInt() == 60
@@ -720,17 +912,106 @@ int main()
                     && !benchmark.value("dark_mode").toBool()
                     && benchmark.value("hyphenation").toString() == "off",
             "Benchmark typography changed");
-    require(appearance::benchmarkTypography("file:///mnt/onboard/other.epub").isEmpty()
-                    && appearance::benchmarkTypography(
-                               "file:///mnt/onboard/KOBALT-benchmark.kepub.epub")
-                               .isEmpty(),
-            "Benchmark profile matched another book");
     readingPpi.store(212);
-    require(appearance::benchmarkTypography("file:///mnt/onboard/kobalt-benchmark.kepub.epub")
-                            .value("font_pixels")
-                            .toInt()
-                    == defaultFontPixels(),
+    require(appearance::benchmarkTypography().value("font_pixels").toInt() == defaultFontPixels(),
             "Benchmark profile did not follow screen density");
+    {
+        // The saved state of the book that is opening.
+        const auto saved = qt::object({ { "fingerprint", "abc" },
+                                        { "position", "chapter-two" },
+                                        { "font_pixels", 44 },
+                                        { "line_spacing", 150 },
+                                        { "line_spacing_version", 1 },
+                                        { "dark_mode", true },
+                                        { "bold_reading", true },
+                                        { "word_spacing", 120 },
+                                        { "widows_orphans", true },
+                                        { "imported_native_location", "native" } });
+        OpeningJob job;
+        job.saved = saved;
+        job.nativeLocation = "host-location";
+
+        struct Start
+        {
+            bool restart;
+            QString initial;
+        };
+
+        const auto merge = [](OpeningJob &job, bool savedMatches) {
+            OpeningState state;
+            state.savedMatches = savedMatches;
+            mergeSavedState(job, state);
+            return Start{ state.restart, state.initial };
+        };
+        auto start = merge(job, true);
+        require(job.saved.value("position").toString() == "chapter-two"
+                        && job.saved.value("font_pixels").toInt() == 44
+                        && job.saved.value("fingerprint").toString() == "abc"
+                        && job.saved.value("dark_mode").toBool()
+                        && job.saved.value("imported_native_location").toString() == "native",
+                "A matching saved state lost its position, typography or display choices");
+        require(!start.restart && start.initial.isEmpty(),
+                "A saved position must win over the host position");
+
+        // Another version of the book keeps only what does not depend on its text.
+        job.saved = saved;
+        start = merge(job, false);
+        require(!job.saved.contains("position") && !job.saved.contains("font_pixels")
+                        && !job.saved.contains("fingerprint")
+                        && !job.saved.contains("imported_native_location"),
+                "A saved state of another book version kept its position or typography");
+        require(job.saved.value("dark_mode").toBool() && job.saved.value("bold_reading").toBool()
+                        && job.saved.value("word_spacing").toInt() == 120
+                        && job.saved.value("widows_orphans").toBool(),
+                "A saved state of another book version lost its display choices");
+        for (const auto *key : appearance::normalizationKeys)
+            require(job.saved.value(key).isBool(),
+                    "A merged saved state must carry every normalization rule");
+        require(!start.restart && start.initial == "host-location",
+                "An opening without a saved position must start at the host position");
+
+        // Book defaults come before the pinned appearance, so the pin wins.
+        job.saved = saved;
+        job.appearanceDefaults = appearance::bookDefaults({});
+        job.appearanceDefaults["margin_pixels"] = 70;
+        job.pinnedAppearance = qt::object(
+                { { "font_pixels", 52 }, { "margin_pixels", 30 }, { "dark_mode", false } });
+        start = merge(job, true);
+        require(job.saved.value("font_pixels").toInt() == 52
+                        && job.saved.value("margin_pixels").toInt() == 30
+                        && !job.saved.value("dark_mode").toBool()
+                        && job.saved.value("position").toString() == "chapter-two",
+                "A pinned appearance must replace saved and default values and keep the position");
+        job.pinnedAppearance = {};
+        job.saved = saved;
+        start = merge(job, true);
+        require(job.saved.value("margin_pixels").toInt() == 70
+                        && job.saved.value("font_pixels").toInt() == 44,
+                "Book defaults must set the margins and keep saved typography");
+
+        // An old line spacing is converted while merging.
+        job.appearanceDefaults = {};
+        job.saved = qt::object({ { "position", "chapter-two" }, { "line_spacing", 122 } });
+        start = merge(job, true);
+        require(job.saved.value("line_spacing").toInt() == 150
+                        && job.saved.value("line_spacing_version").toInt() == 1,
+                "An opening must migrate the old line spacing");
+
+        // A finished book and a host restart both begin at the start.
+        job.saved = saved;
+        job.saved["finished_position"] = "the-end";
+        start = merge(job, true);
+        require(start.restart && start.initial.isEmpty()
+                        && !job.saved.contains("imported_native_location")
+                        && job.saved.value("position").toString() == "chapter-two",
+                "A finished book must restart, drop the imported location and keep its position");
+        job.saved = qt::object({ { "imported_native_location", "native" } });
+        job.restartAtStart = true;
+        start = merge(job, false);
+        require(start.restart && start.initial.isEmpty()
+                        && !job.saved.contains("imported_native_location"),
+                "A host restart must ignore the host position");
+    }
     std::puts("PASS: appearance keys, copy, comparison and typography defaults");
     return 0;
 }

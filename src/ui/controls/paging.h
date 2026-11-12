@@ -19,7 +19,19 @@ class PagerBar : public QWidget
 public:
     PagerBar(QWidget *parent, const QString &prefix);
     ~PagerBar() override;
-    void setPage(int page, int count, const QString &label = {}, bool wrap = false);
+
+    // Modal cards reuse the preceding list's bottom rule at this boundary.
+    void setTopDivider(bool shown)
+    {
+        if (topDivider == shown)
+            return;
+        topDivider = shown;
+        arrange();
+        update();
+    }
+
+    void setPage(int page, int count, const QString &label = {}, bool wrap = false,
+                 const QRect &blank = {});
     // Coordinates in the pager's parent. Never reserve space or cover list rows.
     void setBlankArea(const QRect &bounds);
     // Resolve a user turn using the last presented page and list bounds.
@@ -33,10 +45,11 @@ protected:
 
 private:
     int page = 0, count = 1;
-    bool wrap = false;
+    bool wrap = false, topDivider = true;
     QPointer<QLabel> continuationHint;
     QRect blankArea;
     void updateHint();
+    void arrange();
 };
 
 class PageControls : public QWidget

@@ -16,6 +16,7 @@
 #include "document_cache.h"
 #include "font_weight.h"
 #include "render/page_refresh_regions.h"
+#include "render/page_content.h"
 #include "page_pixels.h"
 #include <QCryptographicHash>
 #include <QFileInfo>
@@ -181,15 +182,21 @@ private:
 class PageDrawBuffer : public LVColorDrawBuf
 {
 public:
-    PageDrawBuffer(QImage &image, bool dark, bool smooth,
+    PageDrawBuffer(QImage &image, bool dark, bool smooth, bool normalizeTextColors,
                    QMap<std::tuple<quintptr, int, int>, bool> *inversion = nullptr)
         : LVColorDrawBuf(image.width(), image.height(), image.bits(), 32),
           pageSize(image.size()),
           dark(dark),
+          normalizeTextColors(normalizeTextColors),
           inversion(inversion)
     {
         setInvertColors(dark);
         setSmoothScalingImages(smooth);
+    }
+
+    void SetTextColor(lUInt32 color) override
+    {
+        LVColorDrawBuf::SetTextColor(normalizeTextColors ? 0 : color);
     }
 
     bool hasImages = false, hasText = false;
@@ -215,7 +222,7 @@ public:
         // On preserved colored paper, keep the publisher's original contrast.
         const bool invertInk =
                 dark && (preserveContrast ? neutral : !neutral && !hasVisibleColor(color));
-        const lUInt32 ink = invertInk ? color ^ 0x00ffffffU : color;
+        const lUInt32 ink = normalizeTextColors ? 0 : invertInk ? color ^ 0x00ffffffU : color;
         LVColorDrawBuf::Draw(x, y, bitmap, width, height, &ink);
     }
 
@@ -274,22 +281,9 @@ private:
     QSize pageSize;
     bool imageRegionsFull = false;
     bool dark;
+    bool normalizeTextColors;
     QMap<std::tuple<quintptr, int, int>, bool> *inversion;
 };
-
-QString regionMetadata(const QVector<QRect> &regions)
-{
-    QJsonArray array;
-    for (const QRect &rect : regions) {
-        QJsonArray values;
-        values.append(rect.x());
-        values.append(rect.y());
-        values.append(rect.width());
-        values.append(rect.height());
-        array.append(values);
-    }
-    return QString::fromUtf8(QJsonDocument(array).toJson(QJsonDocument::Compact));
-}
 
 QVector<QRect> colorTileRegions(const QVector<uchar> &tiles, int columns, int rows,
                                 const QSize &size)
@@ -334,6 +328,7 @@ EngineDocument::EngineDocument(EngineFontInputs fonts) : fonts_(std::move(fonts)
 
 EngineDocument::~EngineDocument()
 {
+    searchText_.reset();
     sourceIndex_.reset();
     engine_.reset();
     source_.reset();
@@ -537,7 +532,10 @@ void EngineDocument::configure(QSize size, const QJsonObject &settings)
     appearance::migrateLineSpacing(saved);
     // Outline thickness must not affect layout-time italic overhang measurements.
     setExtraFontWeight(0);
+    searchText_.reset();
     sourceIndex_.reset();
+    contentsIndex_ = {};
+    graphIndex_ = {};
     engine_.reset();
     alternateViewport_ = {};
     layoutPpi_ = readingPpi.load();
@@ -546,8 +544,6 @@ void EngineDocument::configure(QSize size, const QJsonObject &settings)
     contents_.clear();
     graph_.clear();
     totalWords_ = -1;
-    contentsIndex_ = {};
-    graphIndex_ = {};
     nativeLocation_ = saved.value("imported_native_location").toString();
     cache_.clear();
     spareImage_ = {};
@@ -555,8 +551,10 @@ void EngineDocument::configure(QSize size, const QJsonObject &settings)
     size_ = size;
     darkMode_ = saved.value("dark_mode").toBool(false);
     imageInversion_.clear();
+    inpageFootnotes_ = saved.value("inpage_footnotes").toBool(false);
     hideNonlinearFragments_ = saved.value("hide_nonlinear_fragments").toBool(false);
     const auto normalization = appearance::normalizationSettings(saved);
+    normalizeTextColors_ = normalization.value("normalize_text_colors").toBool();
     normalizePageMargins_ = normalization.value("normalize_page_margins").toBool();
     reduceChapterSpacing_ = normalization.value("reduce_chapter_spacing").toBool();
     verticalSpacing_ = appearance::verticalSpacingMode(saved.value("vertical_justification"));
@@ -805,7 +803,7 @@ QImage EngineDocument::coverImage(QSize maximumSize, const QString &preferredPat
             return {};
         }
         image.fill(Qt::white);
-        PageDrawBuffer buffer(image, false, true);
+        PageDrawBuffer buffer(image, false, true, false);
         buffer.Draw(cover, 0, 0, size.width(), size.height(), false);
         // CREngine leaves the high byte unused; Qt RGB32 requires opaque pixels.
         const int width = image.width(), height = image.height();
@@ -893,16 +891,18 @@ bool EngineDocument::style(int pixels, int spacing, const QString &face, int mar
 bool EngineDocument::style(int pixels, int spacing, const QString &face, int margin,
                            const QString &alignment)
 {
-    return applyAppearance(kobalt::qt::object({ { "font_pixels", pixels },
-                                                { "line_spacing", spacing },
-                                                { "font_face", face },
-                                                { "margin_pixels", margin },
-                                                { "text_alignment", alignment } }));
+    return applyAppearance(
+            kobalt::appearance::Patch(kobalt::qt::object({ { "font_pixels", pixels },
+                                                           { "line_spacing", spacing },
+                                                           { "font_face", face },
+                                                           { "margin_pixels", margin },
+                                                           { "text_alignment", alignment } })));
 }
 
-bool EngineDocument::applyAppearance(const QJsonObject &settings, QSize size,
+bool EngineDocument::applyAppearance(const appearance::Patch &patch, QSize size,
                                      OpeningProgress progress)
 {
+    const auto &settings = patch.fields();
     const int pixels = settings.value("font_pixels").toInt(pixels_);
     const int spacing = settings.value("line_spacing").toInt(spacing_);
     const int paragraphSpacing = settings.contains("paragraph_spacing")
@@ -953,8 +953,11 @@ bool EngineDocument::applyAppearance(const QJsonObject &settings, QSize size,
     const auto alignment = settings.value("text_alignment").toString(alignment_);
     const auto hyphenation = settings.value("hyphenation").toString(hyphenation_);
     const bool dark = settings.value("dark_mode").toBool(darkMode_);
+    const bool inpageFootnotes = settings.value("inpage_footnotes").toBool(inpageFootnotes_);
     const bool hideNonlinear =
             settings.value("hide_nonlinear_fragments").toBool(hideNonlinearFragments_);
+    const bool normalizeTextColors =
+            settings.value("normalize_text_colors").toBool(normalizeTextColors_);
     const bool normalizePageMargins =
             settings.value("normalize_page_margins").toBool(normalizePageMargins_);
     const bool reduceChapterSpacing =
@@ -997,7 +1000,8 @@ bool EngineDocument::applyAppearance(const QJsonObject &settings, QSize size,
     const bool bionicChanged = bionic != bionic_;
     // Outline thickness changes pixels only. Keep the formatted page and its anchors.
     const bool thicknessChanged = weight != weight_;
-    const bool styled = beautifierInitials != beautifierInitials_
+    const bool styled = normalizeTextColors != normalizeTextColors_
+            || inpageFootnotes != inpageFootnotes_ || beautifierInitials != beautifierInitials_
             || beautifierSpacing != beautifierSpacing_ || beautifierIndent != beautifierIndent_
             || fallbackFaces != fallbackFaces_ || normalizePageMargins != normalizePageMargins_
             || reduceChapterSpacing != reduceChapterSpacing_ || wordSpacing != wordSpacing_
@@ -1013,8 +1017,10 @@ bool EngineDocument::applyAppearance(const QJsonObject &settings, QSize size,
     if (!verticalChanged && !styled && !resized && weight == weight_ && dark == darkMode_
         && hideNonlinear == hideNonlinearFragments_)
         return true;
-    if (styled || resized || verticalChanged)
+    if (styled || resized || verticalChanged) {
+        searchText_.reset();
         sourceIndex_.reset();
+    }
     const QString anchor = position();
     auto *document = engine_->getDocument();
     // Snapshots belong to this live publication and parser instance. Invalidate
@@ -1063,6 +1069,8 @@ bool EngineDocument::applyAppearance(const QJsonObject &settings, QSize size,
     darkMode_ = dark;
     activateFontParameters();
     hideNonlinearFragments_ = hideNonlinear;
+    normalizeTextColors_ = normalizeTextColors;
+    inpageFootnotes_ = inpageFootnotes;
     normalizePageMargins_ = normalizePageMargins;
     reduceChapterSpacing_ = reduceChapterSpacing;
     verticalSpacing_ = verticalSpacing;
@@ -1141,7 +1149,8 @@ bool EngineDocument::setThickness(int steps)
 {
     if (steps < 0 || steps > 12)
         return false;
-    return applyAppearance(kobalt::qt::object({ { "weight_steps", steps } }));
+    return applyAppearance(
+            kobalt::appearance::Patch(kobalt::qt::object({ { "weight_steps", steps } })));
 }
 
 bool EngineDocument::setWeight(int steps)
@@ -1149,8 +1158,8 @@ bool EngineDocument::setWeight(int steps)
     const auto axis = weightAxis();
     if (axis.available() && (steps < axis.minimum || steps > axis.maximum))
         return false;
-    return applyAppearance(
-            kobalt::qt::object({ { axis.available() ? "font_weight" : "weight_steps", steps } }));
+    return applyAppearance(kobalt::appearance::Patch(
+            kobalt::qt::object({ { axis.available() ? "font_weight" : "weight_steps", steps } })));
 }
 
 bool EngineDocument::setOpticalSize(double points)
@@ -1159,12 +1168,14 @@ bool EngineDocument::setOpticalSize(double points)
     if (!axis.available() || !std::isfinite(points)
         || (points < axis.minimum || points > axis.maximum) || points != std::floor(points))
         return false;
-    return applyAppearance(kobalt::qt::object({ { "font_optical_size", points } }));
+    return applyAppearance(
+            kobalt::appearance::Patch(kobalt::qt::object({ { "font_optical_size", points } })));
 }
 
 bool EngineDocument::setHyphenation(const QString &mode)
 {
-    return applyAppearance(kobalt::qt::object({ { "hyphenation", mode } }));
+    return applyAppearance(
+            kobalt::appearance::Patch(kobalt::qt::object({ { "hyphenation", mode } })));
 }
 
 void EngineDocument::applyPublisherFontFallbacks()
@@ -1199,6 +1210,11 @@ void EngineDocument::applyStyleSheet()
     if (normalizePageMargins_) {
         overrides = "html,body,DocFragment { margin:0 !important; padding:0 !important; }\n";
     }
+    // Normalize ink in PageDrawBuffer so SVG currentColor keeps its publisher
+    // value. Clear CSS backgrounds outside SVG so theme ink stays readable.
+    if (normalizeTextColors_)
+        overrides +=
+                "*:not(svg, svg *), *:not(svg, svg *)::before, *:not(svg, svg *)::after, *:not(svg, svg *)::first-letter { background-color:transparent !important; }\n";
     overrides +=
             "svg[data-kobalt-fullpage=\"1\"] { width:100% !important; height:100vh !important; }\n";
     // A one-screen-pixel boundary stops a leading illustration's margin from
@@ -1260,6 +1276,58 @@ void EngineDocument::applyStyleSheet()
         overrides +=
                 QString("[data-kobalt-prose=\"1\"], [data-kobalt-prose=\"1\"] span { text-align:%1 !important; text-align-last:auto !important; }")
                         .arg(alignment_);
+    if (inpageFootnotes_) {
+        // Only explicit note bodies become page notes. Popup heuristics also
+        // accept numeric links, which must not move ordinary chapter content.
+        overrides += R"css(
+*[type~="note"]:not(a), *[type~="footnote"]:not(a),
+*[type~="endnote"]:not(a), *[type~="rearnote"]:not(a),
+*[role~="doc-note"]:not(a), *[role~="doc-footnote"]:not(a),
+*[role~="doc-endnote"]:not(a), *[role~="doc-rearnote"]:not(a),
+._idFootnotes > ._idFootnote:not(a), [data-kobalt-page-note="start"] {
+    -cr-hint: footnote-inpage;
+    font-size: 0.8rem;
+}
+[data-kobalt-page-note="extend"] { -cr-hint: extend-footnote-inpage; }
+/* Dedicated note groups must not paint their original box around moved notes. */
+[data-kobalt-page-note="box"], ._idFootnotes {
+    -cr-hint: late;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: none !important;
+    background-color: transparent !important;
+}
+[data-kobalt-page-note="box"] > h1, [data-kobalt-page-note="box"] > h2,
+[data-kobalt-page-note="box"] > h3, [data-kobalt-page-note="box"] > h4,
+[data-kobalt-page-note="box"] > h5, [data-kobalt-page-note="box"] > h6 {
+    display: none !important;
+}
+* {
+    -cr-hint: late;
+    -cr-only-if: inside-inpage-footnote;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: none !important;
+    background-color: transparent !important;
+    text-indent: 0 !important;
+}
+p + p, ul, ol, blockquote, pre {
+    -cr-hint: late;
+    -cr-only-if: inside-inpage-footnote;
+    margin-top: 0.4em !important;
+}
+ul, ol {
+    -cr-hint: late;
+    -cr-only-if: inside-inpage-footnote;
+    padding-left: 1.4em !important;
+}
+blockquote {
+    -cr-hint: late;
+    -cr-only-if: inside-inpage-footnote;
+    margin-left: 1em !important;
+}
+)css";
+    }
     engine_->setStyleSheet(lString8(readerHtmlCss) + lString8(readerOverridesCss)
                            + lString8(overrides.toUtf8().constData()) + lString8("\n")
                            + lString8(userStyleSheet_.constData()));
@@ -1267,7 +1335,7 @@ void EngineDocument::applyStyleSheet()
 
 void EngineDocument::resize(QSize size)
 {
-    applyAppearance({}, size);
+    applyAppearance(kobalt::appearance::Patch(QJsonObject{}), size);
 }
 
 void EngineDocument::prepareDamage(int fromPage, int toPage)
@@ -1348,7 +1416,7 @@ void EngineDocument::trim()
 
 void EngineDocument::setDarkMode(bool enabled)
 {
-    applyAppearance(kobalt::qt::object({ { "dark_mode", enabled } }));
+    applyAppearance(kobalt::appearance::Patch(kobalt::qt::object({ { "dark_mode", enabled } })));
 }
 
 bool EngineDocument::loadNextImage()
@@ -1484,7 +1552,7 @@ QImage EngineDocument::image(int pageNumber)
         result = QImage(size_, QImage::Format_RGB32);
     if (result.isNull())
         return {};
-    PageDrawBuffer buffer(result, darkMode_, true, &imageInversion_);
+    PageDrawBuffer buffer(result, darkMode_, true, normalizeTextColors_, &imageInversion_);
     if (columns_ == 1) {
         engine_->drawColumn(buffer, pageNumber, 0);
     } else {
@@ -1494,7 +1562,7 @@ QImage EngineDocument::image(int pageNumber)
             return {};
         QPainter painter(&result);
         for (int i = 0; i < columns_; ++i) {
-            PageDrawBuffer part(column, darkMode_, true, &imageInversion_);
+            PageDrawBuffer part(column, darkMode_, true, normalizeTextColors_, &imageInversion_);
             engine_->drawColumn(part, pageNumber, i);
             buffer.hasImages |= part.hasImages;
             buffer.hasText |= part.hasText;
@@ -1516,17 +1584,16 @@ QImage EngineDocument::image(int pageNumber)
     hasColor = normalizePagePixels(result, darkMode_, boundedTiles ? &colorTiles : nullptr,
                                    tileColumns, format == QImage::Format_RGBX8888);
     usePageFormat(result, format);
-    result.setText("kobalt.image_regions", regionMetadata(buffer.imageRegions));
-    result.setText("kobalt.image_only",
-                   buffer.imageRegions.size() == 1 && !buffer.hasText ? "true" : "false");
-    result.setText(
-            "kobalt.colour_regions",
-            regionMetadata(
-                    hasColor ? (boundedTiles ? colorTileRegions(colorTiles, tileColumns, tileRows,
-                                                                result.size())
-                                             : QVector<QRect>{ QRect(QPoint(0, 0), result.size()) })
-                             : QVector<QRect>{}));
-    result.setText("kobalt.animation_text_only", !buffer.hasImages && !hasColor ? "true" : "false");
+    PageContent content;
+    content.images = { true, buffer.imageRegions };
+    content.imageOnly = buffer.imageRegions.size() == 1 && !buffer.hasText;
+    content.colours.known = true;
+    content.colours.rectangles = hasColor
+            ? (boundedTiles ? colorTileRegions(colorTiles, tileColumns, tileRows, result.size())
+                            : QVector<QRect>{ QRect(QPoint(0, 0), result.size()) })
+            : QVector<QRect>{};
+    content.textOnly = !buffer.hasImages && !hasColor;
+    setPageContent(result, content);
     // A turn can skip several physical pages of non-linear text.
     const int current = page();
     if (pageNumber == current || pageNumber == turnTarget(current, -1)
@@ -1573,14 +1640,30 @@ const EngineDocument::ChapterIndex &EngineDocument::chapterIndex(ChapterIndex &i
     index.layout = layout;
     index.toc = toc;
     index.source = source;
-    index.links = toc ? tocChapters() : chapterPages(source);
-    auto *doc = engine_->getDocument();
-    QVector<ldomXPointerEx> pointers(index.links.size());
+    // Word counting adds lengths to the same TOC. Reuse its positions and
+    // ordering instead of resolving every XPath again for the Stats graph.
+    if (!toc && &index != &contentsIndex_ && contentsIndex_.layout == layout
+        && contentsIndex_.positions && source.size() == contentsIndex_.links.size()
+        && std::equal(source.cbegin(), source.cend(), contentsIndex_.links.cbegin(),
+                      [](const ChapterLink &a, const ChapterLink &b) {
+                          return a.position == b.position;
+                      })) {
+        index.links = source;
+        for (int i = 0; i < index.links.size(); ++i)
+            index.links[i].page = contentsIndex_.links[i].page;
+        index.positions = contentsIndex_.positions;
+        index.order = contentsIndex_.order;
+        index.sorted = contentsIndex_.sorted;
+        return index;
+    }
+    index.positions = std::make_shared<ChapterPositions>();
+    index.links =
+            toc ? tocChapters(index.positions.get()) : chapterPages(source, index.positions.get());
+    const auto &pointers = *index.positions;
     index.sorted = true;
     for (int i = 0; i < index.links.size(); ++i) {
         if (index.links[i].page < 0 || index.links[i].page >= pages())
             continue;
-        pointers[i] = ldomXPointerEx(doc->createXPointer(cre(index.links[i].position)));
         if (pointers[i].isNull())
             continue;
         if (pointers[i].isElement() && pointers[i].getOffset() > 0)
@@ -1596,21 +1679,25 @@ const EngineDocument::ChapterIndex &EngineDocument::chapterIndex(ChapterIndex &i
     return index;
 }
 
-QVector<ChapterLink> EngineDocument::tocChapters() const
+QVector<ChapterLink> EngineDocument::tocChapters(ChapterPositions *positions) const
 {
     QVector<ChapterLink> result;
     if (!engine_)
         return result;
     std::function<void(LVTocItem *, int)> visit = [&](LVTocItem *item, int depth) {
-        if (!item || depth > 32 || result.size() >= 1024)
+        if (!item || depth > 32 || result.size() >= maximumChapterEntries)
             return;
-        for (int i = 0; i < item->getChildCount() && result.size() < 1024; ++i) {
+        for (int i = 0; i < item->getChildCount() && result.size() < maximumChapterEntries; ++i) {
             auto *child = item->getChild(i);
             auto pointer = child->getXPointer();
             const int start = pointer.isNull() || pointer.toPoint().y < 0
                     ? -1
                     : engine_->getBookmarkPage(pointer);
-            result.append({ qstring(child->getName()), qstring(pointer.toString()), start, depth });
+            result.append({ qstring(child->getName()),
+                            pointer.isNull() ? QString() : qstring(child->getPath()), start,
+                            depth });
+            if (positions)
+                positions->append(ldomXPointerEx(pointer));
             visit(child, depth + 1);
         }
     };
@@ -1622,6 +1709,10 @@ void EngineDocument::setChapters(QVector<ChapterLink> contents, QVector<ChapterL
 {
     if (!engine_)
         return;
+    if (contents.size() > maximumChapterEntries)
+        contents.resize(maximumChapterEntries);
+    if (graph.size() > maximumChapterEntries)
+        graph.resize(maximumChapterEntries);
     // An unresolved native list must not hide the publication's usable TOC.
     // Keep partially resolved lists and the native word-count graph intact.
     if (std::none_of(contents.cbegin(), contents.cend(),
@@ -1632,7 +1723,8 @@ void EngineDocument::setChapters(QVector<ChapterLink> contents, QVector<ChapterL
     graph_ = std::move(graph);
 }
 
-QVector<ChapterLink> EngineDocument::chapterPages(QVector<ChapterLink> links) const
+QVector<ChapterLink> EngineDocument::chapterPages(QVector<ChapterLink> links,
+                                                  ChapterPositions *positions) const
 {
     if (!engine_)
         return {};
@@ -1640,6 +1732,7 @@ QVector<ChapterLink> EngineDocument::chapterPages(QVector<ChapterLink> links) co
         auto pointer = engine_->getDocument()->createXPointer(cre(link.position));
         link.page = pointer.isNull() || pointer.toPoint().y < 0 ? -1
                                                                 : engine_->getBookmarkPage(pointer);
+        positions->append(ldomXPointerEx(pointer));
     }
     return links;
 }
@@ -1697,18 +1790,22 @@ ChapterSelection EngineDocument::chapterAround(const QVector<ChapterLink> &links
     if (current.isNull())
         return result;
     // Lists from chapters() and chapterGraph() for this layout are sorted
-    // already, so a binary search resolves only a few entries.
+    // already, so a binary search compares only a few retained positions.
     const auto layout = layoutSignature();
+    const ChapterPositions *cachedPositions = nullptr;
     for (const auto *index : { &contentsIndex_, &graphIndex_ }) {
-        if (!index->sorted || index->layout != layout
-            || index->links.constData() != links.constData() || index->links.size() != links.size())
+        if (index->layout != layout || index->links.constData() != links.constData()
+            || index->links.size() != links.size())
             continue;
+        cachedPositions = index->positions.get();
+        if (!index->sorted)
+            break;
         const auto &order = index->order;
         int low = 0, high = order.size();
         bool resolved = true;
         while (low < high) {
             const int middle = low + (high - low) / 2;
-            const ldomXPointerEx pointer(doc->createXPointer(cre(links[order[middle]].position)));
+            const auto &pointer = index->positions->at(order[middle]);
             if (pointer.isNull()) {
                 resolved = false;
                 break;
@@ -1730,7 +1827,9 @@ ChapterSelection EngineDocument::chapterAround(const QVector<ChapterLink> &links
     for (int i = 0; i < links.size(); ++i) {
         if (links[i].page < 0 || links[i].page >= pages())
             continue;
-        const ldomXPointerEx pointer(doc->createXPointer(cre(links[i].position)));
+        const auto pointer = cachedPositions
+                ? cachedPositions->at(i)
+                : ldomXPointerEx(doc->createXPointer(cre(links[i].position)));
         if (pointer.isNull())
             continue;
         // Page numbers cannot distinguish two chapter starts on the same page.
@@ -1751,42 +1850,16 @@ ChapterSelection EngineDocument::chapterAround(const QVector<ChapterLink> &links
 ChapterProgress EngineDocument::chapterProgress() const
 {
     const auto links = chapters();
-    if (!contents_.isEmpty()) {
-        const auto selected = chapterSelection(links);
-        if (selected.current >= 0) {
-            const auto title = links[selected.current].title.trimmed();
-            return { title.isEmpty() ? strings::get("reader.untitled_chapter") : title,
-                     selected.page, selected.pages };
-        }
-        if (selected.next >= 0)
-            return { strings::get("reader.front_matter"), page() + 1,
-                     qMax(1, chapterEndPage(links[selected.next])) };
-        return {};
+    const auto selected = chapterSelection(links);
+    if (selected.current >= 0) {
+        const auto title = links[selected.current].title.trimmed();
+        return { title.isEmpty() ? strings::get("reader.untitled_chapter") : title, selected.page,
+                 selected.pages };
     }
-    const int current = page();
-    int start = -1;
-    const ChapterLink *next = nullptr;
-    ChapterProgress progress;
-    bool found = false;
-    for (const auto &chapter : links) {
-        if (chapter.page < 0 || chapter.page >= pages())
-            continue;
-        found = true;
-        if (chapter.page <= current && chapter.page >= start) {
-            start = chapter.page;
-            progress.title = chapter.title.trimmed();
-        } else if (chapter.page > current && (!next || chapter.page < next->page))
-            next = &chapter;
-    }
-    if (!found)
-        return progress;
-    if (progress.title.isEmpty())
-        progress.title = start < 0 ? strings::get("reader.front_matter")
-                                   : strings::get("reader.untitled_chapter");
-    const int first = qMax(0, start);
-    progress.page = current - first + 1;
-    progress.pages = (next ? chapterEndPage(*next) : pages()) - first;
-    return progress;
+    if (selected.next >= 0)
+        return { strings::get("reader.front_matter"), page() + 1,
+                 qMax(1, chapterEndPage(links[selected.next])) };
+    return {};
 }
 
 QString EngineDocument::textFontFace() const
@@ -1852,7 +1925,9 @@ QJsonObject EngineDocument::state() const
               { "hyphenation", hyphenation_ },
               { "dark_mode", darkMode_ },
               { "hide_nonlinear_fragments", hideNonlinearFragments_ },
+              { "inpage_footnotes", inpageFootnotes_ },
               { "normalize_page_margins", normalizePageMargins_ },
+              { "normalize_text_colors", normalizeTextColors_ },
               { "reduce_chapter_spacing", reduceChapterSpacing_ },
               { "vertical_justification", verticalSpacing_ },
               { "vertical_spacing_scope", verticalSpacingScope_ },

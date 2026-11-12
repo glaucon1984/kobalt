@@ -10,6 +10,7 @@
 #include "ui/dialogs/modals.h"
 #include <functional>
 #include "platform/api/keyboard_controller.h"
+#include "storage/custom_pins.h"
 
 namespace kobalt {
 struct BookmarkRow
@@ -33,12 +34,17 @@ public:
     explicit BookmarkList(QWidget *parent, KeyboardFactory keyboard = {});
     ~BookmarkList() override;
 
-    QWidget *pinDialog() const { return pinPopup.data(); }
+    QWidget *pinDialog() const { return pinHelp ? pinHelp.data() : pinPopup.data(); }
 
     std::function<bool(const QString &, const QString &, const QString &)> pinRequested;
     void showBookmarks(QVector<BookmarkRow> rows);
     void showAnnotations(QVector<BookmarkRow> rows, bool loading = false);
     void setSortOrder(const QString &order);
+    void setFeatures(bool bookmarks, bool annotations, bool words = false);
+
+    void setCustomPins(const storage::CustomPins &pins) { customPins = pins; }
+
+    void setCustomPinDirectory(const QString &directory) { customPinDirectory = directory; }
 
     QString sortOrder() const { return order; }
 
@@ -46,6 +52,18 @@ public:
     void setExcerptFont(const QString &family);
 
     bool annotationsShown() const { return annotations; }
+
+    // The Words tab shows `view` below this list's strip. The strip's action
+    // cell then opens every book's words.
+    void setWordsView(QWidget *view);
+    void showWords();
+    // A child panel that covers the whole list, such as every book's words,
+    // and follows its size.
+    void addCoveringPanel(QWidget *panel);
+
+    bool wordsShown() const { return words; }
+
+    std::function<void()> wordsRequested, allWordsRequested;
 
     std::function<void(bool)> tabRequested;
     std::function<void(const QString &)> selected, removeRequested;
@@ -76,12 +94,19 @@ private:
     KeyboardFactory makeKeyboard;
     std::unique_ptr<KeyboardController> keyboard;
     QPointer<ui::ModalOverlay> pinPopup;
+    QPointer<ui::ModalOverlay> pinHelp;
+    void showPinHelp();
+    void showPinErrors();
+    void closePinHelp();
     void openPin(const BookmarkRow &row);
     void openRowActions(const BookmarkRow &row);
     void closePin();
     void placePin();
-    QPushButton *bookmarksTab, *annotationsTab;
-    ui::CellButton *sortButton;
+    QPushButton *bookmarksTab, *annotationsTab, *wordsTab = nullptr;
+    QWidget *wordsView = nullptr;
+    QVector<QPointer<QWidget>> coveringPanels;
+    bool words = false;
+    ui::CaptionDropdown *sortButton;
     ui::CellButton *moreButton;
     QPointer<ui::ModalOverlay> sortPopup;
     void openSort();
@@ -94,11 +119,12 @@ private:
     bool annotations = false;
     bool loading = false;
     QString excerptFamily;
+    storage::CustomPins customPins;
+    QString customPinDirectory = QStringLiteral("custom-pins/");
     int listTop() const;
     int rowHeight() const;
     QFont excerptFont() const;
-    QLabel *summary, *pageHeading, *empty, *emptyHint;
-    ui::ListHeader *listHeader;
+    QLabel *empty, *emptyHint;
     ui::CellButton *close;
     ui::PagerBar *pager;
     int page = 0, rows = 1;

@@ -219,29 +219,37 @@ public:
     bool takeChange() override {
         return std::exchange(changed, false);
     }
-    bool write(const ReadingProgress &expected, const QString &location, double, bool finished,
-               const ReadingActivity &activity, ReadingProgress *verified, QString *error) override {
-        auto fail = [&](const QString &message) {
+    // Every book here is a plain EPUB: a position the library cannot store (no CFI for it) still
+    // gets its page counts, time and status written, and the row keeps its own position.
+    bool allowsUnmappedPosition() const override {
+        return true;
+    }
+    // The result says how far the save got: nothing was written (the database could not be
+    // opened or read, or the row moved under the reader), or a write was attempted and could
+    // not be confirmed.
+    NativeSaveResult write(const ReadingProgress &expected, const QString &location, double, bool finished,
+                           const ReadingActivity &activity) override {
+        using Result = NativeSaveResult (*)(QString);
+        auto fail = [&](Result kind, const QString &message) {
             ++consecutiveErrors;
             qWarning("kobalt-pb: library progress NOT written: %s%s", qPrintable(message),
                      consecutiveErrors >= 3 ? " (giving up for this book)" : "");
-            if (error)
-                *error = message;
-            return false;
+            return kind(message);
         };
         QElapsedTimer clock;
         clock.start();
         Connection connection;
         if (!connection.ok())
-            return fail(connection.error());
+            return fail(NativeSaveResult::unavailable, connection.error());
         QString failure;
         const Row before = readRow(connection.db, book, profile, &failure);
         if (!failure.isEmpty())
-            return fail(failure);
+            return fail(NativeSaveResult::unavailable, failure);
         // As on Kobo: the row must still be the one the reader last saw; a newer position
         // (PBReader moved the book) is offered as a choice first.
         if (expected.valid ? !(snapshot(identity, before) == expected) : before.exists)
-            return fail(strings::get("error.nickel_progress_changed_before_saving"));
+            return fail(NativeSaveResult::progressChanged,
+                        strings::get("error.nickel_progress_changed_before_saving"));
         backupOnce(connection.db);
         const qint64 now = QDateTime::currentSecsSinceEpoch();
         Row row = before;
@@ -255,28 +263,28 @@ public:
             row.positionTs = qMax(now, expected.modified / 1000 + 1);
         }
         if (!writeRow(connection.db, book, profile, row, withPosition, &failure))
-            return fail(failure);
+            return fail(NativeSaveResult::unverified, failure);
         const Row after = readRow(connection.db, book, profile, &failure);
         if (!failure.isEmpty())
-            return fail(failure);
+            return fail(NativeSaveResult::unverified, failure);
         const auto actual = snapshot(identity, after);
         if (!actual.valid || (withPosition && actual.location != location))
-            return fail(strings::get("error.nickel_persistence_could_not_be_verified_local_position_was_retain"));
+            return fail(NativeSaveResult::unverified,
+                        strings::get("error.nickel_persistence_could_not_be_verified_local_position_was_retain"));
         consecutiveErrors = 0;
-        *verified = actual;
         qInfo("kobalt-pb: library progress written: book %lld profile %d page %d/%d%s%s%s in %lld ms",
               static_cast<long long>(book), profile, activity.page + 1, activity.pages, finished ? ", completed" : "",
               withPosition ? ", position " : ", no position", withPosition ? qPrintable(location) : "",
               static_cast<long long>(clock.elapsed()));
-        return true;
+        return NativeSaveResult::verified(actual, !withPosition);
     }
     // As on Kobo: a finished book opened again is being read. Only the flag changes, so the row
     // stays the one the reader saw at open apart from the status ReadingBook now expects.
-    bool markReading() override {
+    NativeActivityResult markReading() override {
         mainthread::BlockingOperation operation("library-opening-status");
         auto fail = [](const QString &message) {
             qWarning("kobalt-pb: library status NOT reset: %s", qPrintable(message));
-            return false;
+            return NativeActivityResult::Failed;
         };
         Connection connection;
         if (!connection.ok())
@@ -286,14 +294,14 @@ public:
         if (!failure.isEmpty())
             return fail(failure);
         if (!row.completed)
-            return true;
+            return NativeActivityResult::Completed;
         backupOnce(connection.db);
         row.completed = 0;
         if (!writeRow(connection.db, book, profile, row, false, &failure))
             return fail(failure);
         qInfo("kobalt-pb: library status reset: book %lld profile %d is no longer completed",
               static_cast<long long>(book), profile);
-        return true;
+        return NativeActivityResult::Completed;
     }
     // Kobalt's local pace estimator, as the standalone reader keeps it, with this bridge's own
     // active-time clock (ReadingBook runs it only without a bridge).
@@ -313,6 +321,11 @@ public:
         }
         speed.pause();
         saveSpeed(false);
+    }
+    // No activity recorder of the firmware's to wait for: the pace record is saved here.
+    void finishReading(std::function<void(NativeActivityResult)> done) override {
+        stopReading();
+        done(NativeActivityResult::Completed);
     }
 
 private:

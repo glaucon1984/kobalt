@@ -39,30 +39,27 @@ protected:
         const int visible = qMin(count, int(chapters.size()) - first);
         if (visible <= 0)
             return;
-        // One scale for the whole book, so a chapter keeps its height on every
-        // page. A single outlier is capped instead of flattening the others.
-        QVector<qint64> counts;
+        // Use the longest chapter in the whole book on every graph page.
+        // Long chapters must keep their proportions, even beside short ones.
         qint64 maximum = 1;
         for (const auto &chapter : chapters)
-            if (chapter.words > 0) {
-                counts.append(chapter.words);
-                maximum = qMax(maximum, chapter.words);
-            }
-        std::sort(counts.begin(), counts.end());
-        const double cap = counts.isEmpty()
-                ? double(maximum)
-                : double(counts[counts.size() / 2]) * chapters::scaleCap;
-        const double scale = qMax(1.0, qMin(double(maximum), cap));
+            maximum = qMax(maximum, chapter.words);
         const int chart = barsHeight;
-        const int barWidth = qBound(1, (width() - (visible - 1) * gap) / visible,
+        // Reserve a full page's columns even on the last page. A short book
+        // still centers its own columns; a paged book keeps their positions.
+        const int columns = qMin(count, int(chapters.size()));
+        const int barWidth = qBound(1, (width() - (columns - 1) * gap) / columns,
                                     int(chapters::maximumBarWidth));
-        const int used = visible * barWidth + (visible - 1) * gap;
+        const int used = columns * barWidth + (columns - 1) * gap;
         const int offset = (width() - used) / 2;
         auto left = [&](int index) { return offset + (index - first) * (barWidth + gap); };
         for (int i = first; i < first + visible; ++i) {
             const qint64 words = qMax<qint64>(0, chapters[i].words);
-            const bool capped = words > scale;
-            const int height = capped ? chart : qMax(2, int(double(words) * chart / scale));
+            // Keep short chapters visible without letting the minimum exceed
+            // the space left for bars on a short screen.
+            const int height = qMin(chart,
+                                    qMax(int(chapters::minimumBarHeight),
+                                         int(double(words) / double(maximum) * chart)));
             const QRect bar(left(i), chart - height, barWidth, height);
             if (selection.current >= 0 && i < selection.current) {
                 painter.fillRect(bar, ink);
@@ -157,6 +154,10 @@ public:
             label->setAlignment(Qt::AlignLeft | Qt::AlignTop);
         for (auto *label : { unit, detail }) {
             label->setTextFormat(Qt::PlainText);
+            // twoLines() breaks a long unit or detail with '\n'. Only the
+            // wrapped painting turns it into a line; the single-line painting
+            // drew it as a missing glyph.
+            label->setWordWrap(true);
             ui::readerStyle(label,
                             ui::styles::font(chapters::unitText)
                                     + "background:transparent;color:palette(placeholder-text);");
@@ -269,17 +270,25 @@ ChapterGraph::ChapterGraph(QWidget *parent) : Panel(parent, Qt::BottomEdge)
     chapterTitle->setTextFormat(Qt::PlainText);
     ui::readerStyle(chapterTitle, ui::styles::font(chrome::labelText) + "background:transparent;");
     bars = new ChapterBars(this);
+    mode = new ui::CellButton(ui::ControlIcon::ZoomOut, this);
+    mode->setObjectName("rrGraphMode");
+    mode->setRule(ui::Edges(Qt::LeftEdge) | Qt::BottomEdge);
+    connect(mode, &QPushButton::clicked, this, [this] {
+        setDense(!dense);
+        if (denseChanged)
+            denseChanged(dense);
+    });
     pager = new ui::PagerBar(this, "rrGraph");
     pager->previous->setAccessibleName(strings::get("chapter_contents.previous_chapters"));
     pager->next->setAccessibleName(strings::get("chapter_contents.next_chapters"));
     connect(pager->previous, &QPushButton::clicked, this, [this] {
-        first = qMax(0, first - capacity());
+        anchor = qMax(0, (graphPage() - 1) * capacity());
         redraw(true);
         if (changed)
             changed();
     });
     connect(pager->next, &QPushButton::clicked, this, [this] {
-        first += capacity();
+        anchor = (graphPage() + 1) * capacity();
         redraw(true);
         if (changed)
             changed();
@@ -320,12 +329,13 @@ void ChapterGraph::setChapterNumber(int number, int count)
 }
 
 void ChapterGraph::setReading(int minutes, qint64 total, qint64 chapterMilliseconds,
-                              qint64 bookMilliseconds)
+                              qint64 bookMilliseconds, int pageTurns)
 {
     if (this->minutes == minutes && words == total && chapterTime == chapterMilliseconds
-        && bookTime == bookMilliseconds)
+        && bookTime == bookMilliseconds && this->pageTurns == pageTurns)
         return;
     this->minutes = minutes;
+    this->pageTurns = pageTurns;
     words = total;
     chapterTime = chapterMilliseconds;
     bookTime = bookMilliseconds;
@@ -386,7 +396,8 @@ void ChapterGraph::refreshCells()
     bookCell->percent->setAccessibleName(
             strings::get("chapter_graph.book_progress").arg(bookValue));
     sessionCell->set(QString::number(qMax(0, minutes)), strings::get("stats.minutes"),
-                     strings::get("stats.since_opening"));
+                     strings::get(pageTurns == 1 ? "stats.page_turn" : "stats.page_turns")
+                             .arg(qMax(0, pageTurns)));
 }
 
 void ChapterGraph::setDense(bool value)
@@ -394,7 +405,7 @@ void ChapterGraph::setDense(bool value)
     if (dense == value)
         return;
     dense = value;
-    first = qMax(0, selection.current) / capacity() * capacity();
+    anchor = qMax(0, selection.current);
     redraw();
 }
 
@@ -421,7 +432,7 @@ bool ChapterGraph::paged() const
 
 int ChapterGraph::graphPage() const
 {
-    return first / capacity();
+    return anchor / capacity();
 }
 
 int ChapterGraph::graphPages() const
@@ -451,13 +462,13 @@ void ChapterGraph::setData(QVector<ChapterLink> chapters, ChapterSelection selec
     this->error = error;
     arrange();
     if (moved)
-        first = qMax(0, selection.current) / capacity() * capacity();
+        anchor = qMax(0, selection.current);
     redraw();
 }
 
 void ChapterGraph::open()
 {
-    first = qMax(0, selection.current) / capacity() * capacity();
+    anchor = qMax(0, selection.current);
     redraw();
     show();
     raise();
@@ -475,15 +486,49 @@ int ChapterGraph::chartTop() const
     return topPadding + chapters::rowHeight;
 }
 
+bool ChapterGraph::inlinePager() const
+{
+    const int minimumChart = chapters::chartHeight - chapters::barsHeight + 2;
+    // A separate pager would push the chapter row under the top toolbar on
+    // a landscape phone. Its wide row has room beside the chapter instead.
+    return paged() && width() >= ui::px(1200) && availableHeight > 0
+            && availableHeight
+            < chartTop() + minimumChart + chapters::cellHeight + chrome::actionHeight;
+}
+
+int ChapterGraph::pagerHeight() const
+{
+    return paged() && !inlinePager() ? int(chrome::actionHeight) : 0;
+}
+
 int ChapterGraph::chartHeight() const
 {
+    const int base = chapters::chartHeight;
     if (availableHeight <= 0)
-        return chapters::chartHeight;
+        return base;
     const int room = availableHeight - topPadding - chapters::rowHeight - chapters::cellHeight
-            - (paged() ? int(chrome::actionHeight) : 0);
-    // Keep bars at least a third of their design height.
-    const int least = chapters::chartHeight - chapters::barsHeight * 2 / 3;
-    return qBound(least, room, int(chapters::chartHeight));
+            - pagerHeight();
+    // A larger physical short edge earns some extra bar height. Wide phones
+    // and six-inch screens in landscape keep their existing chart size.
+    const int shortEdge =
+            qMin(width(), parentWidget() ? parentWidget()->height() : availableHeight);
+    const int growth = qBound(0, (shortEdge - int(chapters::growthShortEdge)) / 2,
+                              int(chapters::maximumGrowth));
+    QVector<qint64> lengths;
+    for (const auto &chapter : chapters)
+        if (chapter.words > 0)
+            lengths.append(chapter.words);
+    std::sort(lengths.begin(), lengths.end());
+    // All pages use the same book-wide distribution. Uneven books benefit
+    // most from the extra resolution, without taking all the exposed paper.
+    const double spread = lengths.isEmpty()
+            ? 1.0
+            : qBound(1.0, double(lengths.last()) / double(lengths[lengths.size() / 2]), 3.0);
+    const int extra =
+            qMin(int(growth * spread / 3), qMax(0, room - base - int(chapters::exposedPaper)));
+    // Leave the text and cells intact when only a very short chart fits.
+    const int least = base - chapters::barsHeight + 2;
+    return qBound(least, room, base + extra);
 }
 
 void ChapterGraph::paintEvent(QPaintEvent *event)
@@ -492,7 +537,7 @@ void ChapterGraph::paintEvent(QPaintEvent *event)
     QPainter painter(this);
     const int border = ui::metrics::control::border;
     painter.fillRect(0, chartTop() - border, width(), border, ui::dividerColor(this));
-    const int cells = chartTop() + chartHeight() + (paged() ? chrome::actionHeight : 0);
+    const int cells = chartTop() + chartHeight() + pagerHeight();
     painter.fillRect(0, cells - border, width(), border, ui::dividerColor(this));
     for (int column = 1; column < 3; ++column)
         painter.fillRect(width() * column / 3, cells, border, height() - cells,
@@ -502,29 +547,52 @@ void ChapterGraph::paintEvent(QPaintEvent *event)
 void ChapterGraph::arrange()
 {
     const int inner = qMax(1, width() - 2 * chrome::inset);
+    const int rowInner = qMax(1, inner - int(chrome::cellWidth));
     const int chart = chartHeight();
-    const int requiredHeight = topPadding + chapters::rowHeight + chart + chapters::cellHeight
-            + (paged() ? chrome::actionHeight : 0);
-    if (height() != requiredHeight)
+    const int requiredHeight =
+            topPadding + chapters::rowHeight + chart + chapters::cellHeight + pagerHeight();
+    if (height() != requiredHeight) {
+        const int bottom = geometry().bottom();
         resize(width(), requiredHeight);
+        if (isVisible())
+            move(x(), bottom - height() + 1);
+    }
     const QFont captionMetrics(ui::captionFont()),
             titleMetrics(ui::interfaceFont(chrome::labelText));
-    chapterCaption->setGeometry(chrome::inset, topPadding + chapters::captionTop, inner / 2,
-                                ui::interfaceLineHeight(captionMetrics));
-    chapterPage->setGeometry(chrome::inset + inner / 2, topPadding + chapters::captionTop,
-                             inner - inner / 2, ui::interfaceLineHeight(captionMetrics));
-    // The title uses the whole row and elides only when it is longer than that.
-    chapterTitle->setGeometry(chrome::inset, topPadding + chapters::titleTop, inner,
-                              ui::interfaceLineHeight(titleMetrics));
-    chapterTitle->setText(ui::elideInterfaceText(title, chapterTitle->font(), inner));
+    const int captionHeight = ui::interfaceLineHeight(captionMetrics);
+    const int titleHeight = ui::interfaceLineHeight(titleMetrics);
+    const int headingTop = topPadding
+            + (chapters::rowHeight - captionHeight - chapters::headingGap - titleHeight) / 2;
+    const int pageWidth =
+            qMin(rowInner / 2, ui::interfaceTextWidth(chapterPage->text(), captionMetrics));
+    const int pagerWidth = inlinePager() ? 3 * int(chrome::cellWidth) : 0;
+    const int titleWidth = qMax(1,
+                                rowInner - pageWidth - int(chrome::inset)
+                                        - (pagerWidth ? pagerWidth + int(chrome::inset) : 0));
+    mode->setGeometry(width() - chrome::cellWidth, topPadding, chrome::cellWidth,
+                      chapters::rowHeight);
+    chapterCaption->setGeometry(chrome::inset, headingTop, titleWidth, captionHeight);
+    chapterPage->setGeometry(
+            chrome::inset + rowInner - pageWidth,
+            topPadding + (chapters::rowHeight - ui::interfaceLineHeight(captionMetrics)) / 2,
+            pageWidth, ui::interfaceLineHeight(captionMetrics));
+    chapterTitle->setGeometry(chrome::inset, headingTop + captionHeight + chapters::headingGap,
+                              titleWidth, titleHeight);
+    chapterTitle->setText(ui::elideInterfaceText(title, chapterTitle->font(), titleWidth));
     const int top = chartTop();
-    bars->barsHeight = chapters::barsHeight - (chapters::chartHeight - chart);
+    bars->barsHeight = chapters::barsHeight + chart - chapters::chartHeight;
     bars->setGeometry(chrome::inset, top + chapters::barsTop, inner,
                       chart - chapters::barsTop - ui::metrics::control::border);
     message->setGeometry(chrome::inset, top, inner, chart);
-    pager->setGeometry(0, top + chart - ui::metrics::control::border, width(),
-                       chrome::actionHeight);
-    const int cells = top + chart + (paged() ? chrome::actionHeight : 0);
+    pager->setFixedHeight(inlinePager() ? chapters::rowHeight - ui::metrics::control::border
+                                        : int(chrome::actionHeight));
+    if (inlinePager())
+        pager->setGeometry(chrome::inset + titleWidth + chrome::inset, topPadding, pagerWidth,
+                           chapters::rowHeight);
+    else
+        pager->setGeometry(0, top + chart - ui::metrics::control::border, width(),
+                           chrome::actionHeight);
+    const int cells = top + chart + pagerHeight();
     for (int column = 0; column < 3; ++column) {
         auto *cell = QVector<StatsCell *>{ chapterCell, bookCell, sessionCell }[column];
         const int left = width() * column / 3 + (column ? ui::metrics::control::border : 0);
@@ -534,7 +602,13 @@ void ChapterGraph::arrange()
 
 void ChapterGraph::redraw(bool paging)
 {
-    first = qBound(0, first / capacity(), graphPages() - 1) * capacity();
+    mode->setGlyph(dense ? ui::ControlIcon::ZoomIn : ui::ControlIcon::ZoomOut);
+    const auto action = strings::get(dense ? "chapter_graph.show_wider_bars"
+                                           : "chapter_graph.show_more_chapters");
+    mode->setAccessibleName(action);
+    mode->setToolTip(action);
+    anchor = qBound(0, anchor, qMax(0, int(chapters.size()) - 1));
+    const int first = graphPage() * capacity();
     const bool available = ready && error.isEmpty() && !chapters.isEmpty();
     bars->setVisible(available);
     message->setVisible(!available);
@@ -544,14 +618,15 @@ void ChapterGraph::redraw(bool paging)
                                       : strings::get("chapter_graph.no_chapter_lengths_available"));
     arrange();
     pager->setPage(graphPage(), available ? graphPages() : 1);
-    const int visible = qMin(capacity(), int(chapters.size()) - first);
+    const int columns = qMin(capacity(), int(chapters.size()));
     bars->chapters = chapters;
     bars->selection = selection;
     bars->first = first;
     bars->count = capacity();
     bars->gap = !dense                            ? chapters::sparseGap
-            : visible <= chapters::wideChapters   ? chapters::gapWide
-            : visible <= chapters::mediumChapters ? chapters::gapMedium
+            : paged()                             ? chapters::gapNarrow
+            : columns <= chapters::wideChapters   ? chapters::gapWide
+            : columns <= chapters::mediumChapters ? chapters::gapMedium
                                                   : chapters::gapNarrow;
     bars->setAccessibleName(strings::get("chapter_graph.chapters_to_of")
                                     .arg(first + 1)

@@ -21,6 +21,7 @@
 #include "ui/controls/text.h"
 #include "ui/controls/paging.h"
 #include "ui/dialogs/modals.h"
+#include "ui/dialogs/choice_sheet.h"
 #include "ui/dialogs/action_menu.h"
 #include "ui/style/fonts.h"
 #include "ui/style/metrics.h"
@@ -2062,7 +2063,9 @@ private slots:
         for (const auto size : { QSize(1072, 1448), QSize(1448, 1072), QSize(1072, 1451) }) {
             view.resize(ui::px(size.width()), ui::px(size.height()));
             QCoreApplication::processEvents();
-            QCOMPARE(pages->y(), int(ui::metrics::chrome::actionHeight) + ui::px(88));
+            QCOMPARE(pages->y(),
+                     int(ui::metrics::chrome::actionHeight)
+                             + int(ui::metrics::chrome::toolStripHeight));
             QVERIFY(pager->isVisible());
             QCOMPARE(pages->geometry().bottom() + 1, pager->y());
             const auto image = pages->grab().toImage();
@@ -2587,6 +2590,221 @@ private slots:
         }
     }
 
+    // Checks that only a backdrop tap closes a pop-up, not a tap on its card's title, padding or border.
+    void modalClosesOnBackdropOnly()
+    {
+        ui::setDensity(300);
+        QWidget host;
+        ui::readerStyle(&host, ui::styles::reader());
+        host.resize(ui::px(1072), ui::px(1448));
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        const auto sheet = ui::makeChoiceSheet(&host, "rrProbe", "Probe title", "Probe hint",
+                                               "rrProbeTitle", "rrProbeHint");
+        sheet.list->add("rrProbeOne", "One");
+        sheet.list->add("rrProbeTwo", "Two");
+        int dismissed = 0, chosen = -1;
+        sheet.overlay->dismissed = [&] { ++dismissed; };
+        sheet.list->chosen = [&](int index) { chosen = index; };
+        ui::presentChoiceSheet(sheet.overlay, sheet.list);
+        QCoreApplication::processEvents();
+        QCOMPARE(sheet.overlay->objectName(), QString("rrProbePopup"));
+        QCOMPARE(sheet.list->objectName(), QString("rrProbeChoices"));
+        auto *card = sheet.overlay->card();
+        auto *title = card->findChild<QLabel *>("rrProbeTitle");
+        QVERIFY(title && title->isVisible() && card->findChild<QLabel *>("rrProbeHint"));
+        QTest::mouseClick(title, Qt::LeftButton);
+        QCOMPARE(dismissed, 0);
+        // The heading's padding beside the title, then the card's border.
+        QTest::mouseClick(title->parentWidget(), Qt::LeftButton, Qt::NoModifier, QPoint(2, 2));
+        QCOMPARE(dismissed, 0);
+        QTest::mouseClick(card, Qt::LeftButton, Qt::NoModifier, QPoint(0, card->height() / 2));
+        QCOMPARE(dismissed, 0);
+        // A row still answers, and does not close the sheet by itself.
+        QTest::mouseClick(sheet.list->options().at(1), Qt::LeftButton);
+        QCOMPARE(chosen, 1);
+        QCOMPARE(dismissed, 0);
+        QVERIFY(!card->geometry().contains(QPoint(4, 4)));
+        QTest::mouseClick(sheet.overlay, Qt::LeftButton, Qt::NoModifier, QPoint(4, 4));
+        QCOMPARE(dismissed, 1);
+    }
+
+    void choiceSheetListFillsCard_data()
+    {
+        QTest::addColumn<int>("ppi");
+        QTest::newRow("212") << 212;
+        QTest::newRow("300") << 300;
+    }
+
+    // Checks that a choice sheet's list fills the card inside its unscaled border, also at 212 ppi.
+    void choiceSheetListFillsCard()
+    {
+        QFETCH(int, ppi);
+        ui::setDensity(ppi);
+        const auto restore = qScopeGuard([] { ui::setDensity(300); });
+        QWidget host;
+        ui::readerStyle(&host, ui::styles::reader());
+        host.resize(ui::px(1072), ui::px(1448));
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        const auto sheet = ui::makeChoiceSheet(&host, "rrProbe", "Probe title");
+        sheet.list->add("rrProbeOne", "One",
+                        "A description that is long enough to wrap onto a second line at the "
+                        "width of the card, so that the row height depends on the width.");
+        sheet.list->add("rrProbeTwo", "Two", "Short.");
+        ui::presentChoiceSheet(sheet.overlay, sheet.list);
+        QCoreApplication::processEvents();
+        auto *card = sheet.overlay->card();
+        QCOMPARE(sheet.list->x(), int(ui::metrics::notice::cardBorder));
+        QCOMPARE(sheet.list->width(), card->width() - 2 * int(ui::metrics::notice::cardBorder));
+        QCOMPARE(sheet.list->height(), sheet.list->heightForWidth(sheet.list->width()));
+    }
+
+    void modalListDividers_data() { variants(); }
+
+    // Modal list boundaries have one divider, including the first visible row after paging.
+    void modalListDividers()
+    {
+        QFETCH(bool, dark);
+        QFETCH(int, ppi);
+        ui::setDensity(ppi);
+        QWidget host;
+        host.setProperty("reader_dark", dark);
+        auto colors = host.palette();
+        colors.setColor(QPalette::Window, dark ? Qt::black : Qt::white);
+        colors.setColor(QPalette::WindowText, dark ? Qt::white : Qt::black);
+        host.setPalette(colors);
+        ui::readerStyle(&host, ui::styles::reader());
+        host.resize(ui::px(1072), ui::px(1448));
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        ui::ChoiceModal modal(&host, { "Choose a folder.", "Resource folders", {} },
+                              { "Cancel", "probeCancel" }, { "OK", "probeClose" });
+        modal.setObjectName("rrModalListProbe");
+        QVector<ui::ListRow *> rows;
+        for (int i = 0; i < 5; ++i) {
+            auto *row = new ui::ListRow(modal.card());
+            row->setTitle(QString("Folder %1").arg(i));
+            row->setFixedHeight(row->sizeHint().height());
+            modal.card()->rows()->insertWidget(modal.card()->rows()->count() - 1, row);
+            rows.append(row);
+        }
+        modal.setGeometry(host.rect());
+        modal.fitCard();
+        modal.show();
+        QCoreApplication::processEvents();
+        const auto divider = ui::dividerColor(modal.card());
+        const auto paper = modal.card()->palette().color(QPalette::Window);
+        const int x = ui::px(10), border = ui::metrics::control::border;
+        QCOMPARE(rows.first()->grab().toImage().pixelColor(x, 0), divider);
+        QCOMPARE(rows.first()->grab().toImage().pixelColor(x, border), paper);
+        QCOMPARE(rows[1]->grab().toImage().pixelColor(x, 0), paper);
+        QCOMPARE(rows.first()->grab().toImage().pixelColor(x, rows.first()->height() - 1), divider);
+        QCOMPARE(modal.primaryButton()->grab().toImage().pixelColor(x, 0), paper);
+        QCOMPARE(modal.secondaryButton()->grab().toImage().pixelColor(x, 0), paper);
+        modal.primaryButton()->setText(
+                "Use this folder for dictionaries, reading fonts and custom bookmark icons");
+        modal.fitCard();
+        QCoreApplication::processEvents();
+        QVERIFY(modal.primaryButton()->y() < modal.secondaryButton()->y());
+        QCOMPARE(modal.primaryButton()->grab().toImage().pixelColor(x, 0), paper);
+        QCOMPARE(modal.secondaryButton()->grab().toImage().pixelColor(x, 0), divider);
+        modal.primaryButton()->setText("OK");
+        host.resize(ui::px(1072), ui::px(600));
+        modal.setGeometry(host.rect());
+        modal.fitCard();
+        auto *next = modal.findChild<QPushButton *>("rrModalListProbeNext");
+        QVERIFY(next && next->isVisible());
+        auto *pager = next->parentWidget();
+        QCOMPARE(next->y(), 0);
+        QCOMPARE(pager->grab().toImage().pixelColor(pager->width() / 2, 0), paper);
+        QCOMPARE(modal.primaryButton()->grab().toImage().pixelColor(x, 0), divider);
+        int pages = 0;
+        do {
+            QCoreApplication::processEvents();
+            for (auto *row : rows) {
+                if (!row->isVisible())
+                    continue;
+                QCOMPARE(row->grab().toImage().pixelColor(x, 0), divider);
+                break;
+            }
+            ++pages;
+            if (!next->isEnabled())
+                break;
+            next->click();
+        } while (pages < 10);
+        QVERIFY(pages > 1 && pages < 10);
+        modal.hide();
+        host.resize(ui::px(1072), ui::px(1448));
+        const auto sheet = ui::makeChoiceSheet(&host, "rrBoundaryProbe", "Pick one");
+        sheet.list->add("probeOne", "One");
+        sheet.list->add("probeTwo", "Two");
+        ui::presentChoiceSheet(sheet.overlay, sheet.list);
+        QCoreApplication::processEvents();
+        QCOMPARE(sheet.list->options().first()->grab().toImage().pixelColor(x, 0),
+                 ui::dividerColor(sheet.list));
+        sheet.overlay->hide();
+        // Construct the same nested header/list form used by settings, without caller borders.
+        sheet.overlay->card()->rows()->removeWidget(sheet.list);
+        auto *group = new QWidget(sheet.overlay->card());
+        auto *layout = new QVBoxLayout(group);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(0);
+        auto *header = new ui::ListHeader(group);
+        header->setCaptions("Options");
+        header->setFixedHeight(header->sizeHint().height());
+        layout->addWidget(header);
+        layout->addWidget(sheet.list);
+        sheet.overlay->card()->rows()->addWidget(group);
+        ui::presentChoiceSheet(sheet.overlay, sheet.list);
+        QCoreApplication::processEvents();
+        QCOMPARE(header->grab().toImage().pixelColor(x, 0), ui::dividerColor(header));
+        auto *first = sheet.list->options().first();
+        QCOMPARE(first->grab().toImage().pixelColor(x, 0),
+                 first->palette().color(QPalette::Window));
+        QCOMPARE(header->grab().toImage().pixelColor(x, header->height() - 1),
+                 ui::dividerColor(header));
+        sheet.overlay->hide();
+        // Some choosers reserve a full page, leaving a blank band after shorter pages.
+        ui::NoticeModal padded(&host, { {}, "Padded choices", {} }, { "Close", "paddedClose" });
+        auto *choices = new ui::RadioList(padded.card());
+        choices->add("paddedOne", "One");
+        choices->setFixedHeight(choices->heightForWidth(ui::px(700)) + ui::px(50));
+        auto *paddedPager = new ui::PagerBar(padded.card(), "rrPaddedProbe");
+        paddedPager->setFixedHeight(ui::metrics::chrome::actionHeight);
+        paddedPager->setPage(0, 2);
+        padded.card()->rows()->insertWidget(1, choices);
+        padded.card()->rows()->insertWidget(2, paddedPager);
+        padded.setGeometry(host.rect());
+        padded.fitCard();
+        padded.show();
+        QCoreApplication::processEvents();
+        QCOMPARE(paddedPager->grab().toImage().pixelColor(paddedPager->width() / 2, 0),
+                 ui::dividerColor(paddedPager));
+        QCOMPARE(paddedPager->next->y(), int(ui::metrics::control::border));
+        padded.hide();
+        ui::NoticeModal filled(&host, { {}, "Wrapped choices", {} }, { "Close", "filledClose" });
+        auto *wrapped = new ui::RadioList(filled.card());
+        wrapped->add(
+                "wrappedOne", "One",
+                "A description that wraps onto several lines in a narrow chooser, so its natural height changes with the available width.");
+        wrapped->add("wrappedTwo", "Two",
+                     "Another description that wraps when the chooser gets narrower.");
+        filled.card()->rows()->insertWidget(1, wrapped);
+        const int cardBorder = ui::metrics::notice::cardBorder;
+        for (const int width : { int(ui::metrics::notice::cardWidth), ui::px(420) }) {
+            filled.hide();
+            wrapped->setFixedHeight(wrapped->heightForWidth(width - 2 * cardBorder));
+            filled.card()->fitToWidth(width);
+            filled.centerCard();
+            filled.show();
+            QCoreApplication::processEvents();
+            QCOMPARE(wrapped->width(), width - 2 * cardBorder);
+            QCOMPARE(wrapped->height(), wrapped->heightForWidth(wrapped->width()));
+            QCOMPARE(filled.primaryButton()->grab().toImage().pixelColor(x, 0), paper);
+        }
+    }
+
     void connectedModalFooter_data() { variants(); }
 
     void connectedModalFooter()
@@ -2831,6 +3049,39 @@ private slots:
         }
     }
 
+    // Checks that the colour swatch labels keep their descenders inside the swatch.
+    void annotationSwatchLabelsFit_data() { variants(); }
+
+    void annotationSwatchLabelsFit()
+    {
+        QFETCH(bool, dark);
+        QFETCH(int, ppi);
+        ui::setDensity(ppi);
+        QWidget host;
+        host.setProperty("reader_dark", dark);
+        host.setPalette(ui::readerPalette(host.palette(), dark));
+        // The phone's narrow swatches and the wider e-reader swatches.
+        for (int width : { ui::px(110), ui::px(160) }) {
+            ui::HighlightSwatch swatch("gray", "Gray", &host);
+            swatch.resize(width, swatch.height());
+            const auto image = swatch.grab().toImage();
+            const auto paper = image.pixelColor(ui::px(4), ui::px(4));
+            const auto inked = [&](int y) {
+                for (int x = 0; x < image.width(); ++x)
+                    if (qAbs(qGray(image.pixel(x, y)) - paper.lightness()) > 100)
+                        return true;
+                return false;
+            };
+            // The label sits in the lower third, below the colour chip. A label
+            // cut off by the swatch's edge leaves ink on its last row.
+            bool label = false;
+            for (int y = image.height() * 2 / 3; y < image.height() - 1; ++y)
+                label = label || inked(y);
+            QVERIFY2(label, "The swatch label is missing");
+            QVERIFY2(!inked(image.height() - 1), "The swatch cuts off its label");
+        }
+    }
+
     void marksSortingAndAnnotationRows_data() { variants(); }
 
     void marksSortingAndAnnotationRows()
@@ -2882,14 +3133,14 @@ private slots:
         b.style = "underline";
         b.color = "green";
         BookmarkRow c{ "third", "Chapter Two", "Later in the book", late.addSecs(60), 8 };
-        auto *summary = list.findChild<QLabel *>("rrBookmarkListSummary");
-        QVERIFY(summary);
-        list.showAnnotations({});
-        QCOMPARE(summary->text(), QString("0 annotations"));
-        list.showAnnotations({ a });
-        QCOMPARE(summary->text(), QString("1 annotation"));
+        // The strip names the sort order, as the Library's strip does.
+        auto *sortCaption = list.findChild<QPushButton *>("rrMarksSort");
+        QVERIFY(sortCaption);
         list.showAnnotations({ a, b });
-        QCOMPARE(summary->text(), QString("2 annotations"));
+        QCOMPARE(sortCaption->text(), strings::get("marks.sort_position"));
+        list.setSortOrder("newest");
+        QCOMPARE(sortCaption->text(), strings::get("marks.sort_newest"));
+        list.setSortOrder("position");
         QString selected, changed;
         list.selected = [&](const QString &id) { selected = id; };
         list.sortRequested = [&](const QString &value) { changed = value; };
@@ -2920,20 +3171,20 @@ private slots:
         list.showAnnotations({ c, b, a });
         QCoreApplication::processEvents();
         QCOMPARE(row()->grab().toImage(), annotationImage);
-        QCOMPARE(list.findChild<QPushButton *>("rrMarksSort")->y(),
-                 list.findChild<QPushButton *>("rrAnnotationsTab")->y());
+        // Sort is the strip's caption below the tabs, at its left edge, as in
+        // the Library. Its name is drawn in ink.
         auto *sortControl = list.findChild<QPushButton *>("rrMarksSort");
+        auto *tab = list.findChild<QPushButton *>("rrAnnotationsTab");
+        QCOMPARE(sortControl->x(), 0);
+        QVERIFY(sortControl->y() > tab->geometry().bottom());
+        QVERIFY(sortControl->width() > list.width() / 2);
         const auto sortImage = sortControl->grab().toImage();
-        const auto iconArea = QRect(sortImage.rect().center() - QPoint(ui::px(20), ui::px(20)),
-                                    QSize(ui::px(40), ui::px(40)));
-        int iconPixels = 0;
         const auto ink = colors.color(QPalette::WindowText);
-        for (int y = iconArea.top(); y <= iconArea.bottom(); ++y)
-            for (int x = iconArea.left(); x <= iconArea.right(); ++x)
-                iconPixels += sortImage.pixelColor(x, y) == ink;
-        QVERIFY(iconPixels > 10);
-        QVERIFY(list.findChild<QPushButton *>("rrMarksSort")->x()
-                >= list.findChild<QPushButton *>("rrBookmarksTab")->geometry().right());
+        int captionPixels = 0;
+        for (int y = 0; y < sortImage.height(); ++y)
+            for (int x = 0; x < sortImage.width() / 2; ++x)
+                captionPixels += sortImage.pixelColor(x, y) == ink;
+        QVERIFY(captionPixels > 10);
         QVector<QImage> appearances;
         for (const auto *style : { "shaded", "underline", "dotted" }) {
             auto item = a;
@@ -3474,6 +3725,46 @@ private slots:
         QVERIFY(navigationRefreshRegion(&owner).isEmpty());
     }
 
+    void buttonFeedbackPointsInsideButton()
+    {
+        QWidget owner;
+        owner.resize(800, 600);
+        QPushButton button("Save", &owner);
+        button.setGeometry(600, 300, 100, 100);
+        ui::ButtonFeedback feedback(&owner);
+        owner.show();
+        feedback.showFor(&button, "Added to My Words");
+        QVERIFY(feedback.isVisible());
+        QVERIFY(!feedback.inputBarrier());
+        QVERIFY(feedback.testAttribute(Qt::WA_TransparentForMouseEvents));
+        QVERIFY(feedback.card()->geometry().bottom() > button.y());
+        QVERIFY(feedback.card()->geometry().bottom() < button.geometry().center().y());
+        auto *pointer = feedback.findChild<QWidget *>("rrAnchorPointer");
+        QVERIFY(pointer && pointer->isVisible());
+        QVERIFY(pointer->geometry().bottom() > button.y());
+        QVERIFY(button.geometry().contains(pointer->geometry().center().x(),
+                                           pointer->geometry().bottom()));
+        feedback.showFor(&button, "Bookmark added!",
+                         { ui::ButtonFeedback::AnchorSide::Left, {}, {} });
+        QVERIFY(feedback.card()->geometry().right() < button.x());
+        QVERIFY(qAbs(pointer->geometry().center().y() - button.geometry().center().y()) <= 1);
+        QVERIFY(pointer->property("card_left").toBool());
+        const auto tip = pointer->geometry().topRight() + QPoint(0, pointer->height() / 2);
+        const auto before = feedback.card()->pos();
+        feedback.showFor(
+                &button, "Bookmark added!",
+                { ui::ButtonFeedback::AnchorSide::Left, {}, QPoint(ui::px(8), ui::px(8)) });
+        QCOMPARE(feedback.card()->pos(), before + QPoint(ui::px(8), ui::px(8)));
+        QCOMPARE(pointer->geometry().topRight() + QPoint(0, pointer->height() / 2), tip);
+        // A button at the top uses the same pointer below the bar.
+        button.move(600, 0);
+        feedback.showFor(&button, "Removed from My Words");
+        QVERIFY(feedback.card()->y() < button.geometry().bottom());
+        QVERIFY(feedback.card()->y() > button.geometry().center().y());
+        QVERIFY(pointer->y() < button.geometry().bottom());
+        QTRY_VERIFY(!feedback.isVisible());
+    }
+
     void hidingSelectionMenuKeepsDamageCompact_data()
     {
         QTest::addColumn<bool>("barrier");
@@ -3535,6 +3826,28 @@ private slots:
             if (!barrier)
                 QVERIFY(shownMask.boundingRect().contains(paints.painted.boundingRect()));
         }
+    }
+
+    // A modal editor and Nickel's keyboard can share one top-level owner.
+    // A keypress repaints the edited text and the key; they must stay two
+    // updates, or the page between the dialog and the keyboard flickers.
+    void keyboardDamageStaysApartFromEditor()
+    {
+        QWidget owner;
+        owner.resize(1072, 1448);
+        QWidget overlay(&owner);
+        overlay.setGeometry(owner.rect());
+        QWidget editor(&overlay);
+        editor.setGeometry(190, 392, 692, 112);
+        QWidget keyboard(&overlay);
+        keyboard.setGeometry(0, 905, 1072, 543);
+        const QRect key(732, 1135, 95, 95);
+        const QRegion painted = QRegion(editor.geometry()) + key;
+        QCOMPARE(panelDamage(&owner, nullptr, painted).size(), 1);
+        const auto damage = panelDamage(&owner, nullptr, painted, keyboard.geometry());
+        QCOMPARE(damage.size(), 2);
+        QVERIFY(damage.contains(editor.geometry()));
+        QVERIFY(damage.contains(key));
     }
 
     void delayedProgressPaintsAfterTheEventLoop_data() { variants(); }
@@ -3762,6 +4075,24 @@ private slots:
             owner.show();
             view->show();
             QVERIFY(view->findChild<QLabel *>("rrOpeningBrand")->isVisible());
+            {
+                // Without a cover, the group runs from the logo's top to the hint.
+                namespace opening = ui::metrics::opening;
+                const qreal scale = qMin(screen.width() / opening::referenceWidth,
+                                         screen.height() / opening::referenceHeight);
+                auto *brand = view->findChild<QLabel *>("rrOpeningBrand");
+                auto *hint = view->findChild<QLabel *>("rrOpeningHint");
+                const qreal logoTop =
+                        brand->y() - (opening::brand.top() - opening::icon.top()) * scale;
+                const QFontMetricsF metrics(hint->font());
+                const qreal baseline = hint->geometry().center().y() + 0.5
+                        + (metrics.ascent() - metrics.descent()) / 2;
+                QVERIFY2(qAbs((logoTop + baseline) / 2 - screen.height() / 2.0) <= 1.5,
+                         qPrintable(QString("Logo group %1..%2 on %3")
+                                            .arg(logoTop)
+                                            .arg(baseline)
+                                            .arg(screen.height())));
+            }
             for (const QSize size : { QSize(200, 300), QSize(300, 100), QSize(100, 400) }) {
                 // Each shape is a separate opening, not a lower-quality replacement.
                 opening = createEmbeddedOpening(&owner, test::makeHostPresentation);
@@ -3784,19 +4115,35 @@ private slots:
                 QVERIFY(progress->geometry().bottom() < hint->geometry().top());
                 const qreal scale = qMin(screen.width() / ui::metrics::opening::referenceWidth,
                                          screen.height() / ui::metrics::opening::referenceHeight);
-                const QPointF origin(
-                        (screen.width() - ui::metrics::opening::referenceWidth * scale) / 2,
-                        (screen.height() - ui::metrics::opening::referenceHeight * scale) / 2);
                 const auto area = ui::metrics::opening::cover;
-                const auto fit = QSizeF(size).scaled(area.size(), Qt::KeepAspectRatio);
-                const QRectF bounds(
-                        origin
-                                + (area.center() - QPointF(fit.width() / 2, fit.height() / 2))
-                                        * scale,
-                        fit * scale);
+                const auto fit = QSizeF(size).scaled(area.size(), Qt::KeepAspectRatio) * scale;
+                const auto surface = view->findChild<QWidget *>("rrOpeningCover")->geometry();
+                QVERIFY(qAbs(surface.height() - fit.height()) <= 1);
+                const QRectF bounds(surface.center().x() + 0.5 - fit.width() / 2, surface.y(),
+                                    fit.width(), fit.height());
                 const auto pixels = view->grab().toImage();
                 QCOMPARE(pixels.pixelColor(bounds.center().toPoint()), QColor(Qt::red));
-                QVERIFY(bounds.bottom() < label->y());
+                // The text keeps its distance from the cover's bottom edge,
+                // whatever the cover's shape.
+                const qreal gap =
+                        (ui::metrics::opening::label.center().y() - area.bottom()) * scale;
+                QVERIFY2(qAbs(label->geometry().center().y() + 0.5 - (bounds.bottom() + gap)) <= 3,
+                         qPrintable(QString("Label centre %1, cover bottom %2, gap %3 on %4x%5")
+                                            .arg(label->geometry().center().y())
+                                            .arg(bounds.bottom())
+                                            .arg(gap)
+                                            .arg(screen.width())
+                                            .arg(screen.height())));
+                // From the cover's top to the baseline of the hint's capitals,
+                // the group is centred on the screen.
+                const QFontMetricsF metrics(hint->font());
+                const qreal baseline = hint->geometry().center().y() + 0.5
+                        + (metrics.ascent() - metrics.descent()) / 2;
+                QVERIFY2(qAbs((bounds.top() + baseline) / 2 - screen.height() / 2.0) <= 1.5,
+                         qPrintable(QString("Group %1..%2 on %3")
+                                            .arg(bounds.top())
+                                            .arg(baseline)
+                                            .arg(screen.height())));
                 QCOMPARE(pixels.pixelColor(
                                  QPoint(qRound(bounds.left()) - 2, qRound(bounds.center().y()))),
                          view->palette().color(QPalette::Window));
@@ -3808,7 +4155,8 @@ private slots:
             late.fill(Qt::red);
             opening->setCover(late);
             QVERIFY(!view->findChild<QLabel *>("rrOpeningBrand")->isVisible());
-            QVERIFY(!view->findChild<QProgressBar *>("rrOpeningProgress")->isVisible());
+            QVERIFY(view->findChild<QProgressBar *>("rrOpeningProgress")->isVisible());
+            QCOMPARE(view->findChild<QProgressBar *>("rrOpeningProgress")->value(), 100);
 
             // A cached cover can arrive after the routing decision, without a session.
             QTemporaryDir directory;
@@ -3841,6 +4189,149 @@ private slots:
         }
     }
 
+    void openingHandoffLayout_data()
+    {
+        QTest::addColumn<bool>("dark");
+        QTest::addColumn<bool>("hasCover");
+        QTest::addColumn<bool>("protectedBook");
+        for (bool dark : { false, true })
+            for (bool cover : { false, true })
+                for (bool protectedBook : { false, true })
+                    QTest::newRow(
+                            qPrintable(QString("%1-%2-%3")
+                                               .arg(dark ? "dark" : "light")
+                                               .arg(cover ? "cover" : "logo")
+                                               .arg(protectedBook ? "protected" : "remembered")))
+                            << dark << cover << protectedBook;
+    }
+
+    // Native handoff keeps the normal cover, completed bar and status anchors in both themes.
+    void openingHandoffLayout()
+    {
+        QFETCH(bool, dark);
+        QFETCH(bool, hasCover);
+        QFETCH(bool, protectedBook);
+        for (const auto screen : { QSize(1072, 1448), QSize(1448, 1072), QSize(720, 1600),
+                                   QSize(1480, 720), QSize(320, 480) }) {
+            QWidget owner;
+            auto opening =
+                    createOpening(&owner, { { "dark_mode", dark } }, test::makeHostPresentation);
+            auto *view = opening->window();
+            view->resize(screen);
+            if (hasCover) {
+                QImage image(200, 300, QImage::Format_RGB32);
+                image.fill(Qt::red);
+                opening->setCover(image);
+            }
+            opening->setProgress(45);
+            view->show();
+            QCoreApplication::processEvents();
+            auto *cover = view->findChild<QWidget *>("rrOpeningCover");
+            auto *bar = view->findChild<QProgressBar *>("rrOpeningProgress");
+            auto *label = view->findChild<QLabel *>("rrOpeningLabel");
+            auto *hint = view->findChild<QLabel *>("rrOpeningHint");
+            auto *redirect = view->findChild<QWidget *>("rrOpeningRedirect");
+            QVERIFY(redirect && !redirect->isVisible());
+            const auto coverRect = cover->geometry(), barRect = bar->geometry(),
+                       hintRect = hint->geometry();
+            const int labelCenter = label->geometry().center().y();
+            // Deliver deferred show and resize work before measuring the handoff.
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::UpdateLater);
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::UpdateRequest);
+            QCoreApplication::processEvents();
+            auto *cancel = view->findChild<QWidget *>("rrCancelOpening");
+            const QRegion exposedCover = cancel->isVisible()
+                    ? QRegion(cancel->geometry().intersected(coverRect).translated(
+                              -coverRect.topLeft()))
+                    : QRegion();
+            PaintRegions coverPaints;
+            cover->installEventFilter(&coverPaints);
+            opening->showFallback(protectedBook ? OpeningFallback::Protected
+                                                : OpeningFallback::Remembered);
+            QCoreApplication::processEvents();
+            QCOMPARE(cover->geometry(), coverRect);
+            // Removing an overlapping cancel button may expose part of the cover.
+            QVERIFY2(coverPaints.painted.subtracted(exposedCover).isEmpty(),
+                     qPrintable(QString("Unexpected cover damage on %1x%2")
+                                        .arg(screen.width())
+                                        .arg(screen.height())));
+            QCOMPARE(bar->geometry(), barRect);
+            QCOMPARE(hint->geometry(), hintRect);
+            QCOMPARE(label->geometry().center().y(), labelCenter);
+            QVERIFY(bar->isVisible() && hint->isVisible() && redirect->isVisible());
+            QCOMPARE(bar->value(), 100);
+            opening->setProgress(80);
+            QCOMPARE(bar->value(), 100);
+            QCOMPARE(label->text(), strings::get("opening.native"));
+            QCOMPARE(hint->text(),
+                     QLocale().toUpper(strings::get(protectedBook ? "opening.protected"
+                                                                  : "opening.remembered")));
+            QVERIFY(ui::interfaceTextWidth(hint->text(), hint->font()) <= hint->width());
+            QVERIFY(view->rect().contains(label->geometry()));
+            QVERIFY(view->rect().contains(redirect->geometry()));
+            QVERIFY(redirect->geometry().right() < label->geometry().left());
+            QVERIFY(label->geometry().bottom() < bar->geometry().top());
+            const auto row = redirect->geometry().united(label->geometry());
+            QVERIFY(qAbs(row.center().x() - view->rect().center().x()) <= 1);
+            QCOMPARE(view->findChild<QLabel *>("rrOpeningBrand")->isVisible(), !hasCover);
+            opening->showFallback(OpeningFallback::Failure);
+            QVERIFY(!redirect->isVisible() && !bar->isVisible() && !hint->isVisible());
+            QVERIFY(view->findChild<QWidget *>("rrOpeningFailure")->isVisible());
+        }
+    }
+
+    // Disabling the cover keeps the logo through cached and late images, progress and handoff.
+    void openingCoverDisabled()
+    {
+        for (bool embedded : { false, true }) {
+            QWidget owner;
+            owner.resize(600, 800);
+            auto opening = embedded
+                    ? createEmbeddedOpening(&owner, test::makeHostPresentation, false)
+                    : createOpening(&owner, { { "show_opening_cover", false } },
+                                    test::makeHostPresentation);
+            auto *view = opening->window();
+            view->setGeometry(owner.rect());
+            QImage cover(100, 150, QImage::Format_RGB32);
+            cover.fill(Qt::red);
+            QTemporaryDir directory;
+            QVERIFY(directory.isValid());
+            const auto path = directory.filePath("cover.png");
+            QVERIFY(cover.save(path));
+            opening->loadCover(path);
+            opening->setCover(cover);
+            owner.show();
+            view->show();
+            QCoreApplication::processEvents();
+            auto *brand = view->findChild<QLabel *>("rrOpeningBrand");
+            auto *surface = view->findChild<QWidget *>("rrOpeningCover");
+            auto *bar = view->findChild<QProgressBar *>("rrOpeningProgress");
+            auto *hint = view->findChild<QLabel *>("rrOpeningHint");
+            QVERIFY(brand->isVisible());
+            QVERIFY(surface->isHidden());
+            const auto before = view->grab().toImage();
+            PaintRegions paints;
+            view->installEventFilter(&paints);
+            opening->setCover(cover);
+            opening->setCover({});
+            QCoreApplication::processEvents();
+            QCOMPARE(paints.count, 0);
+            QCOMPARE(view->grab().toImage(), before);
+            opening->setProgress(45);
+            opening->setReopening();
+            QCOMPARE(bar->value(), 45);
+            QCOMPARE(hint->text(), QLocale().toUpper(strings::get("opening.reopening")));
+            for (auto fallback : { OpeningFallback::Protected, OpeningFallback::Remembered }) {
+                opening->showFallback(fallback);
+                opening->setCover(cover);
+                QVERIFY(brand->isVisible());
+                QVERIFY(surface->isHidden());
+                QCOMPARE(bar->value(), 100);
+                QVERIFY(bar->isVisible());
+            }
+        }
+    }
+
     void openingCoverUpgrade()
     {
         QWidget owner;
@@ -3857,6 +4348,7 @@ private slots:
         full.fill(Qt::red);
         auto opening = createEmbeddedOpening(&owner, test::makeHostPresentation);
         opening->window()->setGeometry(owner.rect());
+        opening->setCover(thumbnail);
         opening->setCover(full);
         owner.show();
         opening->window()->show();
@@ -3871,8 +4363,126 @@ private slots:
         cached->window()->setGeometry(owner.rect());
         cached->setCover(thumbnail);
         cached->window()->show();
+        QCOMPARE(cached->window()->grab().toImage().pixelColor(center), QColor(Qt::blue));
         cached->loadCover(path);
         QTRY_COMPARE(cached->window()->grab().toImage().pixelColor(center), QColor(Qt::red));
+    }
+
+    void openingCoverDamage_data()
+    {
+        QTest::addColumn<bool>("seeded");
+        QTest::addColumn<bool>("dark");
+        QTest::newRow("seeded-light") << true << false;
+        QTest::newRow("seeded-dark") << true << true;
+        QTest::newRow("late-light") << false << false;
+        QTest::newRow("late-dark") << false << true;
+    }
+
+    // Identical visible pixels cause no paint; sharper changed covers damage only their own area.
+    void openingCoverDamage()
+    {
+        QFETCH(bool, seeded);
+        QFETCH(bool, dark);
+        QWidget owner;
+        auto opening = createOpening(&owner, { { "dark_mode", dark } }, test::makeHostPresentation);
+        auto *view = opening->window();
+        view->resize(600, 800);
+        auto *surface = view->findChild<QWidget *>("rrOpeningCover");
+        QVERIFY(surface);
+        QImage thumbnail(100, 200, QImage::Format_RGB32);
+        thumbnail.fill(Qt::blue);
+        QImage full(400, 800, QImage::Format_RGB32);
+        full.fill(Qt::blue);
+        if (seeded)
+            opening->setCover(thumbnail);
+        PaintRegions parentPaints, coverPaints;
+        view->installEventFilter(&parentPaints);
+        surface->installEventFilter(&coverPaints);
+        view->show();
+        QCoreApplication::processEvents();
+        if (!seeded)
+            opening->setCover(thumbnail);
+        QTRY_VERIFY(coverPaints.count > 0);
+        QCoreApplication::processEvents();
+        for (const auto &image : { thumbnail, thumbnail.copy(), full, QImage() }) {
+            parentPaints.painted = coverPaints.painted = {};
+            parentPaints.count = coverPaints.count = 0;
+            opening->setCover(image);
+            QCoreApplication::processEvents();
+            QCOMPARE(coverPaints.count, 0);
+            QVERIFY(parentPaints.painted.isEmpty());
+        }
+        full.fill(Qt::red);
+        opening->setCover(full);
+        QTRY_COMPARE(coverPaints.count, 1);
+        const auto fitted =
+                QSizeF(full.size()).scaled(QSizeF(surface->size()), Qt::KeepAspectRatio);
+        const QRect expected =
+                QRectF((surface->width() - fitted.width()) / 2,
+                       (surface->height() - fitted.height()) / 2, fitted.width(), fitted.height())
+                        .toAlignedRect();
+        QCOMPARE(coverPaints.painted.boundingRect(), expected);
+        QVERIFY(parentPaints.painted.isEmpty());
+        QCOMPARE(surface->grab().toImage().pixelColor(surface->rect().center()), QColor(Qt::red));
+        parentPaints.painted = coverPaints.painted = {};
+        coverPaints.count = 0;
+        opening->setProgress(40);
+        QTRY_VERIFY(!parentPaints.painted.isEmpty());
+        QVERIFY(parentPaints.painted.intersected(surface->geometry()).isEmpty());
+        QCOMPARE(coverPaints.count, 0);
+    }
+
+    void openingMessages_data()
+    {
+        QTest::addColumn<bool>("reopening");
+        QTest::newRow("preparing") << false;
+        QTest::newRow("reopening") << true;
+    }
+
+    // Both opening paths reserve a visible status line and keep it fixed after the delay.
+    void openingMessages()
+    {
+        QFETCH(bool, reopening);
+        QWidget owner;
+        owner.resize(600, 800);
+        auto opening = createEmbeddedOpening(&owner, test::makeHostPresentation);
+        auto *view = opening->window();
+        view->setGeometry(owner.rect());
+        QImage image(100, 150, QImage::Format_RGB32);
+        image.fill(Qt::white);
+        QPainter ink(&image);
+        ink.fillRect(QRect(20, 20, 60, 100), Qt::black);
+        ink.end();
+        opening->setCover(image);
+        owner.show();
+        view->show();
+        auto *hint = view->findChild<QLabel *>("rrOpeningHint");
+        auto *surface = view->findChild<QWidget *>("rrOpeningCover");
+        const auto coverPixels = surface->grab().toImage();
+        QCoreApplication::processEvents();
+        PaintRegions coverPaints;
+        surface->installEventFilter(&coverPaints);
+        QVERIFY(hint->isVisible());
+        QCOMPARE(hint->text(), QLocale().toUpper(strings::get("opening.preparing")));
+        if (reopening) {
+            opening->setReopening();
+            QCOMPARE(hint->text(), QLocale().toUpper(strings::get("opening.reopening")));
+        }
+        const auto bounds = hint->geometry();
+        const auto group = surface->geometry().united(bounds);
+        QVERIFY(qAbs(group.center().x() - view->rect().center().x()) <= 1);
+        // From the cover's top to the baseline of the hint's capitals.
+        const QFontMetricsF metrics(hint->font());
+        const qreal baseline =
+                bounds.center().y() + 0.5 + (metrics.ascent() - metrics.descent()) / 2;
+        QVERIFY(qAbs((surface->y() + baseline) / 2 - view->height() / 2.0) <= 1.5);
+        QTRY_COMPARE_WITH_TIMEOUT(
+                hint->text(), QLocale().toUpper(strings::get("opening.may_take_a_while")), 5000);
+        QCOMPARE(hint->geometry(), bounds);
+        QCOMPARE(coverPaints.count, 0);
+        QCOMPARE(surface->grab().toImage(), coverPixels);
+        opening->setReopening();
+        QCOMPARE(hint->text(), QLocale().toUpper(strings::get("opening.may_take_a_while")));
     }
 
     void openingFirstPaintCallback()

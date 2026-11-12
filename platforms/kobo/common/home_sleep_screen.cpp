@@ -5,9 +5,12 @@
 #include "app/reader/views/sleep_screen.h"
 #include "storage/sleep_snapshot.h"
 #include "support/diagnostics.h"
+#include "support/strings.h"
 #include <QFile>
 #include <QApplication>
 #include <QEvent>
+#include <QScreen>
+#include <QJsonArray>
 #include <QSqlDatabase>
 #include <dlfcn.h>
 #include <future>
@@ -175,8 +178,61 @@ void HomeSleepScreen::forget()
     storage::removeSleepSnapshot(paths.sleepScreen());
 }
 
+bool HomeSleepScreen::preparePrivateScreen(bool powerOff, const QString &openingIdentity)
+{
+    auto identity = openingIdentity;
+    QJsonObject bookState;
+    if (identity.isEmpty()) {
+        const auto token = readToken(databasePath());
+        const auto fields = QJsonDocument::fromJson(token.toUtf8()).array();
+        identity = fields.isEmpty() ? QString() : fields.at(0).toString();
+    }
+    if (!identity.isEmpty()) {
+        const auto state = storage::readBookState(paths, identity, paths.bookState(identity));
+        bookState = state.object;
+        const bool readable = state.status == storage::ReadStatus::Ok
+                || state.status == storage::ReadStatus::Missing;
+        if (readable && !state.object.value("hide_book_on_sleep_screen").toBool(false))
+            return false;
+    }
+    // A failed or ambiguous lookup cannot safely opt a private book back into
+    // Nickel's cover. Use the neutral screen until its choice can be read.
+    clear();
+    const auto *screen = QGuiApplication::primaryScreen();
+    const auto preferences = storage::readPreferences(paths.preferences()).object;
+    sleep::Snapshot source;
+    const auto token = readToken(databasePath(), identity);
+    // Only a verified private snapshot can supply anonymous statistics. Native
+    // covers and old reading-page caches must never become a private backdrop.
+    if (!token.isEmpty() && token == rememberedToken && remembered.privateBook)
+        source = remembered;
+    if (!source.privateBook && !token.isEmpty()) {
+        const auto saved =
+                storage::readSleepSnapshot(paths.sleepScreen(), token, sleep::Mode::Plain);
+        if (saved.privateBook)
+            source = saved;
+    }
+    const auto finished = bookState.value("finished_position").toString();
+    const bool completed =
+            !finished.isEmpty() && finished == bookState.value("position").toString();
+    if (completed || bookState.value("percent").isDouble()) {
+        source.percent = completed ? 100 : qBound(0, bookState.value("percent").toInt(), 100);
+        source.progress = strings::get("sleep.percent_read").arg(source.percent);
+    }
+    snapshot =
+            sleep::privateSnapshot(screen ? screen->size() : QSize(800, 1200), preferences, source);
+    if (source.privateBook && source.design == sleep::Design::Overlay
+        && sleep::design(preferences) == sleep::Design::Overlay && !source.image.isNull())
+        snapshot.image = source.image;
+    poweredOff = powerOff;
+    compose();
+    return true;
+}
+
 void HomeSleepScreen::prepare(bool enabled, bool powerOff)
 {
+    if (enabled && preparePrivateScreen(powerOff))
+        return;
     clear();
     if (!enabled || invalidated || !presentation->supportsSleepScreen())
         return;
@@ -191,6 +247,7 @@ void HomeSleepScreen::prepare(bool enabled, bool powerOff)
     else
         snapshot = storage::readSleepSnapshot(paths.sleepScreen(), token, mode);
     snapshot.tile = sleep::tile(preferences.object);
+    snapshot.design = sleep::design(preferences.object);
     poweredOff = powerOff;
     compose();
 }
@@ -225,14 +282,14 @@ void HomeSleepScreen::compose()
 {
     if (snapshot.image.isNull())
         return;
+    reader::portraitSleepSnapshot(snapshot);
     const auto battery = nativeReaderBattery();
     const auto status = poweredOff ? reader::SleepStatus::PoweredOff
             : battery.fullyCharged ? reader::SleepStatus::Charged
             : battery.charging     ? reader::SleepStatus::Charging
                                    : reader::SleepStatus::Sleeping;
-    snapshot.image = reader::sleepScreenImage(
-            std::move(snapshot.image), snapshot.progress, snapshot.remaining, snapshot.dark,
-            battery.percent, status, snapshot.dimPage, snapshot.tile, snapshot.percent);
+    snapshot.image = reader::sleepDesignImage(std::move(snapshot.image), snapshot, battery.percent,
+                                              status, &underlay);
     snapshot.dimPage = false;
 }
 
@@ -249,6 +306,7 @@ void HomeSleepScreen::clear()
     finishSave();
     presentation->clearSleepScreen();
     snapshot = {};
+    underlay.clear();
     shutdownBackdrop = {};
     poweredOff = false;
 }
@@ -261,12 +319,9 @@ void HomeSleepScreen::updateBattery()
     const auto status = battery.fullyCharged ? reader::SleepStatus::Charged
             : battery.charging               ? reader::SleepStatus::Charging
                                              : reader::SleepStatus::Sleeping;
-    snapshot.image = reader::sleepScreenImage(std::move(snapshot.image), snapshot.progress,
-                                              snapshot.remaining, snapshot.dark, battery.percent,
-                                              status, false, snapshot.tile, snapshot.percent);
-    presentation->updateSleepScreen(snapshot.image,
-                                    reader::sleepScreenCardRect(snapshot.image.size(),
-                                                                !snapshot.remaining.isEmpty(),
-                                                                snapshot.tile));
+    const auto area =
+            reader::repaintSleepStatus(snapshot.image, underlay, snapshot, battery.percent, status);
+    if (!area.isEmpty())
+        presentation->updateSleepScreen(snapshot.image, area);
 }
 } // namespace kobalt::nickel

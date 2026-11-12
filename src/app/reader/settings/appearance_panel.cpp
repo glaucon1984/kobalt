@@ -214,9 +214,41 @@ AppearanceLayout AppearanceSheet::controls() const
              nullptr };
 }
 
+void AppearanceSheet::setTopSection(QWidget *section)
+{
+    topSection = section;
+}
+
 int AppearanceSheet::fitHeight(int width, int availableHeight)
 {
     ensurePolished();
+    int sectionHeight = 0;
+    if (topSection) {
+        // Phones in landscape have no room for presets. E-readers keep them
+        // in either orientation and page the controls when needed.
+        const auto *screen = window();
+        bool shown = pages->currentIndex() == int(AppearancePage::Typography)
+                && !isShortHeight(screen->height(), ui::density());
+        if (shown && screen->height() >= screen->width()) {
+            const auto base = metrics::panel::margins;
+            auto *rows = pages->currentWidget()->layout();
+            const int inner = qMax(1, width - base.left() - base.right());
+            const int content = qMax(rows->minimumSize().height(),
+                                     rows->hasHeightForWidth() ? rows->totalHeightForWidth(inner)
+                                                               : rows->sizeHint().height());
+            const int note = message->isHidden()
+                    ? 0
+                    : qMax(0, message->heightForWidth(inner)) + layout()->spacing();
+            shown = content + base.top() + base.bottom() + note + int(metrics::list::headerHeight)
+                    <= availableHeight;
+        }
+        topSection->setVisible(shown);
+        if (shown)
+            sectionHeight = topSection->sizeHint().height();
+        QMargins margins = metrics::panel::margins;
+        margins.setTop(margins.top() + sectionHeight);
+        layout()->setContentsMargins(margins);
+    }
     const auto margins = layout()->contentsMargins();
     const int innerWidth = qMax(1, width - margins.left() - margins.right());
     auto *rows = pages->currentWidget()->layout();
@@ -279,6 +311,10 @@ int AppearanceSheet::fitHeight(int width, int availableHeight)
     }
     const int height = overflow ? qMax(1, availableHeight) : contentHeight + extra;
     resize(width, height);
+    if (topSection && sectionHeight) {
+        topSection->setGeometry(0, metrics::chrome::heavyRule, width, sectionHeight);
+        topSection->raise();
+    }
     layout()->activate();
     if (overflow)
         showRows(rowPage);
@@ -306,6 +342,8 @@ AppearancePanel::AppearancePanel(const AppearanceLayout &layout,
     auto *typeRows = layout.typeRows, *pageRows = layout.pageRows;
     fontButton = new FontButton(typography);
     fontButton->setObjectName("rrFont");
+    // The font picker is a screen of its own, like Header and footer.
+    fontButton->setForward(true);
     readerStyle(fontButton,
                 QString("min-height:%1px;max-height:%1px;")
                         .arg(metrics::choices::fontButtonHeight - 2 * metrics::control::padding));

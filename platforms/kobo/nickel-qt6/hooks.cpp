@@ -1,4 +1,5 @@
 #include "hooks.h"
+#include "platforms/kobo/common/native_event_history.h"
 #include "platforms/kobo/common/native_tile_cover.h"
 #include "platforms/kobo/common/book_menu.h"
 #include "refresh.h"
@@ -11,6 +12,7 @@
 #include "platforms/kobo/common/native_light.h"
 #include "platforms/kobo/common/native_wifi_power.h"
 #include "platforms/kobo/display/page_animation.h"
+#include "platforms/kobo/nickel-qt6/native_types.h"
 #include <NickelHook.h>
 #include <QMetaType>
 #include <dlfcn.h>
@@ -27,14 +29,18 @@ bool (*nativePrerenderAllowed)(const void *);
 // on; a release that changes it leaves Nickel's reader in place.
 bool firmwareSupported()
 {
-    const auto *volume = static_cast<const QtPrivate::QMetaTypeInterface *>(
-            dlsym(RTLD_DEFAULT, "_ZN9QtPrivate25QMetaTypeInterfaceWrapperI6VolumeE8metaTypeE"));
-    return volume && QMetaType(volume).sizeOf() == 12;
+    return nativeType(volumeType).sizeOf() == sizeof(Volume);
 }
 } // namespace kobalt::nickel_qt6
 
 using namespace kobalt::nickel_qt6;
 static nh_hook readerHooks[] = {
+    { .sym = "_ZN5Event12setExtraDataE4QMapI7QString8QVariantE",
+      .sym_new = "kobalt_event_set_extra_data",
+      .lib = "libnickel.so.1.0.0",
+      .out = nh_symoutptr(kobalt::nativeEventSetExtraData),
+      .desc = "Retain recent whole sessions in native page history",
+      .optional = true },
     { .sym = "_ZN10PixmapView8setImageERK6QImageRK7QString",
       .sym_new = "kobalt_tile_set_image",
       .lib = "libnickel.so.1.0.0",

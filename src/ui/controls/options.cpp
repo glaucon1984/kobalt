@@ -171,6 +171,11 @@ int DescribedOption::valueHeight() const
 
 int DescribedOption::heightForWidth(int width) const
 {
+    // Callers often fix a row's height right after creating it. Until the row
+    // is polished, font() is the host application's font, not the interface
+    // font from the style sheet. On Kobo that is Nickel's font, which wraps
+    // the description differently and left the row too short.
+    ensurePolished();
     if (description.isEmpty() && !preview) {
         const int extra = valueHeight();
         return extra ? qMax<int>(appearance.minimumRowHeight,
@@ -445,6 +450,8 @@ void RadioList::setMinimumRowHeight(int pixels)
 
 void RadioList::setTopDivider(bool shown)
 {
+    if (topDivider == shown)
+        return;
     topDivider = shown;
     arrange();
 }

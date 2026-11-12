@@ -31,6 +31,8 @@ void animateNextFrame(int direction) {
         reinterpret_cast<void (*)(int)>(fn)(direction);
 }
 void textRefresh(QWidget *) {}
+// The cover replacing the opening placeholder: the plugin's per-frame partial update, as for text.
+void coverRefresh(QWidget *) {}
 void pageRefresh(QWidget *widget, bool clean, bool) {
     if (!widget)
         return;

@@ -94,7 +94,11 @@ Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
     openingPage = new QWidget(this);
     auto *body = new QVBoxLayout(openingPage);
     body->setContentsMargins(0, 0, 0, 0);
-    opening = createEmbeddedOpening(openingPage, readerServices().presentation);
+    // The reader's "Kobalt logo while opening books" setting; every book is a new process here,
+    // so the saved value is the current one.
+    opening = createEmbeddedOpening(
+            openingPage, readerServices().presentation,
+            storage::readPreferences(preferencesPath).object.value("show_opening_cover").toBool(true));
     body->addWidget(opening->window());
     connect(opening->window(), &QDialog::rejected, this, &QWidget::close);
     addWidget(openingPage);
@@ -104,6 +108,10 @@ Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
             opening->setProgress(percent);
         else if (currentWidget() == bootPage)
             bootPage->setProgress(percent);
+    });
+    connect(&controller, &standalone::ReaderController::reopeningBook, this, [this] {
+        if (currentWidget() == openingPage)
+            opening->setReopening();
     });
     connect(&controller, &standalone::ReaderController::openingCover, this, [this](QImage cover) {
         bookCover = cover;
@@ -166,7 +174,7 @@ Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
         }
         // Standby and power-off from the library are the firmware's business: its own screens
         // from here on, whatever Kobalt showed while the book was open.
-        leaveFirmwareScreens(bookCover, "close");
+        leaveFirmwareScreens(firmwareCover(), "close");
         if (closing)
             close();
         else
@@ -291,6 +299,39 @@ QImage Host::capturePanel() {
     return {};
 }
 
+void Host::updateBookPrivacy() {
+    auto *reader = controller.window();
+    if (!reader)
+        return;
+    const bool hidden = reader->hidesBookOnSleepScreen();
+    if (hidden == bookPrivate)
+        return;
+    bookPrivate = hidden;
+    // The boot logo follows at once: a page captured before the book was hidden must not stay.
+    bootLogoForBook = false;
+    qInfo("kobalt-pb: book %s the sleep, power-off and boot screens", hidden ? "hidden from" : "shown on");
+}
+
+// What stands for the book where the firmware shows its cover: a blank sheet for a hidden book.
+QImage Host::firmwareCover() const {
+    if (!bookPrivate)
+        return bookCover;
+    QImage blank(QGuiApplication::primaryScreen()->size(), QImage::Format_RGB32);
+    blank.fill(Qt::white);
+    return blank;
+}
+
+// The panel as shown, for the boot logo; blank for a hidden book (the reopen after a power-off
+// then goes blank sheet -> live page).
+QImage Host::bootCapture() const {
+    QImage panel = capturePanel();
+    if (bookPrivate && !panel.isNull()) {
+        panel = QImage(panel.size(), QImage::Format_RGB32);
+        panel.fill(Qt::white);
+    }
+    return panel;
+}
+
 // Kobalt's own sleep sequence, run while the device is already behind the lock screen (or at
 // open, invisibly): it saves progress and composes the sleep image, which the presentation
 // writes as the firmware's lock bitmap for the next standby.
@@ -317,7 +358,8 @@ void Host::taskBackground() {
     // opening view. Told apart from a standby on the charger by the connection being new.
     const bool usbPlug = IsUSBconnected() > 0 && !usbAtLastInput;
     // The page as it was shown, before the sleep view is painted over it: the boot logo.
-    const QImage page = usbPlug ? QImage() : capturePanel();
+    updateBookPrivacy();
+    const QImage page = usbPlug ? QImage() : bootCapture();
     if (sleepRefreshTimer.isActive()) {
         sleepRefreshTimer.stop();
         releaseAwakeForRefresh();
@@ -351,11 +393,11 @@ void Host::taskBackground() {
         // prompt is up and must not be disturbed (see leaveFirmwareScreens). Should the prompt
         // end in Charge instead, Kobalt is woken with the book still open and writes its sleep
         // image again (finishWake). The writes land before the sync below.
-        leaveFirmwareScreens(bookCover, "USB", true);
+        leaveFirmwareScreens(firmwareCover(), "USB", true);
         firmwareScreensLeft = true;
         qInfo("kobalt-pb: USB connected: firmware screens restored, boot capture forgotten");
     } else {
-        if (sleepMode() != sleep::Mode::Stock)
+        if (sleepMode() != sleep::Mode::Stock || bookPrivate)
             writePowerOffImage(reader->composePowerOffImage());
         updateBootLogo(page, "standby");
     }
@@ -523,9 +565,12 @@ void Host::refreshSleepScreen(const char *reason) {
         releaseAwakeForRefresh();
         return;
     }
+    updateBookPrivacy();
     // The built-in sleep screen: the reader composes nothing for it (captureSleepScreen), and
-    // the firmware's own picture is put back instead of Kobalt's last one staying on disk.
-    if (sleepMode() == sleep::Mode::Stock) {
+    // the firmware's own picture is put back instead of Kobalt's last one staying on disk. A
+    // hidden book gets Kobalt's private screen instead, as on Kobo: the power-off file would
+    // otherwise hold its cover.
+    if (sleepMode() == sleep::Mode::Stock && !bookPrivate) {
         applyStockSleepScreen();
         releaseAwakeForRefresh();
         return;
@@ -557,7 +602,7 @@ void Host::refreshSleepScreen(const char *reason) {
             return;
         if (ok && !self->bootLogoForBook && !self->asleep) {
             self->bootLogoForBook = true;
-            self->updateBootLogo(capturePanel(), "open");
+            self->updateBootLogo(self->bootCapture(), "open");
         }
         if (!ok || self->asleep) {
             if (ok)
@@ -594,7 +639,7 @@ void Host::applyStockSleepScreen() {
         qInfo("kobalt-pb: built-in sleep screen: no cover for the power-off file");
     if (!bootLogoForBook) {
         bootLogoForBook = true;
-        updateBootLogo(capturePanel(), "open");
+        updateBootLogo(bootCapture(), "open");
     }
     if (!restoreFirmwareLockImages()) {
         qInfo("kobalt-pb: built-in sleep screen: no lock image of Kobalt's to remove");
@@ -825,6 +870,8 @@ bool Host::eventFilter(QObject *object, QEvent *event) {
     // The reader is told to close: it saves and gives its engine up within a second. The pages
     // of its highlights are asked for now, for the mirror that runs once the book is closed (a
     // highlight made just before leaving would otherwise be listed on page 1).
+    if (event->type() == QEvent::Close && !quitting && object == controller.window())
+        updateBookPrivacy();
     if (event->type() == QEvent::Close && !quitting && object == controller.window() &&
         (!notePagesAsked.isValid() || notePagesAsked.elapsed() > 3000))
         collectNotePages({});

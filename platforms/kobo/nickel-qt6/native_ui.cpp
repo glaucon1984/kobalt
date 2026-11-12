@@ -1,4 +1,5 @@
 #include "support/qt_compat.h"
+#include "platforms/kobo/common/native_symbol.h"
 #include "support/strings.h"
 #include "platforms/kobo/common/native_ui.h"
 #include <QApplication>
@@ -32,12 +33,6 @@
 
 namespace kobalt {
 namespace {
-template <class T>
-T symbol(const char *name)
-{
-    return reinterpret_cast<T>(dlsym(RTLD_DEFAULT, name));
-}
-
 QWidget *nativeWidget(const char *typeSymbol, QWidget *parent)
 {
     const auto *interface = symbol<const QtPrivate::QMetaTypeInterface *>(typeSymbol);
@@ -115,6 +110,18 @@ int nativePageButtonDirection(QKeyEvent *event)
     // Match Kobalt's existing left-to-right page navigation. Nickel owns the
     // physical-button orientation and invertPageTurnButtons mapping.
     return forward(mapped, true) ? 1 : -1;
+}
+
+bool nativePageButtonsRotated()
+{
+    // Nickel exports no rotation flag for the buttons. Its direction for the
+    // upper button combines rotation with the Reading setting, so remove the
+    // setting again.
+    QKeyEvent upper(QEvent::KeyPress, Qt::Key_F23, Qt::NoModifier);
+    const int direction = nativePageButtonDirection(&upper);
+    if (!direction)
+        return false;
+    return (direction > 0) != nativeInvertedPageButtons();
 }
 
 bool nativeReaderSleepScreenAvailable()

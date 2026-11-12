@@ -59,14 +59,9 @@ endforeach()
 string(REGEX REPLACE "^v([0-9]+\\.[0-9]+(\\.[0-9]+)?).*$" "\\1" KOBALT_BUNDLE_VERSION "${KOBALT_VERSION}")
 
 set(source "${KOBALT_ROOT}/src")
-file(READ "${CRENGINE_SOURCE}/cr3gui/data/html5.css" READER_HTML_CSS)
-configure_file("${source}/engine/crengine/reader_styles.h.in" reader_styles.h @ONLY)
-file(GLOB patterns RELATIVE "${CRENGINE_SOURCE}/cr3gui/data/hyph" "${CRENGINE_SOURCE}/cr3gui/data/hyph/*.pattern")
-list(SORT patterns)
-list(TRANSFORM patterns PREPEND "\"")
-list(TRANSFORM patterns APPEND "\"")
-list(JOIN patterns ", " READER_HYPHENATION_PATTERNS)
-configure_file("${source}/engine/crengine/reader_hyphenation.h.in" reader_hyphenation.h @ONLY)
+# The generated engine headers, the cache policy, the annotation storage
+# default, kobalt_shared_definitions and kobalt_notice_resources.
+include("${KOBALT_ROOT}/platforms/shared-inputs.cmake")
 include("${KOBALT_ROOT}/platforms/source-info.cmake")
 kobalt_source_info("${KOBALT_ROOT}")
 configure_file("${source}/support/build_info.h.in" build_info.h @ONLY)
@@ -76,7 +71,9 @@ file(GLOB_RECURSE shared CONFIGURE_DEPENDS
     "${source}/dictionaries/*.cpp" "${source}/engine/*.cpp"
     "${source}/library/*.cpp" "${source}/render/*.cpp"
     "${source}/reading/*.cpp" "${source}/storage/*.cpp" "${source}/sync/*.cpp")
-add_library(kobalt-core OBJECT ${shared} display.cpp
+add_library(kobalt-core OBJECT ${shared} display.cpp ../standalone/native_image.cpp
+    "${source}/platform/qt/export_file.cpp"
+    "${source}/platform/posix/diagnostics.cpp"
     "${source}/assets/assets.cpp" "${source}/assets/bundled_fonts.cpp" "${source}/assets/font_catalog.cpp"
     "${source}/assets/system_fonts.cpp"
     "${source}/support/diagnostics.cpp" "${source}/support/main_thread.cpp"
@@ -90,9 +87,7 @@ target_include_directories(kobalt-core SYSTEM PUBLIC
     "${KOBALT_TEST_DEPENDENCIES}/include" "${KOBALT_TEST_DEPENDENCIES}/include/harfbuzz"
     "${KOBALT_TEST_DEPENDENCIES}/include/freetype2" "${KOBALT_TEST_DEPENDENCIES}/include/fribidi"
     "${KOBALT_TEST_PNG_INCLUDE}")
-include("${KOBALT_ROOT}/platforms/cache-policy.cmake")
-target_compile_definitions(kobalt-core PUBLIC KOBALT_READER_HARDWARE KOBALT_VERSION="${KOBALT_VERSION}"
-    KOBALT_LAYOUT_POLICY="${layout_policy}")
+target_compile_definitions(kobalt-core PUBLIC ${kobalt_shared_definitions})
 if(APPLE)
     target_compile_definitions(kobalt-core PUBLIC fdatasync=fsync)
 endif()
@@ -102,14 +97,6 @@ else()
     target_compile_definitions(kobalt-core PUBLIC KOBALT_NO_SENSORS)
 endif()
 target_compile_options(kobalt-core PRIVATE -Wall -Wextra)
-option(KOBALT_SQLITE_ANNOTATIONS_DEFAULT "Use SQLite annotation storage by default" ON)
-if(KOBALT_SQLITE_ANNOTATIONS_DEFAULT)
-    set_source_files_properties("${source}/storage/annotation_database.cpp" PROPERTIES
-        COMPILE_DEFINITIONS KOBALT_SQLITE_ANNOTATIONS_DEFAULT=1)
-else()
-    set_source_files_properties("${source}/storage/annotation_database.cpp" PROPERTIES
-        COMPILE_DEFINITIONS KOBALT_SQLITE_ANNOTATIONS_DEFAULT=0)
-endif()
 target_link_libraries(kobalt-core PUBLIC Qt6::Widgets Qt6::Network Qt6::Sql
     "${CRENGINE_BUILD}/libcrengine.a"
     "${KOBALT_TEST_DEPENDENCIES}/lib/libharfbuzz.a" "${KOBALT_TEST_DEPENDENCIES}/lib/libxxhash.a"
@@ -131,8 +118,6 @@ add_library(kobalt-desktop OBJECT ${app_sources}
     ../standalone/reader.cpp ../standalone/start_screen.cpp
     "${source}/platform/api/reader_orientation.cpp")
 target_link_libraries(kobalt-desktop PUBLIC kobalt-core)
-set_source_files_properties("${source}/app/reader/views/reading_page.cpp" PROPERTIES
-    COMPILE_DEFINITIONS KOBALT_DESKTOP_POINTER)
 target_compile_options(kobalt-desktop PRIVATE -Wall -Wextra)
 # A build from a linked Git worktree is a variant named after the worktree's
 # folder. A variant has its own name, bundle identifier and profile, so it can
@@ -192,11 +177,8 @@ target_compile_definitions(Kobalt PRIVATE KOBALT_PROFILE_NAME="${KOBALT_PROFILE_
 set_target_properties(Kobalt PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in")
 set(resources "${KOBALT_ROOT}/assets")
-file(GLOB notices CONFIGURE_DEPENDS "${resources}/notices/*")
 qt_add_resources(kobalt-desktop desktop_artwork PREFIX "/desktop" BASE "${resources}" FILES "${resources}/kobalt-android.svg")
-qt_add_resources(kobalt-desktop notices PREFIX "/kobalt" BASE "${resources}" FILES "${resources}/acknowledgments.json" ${notices}
-    "${resources}/samples/words-and-letters.html" "${resources}/samples/layout.html"
-    "${resources}/samples/hanging-punctuation.html")
+qt_add_resources(kobalt-desktop notices PREFIX "/kobalt" BASE "${kobalt_notice_base}" FILES ${kobalt_notice_resources})
 if(APPLE)
     set(bundle_assets "${CMAKE_CURRENT_BINARY_DIR}/Kobalt.app/Contents/Resources/assets")
     add_custom_command(OUTPUT "${bundle_assets}/manifest.json"
@@ -239,6 +221,10 @@ if(BUILD_TESTING)
         "-DTEST_TMP_ROOT=${CMAKE_CURRENT_BINARY_DIR}/test-tmp"
         -P "${KOBALT_ROOT}/platforms/strings-test.cmake")
     set_tests_properties(build.strings PROPERTIES LABELS "fast;build" TIMEOUT 30)
+    add_test(NAME build.sourceChecks COMMAND "${CMAKE_COMMAND}"
+        "-DTEST_TMP_ROOT=${CMAKE_CURRENT_BINARY_DIR}/test-tmp"
+        -P "${KOBALT_ROOT}/platforms/checks/source-checks-test.cmake")
+    set_tests_properties(build.sourceChecks PROPERTIES LABELS "fast;build" TIMEOUT 30)
     add_test(NAME build.screenshotBooks COMMAND "${CMAKE_COMMAND}"
         "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/screenshot-book-test"
         "-DPREPARE_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/prepare-screenshot-books.cmake"
@@ -280,10 +266,10 @@ if(BUILD_TESTING)
         KOBALT_TEST_VARIABLE_FONT="${test_variable_font}" KOBALT_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/test-tmp")
     set(headless_environment "QT_QPA_PLATFORM=minimal:enable_fonts:freetype" "QT_STYLE_OVERRIDE=Fusion" "TMPDIR=${CMAKE_CURRENT_BINARY_DIR}/test-tmp")
-    foreach(check viewportTransition viewportChanges imageViewer pageAnimationCompatibility lightGestureFeedback lightGestureUnavailable lightDarkModeShortcut lightGestureFeedbackPersistence annotationDefaultView galleryWorkerFailure galleryIntegrity sameProcessReadersDoNotRecoverEachOther standaloneHistorySourceKeys verticalJustification startup libraryOnboarding libraryAbout reading restartFinishedBooks errors diagnostics storageDiagnostics timingEvents features stylesheet bookmarks pinnedBookmarks bookmarkMerge annotations annotationModeFeedback annotationSelection coordinateProbeSerialization annotationGripMenus annotationCrossPageDrag selectionCrossPageDrag annotationCrossPageOverlap annotationOverlap touchCursor touchCursorOutsideReader links footnoteHitTargets footnoteHighlightShapes revealedLinkPress tappableLinks bookmarkCornerLinks
-            androidPageAnimations annotationSectionBoundary headerFooterSizes batteryPercentageOnly headerFooterDismissal settings settingsStandby publisherFontDefault fontPagingClearsCaptions kfFontVariants advancedText globalLayout columns fullWidthPanels dictionarySafeArea dictionaryRedraw dictionaryAppearance dictionaryEditing dictionaryBookSearch dictionaryBookSearchUnicode dictionaryDismissal opticalSize phoneFrame bookmarkRibbonSafeArea desktopControls deviceEmulation navigation buttonMapping buttonMappingActions buttonMappingUnavailable chapterGroups largeInterfaceScale largeInterfaceScaleLongExit bookmarkReturn booxMenuDismissalRefresh booxRetirementFrame annotationTwoFingerTapConsumesWholeSequence annotationRightClickRejectsChords library libraryTextInheritance libraryGridRows libraryHold libraryScanningCaption libraryAtStart)
+    foreach(check viewportTransition viewportChanges imageViewer pageAnimationCompatibility lightGestureFeedback lightGestureUnavailable lightDarkModeShortcut lightGestureFeedbackPersistence annotationDefaultView galleryWorkerFailure galleryIntegrity sameProcessReadersDoNotRecoverEachOther standaloneHistorySourceKeys verticalJustification startup libraryOnboarding libraryAbout reading restartFinishedBooks errors diagnostics storageDiagnostics timingEvents features stylesheet bookmarks pinnedBookmarks customPinnedBookmarks resourceFolders bookmarkMerge annotations annotationModeFeedback annotationSelection coordinateProbeSerialization annotationGripMenus annotationCrossPageDrag selectionCrossPageDrag annotationCrossPageOverlap annotationOverlap touchCursor touchCursorOutsideReader links inpageFootnotes footnoteHitTargets footnoteHighlightShapes revealedLinkPress tappableLinks bookmarkCornerLinks
+            androidPageAnimations annotationSectionBoundary headerFooterSizes batteryPercentageOnly headerFooterDismissal settings settingsOpeningCover settingsSleepPrivacy settingsStandby settingsAutomaticOpening settingsZenPage settingsFeatures settingsFeatureLists settingsZenMode settingsStylingSamples settingsRestorePresets settingsTextPresetGallery settingsTextPresetName settingsTextPresetLandscape settingChangesLogged publisherFontDefault fontPagingClearsCaptions kfFontVariants advancedText globalLayout columns fullWidthPanels dictionarySafeArea dictionaryRedraw dictionaryAppearance dictionaryEditing dictionaryBookSearch dictionaryBookSearchUnicode savedWords dictionaryDismissal opticalSize phoneFrame bookmarkRibbonSafeArea desktopControls deviceEmulation navigation swipeChoices pageSwipes buttonMapping buttonMappingActions buttonMappingFollowsRotation buttonMappingUnavailable largeToc chapterGroups graphMode settingsChoicePopupDismissal largeInterfaceScale largeInterfaceScaleLongExit bookmarkReturn booxMenuDismissalRefresh booxRetirementFrame annotationTwoFingerTapConsumesWholeSequence annotationRightClickRejectsChords library libraryTextInheritance libraryGridRows libraryHold libraryScanningCaption libraryAtStart)
         set(lane fast)
-        if(check MATCHES "^(imageViewer|deviceEmulation|pageAnimationCompatibility|lightGestureFeedback|lightGestureUnavailable|lightDarkModeShortcut|lightGestureFeedbackPersistence|annotationDefaultView|sameProcessReadersDoNotRecoverEachOther|standaloneHistorySourceKeys|verticalJustification|features|diagnostics|stylesheet|bookmarks|pinnedBookmarks|bookmarkMerge|annotations|annotationModeFeedback|annotationSelection|coordinateProbeSerialization|annotationGripMenus|annotationCrossPageDrag|androidPageAnimations|annotationSectionBoundary|selectionCrossPageDrag|annotationCrossPageOverlap|annotationOverlap|touchCursor|touchCursorOutsideReader|links|tappableLinks|bookmarkCornerLinks|headerFooterSizes|batteryPercentageOnly|headerFooterDismissal|settings|publisherFontDefault|fontPagingClearsCaptions|advancedText|globalLayout|columns|fullWidthPanels|dictionarySafeArea|dictionaryRedraw|dictionaryAppearance|dictionaryEditing|dictionaryBookSearch|dictionaryBookSearchUnicode|dictionaryDismissal|opticalSize|bookmarkRibbonSafeArea|desktopControls|navigation|buttonMapping|buttonMappingActions|buttonMappingUnavailable|chapterGroups|largeInterfaceScale|largeInterfaceScaleLongExit|bookmarkReturn|booxMenuDismissalRefresh|booxRetirementFrame|library|libraryTextInheritance|libraryGridRows|libraryHold|libraryScanningCaption|libraryAtStart)$")
+        if(check MATCHES "^(settingsOpeningCover|settingsStylingSamples|settingsTextPresetGallery|settingsTextPresetName|settingsTextPresetLandscape|imageViewer|deviceEmulation|pageAnimationCompatibility|lightGestureFeedback|lightGestureUnavailable|lightDarkModeShortcut|lightGestureFeedbackPersistence|annotationDefaultView|sameProcessReadersDoNotRecoverEachOther|standaloneHistorySourceKeys|verticalJustification|features|diagnostics|stylesheet|bookmarks|pinnedBookmarks|customPinnedBookmarks|resourceFolders|bookmarkMerge|annotations|annotationModeFeedback|annotationSelection|coordinateProbeSerialization|annotationGripMenus|annotationCrossPageDrag|androidPageAnimations|annotationSectionBoundary|selectionCrossPageDrag|annotationCrossPageOverlap|annotationOverlap|touchCursor|touchCursorOutsideReader|links|inpageFootnotes|tappableLinks|bookmarkCornerLinks|headerFooterSizes|batteryPercentageOnly|headerFooterDismissal|settings|settingsSleepPrivacy|publisherFontDefault|fontPagingClearsCaptions|advancedText|globalLayout|columns|fullWidthPanels|dictionarySafeArea|dictionaryRedraw|dictionaryAppearance|dictionaryEditing|dictionaryBookSearch|dictionaryBookSearchUnicode|savedWords|dictionaryDismissal|opticalSize|bookmarkRibbonSafeArea|desktopControls|navigation|swipeChoices|pageSwipes|buttonMapping|buttonMappingActions|buttonMappingFollowsRotation|buttonMappingUnavailable|largeToc|chapterGroups|graphMode|settingsChoicePopupDismissal|largeInterfaceScale|largeInterfaceScaleLongExit|bookmarkReturn|booxMenuDismissalRefresh|booxRetirementFrame|library|libraryTextInheritance|libraryGridRows|libraryHold|libraryScanningCaption|libraryAtStart)$")
             set(lane integration)
         endif()
         set(test_timeout 30)
@@ -305,6 +291,18 @@ if(BUILD_TESTING)
         -P "${CMAKE_CURRENT_SOURCE_DIR}/run-test.cmake")
     set_tests_properties(desktop.primaryViews PROPERTIES ENVIRONMENT "${headless_environment}"
         LABELS "desktop;light" TIMEOUT 125)
+    add_test(NAME desktop.syncChoiceView COMMAND "${CMAKE_COMMAND}"
+        "-DTEST_EXECUTABLE=$<TARGET_FILE:kobalt-desktop-tests>" "-DTEST_ARGUMENTS=--screen-tests;syncChoiceView"
+        "-DTEST_TIMEOUT=30" "-DTEST_TMP_ROOT=${CMAKE_CURRENT_BINARY_DIR}/test-tmp"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/run-test.cmake")
+    set_tests_properties(desktop.syncChoiceView PROPERTIES ENVIRONMENT "${headless_environment}"
+        LABELS "desktop;fast" TIMEOUT 35)
+    add_test(NAME desktop.kosyncChoice COMMAND "${CMAKE_COMMAND}"
+        "-DTEST_EXECUTABLE=$<TARGET_FILE:kobalt-desktop-tests>" "-DTEST_ARGUMENTS=--screen-tests;kosyncChoice"
+        "-DTEST_TIMEOUT=120" "-DTEST_TMP_ROOT=${CMAKE_CURRENT_BINARY_DIR}/test-tmp"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/run-test.cmake")
+    set_tests_properties(desktop.kosyncChoice PROPERTIES ENVIRONMENT "${headless_environment}"
+        LABELS "desktop;integration" TIMEOUT 125)
     foreach(check startup reading errors storageDiagnostics galleryIntegrity galleryWorkerFailure)
         set_property(TEST desktop.${check} APPEND PROPERTY LABELS light)
     endforeach()
@@ -370,29 +368,30 @@ if(BUILD_TESTING)
         KOBALT_TEST_ZIP="${KOBALT_TEST_ZIP}"
         KOBALT_FONT_DIRECTORY="${KOBALT_ASSETS}/fonts" KOBALT_INSTALLED_FONTS)
     add_dependencies(kobalt-tests kobalt-reader-lifecycle-tests)
-    foreach(check teardownRemovesApplicationFilter shutdownFinalSaveTimesOut
+    foreach(check teardownRemovesApplicationFilter appearanceTeardownStopsPanelCallbacks shutdownFinalSaveTimesOut
             backgroundWriteFailureRetriesWithoutCountingPause backgroundCheckpointStopsBeforeOtherCallbacks standaloneReadingHistory navigationDismissalWaitsForPanel uneditedPanelTransitions lightReplacesDefaultMenu appearanceApplyOnNavigation appearanceRelayoutPreservesPassage
             overflowClosesCurrentPanel appearanceSettingsRetainsDraft appearanceWriteFailureRetainsDraft
             appearanceSleepRetainsDraft appearanceFailedPreviewDismisses appearanceApplyFailureCanExit
             appearanceCloseDuringPreview appearanceSleepDuringFirstEdit appearanceDragsDuringPreview
             pageTurnsResumeWhenReaderIsShownAfterSleep clockUpdatesOnlyReadingStrips clockStopsWhileReaderIsHidden closeWithPendingBookmark
             closeWaitsForLocalSave closeRetriesRequiredNativeSaves quitAfterFailedLocalSaveRetry closeWaitsForNativeTimeBeforePosition sleepWaitsForNativeTimeBeforePosition revokedNativeDrainRetainsLocalSave
-            pageTurnTimingIgnoresNoopNavigation pageButtonsAfterTouchUseDeliveryTime pageFrameDuringHold pageImageDuringHold pageGestureBurstIgnoresRapidTurns exitThroughReaderAndReopen exitGuardUsesTapTime staleSearchReplyIgnored searchSurvivesReflow
+            pageTurnTimingIgnoresNoopNavigation pageButtonsAfterTouchUseDeliveryTime pageFrameDuringHold pageImageDuringHold pageGestureBurstIgnoresRapidTurns exitThroughReaderAndReopen closeGuardUsesTapTime staleSearchReplyIgnored searchScopesAndPagination searchSurvivesReflow
             searchHighlightClearsOnReflow
-            sleepRequestFreezesOrientationBeforeHandoff closePublishesHeldOrientationBeforeBackgroundPaint
+            settingsOrientationHandoff sleepRequestFreezesOrientationBeforeHandoff closePublishesHeldOrientationBeforeBackgroundPaint
             closeRestoresOrientationBeforeBackgroundPaint rotationOwnership readerUsesSelectedSleepScreen
             closedReaderDoesNotSaveSleepScreen usbDoesNotSaveSleepScreen persistedSleepScreenRejectsStaleAndDamagedFrames
             homeSleepScreenRequiresUnambiguousLastBook nativeOpeningStatus
-            sleepScreenUpdatesWhilePluggedIn sleepScreenDimsOnlyItsOwnedPage sleepTilesRepaintOnlyTheirArea
+            sleepScreenUpdatesWhilePluggedIn sleepWidgetsKeepTimeAcrossSessionTimeout sleepPowerOffWithoutCoverKeepsDesign sleepPrivateBookOverridesEveryDesign sleepPrivateBookRetainsNeutralFrameWhenHandoffFails sleepPrivatePreviewsHideBookPixels sleepPrivateBookCloseSavesAnonymousDesign sleepScreenDimsOnlyItsOwnedPage sleepTilesRepaintOnlyTheirArea sleepDesignsRepaintOnlyTheirStatus sleepMetadataStaysInsideItsLayout sleepLetterPreservesLiteralPlaceholders sleepBackdropsUsePortrait sleepFromLandscapeKeepsTheReadingPage
             sleepSnapshotMatchesTheDisplayedPage
             sleepSnapshotReplacesEachClockWithoutChangingTheReadingPage sleepTimeLeftUsesHoursAboveTwoHours sleepTimeLeftApproximate timeRemainingFormatShared
-            sleepScreenDefaultsMigrateOnce sleepPngOverlaysUseEitherFolder sleepSettingsShowWhereToAddPngs sleepOverlayUsesTheDimmedPage sleepCoverFitsWithoutCroppingOrDimming
+            sleepScreenDefaultsMigrateOnce sleepPngOverlaysUseEitherFolder sleepNativePreviewFollowsSettings sleepSettingsShowWhereToAddPngs sleepGreetingEditor sleepOverlayUsesTheDimmedPage sleepCoverFitsWithoutCroppingOrDimming
             sleepCoverDecodingIsBoundedAndHonorsSourceCancellation wifiStatus readingTimeStatus remoteKeyActivityRequiresActiveReading
-            finishChoiceSurvivesSleepAndRequiresActiveReader finishPromptPersistence progressPercentagesAgree kosyncAccountGating kosyncOpening kosyncNetwork kosyncBackgroundWifi kosyncWifiRelease kosyncMoments minuteClock idleTimers readerStandbySetting wifiPowerSaver wifiPowerSaverAtSleep kosyncManualToolbar kosyncManualConnection kosyncFailure kosyncMissingProgress kosyncPasswordSleep kosyncSleepSavesSyncTime kosyncFinal nativeProgressWaitsForSleep appearanceRetryCooldown closeWithUnusableSettings recoveryNoticeAfterFirstPage benchmarkNoticeAfterRun activityBatchesAndLowBattery usbFinalSave
-            progressChoiceKeepAndGo progressChoiceWaitsForSettings finishedSyncWithoutPositionKeepsLocalReading
+            finishChoiceSurvivesSleepAndRequiresActiveReader finishPromptPersistence progressPercentagesAgree kosyncAccountGating kosyncOpening kosyncNetwork kosyncBackgroundWifi kosyncWifiRelease kosyncMoments minuteClock clockRestsWithoutConsumers clockAsksPaceForTimeLeft turnSkipsHiddenControls idleTimers readerStandbySetting wifiPowerSaver wifiPowerSaverAtSleep kosyncManualToolbar kosyncManualConnection kosyncFailure kosyncMissingProgress kosyncMetadata kosyncPasswordSleep kosyncSleepSavesSyncTime kosyncFinal nativeProgressWaitsForSleep appearanceRetryCooldown closeWithUnusableSettings recoveryNoticeAfterFirstPage benchmarkNoticeAfterRun activityBatchesAndLowBattery usbFinalSave developmentOptions developmentStateReports annotationExportHandoff annotationExportOwnerDestruction
+            progressChoiceKeepAndGo progressChoiceWaitsForSettings progressChoiceWaitsForBookmarks
+            finishedSyncWithoutPositionKeepsLocalReading
             progressChoiceForOlderAlert progressChoiceUnavailablePosition
             appearanceOpeningDoesNotRepaintToolbar annotationFramesKeepFirstPaintComplete annotationListResolvesPagesOnDemand)
-        if(NOT KOBALT_DESKTOP_SENSORS AND check MATCHES "^(sleepRequestFreezesOrientationBeforeHandoff|closePublishesHeldOrientationBeforeBackgroundPaint)$")
+        if(NOT KOBALT_DESKTOP_SENSORS AND check MATCHES "^(settingsOrientationHandoff|sleepRequestFreezesOrientationBeforeHandoff|closePublishesHeldOrientationBeforeBackgroundPaint)$")
             continue()
         endif()
         add_test(NAME lifecycle.${check} COMMAND "${CMAKE_COMMAND}"
@@ -490,7 +489,10 @@ if(BUILD_TESTING)
             canvasCancellationKeepsReentrantGesture
             canvasReleaseCanDeleteWidgets
             canvasInputRespectsModalBarrier
+            modalClosesOnBackdropOnly
+            choiceSheetListFillsCard
             connectedModalFooter
+            modalListDividers
             libraryActionButtons
             libraryAbout
             libraryFolderPicker
@@ -507,14 +509,20 @@ if(BUILD_TESTING)
             pageTurnFrames
             listPressFeedback
             optionAndSwatchPressFeedback
+            annotationSwatchLabelsFit
             marksSortingAndAnnotationRows
             annotationDetailsOnlyLoadVisiblePage
             hidingSelectionMenuKeepsDamageCompact
+            keyboardDamageStaysApartFromEditor
             delayedProgressPaintsAfterTheEventLoop
             progressPaintsOnlyChangedPixels
             openingProgressPaintsAfterTheEventLoop
             openingCoverLayout
             openingCoverUpgrade
+            openingCoverDisabled
+            openingCoverDamage
+            openingMessages
+            openingHandoffLayout
             openingFirstPaintCallback
             readingStripChangesLeaveBodyUnpainted
             navigationPressKeepsDamageInItsTab
@@ -616,8 +624,12 @@ if(BUILD_TESTING)
             target_compile_definitions(kobalt-${name}-tests PRIVATE
                 KOBALT_TEST_ASSET_ROOT="${KOBALT_ASSETS}" KOBALT_FONT_DIRECTORY="${KOBALT_ASSETS}/fonts"
                 KOBALT_INSTALLED_FONTS)
-            if(check STREQUAL "vertical_spacing")
+            if(check MATCHES "^(vertical_spacing|large_toc|links)$")
                 target_compile_definitions(kobalt-${name}-tests PRIVATE KOBALT_TEST_ZIP="${KOBALT_TEST_ZIP}")
+            endif()
+            if(check STREQUAL "custom_pins")
+                target_compile_definitions(kobalt-${name}-tests PRIVATE
+                    KOBALT_TEST_CUSTOM_PIN_SVG="${KOBALT_ROOT}/tests/fixtures/custom-pins/cat.svg")
             endif()
             if(check STREQUAL "svg_limits")
                 target_include_directories(kobalt-${name}-tests SYSTEM PRIVATE "${KOBALT_TEST_DEPENDENCIES}/include/lunasvg")
@@ -633,6 +645,8 @@ if(BUILD_TESTING)
             endif()
             if(check STREQUAL "reader")
                 target_sources(kobalt-${name}-tests PRIVATE "${KOBALT_ROOT}/platforms/kobo/common/engine_positions.cpp")
+            endif()
+            if(check MATCHES "^(reader|document_cache)$")
                 target_compile_definitions(kobalt-${name}-tests PRIVATE
                     KOBALT_TEST_VARIABLE_FONT_DIRECTORY="${KOBALT_ROOT}/tests/fixtures")
             endif()
@@ -671,16 +685,16 @@ if(BUILD_TESTING)
                 ENVIRONMENT "${headless_environment}" LABELS "${group};${lane}" TIMEOUT ${ctest_timeout})
         endforeach()
     endfunction()
-    kobalt_regressions(model storage_assets android_assets profile_storage record_writer main_thread reading_history bookmark_store highlight_store annotation_database appearance_settings header_footer
+    kobalt_regressions(model storage_assets android_assets profile_storage record_writer main_thread reading_history bookmark_store custom_pins highlight_store annotation_database appearance_settings text_presets header_footer
         layout_cache resource_cache layout_compatibility reading_pace reading_speed engine_activity
         local_resources zip_resource diagnostics crash_reports dictionary_store image_damage page_pixels
         logical_word_counter brightness_gesture qt_compat page_refresh_regions screen_refresh plain_archive reading_progress
-        library kosync chapter_progress)
+        library kosync sync_coordinator annotation_draft chapter_progress style_sample_cache preview_store save_wait saved_words)
     kobalt_regressions(model font_axes touch_rotation)
     kobalt_regressions(platform reader_orientation font_sources system_fonts nickel_dictionary_selection
         nickel_reading_pace_cache nickel_reading_save nickel_event_save nickel_account nickel_session_calls nickel_session_volume nickel_book_menu nickel_font_scale native_progress native_sync_network native_dialog_overlay native_lifecycle standby_input standby_diagnostics usb_removal page_transition_native page_animation)
-    kobalt_regressions(engine vertical_spacing source_index columns advanced_text paragraph_spacing beautifier alignment indentation page_layout vertical_writing mathml line_breaking
-        fallback_styles svg_limits image_proportions whitespace links search word_selection reader publisher_markup local_reader document_word_count document_cache alternate_layout)
+    kobalt_regressions(engine large_toc vertical_spacing source_index columns advanced_text paragraph_spacing beautifier alignment indentation page_layout vertical_writing mathml line_breaking
+        fallback_styles svg_limits image_proportions figure_layout whitespace links search word_selection reader publisher_markup local_reader document_word_count document_cache alternate_layout)
     kobalt_regressions(component ui acknowledgments kosync_ui)
     target_sources(kobalt-page-animation-tests PRIVATE "${KOBALT_ROOT}/platforms/kobo/display/page_animation.cpp")
     target_include_directories(kobalt-page-animation-tests PRIVATE "${KOBALT_ROOT}" "${source}")
@@ -689,6 +703,8 @@ if(BUILD_TESTING)
     kobalt_regressions(session reading_book bookmark_session highlight_session reader_session)
     kobalt_regressions(resource image_policy resource_provider)
     kobalt_regressions(corpus multilingual)
+    target_compile_definitions(kobalt-figure-layout-tests PRIVATE
+        KOBALT_TEST_FIGURE_BOOK="${KOBALT_ROOT}/tests/fixtures/figure-caption.epub")
     target_compile_definitions(kobalt-publisher-markup-tests PRIVATE
         KOBALT_TEST_HYPHENATION_CORPUS="${KOBALT_ROOT}/tests/fixtures/hyphenation/ushyphex.tex")
     target_compile_definitions(kobalt-multilingual-tests PRIVATE
@@ -703,27 +719,27 @@ if(BUILD_TESTING)
     set(kobalt_test_areas
         "gallery:^(build\\.screenshotBooks|desktop\\.(gallery.*|phoneFrame|primaryViews))$"
         "evaluation:^(build\\.(loadLock|eval-device-outcomes)|desktop\\.timingEvents|platform\\.scenario-sleep|lifecycle\\.benchmarkNoticeAfterRun)$"
-        "kosync:^(lifecycle\\.(kosync.*|wifi.*)|model\\.kosync|component\\.kosync-ui|platform\\.native-sync-network)$"
+        "kosync:^(lifecycle\\.(kosync.*|wifi.*)|desktop\\.(kosyncChoice|syncChoiceView)|model\\.(kosync|sync-coordinator)|component\\.kosync-ui|platform\\.native-sync-network)$"
         "keyboard:^ui\\.widgetKeyboard.*$"
         "brightness:^(desktop\\.lightGesture.*|lifecycle\\.lightReplacesDefaultMenu|model\\.brightness-gesture)$"
-        "dictionary:^(desktop\\.dictionary.*|model\\.dictionary-store|platform\\.nickel-dictionary-selection)$"
+        "dictionary:^(desktop\\.(dictionary.*|savedWords)|model\\.(dictionary-store|saved-words)|platform\\.nickel-dictionary-selection)$"
         "images:^(desktop\\.imageViewer|engine\\.(image-proportions|svg-limits)|resource\\.image-policy)$"
-        "viewport:^(platform\\.reader-orientation|desktop\\.(viewport.*|bookmarkRibbonSafeArea|fullWidthPanels)|engine\\.alternate-layout|lifecycle\\.(rotationOwnership|sleepRequestFreezesOrientationBeforeHandoff|close.*Orientation.*)|ui\\.libraryCanvasFollowsViewport|model\\.touch-rotation)$"
-        "display:^(platform\\.page-(animation|transition-native)|desktop\\.(pageAnimationCompatibility|androidPageAnimations|boox.*)|ui\\.(pageTurnFrames|boox.*|libraryThemeSurface|.*Paints.*|openingFirstPaintCallback|continuationHintClears|hidingSelectionMenuKeepsDamageCompact|navigationPressKeepsDamageInItsTab|navigationRefreshKeepsOverlayAndPanelPolicies)|model\\.(screen-refresh|page-refresh-regions|image-damage|page-pixels)|lifecycle\\.(appearanceOpeningDoesNotRepaintToolbar|navigationDismissalWaitsForPanel))$"
-        "chrome:^(lifecycle\\.(readingTimeStatus|clock.*|minuteClock|idleTimers|timeRemainingFormatShared|exit.*)|model\\.header-footer|desktop\\.(headerFooter.*|batteryPercentageOnly|largeInterfaceScale.*|desktopControls)|ui\\.(chapterPageSurvivesLongTitles|batteryTextAlignment|readingStripChangesLeaveBodyUnpainted))$"
-        "library:^(desktop\\.(library.*|restartFinishedBooks)|ui\\.library.*|model\\.library)$"
-        "input:^(ui\\.(paged.*|pageTurnTapFilter|pageTurnFilterSeparatesInputClocks|hold.*|fontHoldCancellation|canvas.*|cancelledCanvasTouchRestoresSlider|listPressFeedback|optionAndSwatchPressFeedback)|desktop\\.(navigation|buttonMapping|buttonMappingActions|buttonMappingUnavailable|chapterGroups|hardwarePageButtons\\..*|wordSelection\\..*|touchCursor.*|annotationTwoFingerTapConsumesWholeSequence|annotationRightClickRejectsChords)|lifecycle\\.(pageTurnTimingIgnoresNoopNavigation|pageButtonsAfterTouchUseDeliveryTime|pageFrameDuringHold|pageImageDuringHold|pageGestureBurstIgnoresRapidTurns|remoteKeyActivityRequiresActiveReading))$"
-        "links:^(desktop\\.(links|footnote.*|revealedLinkPress|tappableLinks|bookmarkCornerLinks)|engine\\.(links|search|word-selection)|lifecycle\\.(staleSearchReplyIgnored|searchSurvivesReflow|searchHighlightClearsOnReflow))$"
-        "annotations:^(desktop\\.(annotation.*|bookmark.*|pinnedBookmarks|coordinateProbeSerialization|selectionCrossPageDrag)|ui\\.(annotation.*|marksSortingAndAnnotationRows)|lifecycle\\.(annotation.*|closeWithPendingBookmark)|model\\.(bookmark-store|highlight-store|annotation-database)|session\\.(bookmark|highlight)-session|engine\\.source-index)$"
+        "viewport:^(platform\\.reader-orientation|desktop\\.(viewport.*|bookmarkRibbonSafeArea|fullWidthPanels)|engine\\.alternate-layout|lifecycle\\.(rotationOwnership|settingsOrientationHandoff|sleepRequestFreezesOrientationBeforeHandoff|close.*Orientation.*)|ui\\.libraryCanvasFollowsViewport|model\\.touch-rotation)$"
+        "display:^(platform\\.page-(animation|transition-native)|desktop\\.(pageAnimationCompatibility|androidPageAnimations|boox.*)|ui\\.(pageTurnFrames|boox.*|libraryThemeSurface|.*Paints.*|openingFirstPaintCallback|openingCoverDamage|openingCoverDisabled|openingMessages|openingHandoffLayout|continuationHintClears|hidingSelectionMenuKeepsDamageCompact|keyboardDamageStaysApartFromEditor|navigationPressKeepsDamageInItsTab|navigationRefreshKeepsOverlayAndPanelPolicies)|model\\.(screen-refresh|page-refresh-regions|image-damage|page-pixels)|lifecycle\\.(appearanceOpeningDoesNotRepaintToolbar|navigationDismissalWaitsForPanel))$"
+        "chrome:^(lifecycle\\.(readingTimeStatus|clock.*|minuteClock|idleTimers|timeRemainingFormatShared|exit.*|closeGuard.*)|model\\.header-footer|desktop\\.(headerFooter.*|batteryPercentageOnly|largeInterfaceScale.*|desktopControls)|ui\\.(chapterPageSurvivesLongTitles|batteryTextAlignment|readingStripChangesLeaveBodyUnpainted))$"
+        "library:^(desktop\\.(library.*|resourceFolders|restartFinishedBooks)|ui\\.library.*|model\\.library)$"
+        "input:^(ui\\.(paged.*|pageTurnTapFilter|pageTurnFilterSeparatesInputClocks|hold.*|fontHoldCancellation|canvas.*|cancelledCanvasTouchRestoresSlider|listPressFeedback|optionAndSwatchPressFeedback)|desktop\\.(navigation|swipeChoices|pageSwipes|buttonMapping|buttonMappingActions|buttonMappingFollowsRotation|buttonMappingUnavailable|largeToc|chapterGroups|hardwarePageButtons\\..*|wordSelection\\..*|touchCursor.*|annotationTwoFingerTapConsumesWholeSequence|annotationRightClickRejectsChords)|lifecycle\\.(pageTurnTimingIgnoresNoopNavigation|pageButtonsAfterTouchUseDeliveryTime|pageFrameDuringHold|pageImageDuringHold|pageGestureBurstIgnoresRapidTurns|remoteKeyActivityRequiresActiveReading))$"
+        "links:^(desktop\\.(links|inpageFootnotes|footnote.*|revealedLinkPress|tappableLinks|bookmarkCornerLinks)|engine\\.(links|search|word-selection)|lifecycle\\.(staleSearchReplyIgnored|searchScopesAndPagination|searchSurvivesReflow|searchHighlightClearsOnReflow))$"
+        "annotations:^(desktop\\.(annotation.*|bookmark.*|pinnedBookmarks|customPinnedBookmarks|coordinateProbeSerialization|selectionCrossPageDrag)|ui\\.(annotation.*|marksSortingAndAnnotationRows)|lifecycle\\.(annotation.*|closeWithPendingBookmark)|model\\.(bookmark-store|custom-pins|highlight-store|annotation-database|annotation-draft)|session\\.(bookmark|highlight)-session|engine\\.source-index)$"
         "fonts:^(desktop\\.(publisherFontDefault|fontPagingClearsCaptions|kfFontVariants|opticalSize)|ui\\.fontSelectionDoesNotToggle|model\\.font-axes|platform\\.(font-sources|system-fonts)|resource\\.resource-provider)$"
-        "progress:^(lifecycle\\.(progress.*|finish.*|nativeProgressWaitsForSleep)|model\\.(reading-pace|reading-speed|reading-progress|chapter-progress|logical-word-counter)|engine\\.document-word-count|platform\\.(native-progress|nickel-reading-pace-cache))$"
-        "storage:^(model\\.(storage-assets|android-assets|profile-storage|record-writer|main-thread|reading-history)|session\\.reading-book|lifecycle\\.(closeWaitsFor.*|closeRetriesRequiredNativeSaves|closeWithUnusableSettings|sleepWaitsForNativeTimeBeforePosition|background.*|standaloneReadingHistory|revokedNativeDrainRetainsLocalSave|quitAfterFailedLocalSaveRetry|appearanceRetryCooldown|recoveryNoticeAfterFirstPage|activityBatchesAndLowBattery)|desktop\\.(sameProcessReadersDoNotRecoverEachOther|standaloneHistorySourceKeys)|platform\\.nickel-(event|reading)-save)$"
+        "progress:^(desktop\\.graphMode|lifecycle\\.(progress.*|finish.*|developmentOptions|nativeProgressWaitsForSleep)|model\\.(reading-pace|reading-speed|reading-progress|chapter-progress|logical-word-counter)|engine\\.(document-word-count|large-toc)|platform\\.(native-progress|nickel-reading-pace-cache))$"
+        "storage:^(model\\.(storage-assets|android-assets|profile-storage|record-writer|main-thread|save-wait|reading-history)|session\\.reading-book|lifecycle\\.(closeWaitsFor.*|closeRetriesRequiredNativeSaves|closeWithUnusableSettings|sleepWaitsForNativeTimeBeforePosition|background.*|standaloneReadingHistory|revokedNativeDrainRetainsLocalSave|quitAfterFailedLocalSaveRetry|appearanceRetryCooldown|recoveryNoticeAfterFirstPage|activityBatchesAndLowBattery)|desktop\\.(sameProcessReadersDoNotRecoverEachOther|standaloneHistorySourceKeys)|platform\\.nickel-(event|reading)-save)$"
         "sleep:^(lifecycle\\.(sleep.*|readerStandbySetting|readerUsesSelectedSleepScreen|closedReaderDoesNotSaveSleepScreen|usb.*|persistedSleepScreen.*|homeSleepScreen.*|pageTurnsResumeWhenReaderIsShownAfterSleep|shutdownFinalSaveTimesOut|teardownRemovesApplicationFilter)|platform\\.(shutdown|sleep-persistence|kobo-power-screen|usb-removal|native-lifecycle)|desktop\\.deviceEmulation|model\\.engine-activity)$"
-        "diagnostics:^(model\\.(diagnostics|crash-reports)|desktop\\.(diagnostics|storageDiagnostics)|platform\\.standby-(input|diagnostics))$"
+        "diagnostics:^(model\\.(diagnostics|crash-reports)|desktop\\.(diagnostics|storageDiagnostics|settingChangesLogged)|lifecycle\\.developmentStateReports|platform\\.standby-(input|diagnostics))$"
         "kobo:^(platform\\.(startup-recovery|native-startup-wait|screensaver-loader|native-dialog-overlay|nickel-.*)|lifecycle\\.nativeOpeningStatus|model\\.qt-compat)$"
-        "settings:^(desktop\\.(settings.*|lightDarkModeShortcut)|lifecycle\\.(appearance.*|uneditedPanelTransitions|overflowClosesCurrentPanel)|model\\.appearance-settings|component\\.(ui|acknowledgments)|ui\\.(regularIconWeight|connectedModalFooter))$"
+        "settings:^(desktop\\.(settings.*|lightDarkModeShortcut)|lifecycle\\.(appearance.*|uneditedPanelTransitions|overflowClosesCurrentPanel|turnSkipsHiddenControls)|model\\.(appearance-settings|text-presets|style-sample-cache|preview-store)|component\\.(ui|acknowledgments)|ui\\.(openingCoverDisabled|regularIconWeight|connectedModalFooter|modalListDividers|modalClosesOnBackdropOnly|choiceSheetListFillsCard))$"
         "layout:^(engine\\..*|corpus\\..*|desktop\\.(columns|globalLayout|advancedText|verticalJustification|stylesheet)|model\\.layout-(cache|compatibility))$"
-        "reading:^(desktop\\.(startup|reading|errors|features)|ui\\.openingCover(Layout|Upgrade)|session\\.reader-session|model\\.(local-resources|zip-resource|resource-cache|plain-archive))$"
+        "reading:^(desktop\\.(startup|reading|errors|features)|ui\\.openingCover(Layout|Upgrade|Disabled)|session\\.reader-session|model\\.(local-resources|zip-resource|resource-cache|plain-archive))$"
         "build:^build\\..*$")
     get_property(registered_tests DIRECTORY PROPERTY TESTS)
     foreach(test IN LISTS registered_tests)

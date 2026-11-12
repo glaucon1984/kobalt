@@ -1,3 +1,4 @@
+#include "app/reader/views/annotation_exporter.h"
 #include "services.h"
 #include "ui/controls/keyboard.h"
 #include "ui/style/fonts.h"
@@ -86,6 +87,10 @@ public:
 ReaderHostServices readerHostServices()
 {
     ReaderHostServices result;
+    result.annotationExporter = [](QWidget *reader) {
+        return reader::pickerAnnotationExporter(reader, reader);
+    };
+    result.rightClickAnnotations = true;
 #ifdef Q_OS_MACOS
     result.deviceName = QStringLiteral("Mac");
     char model[256] = {};

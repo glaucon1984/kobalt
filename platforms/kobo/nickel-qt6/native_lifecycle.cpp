@@ -1,4 +1,6 @@
 #include "platforms/kobo/common/lifecycle_test.h"
+#include "platforms/kobo/common/native_symbol.h"
+#include "platforms/kobo/common/native_ui.h"
 #ifndef KOBALT_READER_HARDWARE
 #  include <QCoreApplication>
 #  include <QGuiApplication>
@@ -8,14 +10,6 @@
 #  include <dlfcn.h>
 
 namespace kobalt::nickel {
-namespace {
-template <class T>
-T symbol(const char *name)
-{
-    return reinterpret_cast<T>(dlsym(RTLD_DEFAULT, name));
-}
-} // namespace
-
 void sendTestPageButton(const QJsonObject &command, bool blocked)
 {
     const int key = command.value("button").toString() == "upper" ? Qt::Key_F23 : Qt::Key_F24;
@@ -39,6 +33,7 @@ void sendTestPageButton(const QJsonObject &command, bool blocked)
         settings[0] = vtable + 2;
         saved = get(settings.data());
         set(settings.data(), command.value("invert").toBool());
+        forgetNativeInvertedPageButtons();
     }
     // Enter Qt through its focused window, including Nickel's input filters.
     if (auto *target = QGuiApplication::focusWindow()) {
@@ -50,6 +45,7 @@ void sendTestPageButton(const QJsonObject &command, bool blocked)
     if (override) {
         set(settings.data(), saved);
         destroy(settings.data());
+        forgetNativeInvertedPageButtons();
     }
 }
 } // namespace kobalt::nickel

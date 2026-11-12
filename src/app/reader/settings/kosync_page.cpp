@@ -60,6 +60,27 @@ KosyncPage::KosyncPage(QWidget *parent, QWidget *overlayParent, KeyboardFactory 
     matchingButton_ =
             ui::makeCaptionButton(this, rows, "rrKosyncMatching", strings::get("kosync.matching"),
                                   [this] { showMatchingChoices(); });
+    // KOReader's opt-in "Send document metadata", as a checkbox like the
+    // General settings options. It is off until the user turns it on.
+    metadataOption_ =
+            new ui::DescribedOption(strings::get("kosync.send_metadata"),
+                                    strings::get("kosync.send_metadata_description"), this);
+    metadataOption_->setObjectName("rrKosyncMetadata");
+    auto presentation = metadataOption_->presentation();
+    presentation.indicator = ui::DescribedOption::Indicator::Square;
+    presentation.pressedFill = true;
+    presentation.dividers = Qt::BottomEdge;
+    presentation.horizontalInset = metrics::chrome::inset;
+    presentation.labelPixels = metrics::chrome::labelText;
+    presentation.descriptionPixels = metrics::chrome::descriptionText;
+    presentation.indicatorSize = { metrics::chrome::checkSize, metrics::chrome::checkSize };
+    presentation.minimumRowHeight = metrics::chrome::optionHeight;
+    metadataOption_->setPresentation(presentation);
+    rows->addWidget(metadataOption_);
+    connect(metadataOption_, &QCheckBox::clicked, this, [this](bool checked) {
+        if (sendMetadataChanged)
+            sendMetadataChanged(checked);
+    });
     login_ = ui::makeButton(this, rows, "rrKosyncLogin", strings::get("kosync.login"), [this] {
         if (loginRequested)
             loginRequested();
@@ -67,10 +88,8 @@ KosyncPage::KosyncPage(QWidget *parent, QWidget *overlayParent, KeyboardFactory 
     automaticButton_ =
             ui::makeCaptionButton(this, rows, "rrKosyncAutomatic", strings::get("kosync.automatic"),
                                   [this] { showSchedule(); });
-    sync_ = ui::makeButton(this, rows, "rrKosyncNow", strings::get("kosync.sync_now"), [this] {
-        if (syncRequested)
-            syncRequested();
-    });
+    sync_ = ui::makeButton(this, rows, "rrKosyncNow", strings::get("kosync.sync_now"),
+                           [this] { syncNow(); });
     logout_ = ui::makeButton(this, rows, "rrKosyncLogout", strings::get("kosync.logout"), [this] {
         if (logoutRequested)
             logoutRequested();
@@ -140,12 +159,14 @@ KosyncPage::~KosyncPage()
     dismissEditor();
 }
 
-void KosyncPage::setNativeCloudSync(bool enabled, bool koboCloud)
+void KosyncPage::setNativeCloudSync(const NativeSyncPolicy &policy)
 {
     dismissEditor();
-    nativeCloudSync_ = enabled;
-    const auto description = koboCloud ? "kosync.kobo_cloud" : "kosync.native_sync";
-    description_->setText(strings::get(enabled ? description : "kosync.description"));
+    nativeCloudSync_ = policy.enabled;
+    const auto description = policy.descriptionKey.isEmpty() ? QStringLiteral("kosync.native_sync")
+                                                             : policy.descriptionKey;
+    description_->setText(
+            strings::get(policy.enabled ? description.toUtf8().constData() : "kosync.description"));
     setStatus({}, false);
 }
 
@@ -201,6 +222,8 @@ void KosyncPage::updateAutomaticCaption()
                                                   : "kosync.automatic_caption_wait")
                           .arg(KosyncScheduleSheet::intervalLabel(schedule_.minutes));
     automaticButton_->setCaption(caption);
+    if (stateChanged)
+        stateChanged();
 }
 
 void KosyncPage::showSchedule()
@@ -258,6 +281,11 @@ void KosyncPage::setFilenameMatching(bool enabled)
             strings::get(enabled ? "kosync.match_filename" : "kosync.match_binary"));
 }
 
+void KosyncPage::setSendMetadata(bool enabled)
+{
+    metadataOption_->setChecked(enabled);
+}
+
 QString KosyncPage::takePassword()
 {
     const auto value = password_;
@@ -272,6 +300,29 @@ void KosyncPage::setLastSync(const QDateTime &time)
                                .arg(time.isValid() ? QLocale().toString(time.toLocalTime(),
                                                                         QLocale::ShortFormat)
                                                    : strings::get("kosync.never")));
+    if (stateChanged)
+        stateChanged();
+}
+
+bool KosyncPage::syncEnabled() const
+{
+    return sync_->isEnabled();
+}
+
+QString KosyncPage::lastSyncText() const
+{
+    return lastSync_->text();
+}
+
+QString KosyncPage::automaticCaption() const
+{
+    return automaticButton_->caption();
+}
+
+void KosyncPage::syncNow()
+{
+    if (syncRequested)
+        syncRequested();
 }
 
 void KosyncPage::setStatus(const QString &status, bool busy)
@@ -284,6 +335,8 @@ void KosyncPage::setStatus(const QString &status, bool busy)
     usernameButton_->setVisible(!nativeCloudSync_);
     deviceNameButton_->setVisible(!nativeCloudSync_);
     matchingButton_->setVisible(!nativeCloudSync_);
+    metadataOption_->setVisible(!nativeCloudSync_);
+    metadataOption_->setEnabled(!busy);
     syncInformation_->setVisible(!nativeCloudSync_);
     const bool authenticating = !nativeCloudSync_ && (!signedIn_ || accountEdited_);
     passwordButton_->setVisible(authenticating);
@@ -301,6 +354,8 @@ void KosyncPage::setStatus(const QString &status, bool busy)
     automaticButton_->setEnabled(!busy && signedIn_ && !accountEdited_);
     sync_->setEnabled(!busy && signedIn_ && !accountEdited_);
     logout_->setEnabled(!busy && signedIn_);
+    if (stateChanged)
+        stateChanged();
 }
 
 void KosyncPage::fitWidth(int width)
@@ -353,19 +408,25 @@ void KosyncPage::edit(int field)
         editor->setEchoMode(QLineEdit::Password);
     ui::readerStyle(
             editor,
-            "QLineEdit{border:none;border-radius:0;padding:0;background:palette(window);color:palette(window-text);"
+            QString("QLineEdit{border:%1px solid palette(mid);border-radius:0;padding:0;background:palette(window);color:palette(window-text);")
+                            .arg(int(metrics::control::border))
                     + ui::styles::font(metrics::chrome::labelText) + "}");
     editor->setTextMargins(metrics::notice::cardMargins.left(), 0,
                            metrics::notice::cardMargins.right(), 0);
     if (field == 3)
         editor->setPlaceholderText(defaultDeviceName_);
     editor->setMinimumHeight(metrics::chrome::actionHeight);
+    // Every field uses the same bordered input in the same inset row. Only the
+    // password row adds its reveal button.
+    auto *row = new QWidget(card);
+    row->setObjectName("rrKosyncInputRow");
+    auto *layout = new QHBoxLayout(row);
+    layout->setContentsMargins(metrics::notice::cardMargins.left(),
+                               metrics::notice::cardMargins.top(),
+                               metrics::notice::cardMargins.right(), metrics::notice::cardGap);
+    layout->setSpacing(metrics::notice::cardGap);
+    layout->addWidget(editor, 1);
     if (field == 2) {
-        auto *row = new QWidget(card);
-        auto *layout = new QHBoxLayout(row);
-        layout->setContentsMargins(0, 0, metrics::notice::cardMargins.right(), 0);
-        layout->setSpacing(0);
-        layout->addWidget(editor, 1);
         auto *reveal = ui::makeButton(row, layout, "rrKosyncPasswordReveal",
                                       strings::get("kosync.show_password"), [] { });
         reveal->setCheckable(true);
@@ -387,10 +448,8 @@ void KosyncPage::edit(int field)
             reveal->setAccessibleName(strings::get(visible ? "kosync.hide_password_accessible"
                                                            : "kosync.show_password_accessible"));
         });
-        card->rows()->insertWidget(1, row);
-    } else {
-        card->rows()->insertWidget(1, editor);
     }
+    card->rows()->insertWidget(1, row);
     auto *cancel = dialog->secondaryButton();
     auto *save = dialog->primaryButton();
     const auto submit = [this, field, editor] {
@@ -545,6 +604,13 @@ void KosyncPage::placeEditor()
     int bottom = editorDialog->height() / 2;
     if (!bounds.isEmpty())
         bottom = editorDialog->mapFrom(overlayParent_->window(), bounds.topLeft()).y();
+    auto *card = editorDialog->card();
+    if (card->height() > bottom && editorDialog->width() > editorDialog->height()) {
+        if (auto *row = editorDialog->findChild<QWidget *>("rrKosyncInputRow"))
+            row->layout()->setContentsMargins(metrics::notice::cardMargins.left(), 0,
+                                              metrics::notice::cardMargins.right(), 0);
+        card->fitToWidth(editorDialog->width() - 2 * int(metrics::notice::sideClearance));
+    }
     editorDialog->setCardArea(QRect(0, 0, editorDialog->width(), qMax(1, bottom)));
 }
 

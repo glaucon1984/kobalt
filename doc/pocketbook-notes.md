@@ -438,6 +438,9 @@ What the port needed for develop:
   quality from `/proc/net/wireless`. `deviceName` comes from inkview's `GetDeviceModel()`
   ("PocketBook ..." + " (Kobalt)" is KOsync's default device name). At standby the host keeps the
   device awake while `pendingNetworkSync()` (the reader's bounded final upload, 2 s), 3 s at most.
+- (Since the 2026-11-11 merge this is `annotationExporter`, a `directoryAnnotationExporter` for
+  the same folder, and the reading clock is passed to `ReadingBook` by the controller; see
+  "Upstream develop 0f7c981" at the end.)
 - `annotationExportDirectory` = `/mnt/ext1/Kobalt/Annotations` (without it Kobalt opens a file
   dialog); the library will list the exported HTML.
 - CMake: `src/scenario/` excluded as on Kobo (evaluation packages only), `reading_timer.cpp` built
@@ -995,3 +998,62 @@ from the log. Not established: whether the curve steps or interpolates between h
 `SetFrontlightState` silently stores the value without applying it while automatic brightness is on
 (`hw_is_frontlight_auto()`) and the keylock is off, so Kobalt's brightness slider would do nothing
 in that mode. Not handled: the brightness schedule is not exposed in Kobalt.
+
+## Upstream develop 0f7c981 merged (2026-11-11, the beta 8 line)
+
+106 commits past `v1.0-beta.7`. Five conflicts, all in shared files the port had touched:
+
+- `src/ui/dialogs/modals.cpp` and `reader_kosync.cpp`: upstream fixed the modal that kept its old
+  height after its text changed (c207914) and redesigned the sync prompt around a jump graph, so
+  the port's own fix (d352423) is dropped for upstream's.
+- `reader_dialogs.cpp`: the sleep screen choice is now a gallery of designs
+  (`src/app/reader/settings/sleep_gallery.cpp`). The port's `stockSleepScreenKey` hook on
+  `WindowPresentation` is gone (the header is upstream's again); the gallery's label for the
+  device's own screen and the folder named in the PNG overlay help are `#ifdef KOBALT_POCKETBOOK`
+  (`sleep.design_stock_pocketbook`, `settings.sleep_overlay_description_pocketbook`). The gallery's
+  preview of the device's own screen is still drawn after Kobo's.
+- `reader.cpp`: `captureSleepScreen` takes upstream's portrait `sleepSize` and the Plain backdrop,
+  keeping the port's cached cover background. `composeSleepImage` and `composePowerOffImage` draw
+  through `sleepDesignImage`, so every design reaches the lock and power-off files.
+- `reading_page.cpp`: the port's draw timing and upstream's Zen strip covers, both kept.
+
+What upstream's host interface changes needed in `platforms/pocketbook/`:
+
+- `ReadingBridge`: `write` returns a `NativeSaveResult` (database not opened or read:
+  `unavailable`; the row moved: `progressChanged`; a write that could not be confirmed:
+  `unverified`), `markReading` and `finishReading` report a `NativeActivityResult`, and
+  `allowsUnmappedPosition` is true (every book is a plain EPUB, the case the reader used to
+  decide itself: page counts and time are written when a position has no CFI).
+- `annotationExporter` replaces `annotationExportDirectory` (same folder).
+- `platform::coverRefresh` (the cover replacing the opening placeholder): empty, the plugin's
+  partial update.
+- `platform::nativeImage`: `platforms/standalone/native_image.cpp` (no firmware decoder).
+- The reading clock is no longer a compile definition of `reading_timer.cpp`: the controller
+  passes the boot-time clock to `ReadingBook` (`platformReadingClock` in
+  `platforms/standalone/reader.cpp`), and `main` installs the same clock for diagnostic entries.
+  The process samples of `processDiagnosticSystem` are not installed.
+- `CMakeLists.txt` (and `tools/kobalt-check`) include `platforms/shared-inputs.cmake` for the
+  generated engine headers, the notice resources and the shared definitions, which now include
+  `KOBALT_RENDERING_POLICY`. `layout_policy` is upstream's fixed token from here on, no longer a
+  hash of `dependencies/` (which the port changes), so parsed-book caches are rebuilt once after
+  this update and then follow upstream's compatibility rule.
+- The opening view takes the reader's "Kobalt logo while opening books" setting and the
+  controller's `reopeningBook` signal.
+- Page buttons: upstream now also makes saved button actions follow the held position
+  (`pageButtonsRotated` with `pageButtons::held`, which swaps F23/F24 only). The port keeps
+  crossing its own keys in `buttonControls` and leaves `pageButtonsRotated` unset.
+- A book hidden from the sleep screens (upstream's per-book option): `ReaderWindow` gains
+  `hidesBookOnSleepScreen()`; the host asks it at each sleep screen refresh, at standby and when
+  the reader is told to close (`Host::updateBookPrivacy`). For such a book the built-in sleep
+  screen is not applied (the reader's private design is written instead, and the power-off file
+  with it), and a blank sheet stands for the boot capture and for the cover that the close and a
+  USB plug leave behind.
+
+Dependencies: CREngine moved (new commit, three more patches), HarfBuzz 14.6.0 to 15.1.0, FriBidi
+1.0.17 to 1.0.18. `remote-rebuild-deps.sh` built set `3e76f5c91082796a` and reported the install
+prefix headers as different (HarfBuzz and FriBidi only). Qt was not rebuilt: the static Qt compiled
+against HarfBuzz 14.6 links and runs against 15.1 (HarfBuzz keeps its API and ABI across
+versions; Qt uses nothing of FriBidi). `kobalt-pb-build` was wiped for a fresh configure.
+
+Not wired, as before: `turnOffWifi`, `holdWifiOff`, `kosyncHttp`, `nativeSleepPreview`,
+`monotonicMilliseconds` (KOSync's interval clock stays the process clock).

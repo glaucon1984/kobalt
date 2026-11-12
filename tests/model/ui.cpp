@@ -16,6 +16,7 @@
 #include "assets/font_catalog.h"
 #include "reader_inputs.h"
 #include "app/reader/views/opening.h"
+#include "app/reader/views/appearance_preview.h"
 #include "app/reader/settings/settings_panel.h"
 #include "host_presentation.h"
 #include "support/qt_font.h"
@@ -162,6 +163,102 @@ protected:
 };
 
 // Checks the production controls in pixels: geometry, borders, themes, labels, sliders, dictionary rendering and paging.
+// Releases dismissed content while preserving fonts, temporary hides and fresh reopening.
+void dismissedContent()
+{
+    using namespace kobalt;
+    QWidget host;
+    host.resize(1072, 1448);
+    host.show();
+    QImage image(600, 800, QImage::Format_RGB32);
+    image.fill(Qt::white);
+    reader::AppearancePreview preview(&host);
+    preview.resize(400, 600);
+    {
+        reader::AppearancePreview::Content content;
+        content.page = image.size();
+        content.bodyHeight = image.height();
+        content.body = image;
+        content.header = image;
+        content.footer = image;
+        preview.setContent(content);
+    }
+    preview.show();
+    preview.grab();
+    require(!image.isDetached(), "Appearance preview did not retain its test image");
+    preview.hide();
+    preview.clear();
+    require(image.isDetached(), "Dismissed appearance preview retained its image");
+
+    reader::SettingsPanel settings(&host, {});
+    settings.show();
+    {
+        StyleSample sample;
+        sample.spreads = { { image, image } };
+        sample.crops = { image };
+        sample.details = { image };
+        settings.setStylingSample(reader::SettingsPanel::AdvancedText::WordSpacing, sample);
+    }
+    require(!image.isDetached(), "Styling did not retain its test sample");
+    settings.hide();
+    require(image.isDetached(), "Closed Settings retained Styling sample images");
+
+    ui::PrivateRichText rich;
+    const auto font = ui::interfaceFont(28);
+    rich.setFont(font);
+    const QString html =
+            QStringLiteral("<p>A long definition with several lines of text.</p>").repeated(80);
+    rich.setHtml(html);
+    rich.layout(300, 200);
+    require(rich.pages() > 1 && !rich.lineRectangles().isEmpty(), "Rich text fixture is empty");
+    rich.clear();
+    require(rich.lineRectangles().isEmpty() && rich.height() == 0 && rich.font() == font,
+            "Rich text clear retained layout or discarded its font");
+    rich.setHtml(html);
+    rich.layout(300, 200);
+    require(rich.pages() > 1, "Cleared rich text cannot lay out new content");
+
+    DictionaryPanel dictionary(&host);
+    DictionaryResult result;
+    result.received = result.restored = true;
+    result.html = html;
+    dictionary.open("word", result, QRect(100, 100, 30, 30));
+    auto *definition =
+            static_cast<ui::PagedText *>(dictionary.findChild<QWidget *>("rrDefinition"));
+    require(definition && definition->pages() > 1, "Dictionary fixture is not paginated");
+    const int definitionPages = definition->pages();
+    definition->setPage(1);
+    host.hide();
+    host.show();
+    require(definition->pages() == definitionPages && definition->page() == 1,
+            "Temporary reader hide discarded its dictionary");
+    dictionary.dismiss();
+    require(definition->pages() == 1 && definition->page() == 0,
+            "Dismissed dictionary retained its definition");
+    dictionary.open("word", result, QRect(100, 100, 30, 30));
+    require(definition->pages() == definitionPages, "Dictionary failed to reopen the same content");
+    host.hide();
+    dictionary.dismiss();
+    host.show();
+    require(definition->pages() == 1, "Dictionary dismissal while the reader hid retained text");
+
+    LinkPanel link(&host);
+    LinkDetails details;
+    details.kind = LinkKind::Footnote;
+    details.html = html;
+    link.open(details, QRect(100, 100, 30, 30));
+    auto *note = static_cast<ui::PagedText *>(link.findChild<QWidget *>("rrLinkText"));
+    require(note && note->pages() > 1, "Footnote fixture is not paginated");
+    const int notePages = note->pages();
+    host.hide();
+    host.show();
+    require(note->pages() == notePages, "Temporary reader hide discarded its footnote");
+    link.dismiss();
+    require(note->pages() == 1 && note->page() == 0, "Dismissed footnote retained its text");
+    link.open(details, QRect(100, 100, 30, 30));
+    require(note->pages() == notePages, "Footnote failed to reopen the same content");
+}
+
 int main(int argc, char **argv)
 {
 #ifdef Q_OS_LINUX
@@ -215,6 +312,7 @@ int main(int argc, char **argv)
                     && QFontInfo(kobalt::ui::chromeFont()).family() == "IBM Plex Mono"
                     && QFontInfo(kobalt::ui::brandFont(32)).family() == "Instrument Serif",
             "Component font substitution");
+    dismissedContent();
     {
         int loads = 0;
         kobalt::setDiagnosticObserver([&](const QJsonObject &event) {
@@ -947,18 +1045,19 @@ int main(int argc, char **argv)
             app.processEvents();
             auto *progress = window->findChild<QProgressBar *>("rrOpeningProgress");
             auto *label = window->findChild<QLabel *>("rrOpeningLabel");
-            auto *detail = window->findChild<QLabel *>("rrOpeningDetail");
+            auto *hint = window->findChild<QLabel *>("rrOpeningHint");
             require(progress && progress->isVisible() && label, "normal opening has progress");
             require(!window->findChild<QWidget *>("rrOpeningFailure"),
                     "normal opening builds no failure card");
             view->showFallback(kobalt::OpeningFallback::Protected);
             app.processEvents();
-            require(!progress->isVisible() && !window->findChild<QWidget *>("rrOpeningFailure"),
-                    "handoff has no progress or confirmation");
+            require(progress->isVisible() && progress->value() == 100
+                            && !window->findChild<QWidget *>("rrOpeningFailure"),
+                    "handoff keeps a completed progress bar without confirmation");
             require(label->text() == kobalt::strings::get("opening.native"), "handoff caption");
             view->showFallback(kobalt::OpeningFallback::Remembered);
             app.processEvents();
-            require(detail->text() == kobalt::strings::get("opening.remembered")
+            require(hint->text() == kobalt::strings::get("opening.remembered").toUpper()
                             && !window->findChild<QWidget *>("rrOpeningFailure"),
                     "remembered failure uses neutral automatic handoff");
             view->showFallback(kobalt::OpeningFallback::Failure);
@@ -1102,7 +1201,13 @@ int main(int argc, char **argv)
     }
     {
         using namespace kobalt::ui;
-        for (int id = int(ControlIcon::Search); id <= int(ControlIcon::More); ++id) {
+        QVector<int> icons;
+        for (int id = int(ControlIcon::Search); id <= int(ControlIcon::More); ++id)
+            icons.append(id);
+        for (const auto icon :
+             { ControlIcon::SearchChapter, ControlIcon::SearchBefore, ControlIcon::SearchAfter })
+            icons.append(int(icon));
+        for (const int id : icons) {
             const auto black = controlIcon(ControlIcon(id))
                                        .pixmap(64, 64)
                                        .toImage()
@@ -1559,9 +1664,9 @@ int main(int argc, char **argv)
         auto *close = choices.findChild<QPushButton *>("rrContentsClose");
         close->click();
         require(closed, "Contents close did not return to the reader");
-        require(close->geometry().topLeft() == QPoint()
+        require(close->y() == 0 && close->geometry().right() == close->parentWidget()->width() - 1
                         && close->width() == kobalt::ui::metrics::chrome::cellWidth,
-                "The Chapters bar lost its close cell");
+                "The Chapters bar lost its close cell on the right");
         auto *next = choices.findChild<QPushButton *>("rrContentsNext");
         previous->click();
         require(choices.currentPage() == 2, "Previous did not wrap to the final contents page");
@@ -1777,26 +1882,58 @@ int main(int argc, char **argv)
                 "Short-book bars exceed their width cap or are not centered");
         require(!graph.findChild<QPushButton *>("rrGraphNext")->isVisible(),
                 "A short graph exposed paging controls");
-        // One scale for the whole book, capped so that one outlier does not flatten the rest.
+        // Long chapters retain their ratios even when all exceed three times
+        // the median. The maximum on another graph page still sets the scale.
         QVector<kobalt::ChapterLink> even;
         for (int i = 0; i < 21; ++i)
             even.append({ QString::number(i), QString::number(i), i, 0, 1000 });
-        even.last().words = 10000000;
+        even[18].words = 6500;
+        even[19].words = 9500;
+        even[20].words = 10000;
         graph.setData(even, {}, true, {});
         QApplication::processEvents();
         require(graph.graphPages() == 1, "Twenty-one chapters did not fit on one dense chart");
-        const auto capped = bars->grab().toImage();
-        const int evenWidth = (capped.width() - 20 * chapterMetrics::gapWide) / 21,
-                  evenLeft = (capped.width() - 21 * evenWidth - 20 * chapterMetrics::gapWide) / 2;
-        const int outlierLeft = evenLeft + 20 * (evenWidth + chapterMetrics::gapWide);
-        require(qGray(capped.pixel(evenLeft,
-                                   chartHeight - chartHeight / chapterMetrics::scaleCap + 2))
-                        == 0,
-                "An outlier flattened the other chapters");
-        // A capped chapter reaches the top of the chart with an unbroken outline.
-        for (int y = 0; y < chartHeight; ++y)
-            require(qGray(capped.pixel(outlierLeft, y)) == 0,
-                    "A capped chapter lacks its full height or is marked");
+        auto barHeight = [&](const QImage &image, int x) {
+            for (int y = 0; y < chartHeight; ++y)
+                if (qGray(image.pixel(x, y)) == 0)
+                    return chartHeight - y;
+            return 0;
+        };
+        const auto proportional = bars->grab().toImage();
+        const int evenWidth = (proportional.width() - 20 * chapterMetrics::gapWide) / 21,
+                  evenLeft = (proportional.width() - 21 * evenWidth - 20 * chapterMetrics::gapWide)
+                / 2;
+        auto barLeft = [&](int index) {
+            return evenLeft + index * (evenWidth + chapterMetrics::gapWide);
+        };
+        require(barHeight(proportional, barLeft(18)) == int(0.65 * chartHeight)
+                        && barHeight(proportional, barLeft(19)) == int(0.95 * chartHeight)
+                        && barHeight(proportional, barLeft(20)) == chartHeight,
+                "Unequal long chapters lost their proportions");
+        graph.setDense(false);
+        QApplication::processEvents();
+        const auto firstPage = bars->grab().toImage();
+        const int sparseWidth = (firstPage.width() - 19 * chapterMetrics::sparseGap) / 20;
+        const int sparseLeft =
+                (firstPage.width() - 20 * sparseWidth - 19 * chapterMetrics::sparseGap) / 2;
+        require(barHeight(firstPage, sparseLeft + 19 * (sparseWidth + chapterMetrics::sparseGap))
+                        == int(0.95 * chartHeight),
+                "Paging normalized a chapter against only the visible chapters");
+        graph.findChild<QPushButton *>("rrGraphNext")->click();
+        QApplication::processEvents();
+        const auto secondPage = bars->grab().toImage();
+        require(barHeight(secondPage, sparseLeft) == chartHeight,
+                "The longest chapter lost its height on the final graph page");
+        graph.setDense(true);
+        even.last().words = 10000000;
+        graph.setData(even, {}, true, {});
+        QApplication::processEvents();
+        const auto extreme = bars->grab().toImage();
+        require(barHeight(extreme, barLeft(0)) == int(chapterMetrics::minimumBarHeight)
+                        && barHeight(extreme, barLeft(20)) == chartHeight,
+                "Short chapters lost their visible minimum or changed the longest chapter");
+        require(!graph.findChild<QLabel *>("rrGraphLengthCaption"),
+                "A length label occupies the chart padding");
         for (int i = 21; i < 80; ++i)
             even.append({ QString::number(i), QString::number(i), i, 0, 1000 });
         graph.setData(even, {}, true, {});
@@ -1837,7 +1974,87 @@ int main(int argc, char **argv)
         for (int x = 0; x < lastPage.width(); ++x)
             if (qGray(lastPage.pixel(x, chartHeight - 2)) < 255)
                 ++filled;
-        require(filled == barWidth, "A single final chapter expanded beyond the bar width cap");
+        require(filled == sparseWidth, "A single final chapter changed its page's bar width");
+        // Inspect actual ink spans, including the dense chart's fallback pages.
+        // Every last-page column must start at the same x as on a full page.
+        auto spans = [&](const QImage &image) {
+            QVector<QPair<int, int>> result;
+            int start = -1;
+            for (int x = 0; x <= image.width(); ++x) {
+                const bool ink = x < image.width()
+                        && image.pixelColor(x, chartHeight - 1) == QColor(Qt::black);
+                if (ink && start < 0)
+                    start = x;
+                if (!ink && start >= 0) {
+                    result.append(qMakePair(start, x - start));
+                    start = -1;
+                }
+            }
+            return result;
+        };
+        for (int width : { 720, 1072, 1264, 1448 }) {
+            graph.resize(width, graph.height());
+            for (bool dense : { false, true }) {
+                QVector<kobalt::ChapterLink> many;
+                for (int i = 0; i < (dense ? 180 : 43); ++i)
+                    many.append({ QString::number(i), QString::number(i), i, 0, 1000 });
+                graph.setDense(dense);
+                graph.setData(many, {}, true, {});
+                graph.open();
+                QApplication::processEvents();
+                const auto full = spans(bars->grab().toImage());
+                require(!full.isEmpty(), "The full graph page has no bars");
+                while (next->isEnabled())
+                    next->click();
+                QApplication::processEvents();
+                const auto last = spans(bars->grab().toImage());
+                require(!last.isEmpty() && last.size() <= full.size(),
+                        "The final graph page lost its bars");
+                for (int i = 0; i < last.size(); ++i)
+                    require(last[i] == full[i],
+                            "Graph pages changed their column widths, gaps or left alignment");
+                if (dense)
+                    require(full.first().second >= int(chapterMetrics::minimumBarWidth),
+                            "Dense graph paging lost its minimum column width");
+            }
+        }
+        // Replay the sidebar allocation around a normal reader refresh.
+        // The current chapter must survive the temporary full-width layout.
+        {
+            kobalt::ChapterGraph pinned(&host);
+            QVector<kobalt::ChapterLink> many;
+            for (int i = 0; i < 385; ++i)
+                many.append({ QString::number(i), QString::number(i), i, 0, 1000 });
+            pinned.resize(1328, chapterMetrics::graphHeight);
+            pinned.setDense(false);
+            pinned.setData(many, { 150, 151, 1, 10 }, true, {});
+            pinned.open();
+            pinned.setDense(true);
+            const int currentPage = pinned.graphPage();
+            require(currentPage > 0, "Pinned graph fixture did not reach a later compact page");
+            pinned.resize(1480, pinned.height());
+            pinned.resize(1328, pinned.height());
+            require(pinned.graphPage() == currentPage,
+                    "A sidebar resize hid the current chapter after a graph mode change");
+        }
+        graph.resize(1072, graph.height());
+        graph.setData(chapters, { 20, -1, 1, 1 }, true, {});
+        graph.setDense(false);
+        graph.open();
+        graph.findChild<QPushButton *>("rrGraphPrevious")->click();
+        int toggles = 0;
+        graph.denseChanged = [&](bool) { ++toggles; };
+        auto *mode = graph.findChild<QPushButton *>("rrGraphMode");
+        require(mode && !mode->isCheckable() && !mode->isChecked()
+                        && mode->accessibleName() == get("chapter_graph.show_more_chapters"),
+                "The graph mode control has the wrong state or action name");
+        mode->click();
+        require(!mode->isChecked() && graph.graphPages() == 1
+                        && mode->accessibleName() == get("chapter_graph.show_wider_bars"),
+                "The graph mode control did not show more chapters");
+        mode->click();
+        require(!mode->isChecked() && graph.graphPage() == 1 && toggles == 2,
+                "Toggling did not return to the current reading chapter");
         graph.setDense(true);
         require(graph.graphPages() == 1, "The dense chart kept the sparse pages");
         const QString longTitle =
@@ -1880,7 +2097,15 @@ int main(int argc, char **argv)
                 "Book progress disagrees with the current page");
         require(text("rrGraphBookFigure") == "75", "Book pages remaining omit the displayed page");
         graph.setChapterNumber(13, 24);
+        graph.setReading(23, 35706, -1, -1, 17);
+        require(text("rrGraphSessionDetail") == get("stats.page_turns").arg(17),
+                "Session page turns are missing");
+        graph.setReading(23, 35706, -1, -1, 1);
+        require(text("rrGraphSessionDetail") == get("stats.page_turn").arg(1),
+                "A changed turn count did not update without a minute change");
         graph.setReading(23, 35706);
+        require(text("rrGraphSessionDetail") == get("stats.page_turns").arg(0),
+                "A new session did not clear its displayed page turns");
         require(text("rrGraphChapterNumber") == get("stats.contents_position").arg(13).arg(24)
                         && text("rrGraphSessionFigure") == "23"
                         && text("rrGraphBookDetail") == get("stats.words").arg("35,706"),
@@ -1900,6 +2125,10 @@ int main(int argc, char **argv)
                         "Stats clips a large figure");
                 require(unit->geometry().right() < cell->width() - chrome::inset + 1,
                         "A figure unit runs past its cell");
+                // A single-line label draws a line break as a missing glyph.
+                for (const auto *label : { unit, detail })
+                    require(!label->text().contains('\n') || label->wordWrap(),
+                            "A two-line Stats unit or detail does not break its line");
                 // The same padding sits above the caption and below the last line.
                 require(cell->findChildren<QLabel *>().at(0)->y() == chapterMetrics::cellPadding
                                 && detail->geometry().bottom() + 1 + chapterMetrics::cellPadding
@@ -1995,6 +2224,57 @@ int main(int argc, char **argv)
                                         "chapter_graph.no_chapter_lengths_available")
                         && !bars->isVisible(),
                 "Empty completed counts appeared as loading or stale bars");
+    }
+    {
+        using namespace kobalt;
+        namespace cm = ui::metrics::chapters;
+        const QVector<ChapterLink> balanced{ { "One", "a", 0, 0, 1000 },
+                                             { "Two", "b", 1, 0, 1000 },
+                                             { "Three", "c", 2, 0, 1000 } };
+        auto uneven = balanced;
+        uneven.last().words = 10000;
+        for (const int ppi : { 300, 227 }) {
+            ui::setDensity(ppi);
+            for (const qreal textScale : { 1.0, 1.5 }) {
+                ui::setLargeText(textScale);
+                for (const QSize design :
+                     { QSize(1072, 1448), QSize(1264, 1680), QSize(1855, 2474), QSize(1448, 1072),
+                       QSize(720, 1600), QSize(1600, 720) }) {
+                    const bool phone = qMin(design.width(), design.height()) == 720;
+                    if (phone && textScale > 1)
+                        continue; // Phone mode supports 100% interface text.
+                    const int controls = ui::px(phone ? 224 : 300);
+                    QWidget host;
+                    host.resize(ui::px(design.width()), ui::px(design.height()));
+                    ChapterGraph graph(&host);
+                    graph.resize(host.width(), cm::graphHeight);
+                    graph.setAvailableHeight(host.height() - controls);
+                    graph.setData(balanced, {}, true, {});
+                    auto *bars = graph.findChild<QWidget *>("rrChapterBars");
+                    host.show();
+                    graph.open();
+                    const int bottom = graph.geometry().bottom();
+                    const int balancedHeight = bars->height();
+                    graph.setData(uneven, {}, true, {});
+                    require(graph.geometry().bottom() == bottom,
+                            "Chart growth moved the bottom edge into the navigation bar");
+                    const bool larger = qMin(design.width(), design.height()) > 1072;
+                    require(larger ? bars->height() > balancedHeight
+                                   : bars->height() == balancedHeight,
+                            "Chart growth ignores physical screen size or chapter lengths");
+                    require(graph.height() <= host.height() - controls,
+                            "Stats overlaps the reserved toolbars");
+                    require(bars->y() == int(cm::rowHeight) + int(cm::barsTop),
+                            "The graph lost its top padding");
+                    for (const auto *name :
+                         { "rrGraphChapterCell", "rrGraphBookCell", "rrGraphSessionCell" })
+                        require(graph.findChild<QWidget *>(name)->height() == int(cm::cellHeight),
+                                "Chart growth shrank a Stats cell");
+                }
+            }
+        }
+        ui::setDensity(300);
+        ui::setLargeText(1);
     }
     {
         using namespace kobalt;
@@ -2350,7 +2630,14 @@ int main(int argc, char **argv)
             app.processEvents();
             graphTitle->setGeometry(0, 0, 1, 1);
             graph.setProgress("A chapter with a title that needs layout", 4, 10, 12, 25, 100);
-            require(graphTitle->width() == graph.width() - 2 * int(metrics::chrome::inset),
+            const auto *position = graph.findChild<QLabel *>("rrGraphChapterPosition");
+            const auto *mode = graph.findChild<QPushButton *>("rrGraphMode");
+            require(graphTitle->width() > 1
+                            && !graphTitle->geometry().intersects(position->geometry())
+                            && !graphTitle->geometry().intersects(mode->geometry())
+                            && kobalt::ui::interfaceTextWidth(graphTitle->text(),
+                                                              graphTitle->font())
+                                    <= graphTitle->width(),
                     "Heavier interface text did not lay out unchanged Stats progress");
             require(interfaceWeight() == heavierTextSteps
                             && QFontInfo(interfaceFont()).family() == nativeFamily
@@ -2390,7 +2677,12 @@ int main(int argc, char **argv)
             app.processEvents();
             graphTitle->setGeometry(0, 0, 1, 1);
             graph.setProgress("A chapter with a title that needs layout", 4, 10, 12, 25, 100);
-            require(graphTitle->width() == graph.width() - 2 * int(metrics::chrome::inset),
+            require(graphTitle->width() > 1
+                            && !graphTitle->geometry().intersects(position->geometry())
+                            && !graphTitle->geometry().intersects(mode->geometry())
+                            && kobalt::ui::interfaceTextWidth(graphTitle->text(),
+                                                              graphTitle->font())
+                                    <= graphTitle->width(),
                     "Regular interface text did not lay out unchanged Stats progress");
             require(plain->grab().toImage() == regularPixels && measure() == regular,
                     "Regular text did not return to its pixels");
@@ -2501,6 +2793,42 @@ int main(int argc, char **argv)
             }
             host.hide();
         }
+    // "Currently:" and its value stay whole, apart and on one line when the
+    // text is too wide for the caption column, as "11.5 pt" is at 150% text.
+    for (const qreal scale : { 1.0, 1.5 }) {
+        using namespace kobalt::ui;
+        const qreal originalScale = textScale();
+        setLargeText(scale);
+        QWidget host;
+        host.resize(1072, 1448);
+        readerStyle(&host, styles::reader());
+        auto *rows = new QVBoxLayout(&host);
+        rows->setContentsMargins(metrics::panel::contentMargins);
+        sliderRow(&host, rows, "size", "size-value", "Text size", "less", "more", 12, 96, 1, {});
+        rows->addStretch(1);
+        auto *prefix = host.findChild<QLabel *>("sizeCurrentPrefix");
+        auto *value = host.findChild<QLabel *>("size-value");
+        require(prefix && value, "The slider row has no Currently line");
+        value->setText("11.5 pt");
+        host.show();
+        app.processEvents();
+        require(!host.findChild<QWidget *>("size")
+                         ->parentWidget()
+                         ->property("caption_stacked")
+                         .toBool(),
+                "The slider row stacked its caption on a six-inch screen");
+        require(prefix->width() >= prefix->sizeHint().width(),
+                "The Currently prefix is narrower than its text, which clips the colon");
+        require(value->width() >= value->sizeHint().width(),
+                "The current value is narrower than its text");
+        require(value->x() >= prefix->geometry().right() + 1 + px(6),
+                "The current value has no gap after the Currently prefix");
+        require(prefix->y() == value->y(), "Currently and its value are not on one line");
+        require(prefix->parentWidget()->rect().contains(value->geometry()),
+                "The current value leaves the caption");
+        host.hide();
+        setLargeText(originalScale);
+    }
     {
         using namespace kobalt::ui;
         BackButton back("Back", nullptr);
@@ -2985,6 +3313,46 @@ int main(int argc, char **argv)
     }
     {
         using namespace kobalt::ui;
+        // A selected folder can replace a same-path face between book openings.
+        for (bool loaded : { false, true }) {
+            QTemporaryDir folder;
+            require(folder.isValid(), "Cannot create font refresh fixture");
+            const auto path = folder.path() + "/Reading.ttf";
+            const auto regular =
+                    kobalt::test::readerAssets().fontData("ebook-core/NV_Bitter-Regular.ttf");
+            const auto bold =
+                    kobalt::test::readerAssets().fontData("ebook-core/NV_Bitter-Bold.ttf");
+            require(!regular.isEmpty() && !bold.isEmpty() && regular != bold,
+                    "Missing replacement font fixtures");
+            const auto replace = [&path](const QByteArray &bytes) {
+                QFile file(path);
+                require(file.open(QIODevice::WriteOnly | QIODevice::Truncate)
+                                && file.write(bytes) == bytes.size(),
+                        "Cannot replace font fixture");
+            };
+            replace(regular);
+            const auto family = QString("Folder font refresh %1").arg(loaded);
+            QFont changed(family);
+            changed.setPixelSize(36);
+            require(registerPrivateInterfaceFont(path, family), "Cannot register refresh fixture");
+            QImage previous;
+            if (loaded) {
+                require(nativeEditorFontData(changed) == regular,
+                        "Cannot load original font bytes");
+                previous = renderPrivateText("iiiiWWWW", changed).image;
+            }
+            replace(bold);
+            forgetPrivateInterfaceFonts(folder.path());
+            require(nativeEditorFontData(changed).isEmpty(),
+                    "Removed font registration survived refresh");
+            require(registerPrivateInterfaceFont(path, family)
+                            && nativeEditorFontData(changed) == bold,
+                    "Reopening retained stale font bytes or a stale lazy reader");
+            if (loaded)
+                require(renderPrivateText("iiiiWWWW", changed).image != previous,
+                        "Font refresh retained cached glyphs or shaped text");
+            forgetPrivateInterfaceFonts(folder.path());
+        }
         const auto alias = QStringLiteral("Dictionary private-only canary");
         require(registerPrivateInterfaceFont(
                         kobalt::test::readerAssets().file("fonts/NotoSansMath-Regular.ttf"), alias),
@@ -3652,7 +4020,7 @@ int main(int argc, char **argv)
         settings.show();
         app.processEvents();
         const auto sampleHeight = [&settings](const char *name) {
-            auto *option = settings.fontDialog->findChild<QWidget *>(name);
+            auto *option = settings.sheet->findChild<QWidget *>(name);
             require(option && option->isVisible(), "Dictionary size preview is missing");
             const auto image = option->grab().toImage().convertToFormat(QImage::Format_RGB32);
             int first = image.height(), last = -1;
@@ -3671,12 +4039,12 @@ int main(int argc, char **argv)
             const int small = sampleHeight("rrDictionaryFontSize80");
             require(small > 0 && sampleHeight("rrDictionaryFontSize140") > small,
                     "Dictionary size previews do not draw the selected text sizes");
-            auto *option = settings.fontDialog->findChild<QWidget *>("rrDictionaryFontSize140");
+            auto *option = settings.sheet->findChild<QWidget *>("rrDictionaryFontSize140");
             auto *preview = option->findChild<QWidget *>("rrDictionaryFontPreview140");
             require(preview && option->rect().contains(preview->geometry()),
                     "Extra large dictionary preview escapes its row");
             for (int percent : { 80, 100, 120, 140 }) {
-                auto *choice = settings.fontDialog->findChild<QAbstractButton *>(
+                auto *choice = settings.sheet->findChild<QAbstractButton *>(
                         QString("rrDictionaryFontSize%1").arg(percent));
                 require(choice
                                 && choice->text()
@@ -3686,7 +4054,7 @@ int main(int argc, char **argv)
                 require(choice->accessibleName()
                                 == kobalt::reader::SettingsPanel::dictionaryFontSizeLabel(percent),
                         "Dictionary size choice lost its accessible name");
-                auto *sample = settings.fontDialog->findChild<QWidget *>(
+                auto *sample = settings.sheet->findChild<QWidget *>(
                         QString("rrDictionaryFontPreview%1").arg(percent));
                 auto *label = sample->findChild<QLabel *>();
                 require(label, "Dictionary preview has no sample label");
@@ -3711,7 +4079,7 @@ int main(int argc, char **argv)
                                 && pixels.height() - ink.bottom() - 1 >= kobalt::ui::px(8),
                         "Dictionary preview ink has insufficient padding");
             }
-            settings.dismissFontChoices();
+            settings.dismissSheet();
         }
         const auto savedScale = kobalt::ui::textScale();
         const auto savedSize = reader.size();
@@ -3725,7 +4093,7 @@ int main(int argc, char **argv)
                 const QStringList shortNames{ "S", "M", "L", "XL" };
                 int index = 0;
                 for (int percent : { 80, 100, 120, 140 }) {
-                    auto *choice = settings.fontDialog->findChild<QAbstractButton *>(
+                    auto *choice = settings.sheet->findChild<QAbstractButton *>(
                             QString("rrDictionaryFontSize%1").arg(percent));
                     const auto name =
                             kobalt::reader::SettingsPanel::dictionaryFontSizeLabel(percent);
@@ -3736,7 +4104,7 @@ int main(int argc, char **argv)
                             "Dictionary size choice lost its full accessible name");
                     ++index;
                 }
-                settings.dismissFontChoices();
+                settings.dismissSheet();
             }
         }
         reader.resize(savedSize);
@@ -3749,9 +4117,9 @@ int main(int argc, char **argv)
         });
         app.processEvents();
         auto *indent = static_cast<kobalt::ui::SettingSlider *>(
-                settings.fontDialog->findChild<QSlider *>("rrParagraphIndentSlider"));
+                settings.sheet->findChild<QSlider *>("rrParagraphIndentSlider"));
         auto *gap = static_cast<kobalt::ui::SettingSlider *>(
-                settings.fontDialog->findChild<QSlider *>("rrParagraphSpacingSlider"));
+                settings.sheet->findChild<QSlider *>("rrParagraphSpacingSlider"));
         require(indent && gap, "Paragraph adjustment sliders are missing");
         const int inset = kobalt::ui::metrics::control::sliderInset;
         const auto xAt = [inset](kobalt::ui::SettingSlider *control, double position) {
@@ -3861,14 +4229,14 @@ int main(int argc, char **argv)
         require(indent->value() == 60 && paragraphCommits == beforeTouchCancel,
                 "Multi-touch indent drag lost its fine value or committed");
         indent->setValue(60);
-        settings.fontDialog->findChild<QPushButton *>("rrParagraphIndentMore")->click();
+        settings.sheet->findChild<QPushButton *>("rrParagraphIndentMore")->click();
         require(chosenIndent == 61, "Indent plus did not keep one-percent adjustment");
-        settings.fontDialog->findChild<QPushButton *>("rrParagraphIndentLess")->click();
+        settings.sheet->findChild<QPushButton *>("rrParagraphIndentLess")->click();
         require(chosenIndent == 60, "Indent minus snapped instead of adjusting one percent");
         indent->setValue(0);
-        settings.fontDialog->findChild<QPushButton *>("rrParagraphIndentLess")->click();
+        settings.sheet->findChild<QPushButton *>("rrParagraphIndentLess")->click();
         require(chosenIndent == -1, "Indent minus did not reach Publisher");
-        settings.fontDialog->findChild<QPushButton *>("rrParagraphIndentMore")->click();
+        settings.sheet->findChild<QPushButton *>("rrParagraphIndentMore")->click();
         require(chosenIndent == 0, "Indent plus did not leave Publisher at zero");
         const QVector<int> gapStops{ -1, 0, 25, 50, 75, 100, 125, 150, 175, 200 };
         const QVector<double> gapPositions{ 0, .2, .3, .4, .5, .6, .7, .8, .9, 1 };
@@ -3918,14 +4286,14 @@ int main(int argc, char **argv)
         touch(gap, QEvent::TouchEnd, gapQuarter);
         require(gap->value() == 60 && paragraphCommits == beforeGapCancel,
                 "Cancelled paragraph gap drag lost its fine value or committed");
-        settings.fontDialog->findChild<QPushButton *>("rrParagraphSpacingMore")->click();
+        settings.sheet->findChild<QPushButton *>("rrParagraphSpacingMore")->click();
         require(chosenGap == 61, "Paragraph gap plus did not keep one-percent adjustment");
-        settings.fontDialog->findChild<QPushButton *>("rrParagraphSpacingLess")->click();
+        settings.sheet->findChild<QPushButton *>("rrParagraphSpacingLess")->click();
         require(chosenGap == 60, "Paragraph gap minus snapped instead of adjusting one percent");
         gap->setValue(0);
-        settings.fontDialog->findChild<QPushButton *>("rrParagraphSpacingLess")->click();
+        settings.sheet->findChild<QPushButton *>("rrParagraphSpacingLess")->click();
         require(chosenGap == -1, "Paragraph gap minus did not reach Publisher");
-        settings.fontDialog->findChild<QPushButton *>("rrParagraphSpacingMore")->click();
+        settings.sheet->findChild<QPushButton *>("rrParagraphSpacingMore")->click();
         require(chosenGap == 0, "Paragraph gap plus did not leave Publisher at zero");
         // Compare complete rail and label pixels with the original visible stops.
         for (auto *control : { indent, gap }) {
@@ -3977,7 +4345,7 @@ int main(int argc, char **argv)
                             "Hidden paragraph stop drew a visible tick");
             }
         }
-        settings.dismissFontChoices();
+        settings.dismissSheet();
     }
     {
         kobalt::ui::PagedText text(&reader);
@@ -4096,6 +4464,25 @@ int main(int argc, char **argv)
                                                        keyboard, query),
                 "Keyboard opening and unrelated panel damage must keep the original refresh policy");
         constexpr quint64 modes = 2 | 4 | 8, ordinary = (quint64(1) << 38) | 8;
+        {
+            // Nickel's keyboard: the edited text refreshes in partial mode;
+            // the key and a window-sized policy keep their own.
+            const QRect field(190, 392, 692, 112), glyphs(220, 410, 120, 70),
+                    screen(0, 0, 1072, 1448);
+            QVector<QPair<QRect, quint64>> typed{
+                { field, ordinary }, { glyphs, ordinary }, { key, ordinary }, { screen, ordinary }
+            };
+            kobalt::partialEditorPolicies(typed, field, modes, 4);
+            require(typed[0].second == ((ordinary & ~modes) | 4)
+                            && typed[1].second == ((ordinary & ~modes) | 4),
+                    "Text typed with Nickel's keyboard must refresh in partial mode");
+            require(typed[2].second == ordinary && typed[3].second == ordinary,
+                    "Keys and window-sized policies must keep their own refresh mode");
+            QVector<QPair<QRect, quint64>> unchanged{ { field, ordinary } };
+            kobalt::partialEditorPolicies(unchanged, {}, modes, 4);
+            require(unchanged[0].second == ordinary,
+                    "Without Nickel's keyboard editor the field keeps its policy");
+        }
         using kobalt::completeKeyboardWaveform;
         require(completeKeyboardWaveform(key, keyboard, 8, ordinary, modes) == ordinary,
                 "A native mode-only key policy must receive the text waveform so field/key damage can split");
@@ -5434,6 +5821,26 @@ int main(int argc, char **argv)
             ActionMenu plain(&host, {}, { { "Only", "only", false, ControlIcon::More, {} } });
             require(!plain.findChild<QWidget *>("rrActionMenuHeader"), "An empty header was shown");
         }
+        {
+            // A row measured before polishing used the application font, not
+            // its style sheet font. On Kobo, Nickel's application font made
+            // option rows too short and clipped the card around them.
+            // The bundled monospace font wraps differently from the application font.
+            const auto styled = QFontInfo(kobalt::ui::chromeFont()).family();
+            require(styled != QApplication::font().family(),
+                    "Option font check needs a font other than the application font");
+            QWidget parent;
+            parent.setStyleSheet(QString("*{font-family:\"%1\";}").arg(styled));
+            const QString description =
+                    "A description that is long enough to wrap onto several lines.";
+            auto *reference = new DescribedOption("Option", description, &parent);
+            reference->ensurePolished();
+            require(reference->font().family() == styled,
+                    "Option did not take its font from the style sheet");
+            auto *early = new DescribedOption("Option", description, &parent);
+            require(early->heightForWidth(320) == reference->heightForWidth(320),
+                    "Option was measured with the application font before polishing");
+        }
         ChoiceModal choice(&host, { "A required description", "A title", {} },
                            { "Cancel", "cancel" }, { "Continue", "continue" });
         choice.card()->fitToWidth(760);
@@ -5477,6 +5884,23 @@ int main(int argc, char **argv)
                     "Disabled modal action label disappeared");
             button->setEnabled(true);
         }
+        // Async descriptions must resize nested headings after the initial short message.
+        choice.descriptionLabel()->setText(
+                "On this device · 12.3%\nLocal chapter\n\nSynced position · 45.6%\nRemote "
+                "chapter\nDevice: Test reader\nSynced: 8 Nov 2026 09:00\n\nThe synced position "
+                "is ahead.");
+        choice.fitCard();
+        app.processEvents();
+        auto *body = choice.descriptionLabel();
+        require(body->height() >= body->heightForWidth(body->width()),
+                "Updated modal description is clipped inside its heading");
+        const int expandedHeight = choice.card()->height();
+        body->setText("A short result");
+        choice.fitCard();
+        app.processEvents();
+        require(choice.card()->height() < expandedHeight
+                        && body->height() >= body->heightForWidth(body->width()),
+                "Updated modal kept the previous description's height");
         choice.primaryButton()->setText("Use this font as my default for all books");
         choice.card()->fitToWidth(400);
         app.processEvents();

@@ -2,6 +2,7 @@
 #include <QPainterPath>
 #include "ui/style/metrics.h"
 #include "reading/header_footer.h"
+#include "render/page_refresh_regions.h"
 #include "reading/page_turn_animation.h"
 #include "reading/highlight_geometry.h"
 #include "ui/input/brightness_gesture.h"
@@ -37,8 +38,8 @@ public:
     };
 
     ReflowLayout reflowLayout;
-    // A short sample from the displayed page, prepared after its first paint.
-    // Lengths are in Unicode characters; transition widths remain estimates.
+    // A short sample from the displayed page, read when a viewport transition
+    // starts. Lengths are in Unicode characters; transition widths remain estimates.
     void setReflowText(const QString &text);
 
     const QVector<int> &reflowWordLengths() const { return wordLengths; }
@@ -49,6 +50,12 @@ public:
     bool viewportTransition() const { return changingViewport; }
 
     const QImage &headerImage() const { return headerPixels; }
+
+    // Leaves the header and footer bands blank without changing the page's
+    // layout. Zen mode's reading menu uses it while it is open.
+    void setStripsHidden(bool hidden);
+
+    bool stripsHidden() const { return stripsBlank; }
 
     const QImage &footerImage() const { return footerPixels; }
 
@@ -111,6 +118,7 @@ public:
     // the right edge changes warmth, when each edge is enabled. `lightStarted`
     // receives true for warmth and may refuse the drag.
     bool brightnessEdge = true, warmthEdge = false;
+    bool rightClickAnnotations = false;
     std::function<bool(bool)> lightStarted;
     std::function<void(double)> lightChanged;
     std::function<void(bool)> lightFinished;
@@ -192,10 +200,23 @@ private:
     void paintSlots(QPainter &painter, const QRect &bounds, bool footer,
                     bool sleeping = false) const;
     bool panelBelowHeader = false;
+    bool stripsBlank = false;
     int cornerTop = 0, cornerBottom = 0;
     HeaderState headerState;
     FooterState footerState;
     QImage renderedBody, headerPixels, footerPixels;
+
+    // The refresh regions of the last two page images, by image cache key, so
+    // a turn reads each page's region metadata once. A null image has key 0
+    // and no regions, as the empty entries do.
+    struct RegionEntry
+    {
+        qint64 key = 0;
+        PageRefreshRegions regions;
+    };
+
+    std::array<RegionEntry, 2> regionCache;
+    PageRefreshRegions refreshRegions(const QImage &source);
     QSize renderedSize;
     qint64 renderedPalette = 0;
     int renderedTop = -1, renderedBottom = -1;

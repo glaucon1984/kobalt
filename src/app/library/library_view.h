@@ -7,8 +7,16 @@
 class QLineEdit;
 class QPushButton;
 
+namespace kobalt {
+class SavedWords;
+class WordList;
+class WordPage;
+struct SavedWord;
+} // namespace kobalt
+
 namespace kobalt::ui {
 class CellButton;
+class CaptionDropdown;
 class PagerBar;
 class ModalOverlay;
 class ActionMenu;
@@ -43,12 +51,23 @@ public:
     void pageButton(int direction);
 
     std::function<void(const QString &key)> openBook, removeFolder, removeBook;
+    // Opens a book at a saved word's position.
+    std::function<void(const QString &key, const QString &position)> openPassage;
+    // Adds My Words to the menu. Words live in the profile database there.
+    void setWordsDirectory(const QString &directory);
+    // The Library book a saved word came from, found by its path first and
+    // then by the content fingerprint of books with the same title. Empty when
+    // the book is not in the Library.
+    QString bookFor(const SavedWord &word) const;
     std::function<void(const QString &key, Book::Mark mark)> markBook;
     std::function<void()> addFolder, openFile, rescan;
     std::function<void(const Settings &settings)> settingsChanged;
     // On Android a book opened on its own is Kobalt's copy, which removal
     // deletes. The confirmation says so.
     bool singleBooksAreCopies = false;
+    // Optional host folder pickers: dictionaries, fonts, custom pins, in that order.
+    std::function<QStringList()> resourceFolderLabels;
+    std::function<void(int kind, bool clear)> chooseResourceFolder;
 
 protected:
     void resizeEvent(QResizeEvent *) override;
@@ -62,7 +81,7 @@ private:
     QVector<ui::CellButton *> modes;
     QLineEdit *query;
     std::unique_ptr<KeyboardController> keyboard;
-    QPushButton *sort;
+    ui::CaptionDropdown *sort;
     ui::LoadingIndicator *progress;
     BookPages *pages;
     ui::PagerBar *pager;
@@ -71,6 +90,13 @@ private:
     ui::ActionMenu *moreSheet = nullptr;
     FolderPage *folderPage = nullptr;
     AboutScreen *about = nullptr;
+    std::unique_ptr<SavedWords> savedWords;
+    QString savedWordsDirectory;
+    bool moreSheetWords = false;
+    WordList *wordList = nullptr;
+    WordPage *wordPage = nullptr;
+    void showWords();
+    void openWord(const SavedWord &word);
     ui::ModalOverlay *overlay = nullptr;
     QTimer *throttle;
     bool scanning = false, searching = false, dark = false;
@@ -83,6 +109,7 @@ private:
     void showMenu(ui::ActionMenu *menu, const char *name);
     void confirmRemove(const QString &key);
     void showFolders();
+    void showResourceFolders();
     void showAbout();
     void closeOverlay();
     QWidget *buildEmpty();

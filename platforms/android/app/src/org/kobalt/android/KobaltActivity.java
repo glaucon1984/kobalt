@@ -35,6 +35,8 @@ import java.util.concurrent.atomic.AtomicLong;
 public class KobaltActivity extends QtActivity {
     private static final int PICK_BOOK = 41;
     private static final int PICK_FOLDER = 42;
+    private static final int PICK_RESOURCE_FOLDER = 50;
+    private native void prepareDictionaries(String directory);
     private static final long MAX_BOOK_BYTES = 128L * 1024 * 1024;
     private final ExecutorService importer = Executors.newSingleThreadExecutor();
     private final AtomicLong request = new AtomicLong();
@@ -118,6 +120,7 @@ public class KobaltActivity extends QtActivity {
             if (booxRefresh != null) booxRefresh.publish(decor, resumed && hasWindowFocus());
             WindowInsets insets = decor.getRootWindowInsets();
             boolean hidden = false;
+            boolean libraryBarsVisible = false;
             int left = 0, top = 0, right = 0, bottom = 0, corner = 0;
             if (insets != null) {
                 // Android 12 reports rounded screen corners; footer text keeps clear of them.
@@ -137,6 +140,11 @@ public class KobaltActivity extends QtActivity {
                     hidden = insets.getSystemWindowInsetTop() <= (cutout == null ? 0 : cutout.getSafeInsetTop())
                         && insets.getSystemWindowInsetBottom() <= (cutout == null ? 0 : cutout.getSafeInsetBottom());
                 }
+                // BOOX gesture navigation can keep the navigation bar hidden even
+                // after show(systemBars()). Wait for the status bar and use the
+                // actual navigation inset, which can legitimately be zero.
+                libraryBarsVisible = Build.VERSION.SDK_INT >= 30
+                    ? insets.isVisible(WindowInsets.Type.statusBars()) : !hidden;
                 if (Build.VERSION.SDK_INT >= 30) {
                     android.graphics.Insets safe = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
                     left = safe.left; top = safe.top; right = safe.right; bottom = safe.bottom;
@@ -160,7 +168,7 @@ public class KobaltActivity extends QtActivity {
                 surfaceResized(width, height, left, top, right, bottom, corner);
             }
             readingGeometryReady = reading && hidden && barAnimations.isEmpty();
-            libraryGeometryReady = !reading && insets != null && !hidden && barAnimations.isEmpty();
+            libraryGeometryReady = !reading && libraryBarsVisible && barAnimations.isEmpty();
             if (libraryGeometryReady) {
                 libraryContentSize = ((long)Math.max(0, width - 2 * Math.max(left, right)) << 32)
                     | (Math.max(0, height - top - bottom) & 0xffffffffL);
@@ -204,10 +212,12 @@ public class KobaltActivity extends QtActivity {
                 }
             }
         } else {
+            // LAYOUT_STABLE retains bar insets even after the bars hide on Android 9/10.
+            // The opening handoff needs the actual hidden-bar insets, so use it only in the Library.
             getWindow().getDecorView().setSystemUiVisibility(reading ? View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                 | View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                 | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE : View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                : View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                 | (libraryDark ? 0 : View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR));
         }
     }
@@ -260,14 +270,112 @@ public class KobaltActivity extends QtActivity {
         try { startActivityForResult(intent, PICK_FOLDER); }
         catch (android.content.ActivityNotFoundException error) { toast("No folder picker is installed."); }
     }
+    private void releaseUnusedResourceGrant(String uri) {
+        if (uri == null || uri.isEmpty()) return;
+        android.content.SharedPreferences settings = getSharedPreferences("user-folders", MODE_PRIVATE);
+        for (String kind : UserFolders.KINDS)
+            if (uri.equals(settings.getString(kind, ""))) return;
+        java.util.Set<String> owned = new java.util.HashSet<>(settings.getStringSet("owned-grants", java.util.Collections.emptySet()));
+        if (!owned.remove(uri)) return; // A pre-existing Library grant is not ours to release.
+        try { getContentResolver().releasePersistableUriPermission(Uri.parse(uri), Intent.FLAG_GRANT_READ_URI_PERMISSION); }
+        catch (SecurityException ignored) { }
+        settings.edit().putStringSet("owned-grants", owned).apply();
+    }
+    public void chooseResourceFolder(int kind, boolean clear) {
+        if (kind < 0 || kind >= UserFolders.KINDS.length) return;
+        String key = UserFolders.KINDS[kind];
+        if (clear) {
+            android.content.SharedPreferences settings = getSharedPreferences("user-folders", MODE_PRIVATE);
+            String old = settings.getString(key, "");
+            settings.edit().remove(key).remove(key + "-label").apply();
+            releaseUnusedResourceGrant(old);
+            return;
+        }
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        String old = getSharedPreferences("user-folders", MODE_PRIVATE).getString(key, "");
+        if (!old.isEmpty()) intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, Uri.parse(old));
+        try { startActivityForResult(intent, PICK_RESOURCE_FOLDER + kind); }
+        catch (android.content.ActivityNotFoundException error) { toast("No folder picker is installed."); }
+    }
+    public String resourceFolderLabel(int kind) {
+        if (kind < 0 || kind >= UserFolders.KINDS.length) return "";
+        return getSharedPreferences("user-folders", MODE_PRIVATE).getString(UserFolders.KINDS[kind] + "-label", "");
+    }
+    // Called on the reader opening worker after the previous reader has retired.
+    public boolean refreshUserFolders() {
+        boolean fontsChanged = false;
+        UserFolders folders = new UserFolders(new File(getFilesDir(), "user-folders"));
+        UserFolders.Source source = new UserFolders.Source() {
+            public java.util.List<UserFolders.Entry> list(String key) throws java.io.IOException {
+                Uri document = Uri.parse(key);
+                String id = DocumentsContract.isTreeUri(document) && !key.contains("/document/")
+                        ? DocumentsContract.getTreeDocumentId(document) : DocumentsContract.getDocumentId(document);
+                Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(document, id);
+                java.util.List<UserFolders.Entry> entries = new java.util.ArrayList<>();
+                try (Cursor cursor = getContentResolver().query(children, new String[] {
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME, DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                        DocumentsContract.Document.COLUMN_MIME_TYPE, DocumentsContract.Document.COLUMN_SIZE,
+                        DocumentsContract.Document.COLUMN_LAST_MODIFIED }, null, null, null)) {
+                    if (cursor == null) throw new java.io.IOException("Cannot read the selected folder");
+                    while (entries.size() < 2049 && cursor.moveToNext()) entries.add(new UserFolders.Entry(cursor.getString(0),
+                            DocumentsContract.buildDocumentUriUsingTree(document, cursor.getString(1)).toString(),
+                            DocumentsContract.Document.MIME_TYPE_DIR.equals(cursor.getString(2)),
+                            cursor.isNull(3) ? -1 : cursor.getLong(3), cursor.isNull(4) ? 0 : cursor.getLong(4)));
+                }
+                return entries;
+            }
+            public InputStream open(String key) throws java.io.IOException {
+                return getContentResolver().openInputStream(Uri.parse(key));
+            }
+        };
+        for (int kind = 0; kind < UserFolders.KINDS.length; ++kind) {
+            try {
+                String tree = getSharedPreferences("user-folders", MODE_PRIVATE).getString(UserFolders.KINDS[kind], "");
+                boolean changed = folders.sync(kind, tree, source);
+                if (kind == 1) fontsChanged = changed;
+            } catch (Exception error) {
+                toast("Could not refresh " + UserFolders.KINDS[kind] + ": " + error.getMessage());
+            }
+        }
+        prepareDictionaries(new File(getFilesDir(), "user-folders/dictionaries").getPath());
+        return fontsChanged;
+    }
     @Override protected void onActivityResult(int code, int result, Intent data) {
         super.onActivityResult(code, result, data);
         if (code == PICK_BOOK && result == RESULT_OK && data != null) importBook(data.getData());
+        if (code >= PICK_RESOURCE_FOLDER && code < PICK_RESOURCE_FOLDER + UserFolders.KINDS.length
+                && result == RESULT_OK && data != null && data.getData() != null) {
+            Uri tree = data.getData();
+            try {
+                boolean hadGrant = false;
+                for (android.content.UriPermission grant : getContentResolver().getPersistedUriPermissions())
+                    hadGrant |= grant.getUri().equals(tree) && grant.isReadPermission();
+                getContentResolver().takePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                String label = tree.getLastPathSegment();
+                try (Cursor cursor = getContentResolver().query(DocumentsContract.buildDocumentUriUsingTree(tree,
+                        DocumentsContract.getTreeDocumentId(tree)), new String[] {DocumentsContract.Document.COLUMN_DISPLAY_NAME},
+                        null, null, null)) {
+                    if (cursor != null && cursor.moveToFirst()) label = cursor.getString(0);
+                }
+                String key = UserFolders.KINDS[code - PICK_RESOURCE_FOLDER];
+                android.content.SharedPreferences settings = getSharedPreferences("user-folders", MODE_PRIVATE);
+                String old = settings.getString(key, "");
+                java.util.Set<String> owned = new java.util.HashSet<>(settings.getStringSet("owned-grants", java.util.Collections.emptySet()));
+                if (!hadGrant) owned.add(tree.toString());
+                settings.edit().putString(key, tree.toString()).putStringSet("owned-grants", owned)
+                        .putString(key + "-label", label == null ? tree.toString() : label).apply();
+                releaseUnusedResourceGrant(old);
+            } catch (Exception error) { toast("Kobalt could not keep access to this folder."); }
+        }
         if (code == PICK_FOLDER && result == RESULT_OK && data != null && data.getData() != null) {
             Uri tree = data.getData();
             try {
                 // Keep read access after restarts. The library reads books in place.
                 getContentResolver().takePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                android.content.SharedPreferences settings = getSharedPreferences("user-folders", MODE_PRIVATE);
+                java.util.Set<String> owned = new java.util.HashSet<>(settings.getStringSet("owned-grants", java.util.Collections.emptySet()));
+                if (owned.remove(tree.toString())) settings.edit().putStringSet("owned-grants", owned).apply();
             } catch (SecurityException error) {
                 toast("Kobalt could not keep access to this folder.");
                 return;
@@ -284,6 +392,14 @@ public class KobaltActivity extends QtActivity {
         }
     }
     public void releaseFolder(String uri) {
+        android.content.SharedPreferences settings = getSharedPreferences("user-folders", MODE_PRIVATE);
+        for (String kind : UserFolders.KINDS) {
+            if (!uri.equals(settings.getString(kind, ""))) continue;
+            java.util.Set<String> owned = new java.util.HashSet<>(settings.getStringSet("owned-grants", java.util.Collections.emptySet()));
+            owned.add(uri);
+            settings.edit().putStringSet("owned-grants", owned).apply();
+            return;
+        }
         try {
             getContentResolver().releasePersistableUriPermission(Uri.parse(uri), Intent.FLAG_GRANT_READ_URI_PERMISSION);
         } catch (SecurityException ignored) {

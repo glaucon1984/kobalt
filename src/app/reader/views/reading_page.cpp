@@ -1,3 +1,4 @@
+#include "render/page_content.h"
 #include "render/highlight_paint.h"
 #include "ui/style/theme.h"
 #include "support/qt_font.h"
@@ -590,10 +591,7 @@ void ReadingPage::setSavedHighlights(const QVector<HighlightGeometry> &groups)
             QVariant::fromValue(window()->property("reader_annotation_repairs").value<QRegion>()
                                 | (previousColor | annotationColorRegion).translated(offset)));
     window()->setProperty("reader_colour_regions",
-                          !annotationColorRegion.isEmpty()
-                                  || (!image.text("kobalt.colour_regions").isEmpty()
-                                      && image.text("kobalt.colour_regions") != "[]"
-                                      && image.text("kobalt.animation_text_only") != "true"));
+                          !annotationColorRegion.isEmpty() || pageHasColour(image));
     damageAnnotations(dirty);
 }
 
@@ -736,6 +734,9 @@ void ReadingPage::setReflowText(const QString &text)
         if (reasons & QTextBoundaryFinder::StartOfItem)
             start = words.position();
     } while (words.toNextBoundary() >= 0 && wordLengths.size() < 64);
+    // The sample arrives while the placeholder is shown.
+    if (changingViewport)
+        update();
 }
 
 void ReadingPage::setViewportTransition(bool active)
@@ -766,6 +767,18 @@ void ReadingPage::setPageAnimationStyle(pageTurn::Style style)
             : QImage();
 }
 
+PageRefreshRegions ReadingPage::refreshRegions(const QImage &source)
+{
+    const auto key = source.cacheKey();
+    for (const auto &entry : regionCache)
+        if (entry.key == key)
+            return entry.regions;
+    // Keep the page shown and the one before it: a turn asks for both, twice.
+    regionCache[1] = regionCache[0];
+    regionCache[0] = { key, pageRefreshRegions(source) };
+    return regionCache[0].regions;
+}
+
 void ReadingPage::refreshContent(bool reading, bool now)
 {
     QElapsedTimer stage;
@@ -794,11 +807,10 @@ void ReadingPage::refreshContent(bool reading, bool now)
                                   showFooter(),     showProgress(),     progressFraction,
                                   width(),          footerTextPixels(), colors.cacheKey(),
                                   weight,           font().family() };
-    kobalt::platform::pageRefresh(
-            this, false,
-            reading && !geometryChanged && renderedPalette == colors.cacheKey()
-                    && renderedBody.text("kobalt.animation_text_only") == "true"
-                    && image.text("kobalt.animation_text_only") == "true");
+    kobalt::platform::pageRefresh(this, false,
+                                  reading && !geometryChanged
+                                          && renderedPalette == colors.cacheKey()
+                                          && pageTextOnly(renderedBody) && pageTextOnly(image));
     QRegion dirty((preparedFrom && preparedFrom == renderedBody.cacheKey()
                                    && renderedBody.size() == image.size()
                            ? preparedDamage
@@ -807,22 +819,19 @@ void ReadingPage::refreshContent(bool reading, bool now)
     preparedFrom = 0;
     dirty += annotationFrameDamage.translated(0, topHeight());
     annotationFrameDamage = {};
-    const auto oldRegions = pageRefreshRegions(renderedBody, true);
-    const auto newRegions = pageRefreshRegions(image, true);
+    // Copies: the second lookup can replace the entry of the first.
+    const auto oldRegions = refreshRegions(renderedBody);
+    const auto newRegions = refreshRegions(image);
     window()->setProperty(
             "reader_image_repairs",
-            QVariant::fromValue(
-                    (oldRegions | newRegions).translated(mapTo(window(), QPoint(0, topHeight())))));
+            QVariant::fromValue((oldRegions.colour | newRegions.colour)
+                                        .translated(mapTo(window(), QPoint(0, topHeight())))));
     window()->setProperty(
             "reader_mono_repairs",
-            QVariant::fromValue(
-                    (pageRefreshRegions(renderedBody, false) | pageRefreshRegions(image, false))
-                            .translated(mapTo(window(), QPoint(0, topHeight())))));
+            QVariant::fromValue((oldRegions.mono | newRegions.mono)
+                                        .translated(mapTo(window(), QPoint(0, topHeight())))));
     window()->setProperty("reader_colour_regions",
-                          !annotationColorRegion.isEmpty()
-                                  || (!image.text("kobalt.colour_regions").isEmpty()
-                                      && image.text("kobalt.colour_regions") != "[]"
-                                      && image.text("kobalt.animation_text_only") != "true"));
+                          !annotationColorRegion.isEmpty() || pageHasColour(image));
     renderedBody = image;
     refreshTiming.damageMs = stage.nsecsElapsed() / 1e6;
     stage.start();
@@ -906,10 +915,20 @@ void ReadingPage::refreshContent(bool reading, bool now)
 void ReadingPage::paintEvent(QPaintEvent *)
 {
     QPainter painter(this);
+    // Paper over the header and footer while Zen mode's menu is open. The
+    // menu's groups lie over the rest of the page.
+    const auto paintCovers = [&] {
+        if (!stripsBlank)
+            return;
+        const auto paper = palette().color(QPalette::Window);
+        painter.fillRect(0, 0, width(), topHeight(), paper);
+        painter.fillRect(0, height() - bottomHeight(), width(), bottomHeight(), paper);
+    };
     if (pageTurnAnimation.state() == QTimeLine::NotRunning) {
         QElapsedTimer drawing;
         drawing.start();
         paintContents(painter);
+        paintCovers();
         refreshTiming.drawMs = drawing.nsecsElapsed() / 1e6;
         return;
     }
@@ -1088,6 +1107,15 @@ void ReadingPage::paintBody(QPainter &painter) const
     for (const auto &r : selection)
         painter.fillRect(r.translated(0, topHeight()), Qt::white);
     painter.restore();
+}
+
+void ReadingPage::setStripsHidden(bool hidden)
+{
+    if (stripsBlank == hidden)
+        return;
+    stripsBlank = hidden;
+    update(QRect(0, 0, width(), topHeight()));
+    update(QRect(0, height() - bottomHeight(), width(), bottomHeight()));
 }
 
 void ReadingPage::paintContents(QPainter &painter, bool sleeping) const
@@ -1311,8 +1339,7 @@ void ReadingPage::beginPointer(QPointF point, const QInputEvent *event)
 
 void ReadingPage::mousePressEvent(QMouseEvent *event)
 {
-#if defined(Q_OS_MAC) || defined(KOBALT_DESKTOP_POINTER)
-    if (ui::isPointerMouse(event) && event->button() == Qt::RightButton) {
+    if (rightClickAnnotations && ui::isPointerMouse(event) && event->button() == Qt::RightButton) {
         cancelHold();
         origin = ui::mousePosition(event);
         rightPressed = event->buttons() == Qt::RightButton;
@@ -1320,7 +1347,6 @@ void ReadingPage::mousePressEvent(QMouseEvent *event)
         event->accept();
         return;
     }
-#endif
     rightPressed = false;
     if (!kobalt::ui::isPointerMouse(event) || event->button() != Qt::LeftButton)
         return;
@@ -1329,15 +1355,13 @@ void ReadingPage::mousePressEvent(QMouseEvent *event)
 
 void ReadingPage::mouseMoveEvent(QMouseEvent *event)
 {
-#if defined(Q_OS_MAC) || defined(KOBALT_DESKTOP_POINTER)
-    if (rightPressed && ui::isPointerMouse(event)) {
+    if (rightClickAnnotations && rightPressed && ui::isPointerMouse(event)) {
         rightMoved |= event->buttons() != Qt::RightButton
                 || (ui::mousePosition(event) - origin).manhattanLength()
                         > metrics::lookup::moveTolerance;
         event->accept();
         return;
     }
-#endif
     if (!tracking || !kobalt::ui::isPointerMouse(event))
         return;
     latest = kobalt::ui::mousePosition(event);
@@ -1346,8 +1370,7 @@ void ReadingPage::mouseMoveEvent(QMouseEvent *event)
 
 void ReadingPage::mouseReleaseEvent(QMouseEvent *event)
 {
-#if defined(Q_OS_MAC) || defined(KOBALT_DESKTOP_POINTER)
-    if (ui::isPointerMouse(event) && event->button() == Qt::RightButton) {
+    if (rightClickAnnotations && ui::isPointerMouse(event) && event->button() == Qt::RightButton) {
         const bool request = rightPressed && !rightMoved && event->buttons() == Qt::NoButton
                 && (ui::mousePosition(event) - origin).manhattanLength()
                         <= metrics::lookup::moveTolerance;
@@ -1358,7 +1381,6 @@ void ReadingPage::mouseReleaseEvent(QMouseEvent *event)
         event->accept();
         return;
     }
-#endif
     rightPressed = false;
     if (!kobalt::ui::isPointerMouse(event) || event->button() != Qt::LeftButton)
         return;

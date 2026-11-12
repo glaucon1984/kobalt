@@ -113,6 +113,15 @@ public:
     // power-off file, as the firmware's own reader writes the cover there (shown when the
     // firmware's Power-off logo setting is the book cover).
     QImage bookCover;
+    // The book's own "hide on sleep screens" setting, as the reader last reported it (asked at
+    // each sleep screen refresh, at standby and when the reader is told to close; kept for the
+    // close, when the reader is gone). Such a book leaves neither its cover nor a page in any
+    // screen the firmware shows: Kobalt's private screen replaces the built-in sleep screen,
+    // and a blank sheet stands for the cover and for the boot capture.
+    bool bookPrivate = false;
+    void updateBookPrivacy();
+    QImage firmwareCover() const;
+    QImage bootCapture() const;
 
 protected:
     void closeEvent(QCloseEvent *event) override;

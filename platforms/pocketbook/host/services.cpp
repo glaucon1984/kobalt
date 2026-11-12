@@ -1,6 +1,7 @@
 #include "services.h"
 #include "host.h"
 #include "sleep_screen_files.h"
+#include "app/reader/views/annotation_exporter.h"
 #include "ui/controls/keyboard.h"
 #include "ui/style/fonts.h"
 #include <QGuiApplication>
@@ -232,9 +233,6 @@ public:
     bool supportsSleepScreen() const override {
         return true;
     }
-    const char *stockSleepScreenKey() const override {
-        return "settings.sleep_stock_pocketbook";
-    }
     bool presentSleepScreen(QImage image, Qt::ScreenOrientation) override {
         if (!writeLockImages(image))
             return false;
@@ -371,8 +369,8 @@ ReaderHostServices readerServices() {
     result.downloadableDictionaries = true; // Qt is linked with OpenSSL; CA bundle via SSL_CERT_FILE
     result.deviceName = deviceName();
     // Exported annotations (HTML) in a folder of the user's storage; the library lists them.
-    result.annotationExportDirectory = [] {
-        return QStringLiteral("/mnt/ext1/Kobalt/Annotations");
+    result.annotationExporter = [](QWidget *reader) {
+        return reader::directoryAnnotationExporter(reader, QStringLiteral("/mnt/ext1/Kobalt/Annotations"));
     };
     // Transparent PNGs for the "PNG over text" sleep screen, next to the profile (the installer
     // leaves the folder alone; the user reaches it over USB).

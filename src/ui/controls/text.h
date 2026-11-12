@@ -22,6 +22,12 @@ class InterfaceLabel : public QLabel
 public:
     using QLabel::QLabel;
     void setBalancedWrapping(bool enabled);
+    // Centers the ink of a single line vertically instead of its line box.
+    void setOpticalCentering(bool enabled);
+    // Draws in the theme's secondary ink. A style sheet colour does not
+    // reach the private text painting reliably: the widget palette it reads
+    // is sometimes the theme's ink, after a theme change reaches the label.
+    void setSecondaryInk(bool enabled);
     int heightForWidth(int width) const override;
     QSize sizeHint() const override;
 
@@ -33,6 +39,8 @@ private:
     bool usesBalancedWrapping() const;
     QString layoutText(int width) const;
     bool balancedWrapping = false;
+    bool opticalCentering = false;
+    bool secondaryInk = false;
     mutable int balancedWidth = -1;
     mutable QString balancedSource, balancedText;
     mutable QFont balancedFont;

@@ -4,6 +4,7 @@
 #include "ui/dialogs/modals.h"
 #include "platform/api/keyboard_controller.h"
 #include "sync/kosync_schedule.h"
+#include "reading/native_sync_policy.h"
 #include <QPointer>
 #include <QDateTime>
 
@@ -19,10 +20,11 @@ public:
     void setSchedule(const kosync::Schedule &schedule);
     // Which platform moments the Automatic sync sheet offers.
     void setScheduleFeatures(bool sleepWake, bool wifi);
-    void setNativeCloudSync(bool enabled, bool koboCloud = false);
+    void setNativeCloudSync(const NativeSyncPolicy &policy);
     void setLastSync(const QDateTime &time);
     void setDeviceName(const QString &name, const QString &defaultName);
     void setFilenameMatching(bool enabled);
+    void setSendMetadata(bool enabled);
     void setStatus(const QString &status, bool busy);
     void fitWidth(int width);
 
@@ -34,10 +36,25 @@ public:
     void dismissEditor();
     QPointer<ui::ModalOverlay> editorDialog;
     std::function<void()> loginRequested, logoutRequested, syncRequested;
+
+    // Zen mode's settings page offers Sync now and Automatic sync on their
+    // own, only while this page could offer them.
+    bool syncReady() const { return signedIn_ && !nativeCloudSync_ && !accountEdited_; }
+
+    bool syncEnabled() const;
+    QString lastSyncText() const;
+    QString automaticCaption() const;
+    void syncNow();
+
+    void openSchedule() { showSchedule(); }
+
+    // Called after the account, schedule, last sync or status changes.
+    std::function<void()> stateChanged;
     std::function<void(bool)> automaticChanged;
     std::function<void(const kosync::Schedule &)> scheduleChanged;
     std::function<void(const QString &)> deviceNameChanged;
     std::function<void(bool)> filenameMatchingChanged;
+    std::function<void(bool)> sendMetadataChanged;
 
 protected:
     void hideEvent(QHideEvent *event) override;
@@ -72,6 +89,7 @@ private:
     bool sleepWake_ = false, wifi_ = false;
     ui::CaptionButton *serverButton_, *usernameButton_, *passwordButton_, *deviceNameButton_,
             *matchingButton_;
+    ui::DescribedOption *metadataOption_;
     QPushButton *login_, *logout_, *sync_, *learnMore_;
     ui::CaptionButton *automaticButton_;
     QLabel *description_, *sideloadGuidance_, *status_, *lastSync_;

@@ -7,6 +7,7 @@
 #include <QBoxLayout>
 #include <QEvent>
 #include <QPushButton>
+#include <QImage>
 #include <functional>
 
 namespace kobalt::ui {
@@ -96,6 +97,29 @@ private:
 };
 
 // A selectable diagram of the actual page hit regions, with a label below it.
+// A list strip's caption that opens choices: the choice's name in capitals
+// and a chevron, as the Library's sort. Busy shows scan progress beside it;
+// plain names the view, with no choices to open.
+class CaptionDropdown : public Button
+{
+public:
+    explicit CaptionDropdown(QWidget *parent);
+    bool open = false, busy = false, plain = false;
+    // A small line above the value, such as "Sort by". Empty draws the value
+    // alone.
+    QString label;
+    // The scan progress beside the caption, or zero when it is hidden.
+    int progressWidth = 0;
+    // Whether the caption fits beside scan progress this wide.
+    bool fitsBeside(int progress) const;
+
+protected:
+    void paintEvent(QPaintEvent *) override;
+
+private:
+    static QFont labelFont();
+};
+
 class TapZoneButton : public Button
 {
 public:
@@ -325,6 +349,15 @@ public:
         }
     }
 
+    // Optional bounded alpha mask, tinted by the same palette as built-in icons.
+    void setGlyphMask(const QImage &mask)
+    {
+        if (glyphMask.cacheKey() != mask.cacheKey()) {
+            glyphMask = mask;
+            update();
+        }
+    }
+
     void setRule(Edges edges)
     {
         rule = edges;
@@ -349,6 +382,7 @@ protected:
 
 private:
     ControlIcon glyph;
+    QImage glyphMask;
     int iconPixels;
     Edges rule;
     bool dropdownIndicator = false;

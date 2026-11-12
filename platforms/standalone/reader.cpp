@@ -2,6 +2,7 @@
 #include "reading/reading_density.h"
 #include "support/strings.h"
 #include "support/main_thread.h"
+#include "ui/style/private_text.h"
 #include "support/diagnostics.h"
 #include "reader.h"
 #ifdef KOBALT_POCKETBOOK
@@ -9,6 +10,7 @@
 #include "explorer_progress.h"
 #include "epub_cfi.h"
 #include "reading/reading_progress.h"
+#include "platform/posix/diagnostics.h"
 #endif
 #include "app/reader_interface.h"
 #include "app/messages/opening_message.h"
@@ -28,6 +30,7 @@
 class QOrientationSensor;
 #ifdef Q_OS_ANDROID
 #  include <QCoreApplication>
+#  include <QStandardPaths>
 #  include <QJniObject>
 #  include <QtCore/qnativeinterface.h>
 #endif
@@ -47,7 +50,16 @@ std::unique_ptr<ReadingBridge> platformLibraryBridge(const QString &identity, co
 {
     return pocketbook::makeLibraryBridge(identity, path, paths);
 }
+// Reading time on a clock that keeps counting through the device's light sleep, as on Kobo.
+ReadingTimer::Clock platformReadingClock()
+{
+    return platform::processDiagnosticSystem().bootMilliseconds;
+}
 #else
+ReadingTimer::Clock platformReadingClock()
+{
+    return {};
+}
 QOrientationSensor *platformOrientationSensor(QObject *)
 {
     return nullptr;
@@ -128,9 +140,14 @@ bool ReaderController::resetBook(const QString &path)
     if (!idle() || path.isEmpty())
         return false;
     const auto identity = QUrl::fromLocalFile(QFileInfo(path).absoluteFilePath()).toString();
-    // Keep an identity-only checkpoint so the prototype fallback cannot restore
-    // old settings or progress on the next opening.
-    return storage::writeBookState(paths, identity, { { "book", identity } });
+    // Reset progress and reading preferences, retaining this book's privacy choice.
+    const auto saved = storage::readBookState(paths, identity, paths.bookState(identity));
+    if (saved.status != storage::ReadStatus::Ok && saved.status != storage::ReadStatus::Missing)
+        return false;
+    QJsonObject reset{ { "book", identity } };
+    if (saved.object.value("hide_book_on_sleep_screen").toBool(false))
+        reset["hide_book_on_sleep_screen"] = true;
+    return storage::writeBookState(paths, identity, reset);
 }
 
 void ReaderController::open(const QString &path, QSize pixels, QString sourceKey,
@@ -148,6 +165,7 @@ void ReaderController::open(const QString &path, QSize pixels, QString sourceKey
     }
     this->restartAtStart = restartAtStart;
     currentSourceKey = std::move(sourceKey);
+    openingPosition = std::exchange(startPosition, {});
     begin(path, pixels);
 }
 
@@ -252,6 +270,26 @@ void ReaderController::begin(const QString &path, QSize pixels)
     request.positions = pocketbook::positionCodec();
 #endif
 #ifdef Q_OS_ANDROID
+    // Materialize the selected document trees before the engine discovers
+    // fonts. This factory runs on the opening worker, after the old reader drains.
+    const auto resources = request.resources;
+    request.resources = [resources](const QMap<QString, qint64> &sizes, const QString &font,
+                                    std::shared_ptr<std::atomic_bool> rejected) {
+        mainthread::BlockingOperation operation("android-resource-folder-refresh");
+        if (QNativeInterface::QAndroidApplication::context().callMethod<jboolean>(
+                    "refreshUserFolders")) {
+            // Posted before this worker's opening completion constructs the next reader.
+            QMetaObject::invokeMethod(
+                    qApp,
+                    [] {
+                        ui::forgetPrivateInterfaceFonts(
+                                QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+                                + "/user-folders/fonts");
+                    },
+                    Qt::QueuedConnection);
+        }
+        return resources(sizes, font, std::move(rejected));
+    };
     const QJniObject context = QNativeInterface::QAndroidApplication::context();
     request.syncFilename =
             context.callObjectMethod("syncFilename", "(Ljava/lang/String;)Ljava/lang/String;",
@@ -263,6 +301,12 @@ void ReaderController::begin(const QString &path, QSize pixels)
 #endif
     request.restartAtStart = restartAtStart;
     request.userStyleSheetPath = paths.directory + "/userstyle.css";
+#ifdef Q_OS_ANDROID
+    request.customPinsPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+            + "/user-folders/custom-pins";
+#else
+    request.customPinsPath = paths.customPins();
+#endif
     request.appearanceDefaults = appearance::bookDefaults(settings);
     opening->open(
             std::move(request),
@@ -291,7 +335,8 @@ void ReaderController::begin(const QString &path, QSize pixels)
                 auto book = std::make_unique<ReadingBook>(
                         std::move(guard->opening), statePath, guard->paths, identity, hash,
                         platformLibraryBridge(identity, guard->current, guard->paths), baseline,
-                        diskBaseline, guard->currentSourceKey);
+                        diskBaseline, guard->currentSourceKey, ReadingHistory::UtcClock(),
+                        platformReadingClock());
                 auto services = guard->services();
                 services.phoneLayout = isPhoneScreen(pixels, readingPpi.load());
                 services.startupNotice = std::exchange(guard->recoveryNotice, ReaderNotice{});
@@ -330,24 +375,26 @@ void ReaderController::begin(const QString &path, QSize pixels)
                 const double created = creating.nsecsElapsed() / 1e6;
                 QElapsedTimer waiting;
                 waiting.start();
-                window->preparePresentation(
-                        [guard, pendingWindow, lease, engine, created, waiting](bool ready) {
-                            if (!guard || !pendingWindow || guard->phase != Phase::Opening
-                                || guard->window_ != pendingWindow || guard->lease != lease) {
-                                return;
-                            }
-                            if (!ready || !lease || lease->revoked()) {
-                                guard->retire();
-                                return;
-                            }
-                            guard->phase = Phase::Reading;
-                            pendingWindow->setOpeningTiming(
-                                    guard->openingStarted,
-                                    QJsonObject{ { "engine_ms", engine },
-                                                 { "window_ms", created },
-                                                 { "wait_ms", waiting.nsecsElapsed() / 1e6 } });
-                            emit guard->opened();
-                        });
+                window->preparePresentation([guard, pendingWindow, lease, engine, created,
+                                             waiting](bool ready) {
+                    if (!guard || !pendingWindow || guard->phase != Phase::Opening
+                        || guard->window_ != pendingWindow || guard->lease != lease) {
+                        return;
+                    }
+                    if (!ready || !lease || lease->revoked()) {
+                        guard->retire();
+                        return;
+                    }
+                    guard->phase = Phase::Reading;
+                    if (!guard->openingPosition.isEmpty())
+                        pendingWindow->showPosition(std::exchange(guard->openingPosition, {}));
+                    pendingWindow->setOpeningTiming(
+                            guard->openingStarted,
+                            QJsonObject{ { "engine_ms", engine },
+                                         { "window_ms", created },
+                                         { "wait_ms", waiting.nsecsElapsed() / 1e6 } });
+                    emit guard->opened();
+                });
             },
             [guard, lastStage = OpeningStage::Content,
              painted = QElapsedTimer{}](OpeningStage stage, int percent) mutable {
@@ -366,6 +413,10 @@ void ReaderController::begin(const QString &path, QSize pixels)
             [guard](QImage cover) {
                 if (guard && guard->phase == Phase::Opening)
                     emit guard->openingCover(std::move(cover));
+            },
+            [guard] {
+                if (guard && guard->phase == Phase::Opening)
+                    emit guard->reopeningBook();
             });
 }
 

@@ -1,4 +1,6 @@
 #pragma once
+#include <future>
+#include "reading/features.h"
 // Private to the reader window: its declaration and the widgets only it uses.
 // Include it only from the reader's own translation units.
 #include "ui/controls/buttons.h"
@@ -7,6 +9,7 @@
 #include "ui/controls/page_scrubber.h"
 #include "ui/controls/panels.h"
 #include "ui/dialogs/modals.h"
+#include "platform/api/keyboard_controller.h"
 #include "ui/style/theme.h"
 #include "app/reader_window.h"
 #include "app/reader_interface.h"
@@ -17,9 +20,11 @@
 #include "reading/page_navigation.h"
 #include "ui/input/tap_filter.h"
 #include "sync/kosync.h"
+#include "sync/sync_coordinator.h"
 #include "app/reader/settings/kosync_page.h"
 #include "reading/bookmark_session.h"
 #include "reading/highlight_session.h"
+#include "reading/annotation_draft.h"
 #include "storage/annotation_export.h"
 #include "app/reader/views/reading_page.h"
 #include "app/reader/views/image_viewer.h"
@@ -33,6 +38,14 @@
 #include "app/reader/panels/link_panel.h"
 #include "app/reader/panels/search_panel.h"
 #include "app/reader/settings/appearance_panel.h"
+#include "app/reader/settings/text_presets_panel.h"
+#include "reading/text_presets.h"
+#include "reading/style_sample_cache.h"
+#include "storage/preview_store.h"
+#include "support/save_wait.h"
+#include "app/reader/panels/word_list.h"
+#include "app/reader/panels/word_page.h"
+#include "storage/saved_words.h"
 #include "appearance_edit_session.h"
 #include "app/reader/views/navigation.h"
 #include "platform/api/reader_host_services.h"
@@ -60,6 +73,7 @@
 class QVBoxLayout;
 
 namespace kobalt::reader {
+class SleepGallery;
 // Global preference for the Wi-Fi power saver. Missing means on.
 inline constexpr const char *wifiPowerSaverKey = "turn_off_wifi_on_open";
 inline constexpr const char *disableReaderStandbyKey = "disable_reader_standby";
@@ -86,6 +100,8 @@ public:
     void checkpoint() override;
     bool flushBeforeStandby() override;
     bool pendingStorageSave() const override;
+    // Runs the close and transition steps again when a save reports its end.
+    kobalt::SaveWait saveWait{ this };
     void revokeNativeReading() override;
     void finishStorageSave(std::function<void(bool)> finished, bool nativeAllowed = true) override;
     void prepareUsb(std::function<void()> finished) override;
@@ -95,7 +111,7 @@ public:
 
     bool pendingNetworkSync() const override
     {
-        return kosyncFinishing && kosyncFinishingElapsed.elapsed() < kosyncFinishBudget;
+        return syncCoordinator && syncCoordinator->finalPending();
     }
 
     void positionPages(QStringList positions, std::function<void(QVector<int>)> finished) override
@@ -109,12 +125,20 @@ public:
     void wakeReader() override;
     QImage composeSleepImage(QImage *powerOff = nullptr) override;
     QImage composePowerOffImage() override;
+    bool hidesBookOnSleepScreen() const override { return book->hideBookOnSleepScreen(); }
     QImage cachedSleepCoverBackground(QSize size);
     void progressTick() override;
     void refreshHostPresentation() override;
+
+    void showPosition(const QString &position) override { goToPassage(position); }
+
     void pageButton(int direction) override;
     void physicalPageButton(int key, int direction) override;
     void scriptedPageButton(int direction) override;
+    QJsonObject benchmarkState() const override;
+    bool benchmarkCommand(int command, int argument) override;
+
+    bool closeGuardActive() const override { return closeGuarded; }
 
     bool busy() const override
     {
@@ -126,7 +150,8 @@ public:
     // has paused them for the whole process.
     bool kosyncAutomatic() const
     {
-        return kosyncClient->automatic() && !kobalt::kosync::automaticPaused();
+        return features::enabled(preferences, features::Kosync) && kosyncClient->automatic()
+                && !kobalt::kosync::automaticPaused();
     }
 
     void setOpeningTiming(const QElapsedTimer &started, const QJsonObject &stages) override;
@@ -170,8 +195,6 @@ private:
     void moveAnnotationDrag(QPoint point);
     void finishAnnotationDrag(bool cancelled);
     void requestAnnotationDrag();
-    void resolveAnnotationDraft(std::function<void()> after = {},
-                                std::function<void()> reject = {});
     void resolveAnnotationTokens(kobalt::AnnotationToken start, kobalt::AnnotationToken end,
                                  bool startPolicy, bool endPolicy, std::function<void()> after = {},
                                  std::function<void()> reject = {});
@@ -221,25 +244,89 @@ private:
         return preferences.value("minimal_annotation_mode").toBool(false);
     }
 
-    bool annotationMode = false, annotationSaving = false, annotationShowActionsPending = false,
-         annotationAdjusting = false, annotationDirty = false;
-    QString annotationStart, annotationEnd, annotationEditing, annotationFrame,
-            annotationViewportFrame;
-    kobalt::AnnotationToken annotationStartWord, annotationEndWord;
-    bool annotationStartPolicy = false, annotationEndPolicy = false;
-    QString annotationChosenStart, annotationChosenEnd;
+    bool annotationMode = false, annotationSaving = false, annotationShowActionsPending = false;
+    std::unique_ptr<kobalt::AnnotationDraft> annotationDraft;
+    QString annotationFrame;
     QRect annotationActionAnchor;
-    quint64 annotationSaveRevision = 0;
-    quint64 annotationEpoch = 0, savedHighlightEpoch = 0;
-    QVector<QRect> draftHighlightRects, savedHighlightRects;
-    kobalt::AnnotationGeometry draftHighlightGeometry;
-    bool annotationDragging = false, annotationDragPending = false, annotationDragReleased = false;
-    bool annotationHandleDragging = false, annotationDragAwaitingRelease = false,
-         annotationDragLoadingEdges = false;
-    int annotationDragTurn = 0;
-    kobalt::AnnotationPageEdges annotationDragEdges;
-    int annotationDragBoundary = -1;
-    QPoint annotationDragPoint, annotationDragOrigin;
+    quint64 savedHighlightEpoch = 0;
+    QVector<QRect> savedHighlightRects;
+
+    // One press that selects text or moves a selection handle.
+    struct AnnotationDrag
+    {
+        // Active: the press moves the selection. AwaitingRelease: the gesture
+        // ended at a page boundary before the finger lifted; the release
+        // finishes it.
+        enum class Phase { Idle, Active, AwaitingRelease };
+        // What the press moves. None: a new selection, before its first word.
+        // Anchored: the press began on blank paper and stays a page gesture.
+        // Start and End: that end of the selection; the page passes them as 0
+        // and 1.
+        enum class Boundary { None = -1, Anchored = -2, Start = 0, End = 1 };
+
+        Phase phase = Phase::Idle;
+        Boundary boundary = Boundary::None;
+        // The press began on a selection handle.
+        bool handle = false;
+        // A hit test, range resolution or page turn for this press is running.
+        bool requestPending = false;
+        // The finger lifted while a request was running.
+        bool released = false;
+        bool loadingEdges = false;
+        // The page turn that this press asked for: -1, 1 or 0 for none.
+        int turn = 0;
+        kobalt::AnnotationPageEdges edges;
+        QPoint point, origin;
+
+        bool active() const { return phase == Phase::Active; }
+
+        // The press moves one end of an existing selection.
+        bool movesEnd() const { return boundary == Boundary::Start || boundary == Boundary::End; }
+
+        void begin(Boundary pressed, QPoint at)
+        {
+            phase = Phase::Active;
+            requestPending = released = false;
+            boundary = pressed;
+            handle = movesEnd();
+            turn = 0;
+            edges = {};
+            origin = point = at;
+        }
+
+        void end()
+        {
+            phase = Phase::Idle;
+            requestPending = false;
+        }
+
+        // The gesture is complete, but the finger may still be down.
+        void endBeforeRelease()
+        {
+            requestPending = false;
+            phase = released ? Phase::Idle : Phase::AwaitingRelease;
+        }
+
+        // True once, when the release that a completed gesture waited for arrives.
+        bool takeAwaitedRelease()
+        {
+            if (phase != Phase::AwaitingRelease)
+                return false;
+            phase = Phase::Idle;
+            return true;
+        }
+
+        void forgetAwaitedRelease() { takeAwaitedRelease(); }
+
+        // A range that resolved in reverse order swaps the end being moved.
+        void swapEnd()
+        {
+            if (movesEnd())
+                boundary = boundary == Boundary::Start ? Boundary::End : Boundary::Start;
+        }
+    };
+
+    AnnotationDrag annotationDrag;
     ReaderMarkupRequest annotationRequest;
     qint64 annotationImageKey = 0;
     bool annotationPresentationCapture = false;
@@ -269,16 +356,12 @@ private:
     void finishKosyncPresentation();
     void prepareAnnotationPresentation(std::function<void(bool)> finished);
     void showKosyncChoice();
-    void startKosyncExchange(bool finishing);
-    void continueKosyncWhenReady(std::function<void()> ready);
-    void prepareKosyncNetwork(bool interactive, std::function<void()> ready);
     void updateKosyncFeatures();
     void syncKosyncWhileReading();
     qint64 kosyncClock() const;
     void flushKosync(std::function<void()> finished, bool enabled = true);
-    void finishKosync(const QString &message);
+    void finishKosync(const QString &message, bool finishing);
     void cancelKosync();
-    void releaseKosyncWifi();
     void restartKosync();
     void showKosyncOpening();
     void hideKosyncOpening();
@@ -286,30 +369,21 @@ private:
     // Declared before the client, which uses it until destroyed.
     std::unique_ptr<QNetworkAccessManager> kosyncHttp;
     std::unique_ptr<kosync::Client> kosyncClient;
-    std::unique_ptr<SyncNetwork> kosyncNetwork;
+    // Destroy the attempt owner before its borrowed client and HTTP transport.
+    std::unique_ptr<kosync::SyncCoordinator> syncCoordinator;
     KosyncPage *kosyncPage = nullptr;
-    static constexpr int kosyncFinishBudget = 2000;
-    QTimer kosyncDeadline, kosyncOpeningGrace, kosyncReaderRetry;
-    QElapsedTimer kosyncFinishingElapsed;
-    std::function<void()> kosyncFinished;
+    QTimer kosyncOpeningGrace;
+    ReadingTimer kosyncIntervalClock;
     std::function<void(bool)> kosyncPresentationReady;
-    std::function<void()> kosyncReaderReady;
-    bool kosyncFinishing = false, kosyncOpening = false, kosyncFlushWaiting = false;
-    bool kosyncConnecting = false, kosyncAuthenticating = false;
-    // The running sync asked for a silent connection. When it ends, the
-    // network controller turns off the Wi-Fi that this request turned on.
-    bool kosyncReleaseWifi = false;
+    bool kosyncOpening = false;
     // The power saver's request at sleep. Wake deletes it, which drops a
     // Bluetooth answer that arrives after wake.
     QPointer<QObject> wifiSleepRequest;
-    // Failed background connections in a row, in memory only.
-    int kosyncBackgroundFailures = 0;
     // The next opening-style sync follows a wake, not a book opening.
     bool kosyncWaking = false;
     QPointer<ui::ModalOverlay> kosyncDialog;
-    kosync::Reconciler kosyncProgress;
     QString kosyncMessage;
-    quint64 kosyncEpoch = 0;
+    quint64 kosyncChoiceEpoch = 0;
     bool kosyncStarted = false;
     // The position the last check saw, and when a sync last started, an
     // opening or wake skipped it or a deferred choice came back, from kosyncClock().
@@ -331,6 +405,7 @@ private:
     bool syncFontPicker();
     void showChapterText();
     void showPageImage(const QImage &nextImage);
+    void sampleReflowText();
     QRect appearancePreviewSpace() const;
     bool appearancePreviewFits() const;
     void syncAppearancePreview();
@@ -338,6 +413,14 @@ private:
     void syncAppearanceControls(bool pickingFont);
     void fitAppearance();
     void syncReadingControls();
+    // After a page turn with the menu and every panel hidden, refresh() skips
+    // the control syncs and marks the controls stale. They sync before they
+    // show: showControls() and openPanel() sync on their own, and the event
+    // filter catches every other way a control container becomes visible.
+    bool controlsHidden() const;
+    void syncReadingState();
+    void syncStaleControls();
+    bool controlsStale = false;
     void publishResize();
     void openPendingDestination();
     kobalt::ReaderHostServices services;
@@ -355,6 +438,15 @@ private:
     QImage sleepImage, sleepCover, sleepOverlay;
     bool sleepOverlayLoading = false;
     sleep::Tile activeSleepTile = sleep::Tile::Bookmark;
+    // The design and text of the current sleep screen, without its image, and
+    // what lies under its status so a battery change can repaint only that.
+    sleep::Snapshot sleepShot;
+    QPointer<QLabel> privateSleepFrame;
+    QVector<QImage> sleepUnderlay;
+    // Reading finished earlier today, loaded off the GUI thread when the book
+    // opens. Sleep uses it only once it is ready.
+    std::future<qint64> todayReading;
+    qint64 todayReadingFinished = -1;
     QFileInfo sleepCoverSource;
     sleep::Snapshot exitSleepSnapshot;
     QString sleepProgress, sleepRemaining;
@@ -365,9 +457,7 @@ private:
     QTimer *clockTimer = nullptr;
     // The minute of the day the clock timer was last armed in.
     int clockMinute = -1;
-#ifdef KOBALT_READER_HARDWARE
     const bool liveState = QFile::exists(book->paths().directory + "/live-state");
-#endif
     QLabel *menuClock, *menuSession;
     kobalt::ui::BatteryIndicator *menuBattery;
     kobalt::ui::BluetoothIndicator *menuBluetooth;
@@ -380,19 +470,39 @@ private:
     kobalt::ui::Panel *pinnedBookmarks = nullptr;
     QVector<kobalt::ui::CellButton *> pinnedButtons;
     kobalt::ToolbarComposition toolbarComposition;
+
+    // Toolbar buttons whose state follows the reader. buildToolbar() makes
+    // them once; a recomposition moves and hides them and never rebuilds them.
+    struct ToolbarButtons
+    {
+        QPushButton *light = nullptr, *typography = nullptr, *layout = nullptr, *settings = nullptr,
+                    *graph = nullptr;
+    };
+
+    ToolbarButtons toolbarButtons;
+    // The weight sliders with their minus and plus buttons.
+    QVector<QWidget *> weightControls;
     std::unique_ptr<kobalt::reader::Navigation> navigation;
     QVector<QWidget *> topActions;
     kobalt::ui::Panel *general = nullptr;
     std::unique_ptr<kobalt::LightControls> light;
     kobalt::LightPanel *lightPopup = nullptr;
-    QCheckBox *darkOption, *inheritTextLayoutOption, *animationOption, *edgeLightOption,
-            *lightGestureFeedbackOption, *denseGraphOption;
+    QCheckBox *darkOption, *animationOption, *edgeLightOption, *lightGestureFeedbackOption,
+            *denseGraphOption;
     QCheckBox *automaticOpeningOption = nullptr, *minimalAnnotationOption = nullptr,
-              *hideTabLabelsOption = nullptr;
+              *hideTabLabelsOption = nullptr, *zenModeOption = nullptr, *saveWordsOption = nullptr;
     QCheckBox *wifiPowerSaverOption = nullptr;
     QCheckBox *disableStandbyOption = nullptr;
     QPushButton *autoRotateOption;
     bool hideNativeStatus() const;
+
+    // Zen mode keeps only Chapters, Search, Annotate and Bookmarks in the reading menu.
+    bool zenMode() const { return preferences.value("zen_mode").toBool(false); }
+
+    // Shows or hides Zen mode's reading stats and remembers the choice.
+    void toggleZenStats();
+    void setDenseGraph(bool dense);
+
     QJsonObject preferences;
     QLabel *settingsError;
     kobalt::ui::ModalOverlay *busyNotice = nullptr;
@@ -400,6 +510,9 @@ private:
     kobalt::ui::LightSwipeNotice *brightnessNotice = nullptr;
     kobalt::ui::AnnotationModeNotice *annotationModeNotice = nullptr;
     QTimer annotationModeHide;
+    kobalt::ui::ButtonFeedback *wordNotice = nullptr;
+    void showWordNotice(const QString &text);
+    void placeWordNotice();
     bool raisingPopups = false;
     QPointer<kobalt::ui::ModalOverlay> debugDialog;
     QTimer brightnessHide;
@@ -430,6 +543,9 @@ private:
     QStackedWidget *settingsPages;
     QVector<QPushButton *> rotationButtons;
     bool restoringDefaults = false, themeReady = false, darkTheme = false;
+    // Settings > Defaults > Restore default presets was confirmed. It applies
+    // when Settings closes.
+    bool restoringPresets = false;
     kobalt::ui::FontButton *fontButton;
     QVector<QPushButton *> alignmentButtons, hyphenButtons;
     // Header and footer. The preset is saved per book; the Custom layout is
@@ -465,6 +581,8 @@ private:
     void closeFieldChooser();
     // True when a slot shows something that changes with the clock.
     bool chromeTicks() const;
+    bool clockNeeded() const;
+    bool paceNeeded() const;
     kobalt::ui::SettingSlider *sizeSlider, *opticalSizeSlider, *weightSlider, *variableWeightSlider,
             *spacingSlider, *marginSlider, *verticalMarginSlider, *bookSlider;
     kobalt::reader::AppearanceEditSession appearanceEdit;
@@ -488,7 +606,7 @@ private:
     void openSearch(const QString &query = {});
     kobalt::LinkPanel *linkPanel = nullptr;
     QPointer<kobalt::ui::ModalOverlay> linkDialog;
-    QPointer<kobalt::ui::ModalOverlay> fontDefaultDialog, settingsFontPopup;
+    QPointer<kobalt::ui::ModalOverlay> fontDefaultDialog, settingsSheet;
     QJsonObject settingsFontFaces;
     QString settingsDefaultFontFace;
     QString settingsUiFontFace, settingsUiMonoFontFace, settingsHeaderFooterFontFace;
@@ -517,11 +635,20 @@ private:
     quint64 linkEpoch = 0;
     bool linkPending = false, returningFromLink = false;
     bool linksActive() const;
+    // What covers the page. Each caller adds the terms that only it needs.
+    // A typography panel, Settings or a choice screen.
+    bool sheetOpen() const;
+    // A prompt about the reading position: sync, KOSync or finishing the book.
+    bool positionPromptOpen() const;
+    // A tool over the page: the chapter graph, the light popup, the
+    // dictionary, search, acknowledgments, a link or a pending lookup.
+    bool readingToolOpen() const;
     kobalt::ui::Panel *linkDiscovery = nullptr;
     QLabel *linkDiscoveryIcon = nullptr, *linkDiscoveryHint = nullptr;
     QPushButton *linkDiscoveryToggle = nullptr;
     QLabel *linkDiscoveryExit = nullptr;
     QCheckBox *hideNonlinearOption = nullptr;
+    QCheckBox *inpageFootnotesOption = nullptr;
     bool revealingLinks = false;
     QString revealedPosition;
     void syncLinkDiscovery();
@@ -542,6 +669,24 @@ private:
     void dismissLookup(bool keepGesture = false);
     void dismissDictionary();
     void lookupSelection();
+    // My Words. Null with the JSON diagnostic backend, which has no database.
+    std::unique_ptr<kobalt::SavedWords> savedWords;
+    kobalt::WordList *wordList = nullptr, *allWords = nullptr;
+    kobalt::WordPage *wordPage = nullptr;
+    QString lookupContext, lookupPosition;
+    // The latest lookup as the sheet's save cell would save it.
+    kobalt::SavedWord lookupSnapshot;
+    quint64 savedLookupEpoch = 0;
+    void buildWords();
+    // The annotation key that saved words share with bookmarks and highlights.
+    QString wordsBook() const;
+    QString wordsSource() const;
+    // Saves a lookup that found a definition and shows the sheet's save cell.
+    void recordLookup(const QString &query, const kobalt::DictionaryResult &result);
+    void showWords();
+    void showAllWords();
+    void reloadWords();
+    void openWord(const kobalt::SavedWord &word);
     void resizeText();
     // The host's cutout and corner bands for the current size.
     kobalt::SafeArea safeArea() const;
@@ -564,7 +709,8 @@ private:
     void syncStatusBoundary();
     bool statusBoundaryPending = false;
     void showControls();
-    void dismissControls();
+    // returnToPage is false when another view replaces the menu, such as Search.
+    void dismissControls(bool returnToPage = true);
     void toggleLight();
     void fitSettings();
     void openSettings();
@@ -575,10 +721,83 @@ private:
     void prepareSleepOverlay();
     void updateSleepOverlayOption();
     sleep::Snapshot captureSleepScreen();
+    sleep::Snapshot privateSleepSnapshot();
+    sleep::Details sleepDetails();
+    void loadTodayReading();
     void updateSleepBattery();
     void showSleepScreen();
     void openSleepScreen();
-    void openSleepTile();
+    void loadGalleryCover();
+    void showSleepOverlayHelp();
+    void editSleepGreeting();
+    // Text presets: the bar and cards of the Text panel, All presets, the
+    // save and rename dialog, and their part of Settings > Defaults.
+    void buildTextPresets();
+    void syncTextPresets();
+    ReaderSession *textPresetSettings();
+    kobalt::reader::TextPresetView textPresetView(const kobalt::textpresets::Preset &preset);
+    void applyTextPreset(const QString &id);
+    bool saveTextPresets(QJsonObject next, const QVector<kobalt::textpresets::Preset> &presets);
+    void updateTextPreset(const QString &id);
+    void saveNewTextPreset();
+    void editTextPresetName(const QString &id);
+    // The gallery page whose previews are rendering or shown, as the sample
+    // keys of its previews, and the flag that stops its renders when another
+    // page or a close replaces it.
+    QVector<QByteArray> textPresetPreviewKeys;
+    std::shared_ptr<std::atomic_bool> textPresetPreviewRender;
+    kobalt::StyleSampleRequest textPresetPreviewRequest(const kobalt::textpresets::Preset &preset,
+                                                        QSize size);
+
+    struct TextPresetPreview
+    {
+        QString id, face;
+        kobalt::StyleSampleRequest request;
+        // Everything that decides the finished tile's pixels.
+        QByteArray tile;
+    };
+
+    QVector<TextPresetPreview>
+    textPresetPreviews(const QVector<kobalt::textpresets::Preset> &presets, const QStringList &ids,
+                       QSize size);
+    // Lays the preview out on the engine, keeps the finished tile and calls
+    // `finished` with it, or with a null image when it failed or was cancelled.
+    void renderTextPresetTile(TextPresetPreview preview, QSize size,
+                              std::shared_ptr<std::atomic_bool> cancelled,
+                              std::function<void(const QImage &)> finished);
+    kobalt::storage::PreviewStore &textPresetTiles();
+    std::unique_ptr<kobalt::storage::PreviewStore> textPresetTileStore;
+    // The presets, the one in force and whether the text differs from it.
+    void textPresetChoice(QVector<kobalt::textpresets::Preset> *presets, QString *selected,
+                          bool *modified);
+    void setTextPresetGalleryPresets(kobalt::reader::TextPresetGallery *gallery,
+                                     const QVector<kobalt::textpresets::Preset> &presets,
+                                     const QString &selected);
+    QRect textPresetGalleryBounds() const;
+    // Once a book shows its first page, the reader prepares the All grid's
+    // first page: from storage, or else on the engine, one tile at a time
+    // and only while the reader is idle. Opening All then shows a complete
+    // page in one screen update.
+    void startTextPresetPrerender();
+    void prerenderTextPresets();
+    void prerenderNextTextPreset();
+    // Continues a prerender that waits for the engine. ReaderSession::idle
+    // calls it, so no timer wakes the reader while it sits open.
+    void resumeTextPresetPrerender();
+    bool textPresetPrerenderStarted = false;
+    bool textPresetPrerenderWaiting = false;
+    QWidget *textPresetProbeHost = nullptr;
+    QVector<TextPresetPreview> textPresetPrerenderQueue;
+    QSize textPresetPrerenderSize;
+    std::shared_ptr<std::atomic_bool> textPresetPrerenderCancel;
+    void showTextPresetActions(const QString &id);
+    void confirmDeleteTextPreset(const QString &id);
+    void openTextPresetGallery();
+    void renderTextPresetGallery();
+    void closeTextPresetGallery();
+    void showTextPresetSettings();
+    void openNewBookText();
+    sleep::Snapshot sleepPreviewSample();
     void openSessionTimeout();
 
     struct SleepOption
@@ -593,30 +812,44 @@ private:
                          std::function<void(int)> chosen, const QString &description = {});
     bool saveSleepPreferences(const QJsonObject &next);
     void closeSleepScreen();
+
+    // One row of a choice pop-up.
+    struct ChoiceOption
+    {
+        QString name, label, description;
+        bool enabled = true;
+    };
+
+    // The setting choices of Settings share one pop-up; see reader_dialogs.cpp.
+    void openChoicePopup(QPointer<kobalt::ui::ModalOverlay> &slot, const QString &name,
+                         const QString &title, const QString &hint,
+                         const QVector<ChoiceOption> &options, int current,
+                         std::function<void(int)> chosen, bool focus = true);
+    void closePopup(QPointer<kobalt::ui::ModalOverlay> &slot);
+    bool savePreferences(const QJsonObject &next);
     void showTapZones();
     void openTapZones();
-    void closeTapZones();
     void showPageNavigation();
     void openPageNavigation();
-    void closePageNavigation();
     void showTappableLinks();
     void openTappableLinks();
-    void closeTappableLinks();
     void showMenuView();
     void openMenuView();
-    void closeMenuView();
     void showChapterGroups();
     void openChapterGroups();
-    void closeChapterGroups();
     void showNavigationBarButtons();
     void openNavigationBarButtons();
-    void closeNavigationBarButtons();
     void applyAutomaticOpening(bool enabled);
     void applySettings();
     bool writePreferences(const QJsonObject &next);
     pageButtons::Buttons buttonControls() const;
     void saveButtonControls(const QJsonObject &actions);
-    bool savingButtonControls = false;
+    bool savingButtonControls = false, savingDenseGraph = false;
+    // Counts preferences writes. An asynchronous save that fails undoes its
+    // change only when no later write started: a later write already carries
+    // the change, and its own result decides.
+    quint64 preferencesWrites = 0;
+
     void showSettingsWriteError();
     void selectPanel(int index);
     void openPanel(int index);
@@ -627,9 +860,7 @@ private:
     void showChapters();
     void toggleGraph();
     void openGraph();
-#ifndef KOBALT_READER_HARDWARE
     void showProgressDebug();
-#endif
     bool progressBlocked() const;
     void dismissProgressChoice();
     void showProgressChoice();
@@ -642,18 +873,18 @@ private:
     bool pageList(int direction);
     // Runs from a tap or swipe until its page is painted; invalid otherwise.
     QElapsedTimer turnStarted;
-    // Exit Kobalt ignores the second tap of a double tap on a panel's close
-    // control, which sits where Exit Kobalt is. A tap that waited in the queue
-    // while the screen repainted still counts as part of the double tap, but
-    // only if it was pressed within the guard time of the first. Closing
-    // Settings can hold the GUI longer than that on a device.
-    bool exitGuarded = false;
-    int exitGuardGeneration = 0;
+    // The Settings button ignores the second tap of a double tap on a panel's
+    // close cell, which sits where the Settings button is. A tap that waited
+    // in the queue while the screen repainted still counts as part of the
+    // double tap, but only if it was pressed within the guard time of the
+    // first. Closing Settings can hold the GUI longer than that on a device.
+    bool closeGuarded = false;
+    int closeGuardGeneration = 0;
     // Source timestamps of the newest press and of the press that armed the
-    // exit guard. Zero when the platform gives no timestamp.
-    quint32 lastPressTime = 0, exitGuardPressTime = 0;
-    void guardExit();
-    bool exitGuardElapsed() const;
+    // close guard. Zero when the platform gives no timestamp.
+    quint32 lastPressTime = 0, closeGuardPressTime = 0;
+    void guardCloseTap();
+    bool closeGuardElapsed() const;
     // Full flashes clear the ghosting that partial page turns leave behind.
     // Turns since the last flash, for the Refresh the screen setting.
     int pagesSinceFlash = 0;
@@ -661,9 +892,20 @@ private:
     ui::DescribedOption *bionicOption = nullptr;
     kobalt::ui::CaptionButton *refreshButton = nullptr;
     QPointer<kobalt::ui::ModalOverlay> refreshPopup;
-    kobalt::ui::CaptionButton *sleepScreenButton = nullptr, *sessionTimeoutButton = nullptr,
-                              *sleepTileButton = nullptr;
+    kobalt::ui::CaptionButton *sleepScreenButton = nullptr, *sessionTimeoutButton = nullptr;
     QPointer<kobalt::ui::ModalOverlay> sleepPopup;
+    QPointer<kobalt::reader::SleepGallery> sleepGallery;
+    QPointer<kobalt::ui::ChoiceModal> greetingEditor;
+    std::unique_ptr<kobalt::KeyboardController> greetingKeyboard;
+    kobalt::reader::TextPresetSection *textPresetSection = nullptr;
+    QPointer<kobalt::reader::TextPresetGallery> textPresetGallery;
+    QPointer<kobalt::ui::ChoiceModal> textPresetEditor;
+    QPointer<kobalt::ui::ModalOverlay> textPresetActions;
+    std::unique_ptr<kobalt::KeyboardController> textPresetKeyboard;
+    // The presets the All grid shows: the saved ones, or for Text for new
+    // books also the book defaults and the last book's text.
+    QVector<kobalt::textpresets::Preset> textPresetGalleryEntries;
+    bool textPresetChoosingNewBook = false;
     kobalt::ui::CaptionButton *pageNavigationButton = nullptr, *tapZonesButton = nullptr,
                               *navigationBarButton = nullptr, *chapterGroupsButton = nullptr;
     QPointer<kobalt::ui::ModalOverlay> pageNavigationPopup, tapZonesPopup, navigationBarPopup,
@@ -689,11 +931,13 @@ private:
     std::array<std::shared_ptr<std::atomic_bool>, 6> stylingSampleRenders;
     // Includes queued renders until their results reach the GUI thread.
     int stylingSamplesPending = 0;
+    // Rendered samples of this book, kept until their inputs change, the
+    // size limit removes them or the book closes with this reader.
+    kobalt::StyleSampleCache stylingSampleCache;
     void cancelStylingSamples();
     static QString refreshExplanation(kobalt::ScreenRefresh mode);
     static QString refreshLabel(kobalt::ScreenRefresh mode);
     void showScreenRefresh();
-    void closeScreenRefresh();
     void openScreenRefresh();
     // Declared after book, so it is destroyed before the session it borrows.
     std::unique_ptr<kobalt::BookmarkSession> bookmarks;
@@ -707,12 +951,8 @@ private:
     void closeMarksActions();
     void askExportMarks(AnnotationExportFormat format);
     QByteArray marksExportArchive(AnnotationExportFormat format);
-    void confirmMarksExport(AnnotationExportFormat format, bool replace, const QString &path,
-                            std::function<void()> accepted);
-    void saveMarksExport(AnnotationExportFormat format, const QString &path, bool replaceApproved);
-    void chooseMarksExport(AnnotationExportFormat format);
     void finishMarksExport(AnnotationExportFormat format, bool saved, const QString &location = {});
-    QPointer<QDialog> annotationExportPicker;
+    std::unique_ptr<AnnotationExporter> annotationExporter;
     QPointer<kobalt::ui::ModalOverlay> customReplaceDialog;
     QPointer<kobalt::ui::ModalOverlay> annotationErrorDialog, settingsWriteErrorDialog;
     QPointer<kobalt::ui::ModalOverlay> formattingWarningDialog;
@@ -727,6 +967,12 @@ private:
     bool showNotice(const ReaderNotice &notice) override;
     void showFormattingWarning();
     bool flashAfterMenu = false, flashAfterPagePreview = false;
+    // Turning Zen mode on or off replaces the whole menu. The first frame
+    // after Settings closes clears the panel.
+    bool flashAfterZenSwitch = false;
+    // Whether the last painted frame showed Zen mode's Chapters or Bookmarks
+    // view, or Settings over the Zen menu.
+    bool zenViewPainted = false, zenSettingsPainted = false;
     int navigationActive = -1;
     bool navigationPanelPainted = false;
     void requestFlash(const char *reason);

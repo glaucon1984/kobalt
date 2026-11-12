@@ -27,9 +27,11 @@ page covers installing and using it. [Building](building.md#pocketbook) covers t
   light panel can also follow the brightness and warmth schedules set in the PocketBook's
   frontlight settings, each with its own option; a manual change of that value turns its
   schedule off, as on Kobo.
-- The sleep screen shows the current page or the cover with progress and battery, in the
-  orientation the device is held in; the "PNG over text" option draws a transparent PNG of
-  yours from `applications/kobalt/screensaver` over the dimmed page. The power-off screen shows the same page or cover marked
+- The sleep screen is one of Kobalt's designs (Settings → System → Sleep and power-off screen:
+  the current page, the cover with a bookmark or a card, and the designs that draw a whole
+  screen of their own), with progress and battery, in the
+  orientation the device is held in; the "PNG over text" design draws a transparent PNG of
+  yours from `applications/kobalt/screensaver` over the dimmed page. The power-off screen shows the same design marked
   "Powered off" (as on Kobo, so a switched-off device is told from a sleeping one at a glance),
   and the boot screen shows the page as it was, when the PocketBook's Power-off logo and Boot
   logo settings (Settings → Personalize → Logos) are the book cover.
@@ -164,12 +166,18 @@ would for the built-in reader; a copy from before Kobalt's first write is
   usual loading screen, and so does any other book. A power-off
   straight from a page, without a standby first, shows the capture of the last standby or open
   at the next boot.
-- **The firmware's own screens**: choosing "PocketBook's built-in sleep screen" in Kobalt's
-  Settings → Sleep screen removes Kobalt's lock image (the firmware draws its own picture again)
+- **The firmware's own screens**: choosing "Use PocketBook's screen" in Kobalt's
+  Settings → System → Sleep and power-off screen removes Kobalt's lock image (the firmware draws its own picture again)
   and writes the book's plain cover to the power-off file, as the built-in reader does. The
   power-off logo is then the firmware's choice in Settings → Personalize → Logos: "Book cover"
   shows the cover of the book being read, the default or your own pictures show those. The boot
   capture is kept in every mode, so a power-off with the book open still boots into the page.
+- **A book hidden from the sleep screens** (Settings → System, the book's own option) leaves
+  neither its cover nor a page in any of these screens: the sleep and power-off screens are
+  Kobalt's private design without the book (also when "Use PocketBook's screen" is chosen,
+  since the power-off file would otherwise hold the cover), the boot logo is a blank sheet
+  instead of the page, and a blank sheet replaces the cover where the close and a USB plug
+  leave one. A boot into such a book goes from the blank sheet to the live page.
 - **After the book is closed**, in every mode, the firmware's screens are its own again: Kobalt
   removes its lock image and leaves the book's plain cover in the power-off file and as the
   boot logo, as the built-in reader does, so a standby or power-off from the library shows

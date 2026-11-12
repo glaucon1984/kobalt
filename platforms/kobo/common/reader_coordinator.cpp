@@ -1,3 +1,5 @@
+#include "diagnostics.h"
+#include "clocks.h"
 #include "native_tile_cover.h"
 #include "reading/appearance_settings.h"
 #include "reader_coordinator.h"
@@ -10,7 +12,6 @@
 #include "browser_handoff.h"
 #include "app/reader_window.h"
 #include "reading/reading_book.h"
-#include "reading/reading_timer.h"
 #include "storage/profile_database.h"
 #include "storage/annotation_database.h"
 #include "storage/reader_storage.h"
@@ -64,6 +65,8 @@
 #  include <dlfcn.h>
 #endif
 #include <QThread>
+#include <QJsonDocument>
+#include <cstring>
 #include <utility>
 
 namespace kobalt::nickel {
@@ -80,9 +83,16 @@ QString usbPath(QString path)
 }
 
 QPointer<ReaderCoordinator> activeCoordinator;
-#ifdef KOBALT_SCENARIO_PLAYER
+#if defined(KOBALT_BENCHMARK_API) || defined(KOBALT_SCENARIO_PLAYER)
 bool benchmarkTypographyEnabled = false;
 
+bool benchmarkPublication(const QString &identity)
+{
+    return identity == QStringLiteral("file:///mnt/onboard/kobalt-benchmark.kepub.epub");
+}
+
+#endif
+#ifdef KOBALT_SCENARIO_PLAYER
 // Nickel's own store sync, for the evaluation player. On firmware 4.46.23836
 // and 6.0.279225 the status-bar sync button calls N3SyncManager::sync(). The
 // call returns once the sync has started, and Nickel's workers do the rest.
@@ -114,18 +124,84 @@ struct NativeRadio
 #endif
 } // namespace
 
-#ifdef KOBALT_SCENARIO_PLAYER
+#if defined(KOBALT_BENCHMARK_API) || defined(KOBALT_SCENARIO_PLAYER)
 extern "C" __attribute__((visibility("default"))) int
 kobalt_benchmark_typography_v1(const char *contentId, int enable)
 {
     if (!qApp || QThread::currentThread() != qApp->thread() || !contentId
-        || (enable != 0 && enable != 1)
-        || kobalt::appearance::benchmarkTypography(QString::fromUtf8(contentId)).isEmpty()
+        || (enable != 0 && enable != 1) || !benchmarkPublication(QString::fromUtf8(contentId))
         || !activeCoordinator || (enable && !activeCoordinator->idleForBenchmark()))
+        return 0;
+    if (!enable && !activeCoordinator->clearBenchmarkReader())
         return 0;
     benchmarkTypographyEnabled = enable != 0;
     return 1;
 }
+
+extern "C" __attribute__((visibility("default"))) int
+kobalt_benchmark_state_v1(const char *contentId, char *buffer, int capacity)
+{
+    if (!qApp || QThread::currentThread() != qApp->thread() || !contentId || !buffer
+        || capacity <= 0 || !activeCoordinator)
+        return 0;
+    const auto state = activeCoordinator->benchmarkState(QString::fromUtf8(contentId));
+    if (state.isEmpty())
+        return 0;
+    const auto json = QJsonDocument(state).toJson(QJsonDocument::Compact);
+    if (json.size() >= capacity)
+        return 0;
+    std::memcpy(buffer, json.constData(), json.size());
+    buffer[json.size()] = '\0';
+    return json.size();
+}
+
+extern "C" __attribute__((visibility("default"))) int
+kobalt_benchmark_command_v1(const char *contentId, int command, int argument)
+{
+    if (!qApp || QThread::currentThread() != qApp->thread() || !contentId || !activeCoordinator)
+        return 0;
+    return activeCoordinator->benchmarkCommand(QString::fromUtf8(contentId), command, argument);
+}
+
+extern "C" __attribute__((visibility("default"))) int
+kobalt_benchmark_reader_v1(const char *contentId, int enable)
+{
+    if (!qApp || QThread::currentThread() != qApp->thread() || !contentId
+        || (enable != 0 && enable != 1) || !benchmarkPublication(QString::fromUtf8(contentId))
+        || !benchmarkTypographyEnabled || !activeCoordinator)
+        return 0;
+    return activeCoordinator->selectBenchmarkReader(enable != 0);
+}
+
+bool ReaderCoordinator::selectBenchmarkReader(bool enabled)
+{
+    return idleForBenchmark() && bindings_.setBenchmarkReader
+            && bindings_.setBenchmarkReader(enabled ? 1 : 0);
+}
+
+bool ReaderCoordinator::clearBenchmarkReader()
+{
+    // Cleanup may run while the reader finishes its closing jobs.
+    return !bindings_.setBenchmarkReader || bindings_.setBenchmarkReader(-1);
+}
+
+QJsonObject ReaderCoordinator::benchmarkState(const QString &identity) const
+{
+    if (!benchmarkTypographyEnabled || !benchmarkPublication(identity) || identity != run.identity
+        || !run.reader)
+        return {};
+    auto state = run.reader->benchmarkState();
+    if (!state.isEmpty())
+        state["book"] = identity;
+    return state;
+}
+
+bool ReaderCoordinator::benchmarkCommand(const QString &identity, int command, int argument)
+{
+    return benchmarkTypographyEnabled && benchmarkPublication(identity) && identity == run.identity
+            && run.reader && run.reader->benchmarkCommand(command, argument);
+}
+
 #endif
 
 ReaderCoordinator::ReadingRun::ReadingRun() = default;
@@ -170,6 +246,13 @@ ReaderCoordinator::ReaderCoordinator(ReaderEnvironment &environment, Coordinator
         homeAfterClose = false;
         authorization->setBlocked(true);
         timer.stop();
+        const bool browser = run.reader && BrowserHandoff::activeFor(run.reader);
+        const bool homeOwnsSleep = busy || !run.reader || browser;
+        // A preparing reader can outlive asynchronous disposal. Prepare its
+        // private backdrop before disposal changes the run or its busy state.
+        // Once closed, identity is only retained for reuse: consult Nickel then.
+        if (bindings_.enabled() && homeOwnsSleep)
+            homeSleep->preparePrivateScreen(false, busy || run.reader ? run.identity : QString());
         if (busy) {
             disposeForTransition([] { });
         } else if (run.reader) {
@@ -184,8 +267,11 @@ ReaderCoordinator::ReaderCoordinator(ReaderEnvironment &environment, Coordinator
         }
     };
     lifecycle->sleepViewReady = [this] {
-        if (run.reader && !busy)
+        if (run.reader && !busy && !BrowserHandoff::activeFor(run.reader))
             run.reader->sleepViewReady();
+        // Preparation may finish disposing between the sleep and view signals.
+        // Present a prepared Home frame independently of the remaining reader.
+        homeSleep->present();
     };
     lifecycle->beforeWake = [this] {
         homeSleep->clear();
@@ -241,9 +327,12 @@ ReaderCoordinator::ReaderCoordinator(ReaderEnvironment &environment, Coordinator
         homeSleep->clear();
         if (mode == NativeLifecycle::Shutdown::Reboot)
             return;
-        if (run.reader && run.reader->isVisible() && !busy
-            && !BrowserHandoff::activeFor(run.reader))
+        // The reader hides after handing its sleep frame to Nickel, but still
+        // owns this book and the clean backdrop needed for power-off.
+        if (run.reader && !busy && !BrowserHandoff::activeFor(run.reader))
             homeSleep->preparePowerOff(run.reader->powerScreenSnapshot());
+        else if (bindings_.enabled())
+            homeSleep->preparePrivateScreen(true, busy || run.reader ? run.identity : QString());
     };
     lifecycle->prepareShutdown = [this](std::function<void()> ready) {
         homeAfterClose = false;
@@ -924,9 +1013,9 @@ void ReaderCoordinator::load()
     run.sourceLease = std::make_shared<kobalt::SourceLease>();
     const auto originalAppearance = saved;
     QJsonObject temporaryAppearance;
-#ifdef KOBALT_SCENARIO_PLAYER
-    if (benchmarkTypographyEnabled)
-        temporaryAppearance = kobalt::appearance::benchmarkTypography(run.identity);
+#if defined(KOBALT_BENCHMARK_API) || defined(KOBALT_SCENARIO_PLAYER)
+    if (benchmarkTypographyEnabled && benchmarkPublication(run.identity))
+        temporaryAppearance = kobalt::appearance::benchmarkTypography();
 #endif
     const auto preferences = kobalt::appearance::readerPreferences(
             kobalt::storage::readPreferences(environment_.paths.preferences()).object, saved);
@@ -956,7 +1045,8 @@ void ReaderCoordinator::load()
               kobalt::appearance::bookDefaults(preferences),
               {},
               run.diskBaseline.valid && run.diskBaseline.status == 2,
-              run.nativePublication->coverPath() },
+              run.nativePublication->coverPath(),
+              environment_.paths.customPins() },
             [this](const kobalt::OpeningResult &outcome) {
                 run.openingTimings["load_and_layout_ms"] =
                         run.openingTimer.elapsed() - run.layoutStarted;
@@ -977,6 +1067,10 @@ void ReaderCoordinator::load()
             [this](QImage cover) {
                 if (run.loading)
                     run.loading->setCover(std::move(cover));
+            },
+            [this] {
+                if (run.loading)
+                    run.loading->setReopening();
             });
 }
 
@@ -999,9 +1093,12 @@ void ReaderCoordinator::showReader()
     auto book = std::make_unique<kobalt::ReadingBook>(
             std::move(run.session), run.statePath, environment_.paths, run.identity,
             run.expectedHash,
-            kobalt::nickel::makeReadingBridge(run.identity, std::move(run.nativeProgress)),
+            kobalt::nickel::makeReadingBridge(run.identity, std::move(run.nativeProgress),
+                                              koboCloud),
             run.baseline, run.diskBaseline, QString(), kobalt::ReadingHistory::UtcClock(),
-            koboCloud);
+            nickel::bootTimeClock());
+    // Read Nickel's page-button setting again for this book.
+    forgetNativeInvertedPageButtons();
     auto services = readerHostServices();
     const auto identity = run.identity;
     services.presentation = [this, identity](QWidget *reader) {
@@ -1243,7 +1340,7 @@ void ReaderCoordinator::runScenarios(const QString &path)
         auto *manager = radio.manager();
         return manager && radio.up(manager);
     };
-    host.realMilliseconds = ReadingTimer::platformClock();
+    host.realMilliseconds = nickel::bootTimeClock();
     // Nickel asks canSuspend before each standby, so a refusal keeps the
     // device awake. A kernel wake lock does not work here: Nickel reads
     // wakeup_count on the GUI thread before it suspends, and that read waits
@@ -1323,7 +1420,7 @@ void ReaderCoordinator::runScenarios(const QString &path)
                                        { "qt", QString::fromLatin1(qVersion()) } });
     QFile version("/mnt/onboard/.kobo/version");
     if (version.open(QIODevice::ReadOnly)) {
-        const auto device = kobalt::diagnosticDeviceFields(version.read(512));
+        const auto device = kobalt::nickel::diagnosticDeviceFields(version.read(512));
         for (auto it = device.begin(); it != device.end(); ++it)
             header[it.key()] = it.value();
     }

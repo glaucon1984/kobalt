@@ -23,8 +23,9 @@ public:
     StartScreen(PresentationFactory presentation, library::Store &store,
                 std::function<qreal()> textScale = {}, QWidget *parent = nullptr);
     ~StartScreen() override;
-    void showOpening(const QString &bookKey = {});
+    void showOpening(const QString &bookKey = {}, bool showCover = true);
     void setProgress(int percent);
+    void setReopening();
     void setCover(QImage cover);
     // Closes the library's topmost layer. False at the root library.
     bool dismissModal();
@@ -56,11 +57,15 @@ public:
     // On Android a book opened from the library on its own is Kobalt's copy,
     // which removal deletes. The confirmation says so.
     void setSingleBooksAreCopies(bool value);
+    void setResourceFolders(std::function<QStringList()> labels,
+                            std::function<void(int, bool)> choose);
 signals:
     void exitRequested();
     // From the library: open one of its books, add a folder, or open and add
     // a single book.
     void bookRequested(QString key);
+    // From My Words: open a library book at a saved position.
+    void passageRequested(QString key, QString position);
     void addFolderRequested();
     void libraryOpenRequested();
     void removeBookRequested(QString key);
@@ -79,6 +84,8 @@ private:
     library::LibraryView *view = nullptr;
     std::function<qreal()> textScale;
     KeyboardFactory keyboard;
+    std::function<QStringList()> resourceFolderLabels;
+    std::function<void(int, bool)> chooseResourceFolder;
     // The text scale the library was built with.
     qreal builtTextScale = 1;
     bool libraryRepairPending = false;

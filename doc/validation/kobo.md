@@ -10,6 +10,16 @@ The portable platform checks keep their original assertions with path and fixtur
 
 An unavailable authorization check at wake closes the hidden reader through local-only disposal. It must not write native progress or reading time without a confirmed account. Active Qt 5 account checks retry failed reads between event-loop turns with no SQLite busy wait.
 
+## Qt6 display format guard
+
+On a MediaTek backend that reports `RGBA8888`, Kobalt checks premultiplied drawing before enabling the reader-window allocation hook. Already-optimized formats and other display drivers remain unchanged. The check uses the actual screen format rather than a firmware version or panel colour.
+
+Only fresh window-image allocations made during the registered Kobalt reader's native backing-store resize or begin-paint call use `RGBA8888_Premultiplied`. Nested calls for other windows disable the allocation scope. Existing images are never relabelled. Nickel windows, separate native dialogs, the shared compositor image and the framebuffer retain their native formats. Translucent child controls still use Qt's format-aware painting.
+
+`display-format-hook` records installation with scope `reader-window`. The reader's first flush records `display-format-verified` with its actual image format and allocation count. A missed initial allocation fails verification and disables further substitutions. Set `KOBALT_DISABLE_DISPLAY_FORMAT_HOOK=1` before Nickel starts for a control run.
+
+`pewter.display-format` checks format selection, translucent drawing equivalence and nested allocation scopes in the Qt6 SDK. Firmware validation must also check the real reader format, page turns, panels, annotations, rotation, sleep/wake and return to Nickel. These checks do not establish physical-device display behavior.
+
 ## Pewter: the fake Nickel
 
 Pewter tests the firmware adapters in `platforms/kobo/nickel-qt5/` and `nickel-qt6/` with the Kobo SDKs. Run `bash platforms/kobo/build.sh qt5 --check` or `qt6 --check` from the repository root, or `cmake --build --preset mac-kobo-checks` from `platforms/desktop/` for both. The check builds the tests with the mod library and runs them with CTest in the prepared image. CI runs the same check in each Kobo build job before the package build, and a failure stops the job before the package is built. `pewter.progress` runs in both SDKs. `pewter.qt5-refresh`, the [Qt5 refresh check](display.md#qt5-refresh-adapter), runs in the Qt5 SDK. To run them by hand in the image, configure with `-DKOBALT_BUILD_TESTS=ON`, build the `kobo-tests` target and run `ctest --test-dir ../../build/kobo-qt5` from `platforms/kobo/`.
@@ -20,9 +30,11 @@ Pewter, in `tests/pewter/`, defines the Nickel classes and functions that the ad
 
 The tests run under `qemu-arm` with the Qt libraries of each image: firmware 4's Qt 5.2.1 and C++ library in the Qt5 image, and Qt 6.5 in the Qt6 image. The C library is the image's cross C library, because the image's `qemu-arm` crashes in the glibc 2.19 loader of firmware 4. A test run takes less than a second; a check after a small change takes a few seconds per SDK. Pewter checks what Kobalt asks Nickel to do. It does not check that Nickel behaves the same way, so its functions follow the firmware behavior documented in Sync data, never copied firmware code. Update pewter when a firmware changes a function that Kobalt calls. Physical Tolino devices, reading sessions, reading time and Wi-Fi are not covered yet.
 
-`pewter.native-ui` checks that both Kobo and Tolino offer sleep screens and resolve full-size native covers. Missing volumes, empty image IDs and default covers still return no cover. These checks use synthetic device and cover APIs; they do not establish firmware compatibility.
+`pewter.native-ui` checks that both Kobo and Tolino offer sleep screens and resolve full-size native covers. It also checks that loading-cover refresh attributes select partial mode and clear cleanup flags in both themes. Missing volumes, empty image IDs and default covers still return no cover. These checks use synthetic device and cover APIs; they do not establish firmware compatibility.
 
 `pewter.tile-cover` checks the native tile cover capture in both SDKs. Synthetic native accessors supply book and image identities. The check covers shared image ownership after tile destruction, hidden and ambiguous tiles, edition and image changes, null and generated covers, native invalidation, unchanged content refreshes, missing hooks, nested assignments, nested defaults and deletion during native callbacks. It does not establish when firmware delivers a real tile image. See [Native tile cover capture](diagnostics.md#native-tile-cover-capture) for the runtime evidence.
+
+`pewter.event-history` checks the native page-history hook in both SDKs. It covers the trigger and retained session boundary, oversized sessions, malformed and ambiguous histories, preservation of other fields, and pass-through on the GUI thread and unrelated workers. Firmware persistence, restart recovery and sync payloads require separate runtime checks.
 
 ### What pewter is and is not
 
@@ -39,3 +51,7 @@ These checks leave device gaps. Full loader removal and restart after a failed s
 The Qt5 native allocations were checked against the ARM32 libraries from firmware 4.38.23828, 4.45.23697 and 4.46.23836. The constructors and native allocation sites agree with the light, dictionary and settings storage that the adapters use. ContentSettings has a 72-byte array stride, including alignment padding. This inspection found no allocation mismatch. Each adapter checks its required symbols and available type metadata before use.
 
 `pewter.keyboard` exercises native keyboard allocation, receiver ownership, submission, language switching, placement and cleanup in both SDKs. A queued language change must not reopen a dismissed keyboard, and the next explicit opening must use the chosen language. Its synthetic widgets test the adapter contract, not Nickel’s key layout. Check letters, numbers, symbols, focus and both themes in firmware before deploying a keyboard change.
+
+## Battery benchmark API
+
+`KOBALT_BENCHMARK_API=ON` enables the version 1 in-memory battery benchmark API without the evaluation player or its assets. Evaluation builds also include the API. It accepts only the bundled benchmark publication on the application thread. Enable its typography scope before reading state, requesting page turns or selecting a reader. On Qt6 the reader choice and prerender policy are temporary, in-memory overrides. Disabling the typography scope clears the override, including while the reader finishes closing. Saved preferences are unchanged. State and commands reject closed, suspended or unrelated reading sessions.

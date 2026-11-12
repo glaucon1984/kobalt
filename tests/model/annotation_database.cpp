@@ -115,7 +115,7 @@ void pinnedBookmarks()
     QTemporaryDir root;
     auto pinned = bookmark();
     pinned.name = QString::fromUtf8("Carte 日本語");
-    pinned.icon = "map";
+    pinned.icon = "custom:cat.svg";
     qputenv("KOBALT_ANNOTATIONS_SQLITE", "0");
     BookmarkStore legacy(root.path(), identity, fingerprint, "Book");
     legacy.setBookmarks({ pinned });
@@ -1343,7 +1343,7 @@ void defaultBackend()
         legacyCurrent(root.path());
         qunsetenv("KOBALT_ANNOTATIONS_SQLITE");
         HighlightStore store(root.path(), identity, fingerprint, "Book");
-        require(store.load() && sql(root.path(), "PRAGMA user_version").toInt() == 3,
+        require(store.load() && sql(root.path(), "PRAGMA user_version").toInt() == 4,
                 "Default backend did not migrate JSON to current schema");
     }
     qputenv("KOBALT_ANNOTATIONS_SQLITE", "0");

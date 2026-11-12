@@ -17,8 +17,7 @@ public:
     virtual void resumeAndRepaintBackground() = 0;
 
     virtual bool supportsSleepScreen() const { return false; }
-    // UI string key naming the device's own sleep screen in the sleep screen choice.
-    virtual const char *stockSleepScreenKey() const { return "settings.sleep_stock"; }
+
     // The host owns the frame until its native sleep view closes. Failure
     // leaves the stock sleep screen in place. Native unlocking stays with the host.
     virtual bool presentSleepScreen(QImage, Qt::ScreenOrientation) { return false; }

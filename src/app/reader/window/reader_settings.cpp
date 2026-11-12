@@ -1,5 +1,6 @@
 #include <QKeyEvent>
 #include "reading/remaining_time.h"
+#include "reading/sleep_screen.h"
 #include "ui/controls/buttons.h"
 #include "ui/controls/icons.h"
 #include "ui/style/theme.h"
@@ -20,6 +21,7 @@
 #include "app/reader/settings/style_illustrations.h"
 #include "assets/bundled_fonts.h"
 #include <QCoreApplication>
+#include <QRegularExpression>
 #include <QFontDatabase>
 
 namespace kobalt::reader {
@@ -32,6 +34,42 @@ using kobalt::ui::ControlIcon;
 using kobalt::ui::readerStyle;
 
 namespace {
+// A user changed these reader settings. Each changed key is one
+// `setting-changed` event, so a surprising behavior can be traced back to a
+// tap. Values are logged for true/false, numbers and short lowercase choice
+// tokens such as "bold" or "smart". Other text, such as font names, is logged
+// by key only: logs keep no input text. Text the user types, such as the
+// sleep greeting, is logged by key only even when it looks like a token. A key the file did not hold yet is
+// skipped: the first save of Settings writes every key, mostly defaults the
+// reader never touched. Later saves compare every key.
+void logSettingChanges(const QJsonObject &previous, const QJsonObject &next, bool defaults = false)
+{
+    const auto loggable = [](const QJsonValue &value) {
+        static const QRegularExpression token(QStringLiteral("^[a-z0-9_-]{1,32}$"));
+        return value.isBool() || value.isDouble()
+                || (value.isString() && token.match(value.toString()).hasMatch());
+    };
+    const QStringList typed = { QString::fromLatin1(kobalt::sleep::greetingKey) };
+    for (auto it = next.begin(); it != next.end(); ++it) {
+        const auto before = previous.value(it.key());
+        const auto after = it.value();
+        if (before == after)
+            continue;
+        if (before.isUndefined())
+            continue;
+        QJsonObject fields;
+        fields["setting"] = it.key();
+        const bool values = !typed.contains(it.key());
+        if (values && loggable(before))
+            fields["previous"] = before;
+        if (values && loggable(after))
+            fields["value"] = after;
+        if (defaults)
+            fields["restore_defaults"] = true;
+        kobalt::diagnostic("setting-changed", fields, kobalt::DiagnosticSeverity::Activity);
+    }
+}
+
 QStringList fallbackFontDefaults(const QStringList &families)
 {
     return { QString(defaultFontFace),
@@ -139,6 +177,13 @@ bool Reader::saveChrome(kobalt::headerfooter::Preset preset,
 void Reader::syncChromeControls()
 {
     using namespace kobalt::headerfooter;
+    // A changed field can start or end the need for the minute clock, and a
+    // time-left field needs the reading pace.
+    if (clockTimer && isVisible() && !services.suspended()) {
+        startClock();
+        if (paceNeeded())
+            book->minuteTick();
+    }
     const auto values = chromeValues();
     const auto contents = [&values](const Layout &layout) {
         kobalt::reader::SlotContents result;
@@ -274,10 +319,9 @@ void Reader::openSettings()
                            kosyncClient->signedIn(), kosyncClient->automatic());
     kosyncPage->setLastSync(kosyncClient->lastSync());
     kosyncPage->setFilenameMatching(kosyncClient->filenameMatching());
+    kosyncPage->setSendMetadata(kosyncClient->sendMetadata());
     kosyncPage->setDeviceName(kosyncClient->customDeviceName(), kosyncClient->defaultDeviceName());
-    kosyncPage->setStatus(kosyncMessage,
-                          kosyncClient->busy() || kosyncConnecting || kosyncAuthenticating
-                                  || bool(kosyncReaderReady));
+    kosyncPage->setStatus(kosyncMessage, syncCoordinator->busy());
     session->cancelPendingTurn();
     hideRevealedLinks(false);
     dismissLookup();
@@ -288,6 +332,7 @@ void Reader::openSettings()
     acknowledgments->hide();
     appearanceEdit.clearContinuation();
     restoringDefaults = false;
+    restoringPresets = false;
     for (const auto *key : appearance::fallbackFontKeys) {
         const auto family = preferences.value(key).toString();
         settingsFontFaces[key] = session->fontFaces().contains(family) ? family : QString();
@@ -305,6 +350,10 @@ void Reader::openSettings()
     settingsTimeRemainingFormat =
             remainingTime::approximate(preferences) ? "approximate" : "detailed";
     hideTabLabelsOption->setChecked(preferences.value("hide_tab_labels").toBool(false));
+    saveWordsOption->setChecked(preferences.value("save_looked_up_words").toBool(true));
+    zenModeOption->setChecked(preferences.value("zen_mode").toBool(false));
+    static_cast<SettingsPanel *>(general)->hideBookOnSleepOption->setChecked(
+            book->hideBookOnSleepScreen());
     if (wifiPowerSaverOption)
         wifiPowerSaverOption->setChecked(preferences.value(wifiPowerSaverKey).toBool(false));
     if (disableStandbyOption)
@@ -317,6 +366,9 @@ void Reader::openSettings()
     settingsPages->setCurrentIndex(int(SettingsPage::Display));
     resetDefaults->setText(strings::get("reader.restore_appearance_defaults"));
     resetDefaults->setEnabled(true);
+    auto *resetPresets = static_cast<SettingsPanel *>(general)->resetPresets;
+    resetPresets->setText(strings::get("text_presets.restore"));
+    resetPresets->setEnabled(true);
     // Keep the typography draft until Settings is applied.
     menu->hide();
     const bool showingTopControls = !topControls->isVisible();
@@ -328,10 +380,12 @@ void Reader::openSettings()
     settingsError->clear();
     settingsError->hide();
     darkOption->setChecked(session->state().value("dark_mode").toBool(false));
-    static_cast<SettingsPanel *>(general)->lightDarkModeOption->setChecked(
-            preferences.value("light_dark_mode_shortcut").toBool(false));
-    inheritTextLayoutOption->setChecked(
-            preferences.value(appearance::inheritTextLayoutKey).toBool(true));
+    static_cast<SettingsPanel *>(general)->openingCoverOption->setChecked(
+            !preferences.value("show_opening_cover").toBool(true));
+    static_cast<SettingsPanel *>(general)->featurePreferences = preferences;
+    static_cast<SettingsPanel *>(general)->updateFeatureOptions();
+    showTextPresetSettings();
+    inpageFootnotesOption->setChecked(session->state().value("inpage_footnotes").toBool(false));
     hideNonlinearOption->setChecked(
             session->state().value("hide_nonlinear_fragments").toBool(false));
     auto *displaySettings = static_cast<SettingsPanel *>(general);
@@ -377,6 +431,7 @@ void Reader::openSettings()
         automaticOpeningOption->setChecked(services.automaticBookOpening());
     screenRefreshMode = kobalt::screenRefresh(preferences.value("screen_refresh").toString());
     showScreenRefresh();
+    static_cast<SettingsPanel *>(general)->setZenLayout(zenMode());
     fitSettings();
     general->show();
     general->raise();
@@ -570,17 +625,28 @@ void Reader::renderStylingSamples(int requested)
         auto &render = stylingSampleRenders[feature];
         if (render)
             render->store(true);
+        // The same request in the same orientation shows its earlier result
+        // at once, without the engine.
+        const bool landscape = width() > height();
+        const auto key = styleSampleKey(session->fontInputs(), request);
+        StyleSample cached;
+        if (stylingSampleCache.find(landscape, key, &cached)) {
+            render.reset();
+            panel->setStylingSample(entry.feature, cached);
+            continue;
+        }
         panel->setStylingSample(entry.feature, {});
         render = request.cancelled = std::make_shared<std::atomic_bool>(false);
         ++stylingSamplesPending;
-        renderStyleSample(
-                session->fontInputs(), request, this,
-                [this, panel, entry = entry.feature, cancelled = render](StyleSample sample) {
-                    --stylingSamplesPending;
-                    if (cancelled->load() || !sample.valid())
-                        return;
-                    panel->setStylingSample(entry, sample);
-                });
+        renderStyleSample(session->fontInputs(), request, this,
+                          [this, panel, entry = entry.feature, cancelled = render, landscape,
+                           key](StyleSample sample) {
+                              --stylingSamplesPending;
+                              if (cancelled->load() || !sample.valid())
+                                  return;
+                              stylingSampleCache.insert(landscape, key, sample);
+                              panel->setStylingSample(entry, sample);
+                          });
     }
 }
 
@@ -603,7 +669,10 @@ void Reader::fitAppearance()
 
 pageButtons::Buttons Reader::buttonControls() const
 {
-    auto buttons = services.buttonControls ? services.buttonControls() : pageButtons::Buttons{};
+    auto buttons = services.buttonControls
+            ? pageButtons::held(services.buttonControls(),
+                                services.pageButtonsRotated && services.pageButtonsRotated())
+            : pageButtons::Buttons{};
     for (auto &button : buttons) {
         QKeyEvent event(QEvent::KeyPress, button.key, Qt::NoModifier);
         const int nativeDirection = services.pageButtonDirection(&event);
@@ -615,12 +684,15 @@ pageButtons::Buttons Reader::buttonControls() const
 
 void Reader::saveButtonControls(const QJsonObject &actions)
 {
-    if (savingButtonControls || savingDarkMode >= 0)
+    if (savingButtonControls || savingDarkMode >= 0 || savingDenseGraph)
         return;
     auto next = appearance::globalPreferences(preferences);
     appearance::rememberTextLayout(next, session->state());
     appearance::rememberPageMargins(next, session->state());
     next[pageButtons::preferenceKey] = actions;
+    logSettingChanges(qt::object({ { pageButtons::preferenceKey,
+                                     preferences.value(pageButtons::preferenceKey).toObject() } }),
+                      qt::object({ { pageButtons::preferenceKey, actions } }));
     savingButtonControls = true;
     static_cast<SettingsPanel *>(general)->buttonControlsButton->setEnabled(false);
     if (!preferencesWriter)
@@ -635,6 +707,7 @@ void Reader::saveButtonControls(const QJsonObject &actions)
                                             if (!guard)
                                                 return;
                                             guard->savingButtonControls = false;
+                                            saves::settled();
                                             if (saved)
                                                 guard->preferences[pageButtons::preferenceKey] =
                                                         actions;
@@ -649,7 +722,7 @@ void Reader::saveButtonControls(const QJsonObject &actions)
 bool Reader::writePreferences(const QJsonObject &next)
 {
     // Do not replace a pending asynchronous dark-mode save.
-    if (savingButtonControls || savingDarkMode >= 0)
+    if (savingButtonControls || savingDarkMode >= 0 || savingDenseGraph)
         return false;
     // Known exception: a settings change waits for its write, so each caller
     // can undo the change when the write fails.
@@ -661,22 +734,26 @@ bool Reader::writePreferences(const QJsonObject &next)
     // loses the other's change.
     if (!preferencesWriter)
         preferencesWriter = std::make_unique<storage::RecordWriter>();
+    ++preferencesWrites;
     if (!preferencesWriter->writeNow([path = book->paths().preferences(), global] {
             return kobalt::storage::writePreferences(path, global);
         })) {
         showSettingsWriteError();
         return false;
     }
+    logSettingChanges(preferences, next, restoringDefaults);
     return true;
 }
 
 void Reader::applySettings()
 {
-    if (savingButtonControls || savingDarkMode >= 0 || session->temporaryTypography())
+    if (savingButtonControls || savingDarkMode >= 0 || savingDenseGraph
+        || session->temporaryTypography())
         return;
     // Leaving an unanswered confirmation must not select or save defaults.
     static_cast<SettingsPanel *>(general)->dismissRestore();
     static_cast<SettingsPanel *>(general)->dismissStandbyConfirmation();
+    static_cast<SettingsPanel *>(general)->dismissAutomaticOpeningConfirmation();
     // Edits made before the preview opened have no session yet. Apply them
     // together with these settings once the preview holds them.
     if (appearanceEdit.queued()
@@ -693,6 +770,8 @@ void Reader::applySettings()
     next["dictionary_font_size"] = settingsDictionaryFontSize;
     next["header_footer_added_weight"] = settingsHeaderFooterWeight;
     next["hide_tab_labels"] = hideTabLabelsOption->isChecked();
+    next["save_looked_up_words"] = saveWordsOption->isChecked();
+    next["zen_mode"] = zenModeOption->isChecked();
     if (wifiPowerSaverOption)
         next[wifiPowerSaverKey] = wifiPowerSaverOption->isChecked();
     if (disableStandbyOption)
@@ -703,10 +782,11 @@ void Reader::applySettings()
     next["bold_reading"] =
             bionicOption->isChecked() ? QStringLiteral("bold") : QStringLiteral("off");
     next["dark_mode"] = darkOption->isChecked();
-    next["light_dark_mode_shortcut"] =
-            static_cast<SettingsPanel *>(general)->lightDarkModeOption->isChecked();
-    next[appearance::inheritTextLayoutKey] = inheritTextLayoutOption->isChecked();
+    for (const auto *key : features::keys)
+        next[key] =
+                static_cast<SettingsPanel *>(general)->featurePreferences.value(key).toBool(false);
     next["hide_nonlinear_fragments"] = hideNonlinearOption->isChecked();
+    next["inpage_footnotes"] = inpageFootnotesOption->isChecked();
     next["vertical_justification"] = settingsVerticalSpacing;
     next["vertical_spacing_scope"] = settingsVerticalSpacingScope;
     next.remove("columns");
@@ -730,10 +810,14 @@ void Reader::applySettings()
         next["page_animations"] = animationOption->isChecked();
     next["edge_light_gestures"] = edgeLightOption->isChecked();
     next["show_light_gesture_feedback"] = lightGestureFeedbackOption->isChecked();
+    next["show_opening_cover"] =
+            !static_cast<SettingsPanel *>(general)->openingCoverOption->isChecked();
     next["dense_stats_chart"] = denseGraphOption->isChecked();
     next.remove(pageNavigation::barVisibleKey);
     next["minimal_annotation_mode"] = minimalAnnotationOption->isChecked();
     next["screen_refresh"] = kobalt::screenRefreshValue(screenRefreshMode);
+    if (restoringPresets)
+        textpresets::store(next, textpresets::restoreExamples(textpresets::load(next)));
     if (restoringDefaults) {
         next[kobalt::headerfooter::presetKey] = kobalt::headerfooter::presetValue(
                 services.phoneLayout ? kobalt::headerfooter::Preset::Phone
@@ -746,9 +830,11 @@ void Reader::applySettings()
     const auto rotation = orientation->settings();
     for (auto it = rotation.begin(); it != rotation.end(); ++it)
         next[it.key()] = it.value();
+    next = appearance::cleanPreferences(next);
     if (!writePreferences(next)) {
-        bionicOption->setChecked(session->requestedState().value("bold_reading").toString("off")
-                                 == "bold");
+        bionicOption->setChecked(
+                session->requestedAppearance().fields().value("bold_reading").toString("off")
+                == "bold");
         minimalAnnotationOption->setChecked(minimalAnnotationMode());
         settingsError->setText(strings::get("reader.could_not_save_reader_settings"));
         settingsError->show();
@@ -756,7 +842,33 @@ void Reader::applySettings()
         refresh();
         return;
     }
+    if (zenMode() != next.value("zen_mode").toBool(false))
+        flashAfterZenSwitch = true;
     preferences = next;
+    const bool hideBook = static_cast<SettingsPanel *>(general)->hideBookOnSleepOption->isChecked();
+    if (hideBook != book->hideBookOnSleepScreen()) {
+        book->setHideBookOnSleepScreen(hideBook);
+        QJsonObject snapshot;
+        book->checkpoint(&snapshot, true);
+    }
+    if (!features::enabled(preferences, features::Kosync)) {
+        cancelKosync();
+        kosyncClient->cancel();
+        syncCoordinator->resetProgress();
+        hideKosyncOpening();
+    }
+    if (!features::enabled(preferences, features::Words)) {
+        ++savedLookupEpoch;
+        lookupSnapshot = {};
+        dictionaryPanel->setSaved(false, false);
+        if (wordNotice)
+            wordNotice->hide();
+    }
+    if (!features::enabled(preferences, features::Annotations) && annotationMode)
+        leaveAnnotations();
+    bookmarkList->setSortOrder(preferences.value("marks_sort").toString("position"));
+    showMenuView();
+    showNavigationBarButtons();
     ui::setHeaderFooterAddedWeight(settingsHeaderFooterWeight);
     applyInterfaceFonts();
     dictionaryPanel->setDefinitionFont(settingsDictionaryFontFace, settingsDictionaryFontSize);
@@ -767,15 +879,17 @@ void Reader::applySettings()
     syncChromeControls();
     applyEdgeLight();
     chapterGraph->setDense(preferences.value("dense_stats_chart").toBool(false));
-    auto settings = appearanceEdit.edited() && appearanceEdit.ready()
-            ? appearanceEdit.preview()->requestedState()
-            : session->state();
+    const auto requested = appearanceEdit.edited() && appearanceEdit.ready()
+            ? appearanceEdit.preview()->requestedAppearance()
+            : session->displayedAppearance().settings;
+    QJsonObject settings;
     settings["default_font_face"] =
             settingsDefaultFontFace.isEmpty() ? QString(defaultFontFace) : settingsDefaultFontFace;
     for (const auto *key : appearance::fallbackFontKeys)
         settings[key] = preferences.value(key).toString();
     settings["dark_mode"] = darkOption->isChecked();
     settings["hide_nonlinear_fragments"] = hideNonlinearOption->isChecked();
+    settings["inpage_footnotes"] = inpageFootnotesOption->isChecked();
     settings["vertical_justification"] = preferences.value("vertical_justification");
     settings["vertical_spacing_scope"] = preferences.value("vertical_spacing_scope");
     settings["columns"] = 1;
@@ -796,7 +910,7 @@ void Reader::applySettings()
         for (auto it = defaults.begin(); it != defaults.end(); ++it)
             settings[it.key()] = it.value();
     }
-    session->apply(settings, bodySize());
+    session->requestAppearance(requested.edited(appearance::Patch(settings)), bodySize());
     applyingText = session->busy();
     if (appearanceEdit.destination() == AppearanceDestination::None)
         appearanceEdit.request(AppearanceDestination::Controls);
@@ -808,10 +922,98 @@ void Reader::applySettings()
     refresh();
 }
 
+void Reader::setDenseGraph(bool dense)
+{
+    if (savingButtonControls || savingDarkMode >= 0 || savingDenseGraph) {
+        chapterGraph->setDense(preferences.value("dense_stats_chart").toBool(false));
+        refresh();
+        return;
+    }
+    auto next = appearance::globalPreferences(preferences);
+    appearance::rememberTextLayout(next, session->state());
+    appearance::rememberPageMargins(next, session->state());
+    next["dense_stats_chart"] = dense;
+    logSettingChanges(qt::object({ { "dense_stats_chart",
+                                     preferences.value("dense_stats_chart").toBool(false) } }),
+                      qt::object({ { "dense_stats_chart", dense } }));
+    savingDenseGraph = true;
+    if (!preferencesWriter)
+        preferencesWriter = std::make_unique<storage::RecordWriter>();
+    QPointer<Reader> guard(this);
+    preferencesWriter->post(
+            [path = book->paths().preferences(), next] {
+                return storage::writePreferences(path, next);
+            },
+            [guard, dense](bool saved) {
+                qt::invoke(
+                        QCoreApplication::instance(),
+                        [guard, dense, saved] {
+                            if (!guard)
+                                return;
+                            guard->savingDenseGraph = false;
+                            saves::settled();
+                            if (saved) {
+                                guard->preferences["dense_stats_chart"] = dense;
+                                guard->denseGraphOption->setChecked(dense);
+                            } else {
+                                guard->chapterGraph->setDense(
+                                        guard->preferences.value("dense_stats_chart")
+                                                .toBool(false));
+                                guard->showSettingsWriteError();
+                            }
+                            guard->refresh();
+                        },
+                        Qt::QueuedConnection);
+            });
+    refresh();
+}
+
+void Reader::toggleZenStats()
+{
+    // Do not overtake a pending dark mode or button save, as writePreferences
+    // does. The button already toggled itself, so put it back.
+    if (savingButtonControls || savingDarkMode >= 0 || savingDenseGraph) {
+        syncNavigation();
+        return;
+    }
+    // The panel changes at once. The choice is saved on the writer thread,
+    // so the main thread never waits for storage while the menu is open.
+    const bool shown = !preferences.value("zen_stats").toBool(false);
+    logSettingChanges(qt::object({ { "zen_stats", !shown } }),
+                      qt::object({ { "zen_stats", shown } }));
+    preferences["zen_stats"] = shown;
+    const auto write = ++preferencesWrites;
+    auto next = appearance::globalPreferences(preferences);
+    appearance::rememberTextLayout(next, session->state());
+    appearance::rememberPageMargins(next, session->state());
+    if (!preferencesWriter)
+        preferencesWriter = std::make_unique<storage::RecordWriter>();
+    QPointer<Reader> guard(this);
+    preferencesWriter->post([path = book->paths().preferences(),
+                             next] { return kobalt::storage::writePreferences(path, next); },
+                            [guard, shown, write](bool saved) {
+                                if (saved)
+                                    return;
+                                qt::invoke(
+                                        QCoreApplication::instance(),
+                                        [guard, shown, write] {
+                                            if (!guard || guard->preferencesWrites != write)
+                                                return;
+                                            // A failed save undoes the toggle, as the
+                                            // other settings do.
+                                            guard->preferences["zen_stats"] = !shown;
+                                            guard->showSettingsWriteError();
+                                            guard->syncNavigation();
+                                        },
+                                        Qt::QueuedConnection);
+                            });
+    syncNavigation();
+}
+
 void Reader::applyDarkMode(bool enabled)
 {
-    if (savingButtonControls || savingDarkMode >= 0 || pendingDarkMode >= 0 || session->busy()
-        || session->temporaryTypography()) {
+    if (savingButtonControls || savingDarkMode >= 0 || savingDenseGraph || pendingDarkMode >= 0
+        || session->busy() || session->temporaryTypography()) {
         refresh();
         return;
     }
@@ -819,6 +1021,8 @@ void Reader::applyDarkMode(bool enabled)
     appearance::rememberTextLayout(next, session->state());
     appearance::rememberPageMargins(next, session->state());
     next["dark_mode"] = enabled;
+    logSettingChanges(qt::object({ { "dark_mode", preferences.value("dark_mode").toBool(false) } }),
+                      qt::object({ { "dark_mode", enabled } }));
     savingDarkMode = enabled;
     if (!preferencesWriter)
         preferencesWriter = std::make_unique<storage::RecordWriter>();
@@ -861,23 +1065,20 @@ void Reader::applyBoldReading(bool enabled)
     auto next = preferences;
     next["bold_reading"] = mode;
     if (!writePreferences(next)) {
-        bionicOption->setChecked(session->requestedState().value("bold_reading").toString("off")
-                                 == "bold");
+        bionicOption->setChecked(
+                session->requestedAppearance().fields().value("bold_reading").toString("off")
+                == "bold");
         return;
     }
     preferences = next;
     settingsError->clear();
     settingsError->hide();
-    auto settings = session->requestedState();
-    settings["bold_reading"] = mode;
-    session->apply(settings);
+    session->editAppearance(appearance::Patch(qt::object({ { "bold_reading", mode } })));
     // Keep a pending typography draft in the same mode, including a preview
     // that has not finished opening yet.
     if (appearanceEdit.preview()) {
         mutateAppearance([mode](ReaderSession &preview) {
-            auto settings = preview.requestedState();
-            settings["bold_reading"] = mode;
-            preview.apply(settings);
+            preview.editAppearance(appearance::Patch(qt::object({ { "bold_reading", mode } })));
         });
     }
     refresh();
@@ -972,13 +1173,13 @@ void Reader::registerPickerFonts(const QString &family)
         if (!family.isEmpty() && font.family != family)
             continue;
         if (family.isEmpty() && font.origin == FontOrigin::Interface) {
-            const auto state = appearanceEdit.edited() && appearanceEdit.ready()
-                    ? appearanceEdit.preview()->requestedState()
-                    : session->state();
-            if (font.family != supplementalFontFamily(state.value("language").toString())
+            const auto requested = appearanceEdit.edited() && appearanceEdit.ready()
+                    ? appearanceEdit.preview()->requestedAppearance()
+                    : session->displayedAppearance().settings;
+            if (font.family != supplementalFontFamily(session->state().value("language").toString())
                 && font.family
                         != preferences.value("default_font_face").toString(kobalt::defaultFontFace)
-                && font.family != state.value("font_face").toString())
+                && font.family != requested.fields().value("font_face").toString())
                 continue;
         }
         for (const auto &file : font.files)
@@ -1192,9 +1393,9 @@ void Reader::finishPreview()
     appearanceEdit.clearError();
     const QSize viewport = bodySize();
     if (appearanceEdit.ready())
-        session->apply(appearanceEdit.preview()->requestedState(), viewport);
+        session->requestAppearance(appearanceEdit.preview()->requestedAppearance(), viewport);
     else if (session->image().size() != viewport)
-        session->apply(session->state(), viewport);
+        session->requestAppearance(session->displayedAppearance().settings, viewport);
     header->setGeometry(0, 0, width(), page->topHeight());
     header->setVisible(page->topHeight() > 0);
     if (appearanceEdit.destination() == AppearanceDestination::None)
@@ -1386,12 +1587,5 @@ void Reader::openSettingsFont(const QString &key)
                 showSettingsFonts();
                 refresh();
             });
-    settingsFontPopup = panel->fontDialog;
-    if (!settingsFontPopup)
-        return;
-    settingsFontPopup->installEventFilter(this);
-    for (auto *widget : settingsFontPopup->findChildren<QWidget *>())
-        textRefresh(widget);
-    textRefresh(settingsFontPopup);
 }
 } // namespace kobalt::reader

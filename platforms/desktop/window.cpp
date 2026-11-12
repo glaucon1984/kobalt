@@ -1,3 +1,4 @@
+#include "app/reader/views/annotation_exporter.h"
 #include "window.h"
 #include "app/library/library_view.h"
 #include "services.h"
@@ -276,7 +277,9 @@ Window::Window(storage::Paths paths, EngineFontInputs fonts, QString placeholder
               paths, std::move(fonts), std::move(placeholder),
               [this, configureServices = std::move(configureServices)] {
                   auto services = readerHostServices();
-                  services.nativeDialogParent = [this] { return this; };
+                  services.annotationExporter = [this](QWidget *reader) {
+                      return reader::pickerAnnotationExporter(reader, this);
+                  };
                   services.devicePreview = [this] { return screenPreset != 0; };
                   services.readerStandbySupported = screenPreset != 0;
                   // An emulated sleep or power-off suspends the reader as on Kobo.
@@ -459,6 +462,11 @@ Window::Window(storage::Paths paths, EngineFontInputs fonts, QString placeholder
     });
     start->setDark(controller.preferences().value("dark_mode").toBool(false));
     connect(start, &standalone::StartScreen::bookRequested, this, &Window::openBook);
+    connect(start, &standalone::StartScreen::passageRequested, this,
+            [this](const QString &key, const QString &position) {
+                controller.setStartPosition(position);
+                openBook(key);
+            });
     connect(start, &standalone::StartScreen::libraryOpenRequested, this, &Window::chooseBook);
     connect(start, &standalone::StartScreen::markUnreadRequested, this, [this](const QString &key) {
         if (controller.resetBook(key))
@@ -554,6 +562,8 @@ Window::Window(storage::Paths paths, EngineFontInputs fonts, QString placeholder
     qApp->installEventFilter(this);
     connect(&controller, &standalone::ReaderController::openingProgress, start,
             &standalone::StartScreen::setProgress);
+    connect(&controller, &standalone::ReaderController::reopeningBook, start,
+            &standalone::StartScreen::setReopening);
     connect(&controller, &standalone::ReaderController::openingCover, start,
             &standalone::StartScreen::setCover);
     connect(&controller, &standalone::ReaderController::opened, this, [this] {
@@ -844,7 +854,7 @@ void Window::openBook(const QString &path)
     setPreviewControlsEnabled(false);
     deviceFrame->previous->setEnabled(false);
     deviceFrame->next->setEnabled(false);
-    start->showOpening(absolute);
+    start->showOpening(absolute, controller.preferences().value("show_opening_cover").toBool(true));
     stack->setCurrentWidget(start);
     controller.open(absolute, pixels(), {}, restart);
 }

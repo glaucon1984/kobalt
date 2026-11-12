@@ -9,6 +9,7 @@
 #include "ui/style/scale.h"
 #include "reading/reading_density.h"
 #include "support/diagnostics.h"
+#include "platform/posix/diagnostics.h"
 #include <QApplication>
 #include <unistd.h>
 #include <QDir>
@@ -178,6 +179,11 @@ int main(int argc, char **argv) {
     const LogWriterScope logging;
     qInstallMessageHandler(logHandler);
     qInfo("kobalt-pb %s starting from %s", KOBALT_VERSION, qPrintable(base));
+    // Diagnostic entries carry the time since boot, which keeps counting through light sleep.
+    // The process samples of the other hosts are left out: nothing reads them here.
+    DiagnosticSystem diagnostics;
+    diagnostics.bootMilliseconds = platform::processDiagnosticSystem().bootMilliseconds;
+    setDiagnosticSystem(std::move(diagnostics));
 
     FontCopies copies;
     QApplication app(argc, argv);

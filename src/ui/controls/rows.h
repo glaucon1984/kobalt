@@ -75,6 +75,15 @@ public:
 
     explicit ListRow(QWidget *parent);
     void setTitle(const QString &text);
+
+    void setTopDivider(bool shown)
+    {
+        if (topDivider == shown)
+            return;
+        topDivider = shown;
+        update();
+    }
+
     // A hidden icon keeps the same text alignment unless alignWithoutIcon is false.
     void setTitleIcon(ControlIcon icon, bool visible = true, bool alignWithoutIcon = true);
     void setDetail(const QString &text);
@@ -91,6 +100,8 @@ public:
     void setTitleGap(int pixels);
     void setDetailFont(const QFont &font);
     void setMetadataFont(const QFont &font);
+    // The caption alone, after setMetadataFont; the leading and trailing text keep theirs.
+    void setCaptionFont(const QFont &font);
     QPushButton *addAction(const QString &name, const QString &accessibleName);
     void setActionIcon(ControlIcon icon);
     QSize sizeHint() const override;
@@ -127,7 +138,7 @@ private:
     QString labelStyles[5];
     Accessory accessory = None{};
     ControlIcon leadingIcon{};
-    bool hasLeadingIcon = false;
+    bool hasLeadingIcon = false, topDivider = false;
     QPointer<QWidget> observedParent;
     int detailLines = 1;
     int titleGap = 0;
@@ -143,6 +154,13 @@ public:
     void setTrailingInset(int pixels);
     void setShaded(bool shaded);
 
+    // PopupCard joins this to nearby list rows; other containers choose their own rule.
+    void setTopDivider(bool shown)
+    {
+        topDivider = shown;
+        update();
+    }
+
     QLabel *leftLabel() const { return left; }
 
     QLabel *rightLabel() const { return right; }
@@ -156,7 +174,7 @@ protected:
 private:
     QLabel *left, *right;
     int trailingInset = 0;
-    bool shaded = false;
+    bool shaded = false, topDivider = false;
 };
 
 // Caption and controls share a row when both have room. Narrow screens put
@@ -171,6 +189,12 @@ public:
     QHBoxLayout *controls() const { return controlLayout; }
 
     void setMarkerBand(int height);
+    // Gives the caption the gap before the controls as well. The caption's
+    // own layout then keeps that gap free, except for a line that may need
+    // it, such as a slider's "Currently:" line at 150% text.
+    void setCaptionOverhang(bool enabled);
+    // The caption's width beside the controls.
+    int captionWidth() const;
     // Called when the caption moves above the controls or back beside them.
     std::function<void(bool stacked)> stackedChanged;
 
@@ -191,7 +215,7 @@ private:
     QWidget *captionArea, *controlArea;
     QHBoxLayout *controlLayout;
     int markerBand = 0;
-    bool stacked = false;
+    bool stacked = false, overhang = false;
     static bool stackedAt(int width);
     void arrange(int width);
 };

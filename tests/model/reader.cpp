@@ -614,6 +614,7 @@ static void checkCssDensity()
             "Percentage image width changed with CSS density");
 }
 
+// Manual optical size must reach both normal text and Bold Reading prefixes.
 static void checkBionicWidth()
 {
     QString family;
@@ -630,7 +631,7 @@ static void checkBionicWidth()
                 "<html xmlns='http://www.w3.org/1999/xhtml'><head><style>p{margin:0;text-indent:0;"
                 "font-family:'"
                 + family.toHtmlEscaped().toUtf8() + "';font-weight:400;font-width:"
-                + QByteArray::number(width) + "%}</style></head><body><p>"
+                + QByteArray::number(width) + "%;font-optical-sizing:none}</style></head><body><p>"
                 + (explicitPrefix ? QByteArray("<span style='font-weight:700'>MMMM</span>MMMM")
                                   : QByteArray("MMMMMMMM"))
                 + "</p></body></html>";
@@ -657,10 +658,19 @@ static void checkBionicWidth()
         settings["bold_reading"] = "off";
         require(expected.open(publication(width, true), QSize(800, 1000), settings, &error),
                 qPrintable(error));
-        require(actual.setOpticalSize(14) && expected.setOpticalSize(14),
-                "Cannot set fixture optical size");
-        require(actual.image(0) == expected.image(0),
-                "Bold Reading lost authored font width or optical size on emphasized runs");
+        QImage smallOpticalSize;
+        for (const int points : { 12, 36 }) {
+            require(actual.setOpticalSize(points) && expected.setOpticalSize(points),
+                    "Cannot set fixture optical size");
+            const auto image = actual.image(0);
+            require(image == expected.image(0),
+                    "Bold Reading lost authored font width or optical size on emphasized runs");
+            if (points == 12)
+                smallOpticalSize = image;
+            else
+                require(image != smallOpticalSize,
+                        "Manual optical size did not override font-optical-sizing:none");
+        }
         if (width == 100)
             normalWidth = actual.image(0);
         else
@@ -890,7 +900,8 @@ static void checkVerticalJustification()
         const auto headingRects = model.rangeRects(headings.first().start, headings.first().end);
         require(!headingRects.isEmpty(), "missing chapter heading geometry");
         const auto opening = model.image(0);
-        require(model.applyAppearance({ { "vertical_justification", true } }),
+        require(model.applyAppearance(
+                        kobalt::appearance::Patch({ { "vertical_justification", true } })),
                 "enable vertical fill");
         const auto expandedOpening = model.image(0);
         require(model.rangeRects(headings.first().start, headings.first().end) == headingRects,
@@ -900,7 +911,8 @@ static void checkVerticalJustification()
                     "vertical fill changed chapter heading pixels");
         // Headings keep their spacing while the prose below them can expand.
         require(expandedOpening != opening, "chapter heading disabled prose expansion");
-        require(model.applyAppearance({ { "vertical_justification", false } }),
+        require(model.applyAppearance(
+                        kobalt::appearance::Patch({ { "vertical_justification", false } })),
                 "disable vertical fill");
         require(model.go(1), "open prose page");
         const auto before = model.image(1);
@@ -912,7 +924,9 @@ static void checkVerticalJustification()
         const auto links = model.pageLinks();
         require(!beforeFirst.isEmpty() && !beforeLast.isEmpty() && !links.isEmpty(),
                 "missing prose geometry");
-        require(model.applyAppearance({ { "vertical_justification", true } }), "enable prose fill");
+        require(model.applyAppearance(
+                        kobalt::appearance::Patch({ { "vertical_justification", true } })),
+                "enable prose fill");
         const auto after = model.image(1);
         require(after != before, "vertical justification did not change prose pixels");
         require(model.pages() == pages && model.position() == position,
@@ -958,11 +972,14 @@ static void checkVerticalJustification()
             expected = imageHash(after);
         require(model.go(pages - 1), "open ending page");
         const auto ending = model.image(pages - 1);
-        require(model.applyAppearance({ { "vertical_justification", false } }),
+        require(model.applyAppearance(
+                        kobalt::appearance::Patch({ { "vertical_justification", false } })),
                 "disable ending fill");
         require(model.image(pages - 1) == ending, "short ending page was stretched");
-        require(model.applyAppearance({ { "vertical_justification", true }, { "columns", 2 } },
-                                      QSize(1280, 783)),
+        require(model.applyAppearance(
+                        kobalt::appearance::Patch(
+                                { { "vertical_justification", true }, { "columns", 2 } }),
+                        QSize(1280, 783)),
                 "enable two-column fill");
         require(model.go(1), "open two-column prose");
         const auto columnEdges = model.annotationPageEdges();
@@ -970,7 +987,8 @@ static void checkVerticalJustification()
         require(!lastRects.isEmpty()
                         && model.wordAt(lastRects.last().center()).start == columnEdges.last.start,
                 "second-column inverse mapping missed the word");
-        require(model.applyAppearance({ { "columns", 1 } }, QSize(800, 973)),
+        require(model.applyAppearance(kobalt::appearance::Patch({ { "columns", 1 } }),
+                                      QSize(800, 973)),
                 "restore single-column viewport");
         require(model.saveDocumentCache(), "save vertical justification line metadata");
     }
@@ -987,7 +1005,8 @@ static void checkVerticalJustification()
         require(excluded.open(publication(body), QSize(800, 973), {}, &error), qPrintable(error));
         require(excluded.pages() > 2, "exclusion fixture did not fill a page");
         const auto before = excluded.image(0);
-        require(excluded.applyAppearance({ { "vertical_justification", true } }),
+        require(excluded.applyAppearance(
+                        kobalt::appearance::Patch({ { "vertical_justification", true } })),
                 "enable excluded layout fill");
         require(excluded.image(0) == before,
                 "vertical fill changed an authored or decorated layout");
@@ -1529,7 +1548,8 @@ int main(int argc, char **argv)
         const auto position = scaled.position();
         const auto pages = scaled.pages();
         const auto cached = scaled.cachedPages();
-        require(scaled.applyAppearance(kobalt::qt::object({ { "smooth_images", false } }))
+        require(scaled.applyAppearance(kobalt::appearance::Patch(
+                        kobalt::qt::object({ { "smooth_images", false } })))
                         && scaled.cachedPages() == cached && hash(scaled.image(0)) == hash(smooth),
                 "Retired smoothing option changed output or discarded cached pages");
         auto grayPixels = [](const QImage &image) {
@@ -1553,7 +1573,8 @@ int main(int argc, char **argv)
                                        kobalt::qt::object({ { "smooth_images", false } }), &error)
                         && hash(reopened.image(0)) == hash(smooth),
                 "An old saved false value disabled image smoothing");
-        require(scaled.applyAppearance(kobalt::qt::object({ { "smooth_images", true } }))
+        require(scaled.applyAppearance(kobalt::appearance::Patch(
+                        kobalt::qt::object({ { "smooth_images", true } })))
                         && hash(scaled.image(0)) == hash(smooth),
                 "Retired smoothing value changed its output");
     }
@@ -1602,7 +1623,7 @@ int main(int argc, char **argv)
         separate.resize(QSize(800, 1000));
         const auto separateMs = timer.elapsed();
         timer.restart();
-        require(combined.applyAppearance(appearance, QSize(800, 1000)),
+        require(combined.applyAppearance(kobalt::appearance::Patch(appearance), QSize(800, 1000)),
                 "Cannot apply combined appearance changes");
         const auto combinedMs = timer.elapsed();
         require(separate.state() == combined.state() && combined.position() == anchor
@@ -1617,11 +1638,11 @@ int main(int argc, char **argv)
         auto invalid = appearance;
         invalid["hyphenation"] = QStringLiteral("invalid");
         invalid["font_pixels"] = 48;
-        require(!combined.applyAppearance(invalid, QSize(900, 1100)) && combined.state() == saved
-                        && combined.cachedPages() == cached,
+        require(!combined.applyAppearance(kobalt::appearance::Patch(invalid), QSize(900, 1100))
+                        && combined.state() == saved && combined.cachedPages() == cached,
                 "Invalid appearance partially changed the book");
-        require(combined.applyAppearance(appearance, QSize(800, 1000)) && combined.state() == saved
-                        && combined.cachedPages() == cached,
+        require(combined.applyAppearance(kobalt::appearance::Patch(appearance), QSize(800, 1000))
+                        && combined.state() == saved && combined.cachedPages() == cached,
                 "Unchanged appearance invalidated the page cache");
         std::printf("Appearance comparison: separate=%lld ms, combined=%lld ms\n",
                     static_cast<long long>(separateMs), static_cast<long long>(combinedMs));
@@ -2619,7 +2640,12 @@ int main(int argc, char **argv)
                     "<p><span id=\"native\">A&#x1f600;<em>BC</em>D</span></p>"
                     "<p id=\"normalized\">A   B\n C</p>"
                     "<p id=\"point-nodes\">A<!--comment--><?instruction test?>B<![CDATA[C]]>D</p>"
-                    "<p class=\"hidden\">Hidden text<span id=\"duplicate\"><span id=\"duplicate\">X</span></span></p></body></html>";
+                    "<p class=\"hidden\">Hidden text<span id=\"duplicate\"><span id=\"duplicate\">X</span></span>"
+                    "<span id=\"duplicate\">A&#x1f600;BC</span>"
+                    "<span id=\"kobo.1.1\">First</span><span id=\"kobo.1.1\">Second</span>"
+                    "<span id=\"dup%2Danchor\">First</span><span id=\"dup%2Danchor\">Second</span>"
+                    "<span id=\"dup-anchor\">Wrong passage</span>"
+                    "<span id=\"split\">First<br/>Second</span><span id=\"split\">Other</span></p></body></html>";
         require(styled.append(name, content, &error), qPrintable(error));
     }
     kobalt::EngineDocument css(kobalt::test::readerFonts());
@@ -2688,12 +2714,84 @@ int main(int argc, char **argv)
     require(css.platformPosition(positions, &error) == chapter2 && error.isEmpty()
                     && css.position() == normalizedAnchor,
             "Normalized whitespace prevented chapter-only progress or changed the local position");
-    require(css.goTo("/body/DocFragment[2]/body/p[6]/span[1]/span[1]/text().0"),
+    require(css.goTo("/body[1]/DocFragment[2]/body[1]/p[6]/span[1]/span[1]/text()[1].0"),
             "Cannot select the duplicate-ID fixture");
     const auto ambiguousAnchor = css.position();
-    require(css.platformPosition(positions, &error).isEmpty() && !error.isEmpty()
+    const auto nestedPoint = chapter2 + "#point(/1/2/6/2/1/1:0)";
+    require(css.platformPosition(positions, &error) == nestedPoint && error.isEmpty()
                     && css.position() == ambiguousAnchor,
-            "Ambiguous source IDs were saved as a native position");
+            "Duplicated nested IDs prevented a structural position or changed the local position");
+    require(css.goToPlatform(positions, nestedPoint, &error) && css.position() == ambiguousAnchor
+                    && error.isEmpty(),
+            "A structural position resolved through an ambiguous ID instead of its own path");
+    require(css.goTo("/body[1]/DocFragment[2]/body[1]/p[6]/span[2]/text()[1].2"),
+            "Cannot select the duplicate sibling ID fixture");
+    const auto siblingAnchor = css.position();
+    const auto siblingPoint = chapter2 + "#point(/1/2/6/3/1:5)";
+    require(css.platformPosition(positions, &error) == siblingPoint && error.isEmpty()
+                    && css.position() == siblingAnchor,
+            "Duplicated sibling IDs lost the structural position or its UTF-8 offset");
+    require(css.goToPlatform(positions, nestedPoint, &error)
+                    && css.goToPlatform(positions, siblingPoint, &error)
+                    && css.position() == siblingAnchor && error.isEmpty(),
+            "A duplicate sibling ID changed the structural position on import");
+    require(!css.goToPlatform(positions, chapter2 + "#duplicate:0", &error)
+                    && css.position() == siblingAnchor,
+            "An ambiguous ID-only location was accepted after structural import");
+    require(css.goTo("/body/DocFragment[2]/body/p[6]/span[4]/text().2"),
+            "Cannot select the duplicate KEPUB span fixture");
+    const auto kepubAnchor = css.position();
+    require(css.platformPosition(positions, &error) == chapter2 && error.isEmpty()
+                    && css.position() == kepubAnchor,
+            "Duplicated KEPUB spans prevented chapter progress or changed the local position");
+    require(!css.goToPlatform(positions, chapter2 + "#kobo.1.1:0", &error)
+                    && css.position() == kepubAnchor,
+            "An ambiguous KEPUB span was accepted on import");
+    require(css.goTo("/body[1]/DocFragment[2]/body[1]/p[6]/span[6]/text()[1].2"),
+            "Cannot select the duplicate literal-percent ID fixture");
+    const auto percentAnchor = css.position();
+    const auto percentPoint = chapter2 + "#point(/1/2/6/7/1:2)";
+    require(css.platformPosition(positions, &error) == percentPoint && error.isEmpty(),
+            "Duplicated literal-percent IDs prevented a structural position");
+    require(css.goToPlatform(positions, percentPoint, &error) && css.position() == percentAnchor
+                    && error.isEmpty(),
+            "Structural import URL-decoded a literal source ID and opened another passage");
+    require(!css.goToPlatform(positions, chapter2 + "#dup%252Danchor:2", &error)
+                    && css.position() == percentAnchor,
+            "URL-encoded ambiguous ID-only location was accepted");
+    for (const bool atEnd : { false, true }) {
+        const auto splitAnchor = QStringLiteral("/body[1]/DocFragment[2]/body[1]/p[6]/span[8]/")
+                + (atEnd ? "text()[1].5" : "text()[2].0");
+        require(css.goTo(splitAnchor), "Cannot select either side of the line break");
+        const auto splitPoint =
+                chapter2 + (atEnd ? "#point(/1/2/6/9/1:5)" : "#point(/1/2/6/9/3:0)");
+        require(css.platformPosition(positions, &error) == splitPoint && error.isEmpty(),
+                "Duplicate ID lost its text-node boundary on export");
+        require(css.goToPlatform(positions, splitPoint, &error) && error.isEmpty()
+                        && css.position() == splitAnchor,
+                "Structural import crossed the line break at a shared text offset");
+    }
+    {
+        const auto repeated = storedEpub(
+                { { "mimetype", "application/epub+zip" },
+                  { "META-INF/container.xml",
+                    "<container xmlns='urn:oasis:names:tc:opendocument:xmlns:container' version='1.0'><rootfiles><rootfile full-path='book.opf' media-type='application/oebps-package+xml'/></rootfiles></container>" },
+                  { "book.opf",
+                    "<package xmlns='http://www.idpf.org/2007/opf' version='2.0'><metadata/><manifest><item id='c' href='c.xhtml' media-type='application/xhtml+xml'/></manifest><spine><itemref idref='c'/><itemref idref='c'/></spine></package>" },
+                  { "c.xhtml",
+                    "<html xmlns='http://www.w3.org/1999/xhtml'><head><title>Repeated</title></head><body><p id='dup'>First</p><p id='dup'>Second</p></body></html>" } });
+        kobalt::EngineDocument model(kobalt::test::readerFonts());
+        require(model.open(repeated, QSize(1072, 1328), {}, &error), qPrintable(error));
+        require(model.goTo("/body[1]/DocFragment[2]/body[1]/p[2]/text()[1].1"),
+                "Cannot select the repeated source chapter");
+        const auto anchor = model.position();
+        require(model.platformPosition(positions, &error).isEmpty() && !error.isEmpty()
+                        && model.position() == anchor,
+                "Duplicate-ID fallback exported an ambiguous chapter path");
+        require(!model.goToPlatform(positions, "c.xhtml#point(/1/2/2/1:1)", &error)
+                        && model.position() == anchor,
+                "Structural import accepted an ambiguous chapter path");
+    }
     const auto styledPage = css.image(0);
     int firstInk = styledPage.width();
     for (int y = 0; y < styledPage.height(); ++y)
@@ -2817,13 +2915,14 @@ int main(int argc, char **argv)
     const auto regularWidth = regular->getTextWidth(U"Regular words", 13);
     const auto boldWidth = bold->getTextWidth(U"Bold words", 10);
     int thicknessLayoutCallbacks = 0;
-    require(css.applyAppearance(kobalt::qt::object({ { "weight_steps", 3 } }), {},
-                                [&](kobalt::OpeningStage stage, int) {
-                                    if (stage == kobalt::OpeningStage::Styles
-                                        || stage == kobalt::OpeningStage::Pages) {
-                                        ++thicknessLayoutCallbacks;
-                                    }
-                                }),
+    require(css.applyAppearance(
+                    kobalt::appearance::Patch(kobalt::qt::object({ { "weight_steps", 3 } })), {},
+                    [&](kobalt::OpeningStage stage, int) {
+                        if (stage == kobalt::OpeningStage::Styles
+                            || stage == kobalt::OpeningStage::Pages) {
+                            ++thicknessLayoutCallbacks;
+                        }
+                    }),
             "Weight adjustment failed");
     require(thicknessLayoutCallbacks == 0, "Outline thickness recalculated styles or pagination");
     const auto weightedPage = hash(css.image(0));
@@ -2900,7 +2999,8 @@ int main(int argc, char **argv)
     require(css.setWeight(4), "Cannot prepare saved thickness for Bionic reading");
     const auto priorWeightPage = hash(css.image(0));
     for (const auto *mode : { "bold" }) {
-        require(css.applyAppearance(kobalt::qt::object({ { "bold_reading", mode } })),
+        require(css.applyAppearance(kobalt::appearance::Patch(
+                        kobalt::qt::object({ { "bold_reading", mode } }))),
                 "Cannot enable Bionic reading");
         const auto emphasized = hash(css.image(0));
         kobalt::EngineDocument freshlyEmphasized(css.fontInputs());
@@ -2928,13 +3028,16 @@ int main(int argc, char **argv)
         css.releaseImages();
         require(hash(reopened.image(0)) == weightedPage && hash(css.image(0)) == emphasized,
                 "Alternating models contaminated font glyph caches");
-        require(css.applyAppearance(kobalt::qt::object({ { "bold_reading", "off" } }))
+        require(css.applyAppearance(kobalt::appearance::Patch(
+                        kobalt::qt::object({ { "bold_reading", "off" } })))
                         && hash(css.image(0)) == priorWeightPage,
                 "Disabling Bionic reading did not restore thickness");
     }
-    require(!css.applyAppearance(kobalt::qt::object({ { "bold_reading", "invalid" } })),
+    require(!css.applyAppearance(kobalt::appearance::Patch(
+                    kobalt::qt::object({ { "bold_reading", "invalid" } }))),
             "Invalid Bionic mode was accepted");
-    require(!css.applyAppearance(kobalt::qt::object({ { "bold_reading", "synthetic" } })),
+    require(!css.applyAppearance(kobalt::appearance::Patch(
+                    kobalt::qt::object({ { "bold_reading", "synthetic" } }))),
             "Retired Bionic mode was accepted");
     auto legacyBionic = css.state();
     legacyBionic["bold_reading"] = QStringLiteral("synthetic");
@@ -2968,7 +3071,8 @@ int main(int argc, char **argv)
             qPrintable(error));
     const auto codeImage = hash(codeModel.image(0));
     for (const auto *mode : { "bold" })
-        require(codeModel.applyAppearance(kobalt::qt::object({ { "bold_reading", mode } }))
+        require(codeModel.applyAppearance(
+                        kobalt::appearance::Patch(kobalt::qt::object({ { "bold_reading", mode } })))
                         && hash(codeModel.image(0)) == codeImage,
                 "Bionic reading altered proportional code");
     kobalt::Publication nowrapBook;
@@ -3002,7 +3106,8 @@ int main(int argc, char **argv)
     for (const auto *mode : { "bold", "off", "bold", "off" }) {
         int formattingStarts = 0;
         require(nowrapModel.applyAppearance(
-                        kobalt::qt::object({ { "bold_reading", mode } }), {},
+                        kobalt::appearance::Patch(kobalt::qt::object({ { "bold_reading", mode } })),
+                        {},
                         [&](kobalt::OpeningStage stage, int percent) {
                             require(stage != kobalt::OpeningStage::Text && percent >= 0
                                             && percent <= 100,
@@ -3046,12 +3151,13 @@ int main(int argc, char **argv)
     require(inlineHeading.open(inlineBook.finish(&error), QSize(1072, 1328), {}, &error),
             qPrintable(error));
     for (const auto &face : { QStringLiteral("Libron"), kobalt::test::headingReadingFace() }) {
-        require(inlineHeading.applyAppearance(
-                        kobalt::qt::object({ { "font_face", face }, { "bold_reading", "off" } })),
+        require(inlineHeading.applyAppearance(kobalt::appearance::Patch(
+                        kobalt::qt::object({ { "font_face", face }, { "bold_reading", "off" } }))),
                 "Cannot select the inline-heading regression font");
         int normalHeight = 0;
         for (const auto *mode : { "off", "bold" }) {
-            require(inlineHeading.applyAppearance(kobalt::qt::object({ { "bold_reading", mode } })),
+            require(inlineHeading.applyAppearance(kobalt::appearance::Patch(
+                            kobalt::qt::object({ { "bold_reading", mode } }))),
                     "Cannot test emphasized inline heading");
             const auto headings = inlineHeading.searchPage("One", 0).hits;
             require(!headings.isEmpty(), "Cannot find inline chapter number");

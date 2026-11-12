@@ -50,6 +50,10 @@ void StartScreen::buildLibrary()
     // Complete the subtree before embedding it; proxy resize can disable new children.
     canvas->setContent(view);
     view->openBook = [this](const QString &key) { emit bookRequested(key); };
+    view->openPassage = [this](const QString &key, const QString &position) {
+        emit passageRequested(key, position);
+    };
+    view->setWordsDirectory(store.profileDirectory());
     view->addFolder = [this] { emit addFolderRequested(); };
     view->openFile = [this] { emit libraryOpenRequested(); };
     view->rescan = [this] { store.scan(); };
@@ -69,6 +73,8 @@ void StartScreen::buildLibrary()
         view->refresh();
     };
     view->singleBooksAreCopies = singleBooksAreCopies;
+    view->resourceFolderLabels = resourceFolderLabels;
+    view->chooseResourceFolder = chooseResourceFolder;
     view->setKeyboardFactory(keyboard);
     view->setDark(dark);
     view->show();
@@ -96,6 +102,17 @@ void StartScreen::applyTextSize()
     }
     view = nullptr;
     buildLibrary();
+}
+
+void StartScreen::setResourceFolders(std::function<QStringList()> labels,
+                                     std::function<void(int, bool)> choose)
+{
+    resourceFolderLabels = std::move(labels);
+    chooseResourceFolder = std::move(choose);
+    if (view) {
+        view->resourceFolderLabels = resourceFolderLabels;
+        view->chooseResourceFolder = chooseResourceFolder;
+    }
 }
 
 void StartScreen::setKeyboardFactory(KeyboardFactory factory)
@@ -232,7 +249,7 @@ StartScreen::~StartScreen()
     store.changed = {};
 }
 
-void StartScreen::showOpening(const QString &bookKey)
+void StartScreen::showOpening(const QString &bookKey, bool showCover)
 {
     // Recreate the view to reset progress and the delayed hint for each book.
     if (openingSurface) {
@@ -248,7 +265,7 @@ void StartScreen::showOpening(const QString &bookKey)
     content->setProperty("reader_dark", dark);
     auto *body = new QVBoxLayout(content);
     body->setContentsMargins(0, 0, 0, 0);
-    opening = createEmbeddedOpening(content, presentation);
+    opening = createEmbeddedOpening(content, presentation, showCover);
     opening->loadCover(store.coverPath(store.index().books.value(bookKey).cover));
     connect(opening->window(), &QDialog::rejected, this, &StartScreen::exitRequested);
     body->addWidget(opening->window());
@@ -263,6 +280,12 @@ void StartScreen::setCover(QImage cover)
 {
     if (opening && currentWidget() == openingSurface)
         opening->setCover(std::move(cover));
+}
+
+void StartScreen::setReopening()
+{
+    if (opening && currentWidget() == openingSurface)
+        opening->setReopening();
 }
 
 void StartScreen::setProgress(int percent)

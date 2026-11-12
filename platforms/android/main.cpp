@@ -1,3 +1,6 @@
+#include "platform/posix/diagnostics.h"
+#include "annotation_export.h"
+#include "app/reader/views/annotation_exporter.h"
 #include "platforms/standalone/reader.h"
 #include "platforms/standalone/start_screen.h"
 #include "services.h"
@@ -47,7 +50,10 @@ public:
                   std::move(fonts), std::move(placeholder),
                   [this] {
                       auto services = android::readerHostServices();
-                      services.nativeDialogParent = [this] { return this; };
+                      services.annotationExporter = [this](QWidget *reader) {
+                          return reader::pickerAnnotationExporter(reader, this,
+                                                                  android::writeAnnotationExport);
+                      };
                       // The cutout and system-bar bands above and below the
                       // reader, while it shows. The sides stay window margins.
                       services.safeArea = [this](QSize) {
@@ -85,6 +91,11 @@ public:
                 [] { android::activity("chooseFolder"); });
         connect(start, &standalone::StartScreen::exitRequested, this, &QWidget::close);
         connect(start, &standalone::StartScreen::bookRequested, this, &Window::openLibraryBook);
+        connect(start, &standalone::StartScreen::passageRequested, this,
+                [this](const QString &key, const QString &position) {
+                    controller.setStartPosition(position);
+                    openLibraryBook(key);
+                });
         connect(start, &standalone::StartScreen::markUnreadRequested, this,
                 [this](const QString &key) {
                     const auto book = store.index().books.value(key);
@@ -111,6 +122,7 @@ public:
                     store.removeBook(key);
                 });
         start->setSingleBooksAreCopies(true);
+        start->setResourceFolders(android::resourceFolderLabels, android::chooseResourceFolder);
         applyLibraryTheme();
         layout->addWidget(start);
         canvas = new standalone::WidgetCanvas(this);
@@ -216,6 +228,8 @@ public:
                 });
         connect(&controller, &standalone::ReaderController::openingProgress, start,
                 &standalone::StartScreen::setProgress);
+        connect(&controller, &standalone::ReaderController::reopeningBook, start,
+                &standalone::StartScreen::setReopening);
         connect(&controller, &standalone::ReaderController::openingCover, start,
                 &standalone::StartScreen::setCover);
         connect(&controller, &standalone::ReaderController::opened, this, [this] {
@@ -404,7 +418,7 @@ private:
 
     void showOpening(const QString &key = {})
     {
-        start->showOpening(key);
+        start->showOpening(key, controller.preferences().value("show_opening_cover").toBool(true));
         new android::CanvasRefresh(start->openingCanvas(), android::refreshAvailable,
                                    submitRefresh);
     }
@@ -565,9 +579,12 @@ int main(int argc, char **argv)
     readingPpi.store(physicalPpi);
     ui::setDensity(physicalPpi);
     QApplication::setFont(ui::interfaceFont());
+    setDiagnosticSystem(platform::processDiagnosticSystem());
     initializeDiagnostics(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
                           + "/diagnostics");
-    Window window(engineFontInputs(*assets, "/system/fonts", {}),
+    Window window(engineFontInputs(*assets, "/system/fonts",
+                                   QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+                                           + "/user-folders/fonts"),
                   placeholderFontFamily(*assets, copies));
     // Keep edge-to-edge geometry while the activity controls bar visibility.
     window.show();

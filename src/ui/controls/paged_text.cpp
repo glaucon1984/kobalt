@@ -16,6 +16,15 @@ PagedText::PagedText(QWidget *parent) : QWidget(parent)
     document.setFont(font);
 }
 
+void PagedText::clear()
+{
+    source.clear();
+    document.clear();
+    current = 0;
+    stale = true;
+    update();
+}
+
 void PagedText::setHtml(const QString &html)
 {
     source = html;
@@ -65,6 +74,12 @@ int PagedText::pages() const
 {
     ensureLayout();
     return document.pages();
+}
+
+int PagedText::contentHeight() const
+{
+    ensureLayout();
+    return document.height() + margins.top() + margins.bottom();
 }
 
 void PagedText::setPage(int number)

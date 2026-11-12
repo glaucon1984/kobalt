@@ -1,4 +1,5 @@
 #pragma once
+#include "reading/appearance_settings.h"
 #include "publication/opening_result.h"
 #include "reading/chapter.h"
 #include "assets/font_catalog.h"
@@ -22,6 +23,8 @@
 #include <functional>
 #include <utility>
 #include <tuple>
+
+class ldomXPointerEx;
 
 namespace kobalt {
 class ColumnView;
@@ -61,10 +64,18 @@ struct SearchHit
     int page = -1;
 };
 
+enum class SearchScope { Book, Chapter, Before, After };
+
+struct SearchCursor
+{
+    int block = 0, offset = 0;
+};
+
 struct SearchBatch
 {
     QVector<SearchHit> hits;
     int nextPage = 0;
+    SearchCursor cursor;
     bool done = false, limited = false;
     // A restarted scan replaces results from the previous layout.
     bool reset = false;
@@ -77,6 +88,8 @@ struct TextRange
     QString chosenStart = {};
     bool sentenceStartPolicy = false;
     bool sentenceEndPolicy = false;
+    // The sentence around the range, when asked for.
+    QString context = {};
 };
 
 struct WordSelection
@@ -141,7 +154,8 @@ public:
     bool openResources(std::shared_ptr<ResourceCache> resources, const QMap<QString, qint64> &sizes,
                        QSize size, const QJsonObject &saved, QString *error,
                        OpeningProgress progress = {}, OpeningResult *result = nullptr,
-                       std::function<void()> coverReady = {});
+                       std::function<void()> coverReady = {},
+                       std::function<void()> cacheReady = {});
     bool rebindResources(const std::shared_ptr<ResourceCache> &resources,
                          const QMap<QString, qint64> &sizes);
     // Set before opening. CREngine keeps parsed books and their pages in
@@ -207,7 +221,8 @@ public:
     AnnotationToken annotationTokenAt(QPoint point);
     AnnotationToken annotationDragTokenAt(QPoint point, const QString &boundary, bool start);
     // Resolves and orders source boundaries without changing pagination or position.
-    TextRange textRange(const QString &start, const QString &end);
+    // `withContext` also reads the surrounding sentence, at most 600 characters.
+    TextRange textRange(const QString &start, const QString &end, bool withContext = false);
     // Indices of source ranges intersecting [start, end), in input order.
     // Invalid, empty and reversed ranges are ignored. No text or geometry is read.
     QVector<int> intersectingRanges(const QString &start, const QString &end,
@@ -223,6 +238,14 @@ public:
     QVector<PageLink> pageLinks();
     LinkDetails linkDetails(const QString &source, bool preview = true);
     SearchBatch searchPage(const QString &query, int page);
+    // Worker-only, incremental preparation. The cache belongs to this layout.
+    bool prepareSearch();
+    SearchBatch searchText(const QString &query, SearchCursor cursor, int maximum,
+                           SearchScope scope = SearchScope::Book, const QString &origin = {},
+                           bool details = true);
+    QVector<SearchHit> searchDetails(QVector<SearchHit> hits, SearchScope scope,
+                                     const QString &origin);
+
     // Source-only current-page intersection. Does not resolve remote geometry.
     // Returns input indices in order; at most 2000 saved ranges plus one draft.
     QVector<int> visibleRanges(const QVector<QPair<QString, QString>> &ranges) const;
@@ -234,7 +257,7 @@ public:
     // Bounded saved-range geometry for a preview. Keeps the exact reading bookmark.
     QVector<QVector<QRect>> pageRangeRects(int page,
                                            const QVector<QPair<QString, QString>> &ranges);
-    bool applyAppearance(const QJsonObject &settings, QSize size = {},
+    bool applyAppearance(const appearance::Patch &patch, QSize size = {},
                          OpeningProgress progress = {});
     bool style(int pixels, int spacing);
     bool style(int pixels, int spacing, const QString &face, int margin);
@@ -320,14 +343,21 @@ private:
                                    const QString &position) const;
     int chapterEndPage(const ChapterLink &next) const;
     void markKoboLinkDecorations();
+    void markPageNotes();
     EngineFontInputs fonts_;
     friend class nickel::NickelPositionCodec;
     friend class pocketbook::PocketBookPositionCodec;
     std::shared_ptr<ReaderSource> source_;
     QJsonObject openingTimes_;
     std::unique_ptr<ColumnView> engine_;
+    struct SearchText;
+    std::shared_ptr<SearchText> searchText_;
+    void ensureSearchText();
+    bool ensureSearchScope(SearchScope scope, const QString &origin);
     struct SourceIndex;
     friend struct ReaderSourceIndexProbe;
+    friend struct ReaderFootnoteProbe;
+    friend struct ReaderFigureProbe;
     mutable std::shared_ptr<SourceIndex> sourceIndex_;
     std::shared_ptr<SourceIndex> sourceIndex(const QStringList &positions,
                                              const std::function<bool()> &current = {}) const;
@@ -346,8 +376,10 @@ private:
     bool openedFromCache_ = false;
     QVector<ChapterLink> contents_, graph_;
     qint64 totalWords_ = -1;
-    QVector<ChapterLink> chapterPages(QVector<ChapterLink> links) const;
-    QVector<ChapterLink> tocChapters() const;
+    using ChapterPositions = QVector<ldomXPointerEx>;
+    QVector<ChapterLink> chapterPages(QVector<ChapterLink> links,
+                                      ChapterPositions *positions) const;
+    QVector<ChapterLink> tocChapters(ChapterPositions *positions = nullptr) const;
 
     // Chapter entries resolved for one pagination: their pages, and the
     // entries with a page sorted by source position. Resolving every entry
@@ -357,6 +389,9 @@ private:
         quint64 layout = 0;
         bool toc = false;
         QVector<ChapterLink> source, links;
+        // Keep resolved DOM positions for this layout. Parsing indexed XPath
+        // strings again walks sibling nodes in large single-file songbooks.
+        std::shared_ptr<ChapterPositions> positions;
         // Indexes into `links`, in source order. Equal positions keep list order.
         QVector<int> order;
         // CREngine places an element position with a child offset before every
@@ -391,7 +426,9 @@ private:
     bool darkMode_ = false;
     QMap<std::tuple<quintptr, int, int>, bool> imageInversion_;
     bool hideNonlinearFragments_ = false;
+    bool inpageFootnotes_ = false;
     bool normalizePageMargins_ = true, reduceChapterSpacing_ = true;
+    bool normalizeTextColors_ = false;
     QString verticalSpacing_ = "off", verticalSpacingScope_ = "all";
     int wordSpacing_ = 100;
     int justificationTracking_ = 0;
@@ -409,7 +446,8 @@ private:
     QMap<QPair<qint64, qint64>, QRect> damage_;
     bool openSource(std::shared_ptr<ReaderSource> source, QSize size, const QJsonObject &saved,
                     QString *error, OpeningProgress progress = {}, OpeningResult *result = nullptr,
-                    std::function<void()> coverReady = {}, QSet<QString> skippedFonts = {});
+                    std::function<void()> coverReady = {}, QSet<QString> skippedFonts = {},
+                    std::function<void()> cacheReady = {});
     void trim();
     void applyPublisherFontFallbacks();
     void applyStyleSheet();

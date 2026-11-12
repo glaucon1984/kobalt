@@ -135,13 +135,24 @@ enum class ControlIcon {
     BookmarkRemove,
     ExportAction,
     FitImage,
-    Door
+    Door,
+    Redirect,
+    Bold,
+    SearchChapter,
+    SearchBefore,
+    SearchAfter,
+    WordsAdd,
+    WordsSaved,
+    ZoomIn,
+    ZoomOut
 };
 // Paint vectors at the target resolution without an intermediate icon bitmap.
 void paintOpeningIcon(QPainter &painter, ControlIcon icon, const QRectF &bounds, QColor color);
 // Use 90% of Bluetooth's visible height, centered on its intersection.
 void paintWifiStatusIcon(QPainter &painter, ControlIcon icon, const QRectF &bounds, QColor color);
 QIcon controlIcon(ControlIcon icon, QColor color = Qt::black, bool sideButtons = false);
+// How far to move an icon's square box so its ink, not the box, is centred.
+int iconInkOffset(ControlIcon icon, int size);
 QStringList bookmarkIconNames();
 ControlIcon bookmarkIcon(const QString &name);
 // These Qt-facing helpers configure shared Button instances.

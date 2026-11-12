@@ -9,6 +9,10 @@
 #include "ui/style/theme.h"
 #include "ui/panel_timing.h"
 #include "settings_panel.h"
+#include "ui/dialogs/choice_sheet.h"
+#include "support/qt_compat.h"
+#include "reading/text_presets.h"
+#include "reading/features.h"
 #include "app/about/about_page.h"
 #include "reading/reading_density.h"
 #include "app/reader/panels/dictionary_panel.h"
@@ -32,6 +36,7 @@
 #include <QHideEvent>
 #include <QRegularExpression>
 #include <QPainter>
+#include <QTimer>
 
 namespace kobalt::reader {
 namespace metrics = ui::metrics;
@@ -42,37 +47,176 @@ using ui::readerStyle;
 using ReaderOption = ui::DescribedOption;
 
 namespace {
-QPushButton *segmentButton(QWidget *parent, QHBoxLayout *layout, QButtonGroup *group,
-                           const QString &name, const QString &text);
-
-// Keep section titles on the Settings baseline. The private text bitmap
-// includes each word's descenders, so centering that bitmap moves the baseline.
-class SettingsTitle final : public ui::InterfaceLabel
+// Leaves Zen mode only after a held press. While held, it inverts and fills
+// three steps, one update each, so an e-ink panel sees no animation. Letting
+// go early clears the steps. The step length is half a second; the
+// `reader_hold_step_ms` property shortens it for tests.
+class HoldButton final : public QPushButton
 {
 public:
-    using ui::InterfaceLabel::InterfaceLabel;
+    HoldButton(const QString &label, const QString &holding, QWidget *parent)
+        : QPushButton(label, parent), idleLabel(label), holdingLabel(holding)
+    {
+        setFocusPolicy(Qt::StrongFocus);
+        setAccessibleName(label);
+        timer.setSingleShot(false);
+        connect(&timer, &QTimer::timeout, this, [this] { advance(); });
+        connect(this, &QPushButton::pressed, this, [this] {
+            const int interval = property("reader_hold_step_ms").toInt();
+            setStep(0);
+            timer.start(interval > 0 ? interval : 500);
+            update();
+        });
+        connect(this, &QPushButton::released, this, [this] { cancel(); });
+    }
+
+    static constexpr int steps = 3;
+    std::function<void()> held;
+
+    // In the heading the button is a cell like the close cell: a rule on its
+    // left instead of a heavy frame.
+    void setCell(bool value)
+    {
+        if (cell == value)
+            return;
+        cell = value;
+        update();
+    }
+
+    int cellWidth() const
+    {
+        const auto font = ui::interfaceFont(chrome::labelText);
+        return qMax(ui::interfaceTextWidth(idleLabel, font),
+                    ui::interfaceTextWidth(holdingLabel, font))
+                + chrome::cellIcon + ui::px(16) + 2 * chrome::inset;
+    }
+
+    // Called when the steps change, so the note below can follow.
+    std::function<void(int)> stepChanged;
 
 protected:
-    void paintEvent(QPaintEvent *event) override
+    void paintEvent(QPaintEvent *) override
     {
-        if (!ui::needsPrivateText(text(), font())) {
-            ui::InterfaceLabel::paintEvent(event);
-            return;
-        }
-        const auto reference = ui::renderPrivateText(strings::get("settings.title"), font());
-        const auto shown = ui::renderPrivateText(text(), font());
-        const auto area = contentsRect();
-        const int baseline =
-                area.top() + (area.height() - reference.image.height()) / 2 - reference.origin.y();
         QPainter painter(this);
-        painter.setFont(font());
-        painter.setPen(palette().color(QPalette::WindowText));
-        ui::drawInterfaceText(
-                painter,
-                QRect(area.left(), baseline + shown.origin.y(), area.width(), shown.image.height()),
-                text(), Qt::AlignLeft | Qt::AlignTop);
+        const bool down = isDown() || step > 0;
+        const auto paper = palette().color(QPalette::Window);
+        const auto ink = palette().color(QPalette::WindowText);
+        painter.fillRect(rect(), down ? ink : paper);
+        if (cell)
+            ui::paintEdges(painter, rect(), Qt::LeftEdge, palette().color(QPalette::Mid));
+        else
+            ui::paintEdges(painter, rect(),
+                           ui::Edges(Qt::LeftEdge) | Qt::TopEdge | Qt::RightEdge | Qt::BottomEdge,
+                           ink, chrome::heavyRule);
+        const auto color = down ? paper : ink;
+        const auto font = ui::interfaceFont(chrome::labelText);
+        const QString label = down ? holdingLabel : idleLabel;
+        const int icon = chrome::cellIcon, gap = ui::px(16);
+        const int textWidth = ui::interfaceTextWidth(label, font);
+        const int stepWidth = ui::px(64), stepHeight = ui::px(10), stepGap = ui::px(10);
+        const int labelHeight = qMax(icon, QFontMetrics(font).height());
+        const int block = labelHeight + ui::px(14) + stepHeight;
+        const int top = (height() - block) / 2;
+        int x = (width() - icon - gap - textWidth) / 2;
+        ui::controlIcon(ui::ControlIcon::Lock, color)
+                .paint(&painter, QRect(x, top + (labelHeight - icon) / 2, icon, icon));
+        painter.setPen(color);
+        painter.setFont(font);
+        ui::drawInterfaceText(painter,
+                              QRect(x + icon + gap, top, textWidth + ui::px(4), labelHeight), label,
+                              Qt::AlignLeft | Qt::AlignVCenter);
+        const int stepsLeft = (width() - steps * stepWidth - (steps - 1) * stepGap) / 2;
+        const int stepsTop = top + labelHeight + ui::px(14);
+        for (int index = 0; index < steps; ++index) {
+            const QRect box(stepsLeft + index * (stepWidth + stepGap), stepsTop, stepWidth,
+                            stepHeight);
+            if (index < step)
+                painter.fillRect(box, color);
+            else
+                ui::paintEdges(painter, box,
+                               ui::Edges(Qt::LeftEdge) | Qt::TopEdge | Qt::RightEdge
+                                       | Qt::BottomEdge,
+                               color);
+        }
     }
+
+    // A press that ends without a release, because Settings was hidden or
+    // the button moved between the heading and the bar, must not leave Zen
+    // mode later.
+    void hideEvent(QHideEvent *event) override
+    {
+        cancel();
+        QPushButton::hideEvent(event);
+    }
+
+    bool event(QEvent *event) override
+    {
+        if (event->type() == QEvent::ParentChange)
+            cancel();
+        return QPushButton::event(event);
+    }
+
+private:
+    void cancel()
+    {
+        timer.stop();
+        setDown(false);
+        setStep(0);
+        update();
+    }
+
+    void setStep(int next)
+    {
+        if (step == next)
+            return;
+        step = next;
+        setProperty("reader_hold_step", step);
+        if (stepChanged)
+            stepChanged(step);
+        update();
+    }
+
+    void advance()
+    {
+        setStep(step + 1);
+        if (step < steps)
+            return;
+        timer.stop();
+        if (held)
+            held();
+        // The next time Zen mode opens Settings, the button starts empty.
+        setStep(0);
+    }
+
+    QString idleLabel, holdingLabel;
+    QTimer timer;
+    int step = 0;
+    bool cell = false;
 };
+
+ui::DescribedOption *checklistOption(QWidget *parent, const QString &name, const QString &label,
+                                     const QString &description, bool first)
+{
+    auto *option = new ui::DescribedOption(label, description, parent);
+    option->setObjectName(name);
+    auto presentation = option->presentation();
+    presentation.indicator = ui::DescribedOption::Indicator::Square;
+    presentation.pressedFill = true;
+    presentation.leadingIndicator = true;
+    presentation.dividers = Qt::BottomEdge;
+    if (first)
+        presentation.dividers |= Qt::TopEdge;
+    presentation.horizontalInset = chrome::inset;
+    presentation.labelPixels = chrome::labelText;
+    presentation.descriptionPixels = chrome::descriptionText;
+    presentation.indicatorSize = { chrome::checkSize, chrome::checkSize };
+    presentation.minimumRowHeight = chrome::optionHeight;
+    option->setPresentation(presentation);
+    return option;
+}
+
+QPushButton *segmentButton(QWidget *parent, QHBoxLayout *layout, QButtonGroup *group,
+                           const QString &name, const QString &text);
 
 // The chevron of a section row in the narrow Settings list, as other rows
 // that open a page show it. It follows its row's size and pressed state.
@@ -288,6 +432,26 @@ QPushButton *actionButton(QWidget *parent, QBoxLayout *layout, const char *name,
 }
 } // namespace
 
+void SettingsTitle::paintEvent(QPaintEvent *event)
+{
+    if (!ui::needsPrivateText(text(), font())) {
+        ui::InterfaceLabel::paintEvent(event);
+        return;
+    }
+    const auto reference = ui::renderPrivateText(strings::get("settings.title"), font());
+    const auto shown = ui::renderPrivateText(text(), font());
+    const auto area = contentsRect();
+    const int baseline =
+            area.top() + (area.height() - reference.image.height()) / 2 - reference.origin.y();
+    QPainter painter(this);
+    painter.setFont(font());
+    painter.setPen(palette().color(QPalette::WindowText));
+    ui::drawInterfaceText(
+            painter,
+            QRect(area.left(), baseline + shown.origin.y(), area.width(), shown.image.height()),
+            text(), Qt::AlignLeft | Qt::AlignTop);
+}
+
 SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     : ui::Panel(parent, Qt::BottomEdge)
 {
@@ -302,14 +466,9 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     heading->setEdgeWidth(chrome::heavyRule);
     heading->setFixedHeight(chrome::actionHeight);
     auto *headingRows = new QHBoxLayout(heading);
+    headingLayout = headingRows;
     headingRows->setContentsMargins(0, 0, 0, chrome::heavyRule);
     headingRows->setSpacing(0);
-    closeButton = new ui::CellButton(ui::ControlIcon::Close, heading);
-    closeButton->setObjectName("rrSettingsClose");
-    closeButton->setAccessibleName(strings::get("settings.close"));
-    closeButton->setRule(Qt::RightEdge);
-    closeButton->setFixedWidth(chrome::cellWidth);
-    headingRows->addWidget(closeButton);
     backButton = new ui::CellButton(ui::ControlIcon::Back, heading);
     backButton->setObjectName("rrSettingsBack");
     backButton->setAccessibleName(strings::get("common.back"));
@@ -319,6 +478,9 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     headingRows->addWidget(backButton);
     connect(backButton, &QPushButton::clicked, this, [this] {
         sectionOpen = false;
+        // In Zen mode, back returns from About to the Zen page.
+        if (zen)
+            settingsPages->setCurrentIndex(int(SettingsPage::Zen));
         if (refitRequested)
             refitRequested();
     });
@@ -327,6 +489,33 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     settingsTitle->setContentsMargins(chrome::inset, 0, chrome::inset, 0);
     readerStyle(settingsTitle, styles::brand(chrome::titleText) + "background:transparent;");
     headingRows->addWidget(settingsTitle, 1);
+    // Zen mode marks its settings page as the reading menu marks its status
+    // line: the section heading caption, inverted to paper on an ink block.
+    zenMarkBox = new QWidget(heading);
+    auto *zenMarkRows = new QHBoxLayout(zenMarkBox);
+    zenMarkRows->setContentsMargins(0, 0, chrome::inset, 0);
+    auto *zenMark = new QLabel(strings::get("navigation.zen"), zenMarkBox);
+    zenMark->setObjectName("rrSettingsZenMark");
+    zenMark->setAlignment(Qt::AlignCenter);
+    readerStyle(zenMark,
+                QString("QLabel{%1font-weight:bold;background:palette(window-text);"
+                        "color:palette(window);padding:%2px %3px;}")
+                        .arg(styles::caption(), QString::number(ui::px(2)),
+                             QString::number(ui::px(12))));
+    auto markFont = ui::captionFont();
+    markFont.setBold(true);
+    zenMark->setFont(markFont);
+    zenMarkRows->addWidget(zenMark, 0, Qt::AlignVCenter);
+    zenMarkBox->hide();
+    headingRows->addWidget(zenMarkBox);
+    // The close cell sits on the right, as in Text Presets. An open section
+    // replaces it with the back cell on the left.
+    closeButton = new ui::CellButton(ui::ControlIcon::Close, heading);
+    closeButton->setObjectName("rrSettingsClose");
+    closeButton->setAccessibleName(strings::get("settings.close"));
+    closeButton->setRule(Qt::LeftEdge);
+    closeButton->setFixedWidth(chrome::cellWidth);
+    headingRows->addWidget(closeButton);
     generalRows->addWidget(heading);
     auto *sections = new QWidget(this);
     generalRows->addWidget(sections, 1);
@@ -357,6 +546,50 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     optionsPager->next->setRule(ui::Edges(Qt::LeftEdge) | Qt::RightEdge);
     optionsRows->addWidget(optionsPager);
     optionsPager->hide();
+    // The way out of Zen mode sits on the bottom edge, where the tabs are.
+    lightSupported = inputs.lightSupported;
+    auto *leaveBar = new ui::Panel(optionsColumn, Qt::TopEdge);
+    zenLeaveBar = leaveBar;
+    leaveBar->setObjectName("rrZenLeaveBar");
+    leaveBar->setEdgeWidth(chrome::heavyRule);
+    auto *leaveRows = new QVBoxLayout(leaveBar);
+    leaveLayout = leaveRows;
+    leaveRows->setContentsMargins(chrome::inset, chrome::heavyRule + ui::px(24), chrome::inset,
+                                  ui::px(24));
+    leaveRows->setSpacing(ui::px(12));
+    auto *leave = new HoldButton(strings::get("settings.zen_leave"),
+                                 strings::get("settings.zen_leave_holding"), leaveBar);
+    leave->setObjectName("rrZenLeave");
+    // The button paints itself; the sheet only keeps button styles from
+    // changing its height.
+    readerStyle(leave,
+                QString("QPushButton{min-height:%1px;max-height:%1px;border:0;padding:0;}")
+                        .arg(int(chrome::actionHeight)));
+    leave->setFixedHeight(chrome::actionHeight);
+    leaveRows->addWidget(leave);
+    zenLeave = leave;
+    auto *leaveNote = new ui::InterfaceLabel(strings::get("settings.zen_leave_note"), leaveBar);
+    leaveNote->setObjectName("rrZenLeaveNote");
+    leaveNote->setAlignment(Qt::AlignCenter);
+    leaveNote->setWordWrap(true);
+    readerStyle(leaveNote,
+                QString("font-size:%1px;font-style:italic;background:transparent;")
+                        .arg(int(chrome::descriptionText)));
+    leaveRows->addWidget(leaveNote);
+    leave->stepChanged = [leaveNote](int step) {
+        leaveNote->setText(
+                strings::get(step > 0 ? "settings.zen_leave_release" : "settings.zen_leave_note"));
+    };
+    leave->held = [this] {
+        zenModeOption->setChecked(false);
+        setZenLayout(false);
+        if (zenLeft)
+            zenLeft();
+        if (refitRequested)
+            refitRequested();
+    };
+    optionsRows->addWidget(leaveBar);
+    leaveBar->hide();
     connect(optionsPager->previous, &QPushButton::clicked, this,
             [this] { showOptionsPage(optionsPager->turnTarget(-1)); });
     connect(optionsPager->next, &QPushButton::clicked, this,
@@ -436,10 +669,6 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     };
     darkOption = check(displayPage, "rrDarkMode", strings::get("reader.dark_mode"),
                        strings::get("settings.dark_description"));
-    lightDarkModeOption =
-            check(displayPage, "rrLightDarkModeShortcut", strings::get("settings.light_dark_mode"),
-                  strings::get("settings.light_dark_mode_description"));
-    lightDarkModeOption->setVisible(inputs.lightSupported);
     const bool animationsSupported = pageAnimationsAvailable(inputs.animationSupport);
     const auto animationDescription =
             strings::get(inputs.animationSupport == PageAnimationSupport::Uncertain
@@ -451,16 +680,20 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     animationOption->setEnabled(animationsSupported);
     bionicOption = check(displayPage, "rrBionicReading", strings::get("reader.bold_reading"),
                          strings::get("reader.bionic_description"));
+    // The two modes come first, so they are the first options Settings shows.
+    section(displayPage, generalOptions, "rrDisplayModesSection",
+            strings::get("settings.section_modes"));
+    zenModeOption = check(displayPage, "rrZenMode", strings::get("settings.zen_mode"),
+                          strings::get("settings.zen_mode_description"));
+    generalOptions->addWidget(zenModeOption);
+    generalOptions->addWidget(darkOption);
+    generalOptions->addWidget(bionicOption);
     section(displayPage, generalOptions, "rrDisplayScreenSection",
             strings::get("settings.section_screen"));
     refreshButton = ui::makeCaptionButton(displayPage, nullptr, "rrScreenRefresh",
                                           strings::get("reader.refresh_the_screen"), [] { });
     generalOptions->addWidget(refreshButton);
     generalOptions->addWidget(animationOption);
-    section(displayPage, generalOptions, "rrDisplayAppearanceSection",
-            strings::get("settings.section_appearance"));
-    for (auto *option : { darkOption, lightDarkModeOption, bionicOption })
-        generalOptions->addWidget(option);
     section(displayPage, generalOptions, "rrDisplayColumnsSection", strings::get("reader.columns"));
     landscapeColumnsOption =
             check(displayPage, "rrLandscapeColumns", strings::get("settings.landscape_columns"),
@@ -543,11 +776,9 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     defaultsRows->setSpacing(0);
     section(defaultsPage, defaultsRows, "rrDefaultsNewBooksSection",
             strings::get("settings.section_new_books"));
-    inheritTextLayoutOption =
-            check(defaultsPage, "rrInheritTextLayout", strings::get("settings.inherit_text_layout"),
-                  strings::get("settings.inherit_text_layout_description"));
-    defaultsRows->addWidget(inheritTextLayoutOption);
-    inheritTextLayoutOption->setChecked(true);
+    textForNewBooksButton =
+            ui::makeCaptionButton(defaultsPage, defaultsRows, "rrTextForNewBooks",
+                                  strings::get("settings.text_for_new_books"), [] { });
     section(defaultsPage, defaultsRows, "rrDefaultsGlobalFontSection",
             strings::get("settings.section_default_global_font"));
     defaultFontButton = ui::makeCaptionButton(defaultsPage, nullptr, "rrDefaultFont",
@@ -581,6 +812,23 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     readerStyle(resetDefaults, styles::font(metrics::text::secondary));
     resetDefaults->setFixedHeight(metrics::about::actionHeight);
     resetRow->addStretch(1);
+    // Text presets are not appearance defaults: a restore of either leaves
+    // the other alone.
+    auto *presetsRow = kobalt::ui::horizontalRow();
+    defaultsRows->addLayout(presetsRow);
+    presetsRow->addStretch(1);
+    resetPresets =
+            ui::makeCaptionButton(defaultsPage, presetsRow, "rrRestorePresets",
+                                  strings::get("text_presets.restore"), [this] {
+                                      settingsPages->setCurrentIndex(int(SettingsPage::Defaults));
+                                      restorePresetsDialog->fitCard();
+                                      restorePresetsDialog->show();
+                                      restorePresetsDialog->raise();
+                                      restorePresetsDialog->setFocus();
+                                  });
+    readerStyle(resetPresets, styles::font(metrics::text::secondary));
+    resetPresets->setFixedHeight(metrics::about::actionHeight);
+    presetsRow->addStretch(1);
     defaultsRows->addStretch(1);
     auto *stylingPage = new QWidget(settingsPages);
     stylingPage->setObjectName("rrStylingOptions");
@@ -624,6 +872,10 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
                                 strings::get("reader.hide_nonlinear_fragments"),
                                 strings::get("settings.hide_nonlinear_fragments_description"));
     stylingRows->addWidget(hideNonlinearOption);
+    inpageFootnotesOption =
+            check(stylingPage, "rrInpageFootnotes", strings::get("settings.inpage_footnotes"),
+                  strings::get("settings.inpage_footnotes_description"));
+    stylingRows->addWidget(inpageFootnotesOption);
     for (const auto &[button, icon] :
          { std::pair{ beautifierButton, ui::ControlIcon::MagicWand },
            std::pair{ wordSpacingButton, ui::ControlIcon::SpreadHorizontal },
@@ -636,6 +888,7 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
         ui::buttonIcon(button, icon);
     }
     hideNonlinearOption->setLeadingIcon(ui::ControlIcon::Hidden);
+    inpageFootnotesOption->setLeadingIcon(ui::ControlIcon::Link);
     wordSpacingButton->setDescription(strings::get("settings.word_spacing_summary"));
     trackingButton->setDescription(strings::get("settings.justification_tracking_summary"));
     widowsOrphansButton->setDescription(strings::get("settings.widows_orphans_summary"));
@@ -656,23 +909,57 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
                     : strings::get("settings.unsupported_description"));
     automaticOpeningOption->setEnabled(inputs.automaticBookOpeningSupported);
     systemRows->addWidget(automaticOpeningOption);
+    if (inputs.automaticBookOpeningSupported) {
+        // Turning automatic opening off sends every later book to Kobo's
+        // reader. It sits where Zen mode sits on Display, so ask first.
+        automaticOpeningDialog = new ui::ChoiceModal(
+                parent,
+                { strings::get("settings.automatic_book_opening_off_description"),
+                  strings::get("settings.automatic_book_opening_off_title"),
+                  {} },
+                { strings::get("common.cancel"), "rrKeepAutomaticBookOpening" },
+                { strings::get("settings.automatic_book_opening_off"),
+                  "rrConfirmAutomaticBookOpeningOff" });
+        automaticOpeningDialog->setObjectName("rrAutomaticBookOpeningConfirmation");
+        automaticOpeningDialog->setDimmed(true);
+        connect(automaticOpeningOption, &QCheckBox::clicked, this, [this](bool checked) {
+            if (checked) {
+                if (automaticOpeningChosen)
+                    automaticOpeningChosen(true);
+                return;
+            }
+            // An unanswered confirmation must never turn the choice off.
+            automaticOpeningOption->setChecked(true);
+            automaticOpeningDialog->fitCard();
+            automaticOpeningDialog->show();
+            automaticOpeningDialog->raise();
+            automaticOpeningDialog->secondaryButton()->setFocus();
+        });
+        connect(automaticOpeningDialog->secondaryButton(), &QPushButton::clicked, this,
+                [this] { dismissAutomaticOpeningConfirmation(); });
+        connect(automaticOpeningDialog->primaryButton(), &QPushButton::clicked, this, [this] {
+            dismissAutomaticOpeningConfirmation();
+            if (automaticOpeningChosen)
+                automaticOpeningChosen(false);
+        });
+        automaticOpeningDialog->dismissed = [this] { dismissAutomaticOpeningConfirmation(); };
+    }
     timeRemainingFormatButton =
             ui::makeCaptionButton(systemPage, nullptr, "rrTimeRemainingFormat",
                                   strings::get("settings.time_remaining_format"), [] { });
     systemRows->addWidget(timeRemainingFormatButton);
     section(systemPage, systemRows, "rrSystemSleepSection", strings::get("settings.section_sleep"));
+    hideBookOnSleepOption = check(systemPage, "rrHideBookOnSleepScreen",
+                                  strings::get("settings.hide_book_on_sleep_screen"),
+                                  strings::get("settings.hide_book_on_sleep_screen_description"));
+    hideBookOnSleepOption->setEnabled(inputs.sleepScreenSupported);
+    systemRows->addWidget(hideBookOnSleepOption);
     sleepScreenButton = ui::makeCaptionButton(systemPage, nullptr, "rrSleepScreen",
                                               strings::get("settings.sleep_screen"), [] { });
     sleepScreenButton->setEnabled(inputs.sleepScreenSupported);
     if (!inputs.sleepScreenSupported)
         sleepScreenButton->setCaption(strings::get("settings.unsupported_caption"));
     systemRows->addWidget(sleepScreenButton);
-    sleepTileButton = ui::makeCaptionButton(systemPage, nullptr, "rrSleepTile",
-                                            strings::get("settings.sleep_tile"), [] { });
-    sleepTileButton->setEnabled(inputs.sleepScreenSupported);
-    if (!inputs.sleepScreenSupported)
-        sleepTileButton->setCaption(strings::get("settings.unsupported_caption"));
-    systemRows->addWidget(sleepTileButton);
     sessionTimeoutButton = ui::makeCaptionButton(systemPage, nullptr, "rrSessionTimeout",
                                                  strings::get("settings.session_timeout"), [] { });
     systemRows->addWidget(sessionTimeoutButton);
@@ -686,6 +973,9 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     }
     section(systemPage, systemRows, "rrSystemInterfaceSection",
             strings::get("settings.section_user_interface"));
+    disabledFeaturesButton = ui::makeCaptionButton(systemPage, systemRows, "rrDisabledFeatures",
+                                                   strings::get("settings.hidden_features"),
+                                                   [this] { showDisabledFeatures(); });
     uiFontButton = ui::makeCaptionButton(systemPage, nullptr, "rrUiFont",
                                          strings::get("settings.ui_font"), [] { });
     uiMonoFontButton = ui::makeCaptionButton(systemPage, nullptr, "rrUiMonoFont",
@@ -713,6 +1003,9 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
                                   strings::get("settings.dictionary_font_size"), [] { });
     systemRows->addWidget(dictionaryFontButton);
     systemRows->addWidget(dictionaryFontSizeButton);
+    saveWordsOption = check(systemPage, "rrSaveWords", strings::get("settings.save_words"),
+                            strings::get("settings.save_words_description"));
+    systemRows->addWidget(saveWordsOption);
     if (inputs.readerStandbySupported) {
         section(systemPage, systemRows, "rrSystemAdvancedSection",
                 strings::get("settings.section_advanced"));
@@ -747,6 +1040,12 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
         });
         standbyDialog->dismissed = [this] { dismissStandbyConfirmation(); };
     }
+    section(systemPage, systemRows, "rrSystemOpeningSection",
+            strings::get("settings.section_opening"));
+    openingCoverOption =
+            check(systemPage, "rrHideOpeningCover", strings::get("settings.opening_cover"),
+                  strings::get("settings.opening_cover_description"));
+    systemRows->addWidget(openingCoverOption);
     systemRows->addStretch(1);
     aboutPage = new AboutPage(settingsPages);
     settingsPages->addWidget(aboutPage);
@@ -771,40 +1070,105 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     settingsPages->insertWidget(int(SettingsPage::Dictionaries), dictionaries);
     kosync = new KosyncPage(settingsPages, parent, inputs.keyboard);
     settingsPages->addWidget(kosync);
+    zenPage = new QWidget(settingsPages);
+    zenPage->setObjectName("rrZenSettings");
+    settingsPages->addWidget(zenPage);
+    auto *zenRows = new QVBoxLayout(zenPage);
+    zenRows->setContentsMargins(0, 0, 0, 0);
+    zenRows->setSpacing(0);
+    section(zenPage, zenRows, "rrZenDisplaySection", strings::get("settings.display"));
+    zenDarkOption = check(zenPage, "rrZenDarkMode", strings::get("reader.dark_mode"),
+                          strings::get("settings.dark_description"));
+    // The rows keep their height; the stretch below takes the spare space.
+    zenDarkOption->setSizePolicy(zenDarkOption->sizePolicy().horizontalPolicy(),
+                                 QSizePolicy::Maximum);
+    zenRows->addWidget(zenDarkOption);
+    // The Display tab's checkbox applies Dark mode at once; this one presses it.
+    connect(zenDarkOption, &QCheckBox::clicked, this, [this](bool on) {
+        if (darkOption->isChecked() != on)
+            darkOption->click();
+        zenDarkOption->setChecked(darkOption->isChecked());
+    });
+    connect(darkOption, &QCheckBox::toggled, zenDarkOption, &QCheckBox::setChecked);
+    zenLightButton = ui::makeCaptionButton(zenPage, zenRows, "rrZenLight",
+                                           strings::get("settings.zen_light"), [this] {
+                                               if (zenLightRequested)
+                                                   zenLightRequested();
+                                           });
+    zenLightButton->setCaption(strings::get(inputs.warmthSupported
+                                                    ? "settings.zen_light_caption"
+                                                    : "settings.zen_light_brightness"));
+    zenSyncSection = section(zenPage, zenRows, "rrZenSyncSection", strings::get("kosync.title"));
+    zenSyncButton =
+            ui::makeCaptionButton(zenPage, zenRows, "rrZenSyncNow", strings::get("kosync.sync_now"),
+                                  [this] { kosync->syncNow(); });
+    zenAutomaticButton = ui::makeCaptionButton(zenPage, zenRows, "rrZenAutomaticSync",
+                                               strings::get("kosync.automatic"),
+                                               [this] { kosync->openSchedule(); });
+    kosync->stateChanged = [this] { updateZenPage(); };
+    section(zenPage, zenRows, "rrZenAboutSection", strings::get("settings.about"));
+    zenAboutButton = ui::makeCaptionButton(
+            zenPage, zenRows, "rrZenAbout", strings::get("settings.zen_about"), [this] {
+                settingsPages->setCurrentIndex(int(SettingsPage::About));
+                if (refitRequested)
+                    refitRequested();
+            });
+    // The version reads as a description, not as a chosen value.
+    zenAboutButton->setDescription(aboutPage->findChild<QLabel *>("rrAboutVersion")->text());
+    zenRows->addStretch(1);
     restoreDialog = new ui::ChoiceModal(
             parent,
             { strings::get(
                       "reader.your_reading_position_stays_the_same_the_defaults_apply_when_you_c"),
               strings::get("reader.restore_appearance_defaults_prompt"),
-              {} },
+              {},
+              "rrRestoreTitle" },
             { strings::get("common.cancel"), "rrKeepDefaults" },
             { strings::get("reader.restore_defaults"), "rrConfirmDefaults" });
     restoreDialog->setObjectName("rrRestoreConfirmation");
     restoreDialog->setDimmed(true);
-    restoreDialog->card()->findChild<QLabel *>("rrModalTitle")->setObjectName("rrRestoreTitle");
     restoreDialog->descriptionLabel()->setObjectName("rrRestoreDescription");
     keepDefaults = restoreDialog->secondaryButton();
     confirmDefaults = restoreDialog->primaryButton();
     connect(keepDefaults, &QPushButton::clicked, this, [this] { dismissRestore(); });
     connect(confirmDefaults, &QPushButton::clicked, this, [this] { dismissRestore(); });
     restoreDialog->dismissed = [this] { dismissRestore(); };
+    restorePresetsDialog = new ui::ChoiceModal(
+            parent,
+            { strings::get("text_presets.restore_detail"),
+              strings::get("text_presets.restore_prompt"),
+              {} },
+            { strings::get("common.cancel"), "rrKeepPresets" },
+            { strings::get("text_presets.restore_confirm"), "rrConfirmPresets" });
+    restorePresetsDialog->setObjectName("rrRestorePresetsConfirmation");
+    restorePresetsDialog->setDimmed(true);
+    keepPresets = restorePresetsDialog->secondaryButton();
+    confirmPresets = restorePresetsDialog->primaryButton();
+    connect(keepPresets, &QPushButton::clicked, this, [this] { dismissRestore(); });
+    connect(confirmPresets, &QPushButton::clicked, this, [this] { dismissRestore(); });
+    restorePresetsDialog->dismissed = [this] { dismissRestore(); };
     settingsError = new ui::InterfaceLabel(this);
     settingsError->setWordWrap(true);
     settingsError->hide();
     generalRows->addWidget(settingsError);
     connect(settingsPages, &QStackedWidget::currentChanged, this, [this](int index) {
-        settingsTabButtons[index]->setChecked(true);
+        // The Zen page has no tab.
+        if (index < settingsTabButtons.size())
+            settingsTabButtons[index]->setChecked(true);
         optionPage = 0;
     });
     settingsTabButtons.first()->setChecked(true);
-    QVector<ui::DescribedOption *> options = { hideNonlinearOption,        darkOption,
-                                               lightDarkModeOption,        bionicOption,
-                                               landscapeColumnsOption,     animationOption,
-                                               inheritTextLayoutOption,    edgeLightOption,
-                                               lightGestureFeedbackOption, denseGraphOption,
-                                               hideTabLabelsOption,        wifiPowerSaverOption,
-                                               disableStandbyOption,       automaticOpeningOption,
-                                               minimalAnnotationOption };
+    QVector<ui::DescribedOption *> options = {
+        hideNonlinearOption,    inpageFootnotesOption,      darkOption,
+        bionicOption,           landscapeColumnsOption,     animationOption,
+        edgeLightOption,        lightGestureFeedbackOption, denseGraphOption,
+        hideTabLabelsOption,    wifiPowerSaverOption,       disableStandbyOption,
+        automaticOpeningOption, minimalAnnotationOption,    hideBookOnSleepOption,
+        saveWordsOption
+    };
+    options.append(openingCoverOption);
+    options.prepend(zenModeOption);
+    options.append(zenDarkOption);
     for (auto *option : options) {
         if (!option)
             continue;
@@ -821,14 +1185,16 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     }
     generalOptions->setContentsMargins(0, 0, 0, 0);
     defaultsRows->setContentsMargins(0, 0, 0, 0);
-    resetRow->setStretch(0, 0);
-    resetRow->setStretch(1, 1);
-    resetRow->setStretch(2, 0);
+    for (auto *row : { resetRow, presetsRow }) {
+        row->setStretch(0, 0);
+        row->setStretch(1, 1);
+        row->setStretch(2, 0);
+    }
     for (auto *button : { resetDefaults,
+                          resetPresets,
                           refreshButton,
                           columnSpacingButton,
                           sleepScreenButton,
-                          sleepTileButton,
                           sessionTimeoutButton,
                           pageNavigationButton,
                           buttonControlsButton,
@@ -837,6 +1203,7 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
                           tappableLinksButton,
                           navigationBarButton,
                           menuViewButton,
+                          disabledFeaturesButton,
                           uiFontButton,
                           uiMonoFontButton,
                           headerFooterFontButton,
@@ -854,32 +1221,32 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
                           trackingButton,
                           hangingPunctuationButton,
                           widowsOrphansButton,
-                          verticalSpacingButton }) {
-        button->setRule(Qt::BottomEdge);
+                          verticalSpacingButton,
+                          zenLightButton,
+                          zenSyncButton,
+                          zenAutomaticButton,
+                          zenAboutButton,
+                          textForNewBooksButton }) {
+        styleListAction(button);
         // The refresh row's caption shows its current choice, set when Settings opens.
-        if (button == resetDefaults)
+        if (button == resetDefaults || button == resetPresets)
             button->setCaption(strings::get("settings.asks_first"));
-        ui::readerStyle(
-                button,
-                QString("QPushButton{font-size:%1px;min-height:%2px;max-height:%2px;border:0;border-radius:0;text-align:left;padding:0 %3px;background:palette(window);color:palette(window-text);} QPushButton:pressed{background:palette(midlight);}")
-                        .arg(int(chrome::labelText))
-                        .arg(int(chrome::listActionHeight))
-                        .arg(int(chrome::inset)));
         if (button == beautifierButton || button == wordSpacingButton
             || button == paragraphSpacingButton || button == trackingButton
             || button == hangingPunctuationButton || button == widowsOrphansButton
-            || button == verticalSpacingButton) {
+            || button == verticalSpacingButton || button == zenSyncButton
+            || button == zenAboutButton) {
             button->setMaximumHeight(QWIDGETSIZE_MAX);
             readerStyle(
                     button,
                     QString("QPushButton{font-size:%1px;border:0;border-radius:0;text-align:left;padding:0;background:palette(window);color:palette(window-text);}")
                             .arg(int(chrome::labelText)));
             button->setMinimumHeight(chrome::listActionHeight);
-        } else {
-            button->setFixedHeight(chrome::listActionHeight);
         }
     }
     settingsTabs->setAlignment(Qt::AlignTop);
+    for (int index = 0; index < settingsPages->count(); ++index)
+        settingsPages->widget(index)->installEventFilter(this);
     styleTabs(false);
     fitRail();
     hide();
@@ -926,15 +1293,20 @@ void SettingsPanel::styleTabs(bool list)
                                              .arg(int(metrics::control::border)))
                         .arg(selected));
     }
-    if (!list && settingsPages->currentIndex() >= 0)
-        settingsTabButtons[settingsPages->currentIndex()]->setChecked(true);
+    const int current = settingsPages->currentIndex();
+    if (!list && current >= 0 && current < settingsTabButtons.size())
+        settingsTabButtons[current]->setChecked(true);
+    // Without the rail beside it, as in a list or Zen mode, the page has no
+    // left rule.
+    const bool railless = list || zen;
     readerStyle(
             settingsPages,
-            list ? QString("QStackedWidget{border:0;}")
-                 : QString("QStackedWidget{border:0;border-left:%1px solid palette(window-text);}")
-                            .arg(int(metrics::control::border)));
+            railless
+                    ? QString("QStackedWidget{border:0;}")
+                    : QString("QStackedWidget{border:0;border-left:%1px solid palette(window-text);}")
+                              .arg(int(metrics::control::border)));
     static_cast<ui::Panel *>(optionsViewport)
-            ->setEdges(list ? ui::Edges() : ui::Edges(Qt::LeftEdge));
+            ->setEdges(railless ? ui::Edges() : ui::Edges(Qt::LeftEdge));
 }
 
 int SettingsPanel::fitContent(QSize availableSize)
@@ -954,25 +1326,50 @@ int SettingsPanel::fitContent(QSize availableSize)
         sectionOpen = listMode && isVisible();
         styleTabs(listMode);
     }
-    const bool showList = listMode && !sectionOpen;
-    tabRail->setVisible(!listMode || showList);
+    // Zen mode has no rail or section list: its page fills the width, and
+    // About, opened from it, has a back cell, as an opened section has.
+    const bool zenPageShown = zen && settingsPages->currentIndex() == int(SettingsPage::Zen);
+    const bool sectionShown = zen ? !zenPageShown : listMode && sectionOpen;
+    const bool showList = !zen && listMode && !sectionOpen;
+    const bool rail = !zen && !listMode;
+    tabRail->setVisible(rail || showList);
     optionsColumn->setVisible(!showList);
-    backButton->setVisible(listMode && sectionOpen);
-    closeButton->setVisible(!(listMode && sectionOpen));
-    settingsTitle->setText(listMode && sectionOpen
-                                   ? settingsTabButtons[settingsPages->currentIndex()]
-                                             ->property("reader_tab_label")
-                                             .toString()
-                                   : strings::get("settings.title"));
+    backButton->setVisible(sectionShown);
+    closeButton->setVisible(!sectionShown);
+    zenMarkBox->setVisible(zen);
+    settingsTitle->setText(sectionShown ? settingsTabButtons[settingsPages->currentIndex()]
+                                                  ->property("reader_tab_label")
+                                                  .toString()
+                                        : strings::get("settings.title"));
     if (showList) {
         tabRail->setFixedWidth(availableSize.width());
         optionsPager->hide();
         return availableSize.height();
     }
-    if (!listMode)
+    if (rail)
         fitRail(availableSize.height() - headingHeight);
-    const int fullWidth = qMax(1, availableSize.width() - (listMode ? 0 : tabRail->width()));
-    const int availableHeight = qMax(1, availableSize.height() - headingHeight);
+    const int fullWidth = qMax(1, availableSize.width() - (rail ? tabRail->width() : 0));
+    // A landscape screen is short, so the hold button moves into the
+    // heading as a cell, and the bar with its note goes.
+    const bool leaveInHeading = availableSize.width() > availableSize.height();
+    auto *leave = static_cast<HoldButton *>(zenLeave);
+    if (leaveInHeading != (leave->parentWidget() != zenLeaveBar)) {
+        if (leaveInHeading) {
+            // The hold cell goes before the close cell.
+            headingLayout->insertWidget(headingLayout->indexOf(closeButton), leave);
+            leave->setFixedSize(leave->cellWidth(), chrome::actionHeight - chrome::heavyRule);
+        } else {
+            leaveLayout->insertWidget(0, leave);
+            leave->setMinimumWidth(0);
+            leave->setMaximumWidth(QWIDGETSIZE_MAX);
+            leave->setFixedHeight(chrome::actionHeight);
+        }
+        leave->setCell(leaveInHeading);
+    }
+    leave->setVisible(zenPageShown);
+    zenLeaveBar->setVisible(zenPageShown && !leaveInHeading);
+    const int leaveHeight = zenPageShown && !leaveInHeading ? zenLeaveBar->sizeHint().height() : 0;
+    const int availableHeight = qMax(1, availableSize.height() - headingHeight - leaveHeight);
     auto *content = settingsPages->currentWidget();
     content->ensurePolished();
     auto *rows = content->layout();
@@ -1036,8 +1433,74 @@ int SettingsPanel::fitContent(QSize availableSize)
         if (split > 0 && split <= pageHeight && contentHeight - split <= pageHeight)
             optionPages = { { 0, split }, { split, contentHeight } };
     }
+    pagedRows = pageRows();
     showOptionsPage(optionPage);
-    return panelHeight + headingHeight;
+    return panelHeight + headingHeight + leaveHeight;
+}
+
+QVector<QRect> SettingsPanel::pageRows() const
+{
+    QVector<QRect> result;
+    auto *rows =
+            settingsPages->currentWidget() ? settingsPages->currentWidget()->layout() : nullptr;
+    if (!rows)
+        return result;
+    for (int index = 0; index < rows->count(); ++index)
+        if (!rows->itemAt(index)->isEmpty())
+            result.append(rows->itemAt(index)->geometry());
+    return result;
+}
+
+bool SettingsPanel::eventFilter(QObject *watched, QEvent *event)
+{
+    // The page's layout handles the request after this filter. Compare the
+    // rows once it has, and refit only when one moved or changed height.
+    if (event->type() == QEvent::LayoutRequest && watched == settingsPages->currentWidget()
+        && isVisible() && optionPages.size() > 1 && !repaginateQueued && refitRequested) {
+        repaginateQueued = true;
+        qt::later(0, this, [this] {
+            repaginateQueued = false;
+            if (isVisible() && pageRows() != pagedRows && refitRequested)
+                refitRequested();
+        });
+    }
+    return ui::Panel::eventFilter(watched, event);
+}
+
+void SettingsPanel::setZenLayout(bool value)
+{
+    if (zen != value) {
+        zen = value;
+        // Zen mode opens on its page; leaving it shows Display first.
+        settingsPages->setCurrentIndex(int(zen ? SettingsPage::Zen : SettingsPage::Display));
+        styleTabs(listMode);
+    } else if (zen) {
+        settingsPages->setCurrentIndex(int(SettingsPage::Zen));
+    }
+    updateZenPage();
+}
+
+void SettingsPanel::updateZenPage()
+{
+    zenDarkOption->setChecked(darkOption->isChecked());
+    zenDarkOption->setEnabled(darkOption->isEnabled());
+    // Without edge swipes, Zen mode has no other way to change the light.
+    const bool light = lightSupported && !edgeLightOption->isChecked();
+    const bool sync =
+            features::enabled(featurePreferences, features::Kosync) && kosync->syncReady();
+    // Rows that appear or go while the page shows change its layout.
+    const bool changed = zenLightButton->isVisibleTo(zenPage) != light
+            || zenSyncSection->isVisibleTo(zenPage) != sync;
+    zenLightButton->setVisible(light);
+    for (QWidget *row : { zenSyncSection, static_cast<QWidget *>(zenSyncButton),
+                          static_cast<QWidget *>(zenAutomaticButton) })
+        row->setVisible(sync);
+    zenSyncButton->setDescription(kosync->lastSyncText());
+    zenSyncButton->setEnabled(kosync->syncEnabled());
+    zenAutomaticButton->setCaption(kosync->automaticCaption());
+    zenAutomaticButton->setEnabled(kosync->syncEnabled());
+    if (changed && zen && isVisible() && refitRequested)
+        refitRequested();
 }
 
 void SettingsPanel::showOptionsPage(int page)
@@ -1060,22 +1523,23 @@ void SettingsPanel::showOptionsPage(int page)
 SettingsPanel::~SettingsPanel()
 {
     delete restoreDialog;
+    delete restorePresetsDialog;
     delete standbyDialog;
-    delete fontDialog;
+    delete sheet;
 }
 
 void SettingsPanel::showFontChoices(const QString &title, const QVector<ReadingFont> &fonts,
                                     const QString &current, const QString &emptyLabel,
                                     std::function<void(const QString &)> chosen)
 {
-    if (fontDialog || fonts.isEmpty())
+    if (sheet || fonts.isEmpty())
         return;
-    fontDialog = new ui::ModalOverlay(parentWidget());
-    fontDialog->setObjectName("rrSettingsFontPopup");
-    fontDialog->setDimmed(true);
-    fontDialog->setGeometry(parentWidget()->rect());
-    fontDialog->dismissed = [this] { dismissFontChoices(); };
-    auto *card = fontDialog->card();
+    sheet = new ui::ModalOverlay(parentWidget());
+    sheet->setObjectName("rrSettingsFontPopup");
+    sheet->setDimmed(true);
+    sheet->setGeometry(parentWidget()->rect());
+    sheet->dismissed = [this] { dismissSheet(); };
+    auto *card = sheet->card();
     auto *rows = card->rows();
     rows->setContentsMargins(metrics::control::border, metrics::notice::cardMargins.top(),
                              metrics::control::border, metrics::control::border);
@@ -1089,7 +1553,6 @@ void SettingsPanel::showFontChoices(const QString &title, const QVector<ReadingF
     auto *choices = new ui::RadioList(card);
     choices->setObjectName("rrSettingsFontChoices");
     choices->setMinimumRowHeight(metrics::list::oneLine);
-    choices->setTopDivider(true);
     int selected = 0;
     for (int index = 0; index < fonts.size(); ++index) {
         const auto &family = fonts[index].family;
@@ -1153,15 +1616,15 @@ void SettingsPanel::showFontChoices(const QString &title, const QVector<ReadingF
         choices->setFixedHeight(range.second * rowHeight);
         pager->setPage(page, pages.size());
         card->fitToWidth(cardWidth);
-        fontDialog->centerCard();
+        sheet->centerCard();
     };
-    connect(pager->previous, &QPushButton::clicked, fontDialog,
+    connect(pager->previous, &QPushButton::clicked, sheet,
             [pager, showPage] { showPage(pager->turnTarget(-1)); });
-    connect(pager->next, &QPushButton::clicked, fontDialog,
+    connect(pager->next, &QPushButton::clicked, sheet,
             [pager, showPage] { showPage(pager->turnTarget(1)); });
     choices->chosen = [this, fonts, chosen](int index) {
         const auto family = fonts[index].family;
-        dismissFontChoices();
+        dismissSheet();
         chosen(family);
     };
     int initialPage = 0;
@@ -1169,9 +1632,7 @@ void SettingsPanel::showFontChoices(const QString &title, const QVector<ReadingF
         if (selected >= pages[page].first && selected < pages[page].first + pages[page].second)
             initialPage = page;
     showPage(initialPage);
-    fontDialog->show();
-    fontDialog->raise();
-    fontDialog->setFocus();
+    presentSheet();
 }
 
 QString SettingsPanel::dictionaryFontSizeLabel(int percent, bool compact)
@@ -1192,25 +1653,26 @@ QString SettingsPanel::dictionaryFontSizeLabel(int percent, bool compact)
     }
 }
 
+// Opens a sheet with a title and one pick-one list, as `sheet`. The caller
+// adds the options, fits it with ui::fitChoiceSheet() and shows it with
+// presentSheet().
+ui::RadioList *SettingsPanel::openChoiceSheet(const QString &name, const QString &title,
+                                              const QString &hint, const QString &titleName)
+{
+    const auto made = ui::makeChoiceSheet(parentWidget(), name, title, hint, titleName);
+    sheet = made.overlay;
+    sheet->dismissed = [this] { dismissSheet(); };
+    return made.list;
+}
+
 void SettingsPanel::showDictionaryFontSizes(int current, const QString &family, bool customFont,
                                             std::function<void(int)> chosen)
 {
-    if (fontDialog)
+    if (sheet)
         return;
-    fontDialog = new ui::ModalOverlay(parentWidget());
-    fontDialog->setObjectName("rrDictionaryFontSizePopup");
-    fontDialog->setDimmed(true);
-    fontDialog->setGeometry(parentWidget()->rect());
-    fontDialog->dismissed = [this] { dismissFontChoices(); };
-    auto *card = fontDialog->card();
-    auto *rows = card->rows();
-    rows->setContentsMargins(metrics::control::border, metrics::notice::cardMargins.top(),
-                             metrics::control::border, metrics::control::border);
-    rows->setSpacing(0);
-    card->heading(strings::get("settings.dictionary_font_size"));
-    auto *choices = new ui::RadioList(card);
+    auto *choices =
+            openChoiceSheet("rrDictionaryFontSize", strings::get("settings.dictionary_font_size"));
     choices->setMinimumRowHeight(metrics::list::oneLine);
-    choices->setTopDivider(true);
     const bool compact = isPhoneScreen(parentWidget()->size(), ui::density());
     for (int percent : appearance::dictionaryFontSizes) {
         auto *option = choices->add(
@@ -1250,40 +1712,24 @@ void SettingsPanel::showDictionaryFontSizes(int current, const QString &family, 
             choices->setCurrent(choices->options().size() - 1);
     }
     choices->chosen = [this, chosen](int index) {
-        dismissFontChoices();
+        dismissSheet();
         chosen(appearance::dictionaryFontSizes[index]);
     };
-    rows->addWidget(choices);
-    const int cardWidth = qMin<int>(metrics::notice::cardWidth,
-                                    parentWidget()->width() - 2 * metrics::notice::sideClearance);
-    choices->setFixedHeight(choices->heightForWidth(cardWidth - 2 * metrics::control::border));
-    card->fitToWidth(cardWidth);
-    fontDialog->centerCard();
-    fontDialog->show();
-    fontDialog->raise();
-    fontDialog->setFocus();
+    ui::fitChoiceSheet(sheet, choices);
+    presentSheet();
 }
 
 void SettingsPanel::showHeaderFooterWeights(int current, const QFont &sampleFont,
                                             std::function<void(int)> chosen)
 {
-    if (fontDialog)
+    if (sheet)
         return;
-    fontDialog = new ui::ModalOverlay(parentWidget());
-    fontDialog->setObjectName("rrHeaderFooterWeightPopup");
-    fontDialog->setDimmed(true);
-    fontDialog->setGeometry(parentWidget()->rect());
-    fontDialog->dismissed = [this] { dismissFontChoices(); };
-    auto *card = fontDialog->card();
-    auto *rows = card->rows();
-    rows->setContentsMargins(metrics::control::border, metrics::notice::cardMargins.top(),
-                             metrics::control::border, metrics::control::border);
-    rows->setSpacing(0);
-    card->heading(strings::get("settings.header_footer_weight"), {}, "rrHeaderFooterWeightTitle");
-    auto *choices = new ui::RadioList(card);
+    auto *choices =
+            openChoiceSheet("rrHeaderFooterWeight", strings::get("settings.header_footer_weight"),
+                            {}, "rrHeaderFooterWeightTitle");
     choices->setMinimumRowHeight(metrics::list::oneLine);
-    choices->setTopDivider(true);
-    for (int steps : { 0, 2, 4, 6, 8 }) {
+    const QVector<int> weights{ 0, 2, 4, 6, 8 };
+    for (int steps : weights) {
         auto *option = choices->add(
                 QString("rrHeaderFooterWeight%1").arg(steps),
                 steps ? strings::get("settings.header_footer_weight_heavier").arg(steps)
@@ -1295,19 +1741,12 @@ void SettingsPanel::showHeaderFooterWeights(int current, const QFont &sampleFont
         if (steps == current)
             choices->setCurrent(choices->options().size() - 1);
     }
-    choices->chosen = [this, chosen](int index) {
-        dismissFontChoices();
-        chosen(index * 2);
+    choices->chosen = [this, chosen, weights](int index) {
+        dismissSheet();
+        chosen(weights[index]);
     };
-    rows->addWidget(choices);
-    const int cardWidth = qMin<int>(metrics::notice::cardWidth,
-                                    parentWidget()->width() - 2 * metrics::notice::sideClearance);
-    choices->setFixedHeight(choices->heightForWidth(cardWidth - 2 * metrics::control::border));
-    card->fitToWidth(cardWidth);
-    fontDialog->centerCard();
-    fontDialog->show();
-    fontDialog->raise();
-    fontDialog->setFocus();
+    ui::fitChoiceSheet(sheet, choices);
+    presentSheet();
 }
 
 QString SettingsPanel::columnSpacingLabel(int percent)
@@ -1326,14 +1765,14 @@ QString SettingsPanel::paragraphSpacingLabel(int percent)
 void SettingsPanel::showBeautifier(const QJsonObject &current,
                                    std::function<void(QJsonObject)> chosen)
 {
-    if (fontDialog)
+    if (sheet)
         return;
-    fontDialog = new ui::ModalOverlay(parentWidget());
-    fontDialog->setObjectName("rrBeautifierPopup");
-    fontDialog->setDimmed(true);
-    fontDialog->setGeometry(parentWidget()->rect());
-    fontDialog->dismissed = [this] { dismissFontChoices(); };
-    auto *card = fontDialog->card();
+    sheet = new ui::ModalOverlay(parentWidget());
+    sheet->setObjectName("rrBeautifierPopup");
+    sheet->setDimmed(true);
+    sheet->setGeometry(parentWidget()->rect());
+    sheet->dismissed = [this] { dismissSheet(); };
+    auto *card = sheet->card();
     auto *rows = card->rows();
     rows->setContentsMargins(metrics::control::border, metrics::notice::cardMargins.top(),
                              metrics::control::border, metrics::control::border);
@@ -1362,29 +1801,18 @@ void SettingsPanel::showBeautifier(const QJsonObject &current,
     rows->addWidget(presetRow);
     QVector<ui::DescribedOption *> options;
     const QStringList names{ "rrNormalizationMargins", "rrNormalizationChapters",
-                             "rrBeautifierInitials", "rrBeautifierSpacing", "rrBeautifierIndent" };
-    const QStringList labels{ "settings.normalization_margins", "settings.normalization_chapters",
-                              "settings.beautifier_initials", "settings.beautifier_spacing",
-                              "settings.beautifier_indent" };
+                             "rrBeautifierInitials",   "rrBeautifierSpacing",
+                             "rrBeautifierIndent",     "rrNormalizationTextColors" };
+    const QStringList labels{
+        "settings.normalization_margins", "settings.normalization_chapters",
+        "settings.beautifier_initials",   "settings.beautifier_spacing",
+        "settings.beautifier_indent",     "settings.normalization_text_colors"
+    };
     for (int i = 0; i < int(appearance::normalizationKeys.size()); ++i) {
         const auto prefix = labels[i];
-        auto *option = new ui::DescribedOption(
-                strings::get(prefix.toUtf8().constData()),
-                strings::get((prefix + "_description").toUtf8().constData()), card);
-        option->setObjectName(names[i]);
-        auto presentation = option->presentation();
-        presentation.indicator = ui::DescribedOption::Indicator::Square;
-        presentation.pressedFill = true;
-        presentation.leadingIndicator = true;
-        presentation.dividers = Qt::BottomEdge;
-        if (i == 0)
-            presentation.dividers |= Qt::TopEdge;
-        presentation.horizontalInset = chrome::inset;
-        presentation.labelPixels = chrome::labelText;
-        presentation.descriptionPixels = chrome::descriptionText;
-        presentation.indicatorSize = { chrome::checkSize, chrome::checkSize };
-        presentation.minimumRowHeight = chrome::optionHeight;
-        option->setPresentation(presentation);
+        auto *option = checklistOption(card, names[i], strings::get(prefix.toUtf8().constData()),
+                                       strings::get((prefix + "_description").toUtf8().constData()),
+                                       i == 0);
         option->setChecked(draft->value(appearance::normalizationKeys[i]).toBool());
         connect(option, &QCheckBox::clicked, card, [draft, presets, i](bool checked) {
             (*draft)[appearance::normalizationKeys[i]] = checked;
@@ -1409,10 +1837,10 @@ void SettingsPanel::showBeautifier(const QJsonObject &current,
     auto *done =
             ui::makeModalButton(card, { strings::get("common.done"), "rrBeautifierDone" }, true);
     card->adaptiveActions({ cancel, done });
-    connect(cancel, &QPushButton::clicked, this, [this] { dismissFontChoices(); });
+    connect(cancel, &QPushButton::clicked, this, [this] { dismissSheet(); });
     connect(done, &QPushButton::clicked, this, [this, draft, chosen] {
         const auto value = *draft;
-        dismissFontChoices();
+        dismissSheet();
         chosen(value);
     });
     const int width =
@@ -1420,10 +1848,8 @@ void SettingsPanel::showBeautifier(const QJsonObject &current,
     for (auto *option : options)
         option->setFixedHeight(option->heightForWidth(width - 2 * metrics::control::border));
     card->fitToWidth(width);
-    fontDialog->centerCard();
-    fontDialog->show();
-    fontDialog->raise();
-    fontDialog->setFocus();
+    sheet->centerCard();
+    presentSheet();
 }
 
 QString SettingsPanel::timeRemainingFormatLabel(const QString &format)
@@ -1435,24 +1861,13 @@ QString SettingsPanel::timeRemainingFormatLabel(const QString &format)
 void SettingsPanel::showTimeRemainingFormats(const QString &current,
                                              std::function<void(const QString &)> chosen)
 {
-    if (fontDialog)
+    if (sheet)
         return;
-    fontDialog = new ui::ModalOverlay(parentWidget());
-    fontDialog->setObjectName("rrTimeRemainingFormatPopup");
-    fontDialog->setDimmed(true);
-    fontDialog->setGeometry(parentWidget()->rect());
-    fontDialog->dismissed = [this] { dismissFontChoices(); };
-    auto *card = fontDialog->card();
-    auto *rows = card->rows();
-    rows->setContentsMargins(metrics::control::border, metrics::notice::cardMargins.top(),
-                             metrics::control::border, metrics::control::border);
-    rows->setSpacing(0);
-    card->heading(strings::get("settings.time_remaining_format"),
-                  strings::get("settings.time_remaining_format_description"), {}, {});
-    auto *choices = new ui::RadioList(card);
-    choices->setMinimumRowHeight(chrome::listActionHeight);
-    choices->setTopDivider(true);
-    for (const auto *format : { "detailed", "approximate" }) {
+    auto *choices =
+            openChoiceSheet("rrTimeRemainingFormat", strings::get("settings.time_remaining_format"),
+                            strings::get("settings.time_remaining_format_description"));
+    const QStringList formats{ "detailed", "approximate" };
+    for (const auto &format : formats) {
         choices->add(QString("rrTimeRemainingFormat_%1").arg(format),
                      timeRemainingFormatLabel(format),
                      strings::get(QString("settings.time_remaining_%1_description")
@@ -1462,58 +1877,32 @@ void SettingsPanel::showTimeRemainingFormats(const QString &current,
         if (format == current)
             choices->setCurrent(choices->options().size() - 1);
     }
-    choices->chosen = [this, chosen](int index) {
-        dismissFontChoices();
-        chosen(index == 1 ? QStringLiteral("approximate") : QStringLiteral("detailed"));
+    choices->chosen = [this, chosen, formats](int index) {
+        dismissSheet();
+        chosen(formats[index]);
     };
-    rows->addWidget(choices);
-    const int cardWidth = qMin<int>(metrics::notice::cardWidth,
-                                    parentWidget()->width() - 2 * metrics::notice::sideClearance);
-    choices->setFixedHeight(choices->heightForWidth(cardWidth - 2 * metrics::control::border));
-    card->fitToWidth(cardWidth);
-    fontDialog->centerCard();
-    fontDialog->show();
-    fontDialog->raise();
-    fontDialog->setFocus();
+    ui::fitChoiceSheet(sheet, choices);
+    presentSheet();
 }
 
 void SettingsPanel::showColumnSpacingChoices(int current, std::function<void(int)> chosen)
 {
-    if (fontDialog)
+    if (sheet)
         return;
-    fontDialog = new ui::ModalOverlay(parentWidget());
-    fontDialog->setObjectName("rrColumnSpacingPopup");
-    fontDialog->setDimmed(true);
-    fontDialog->setGeometry(parentWidget()->rect());
-    fontDialog->dismissed = [this] { dismissFontChoices(); };
-    auto *card = fontDialog->card();
-    auto *rows = card->rows();
-    rows->setContentsMargins(metrics::control::border, metrics::notice::cardMargins.top(),
-                             metrics::control::border, metrics::control::border);
-    rows->setSpacing(0);
-    card->heading(strings::get("reader.column_spacing"),
-                  strings::get("settings.column_spacing_description"), {}, {});
-    auto *choices = new ui::RadioList(card);
-    choices->setMinimumRowHeight(chrome::listActionHeight);
-    choices->setTopDivider(true);
-    for (int percent : { 100, 150, 200, 250, 300 }) {
+    auto *choices = openChoiceSheet("rrColumnSpacing", strings::get("reader.column_spacing"),
+                                    strings::get("settings.column_spacing_description"));
+    const QVector<int> spacings{ 100, 150, 200, 250, 300 };
+    for (int percent : spacings) {
         choices->add(QString("rrColumnSpacing%1").arg(percent), columnSpacingLabel(percent));
         if (percent == current)
             choices->setCurrent(choices->options().size() - 1);
     }
-    choices->chosen = [this, chosen](int index) {
-        dismissFontChoices();
-        chosen(100 + index * 50);
+    choices->chosen = [this, chosen, spacings](int index) {
+        dismissSheet();
+        chosen(spacings[index]);
     };
-    rows->addWidget(choices);
-    const int cardWidth = qMin<int>(metrics::notice::cardWidth,
-                                    parentWidget()->width() - 2 * metrics::notice::sideClearance);
-    choices->setFixedHeight(choices->heightForWidth(cardWidth - 2 * metrics::control::border));
-    card->fitToWidth(cardWidth);
-    fontDialog->centerCard();
-    fontDialog->show();
-    fontDialog->raise();
-    fontDialog->setFocus();
+    ui::fitChoiceSheet(sheet, choices);
+    presentSheet();
 }
 
 namespace {
@@ -1626,11 +2015,11 @@ void SettingsPanel::showStylingChoices(AdvancedText feature, int current,
                                        std::function<void(int)> chosen, const QString &alignment,
                                        int secondary, std::function<void(int, int)> pairChosen)
 {
-    if (fontDialog)
+    if (sheet)
         return;
     ui::PanelTiming timing("styling");
     timing.field("feature", int(feature));
-    fontDialog = new ui::ModalOverlay(parentWidget());
+    sheet = new ui::ModalOverlay(parentWidget());
     const bool tracking = feature == AdvancedText::Tracking;
     const bool paragraph = feature == AdvancedText::ParagraphSpacing;
     const bool spacing = feature == AdvancedText::WordSpacing || tracking
@@ -1673,11 +2062,11 @@ void SettingsPanel::showStylingChoices(AdvancedText feature, int current,
     const auto text = [key](const QString &suffix) {
         return strings::get((key + suffix).toUtf8().constData());
     };
-    fontDialog->setObjectName(prefix + "Popup");
-    fontDialog->setDimmed(true);
-    fontDialog->setGeometry(parentWidget()->rect());
-    fontDialog->dismissed = [this] { dismissFontChoices(); };
-    auto *card = fontDialog->card();
+    sheet->setObjectName(prefix + "Popup");
+    sheet->setDimmed(true);
+    sheet->setGeometry(parentWidget()->rect());
+    sheet->dismissed = [this] { dismissSheet(); };
+    auto *card = sheet->card();
     auto *rows = card->rows();
     rows->setContentsMargins(metrics::control::border, metrics::control::border,
                              metrics::control::border, metrics::control::border);
@@ -1701,7 +2090,7 @@ void SettingsPanel::showStylingChoices(AdvancedText feature, int current,
     close->setRule(Qt::LeftEdge);
     close->setFixedWidth(chrome::cellWidth);
     headerRow->addWidget(close);
-    connect(close, &QPushButton::clicked, this, [this] { dismissFontChoices(); });
+    connect(close, &QPushButton::clicked, this, [this] { dismissSheet(); });
     rows->addWidget(header);
 
     auto *preview = new StylingPreview(card);
@@ -1927,9 +2316,7 @@ void SettingsPanel::showStylingChoices(AdvancedText feature, int current,
     }
     card->fitToWidth(cardWidth);
     fitStylingCard();
-    fontDialog->show();
-    fontDialog->raise();
-    fontDialog->setFocus();
+    presentSheet();
     showStylingPreview();
     if (!stylingSamples.value(int(feature)).valid() && stylingRequested)
         stylingRequested(feature);
@@ -1937,9 +2324,9 @@ void SettingsPanel::showStylingChoices(AdvancedText feature, int current,
 
 void SettingsPanel::fitStylingCard()
 {
-    if (!fontDialog || !stylingPreview)
+    if (!sheet || !stylingPreview)
         return;
-    auto *card = fontDialog->card();
+    auto *card = sheet->card();
     auto *preview = stylingPreview.data();
     preview->setFixedHeight(preview->property("preferred_height").toInt());
     card->fitToWidth(card->width());
@@ -1951,7 +2338,7 @@ void SettingsPanel::fitStylingCard()
                 qMax(ui::px(120), preview->height() - (card->height() - available)));
         card->fitToWidth(card->width());
     }
-    fontDialog->centerCard();
+    sheet->centerCard();
 }
 
 void SettingsPanel::showStylingPreview()
@@ -1967,13 +2354,26 @@ void SettingsPanel::showStylingPreview()
         stylingSampleReady = {};
         ready();
     }
-    if (auto *same = fontDialog ? fontDialog->findChild<QWidget *>("rrStylingSameNote") : nullptr) {
+    if (auto *same = sheet ? sheet->findChild<QWidget *>("rrStylingSameNote") : nullptr) {
         const bool shown = sample.valid() && !sample.differs;
         if (same->isVisible() != shown) {
             same->setVisible(shown);
             fitStylingCard();
         }
     }
+}
+
+// A Settings list row: a bottom rule, the label size and one fixed row height.
+void SettingsPanel::styleListAction(ui::CaptionButton *button)
+{
+    button->setRule(Qt::BottomEdge);
+    ui::readerStyle(
+            button,
+            QString("QPushButton{font-size:%1px;min-height:%2px;max-height:%2px;border:0;border-radius:0;text-align:left;padding:0 %3px;background:palette(window);color:palette(window-text);} QPushButton:pressed{background:palette(midlight);}")
+                    .arg(int(chrome::labelText))
+                    .arg(int(chrome::listActionHeight))
+                    .arg(int(chrome::inset)));
+    button->setFixedHeight(chrome::listActionHeight);
 }
 
 void SettingsPanel::setStylingSample(AdvancedText feature, const StyleSample &sample)
@@ -1996,9 +2396,9 @@ void SettingsPanel::invalidateStylingSamples(int unchanged)
     }
 }
 
-void SettingsPanel::dismissFontChoices()
+void SettingsPanel::dismissSheet()
 {
-    if (!fontDialog)
+    if (!sheet)
         return;
     // The closed sheet is deleted later. Until then, only the next sheet's
     // preview may answer to the shared name.
@@ -2006,17 +2406,38 @@ void SettingsPanel::dismissFontChoices()
         stylingPreview->setObjectName({});
     stylingPreview.clear();
     stylingSampleReady = {};
-    fontDialog->hide();
-    fontDialog->deleteLater();
-    fontDialog.clear();
+    sheet->hide();
+    sheet->deleteLater();
+    sheet.clear();
+}
+
+void SettingsPanel::presentSheet()
+{
+    sheet->show();
+    sheet->raise();
+    sheet->setFocus();
+    if (sheetShown)
+        sheetShown(sheet);
 }
 
 void SettingsPanel::dismissRestore()
 {
-    if (!restoreDialog || restoreDialog->isHidden())
+    if (restoreDialog && !restoreDialog->isHidden()) {
+        restoreDialog->hide();
+        resetDefaults->setFocus();
+    }
+    if (restorePresetsDialog && !restorePresetsDialog->isHidden()) {
+        restorePresetsDialog->hide();
+        resetPresets->setFocus();
+    }
+}
+
+void SettingsPanel::dismissAutomaticOpeningConfirmation()
+{
+    if (!automaticOpeningDialog || automaticOpeningDialog->isHidden())
         return;
-    restoreDialog->hide();
-    resetDefaults->setFocus();
+    automaticOpeningDialog->hide();
+    automaticOpeningOption->setFocus();
 }
 
 void SettingsPanel::dismissStandbyConfirmation()
@@ -2033,16 +2454,18 @@ void SettingsPanel::hideEvent(QHideEvent *event)
     sectionOpen = false;
     dismissRestore();
     dismissStandbyConfirmation();
-    dismissFontChoices();
+    dismissAutomaticOpeningConfirmation();
+    dismissSheet();
     if (stylingHidden)
         stylingHidden();
+    stylingSamples.clear();
     ui::Panel::hideEvent(event);
 }
 
 void SettingsPanel::resizeEvent(QResizeEvent *event)
 {
     // A rotation can leave too few rows for the current font page. Reopen at the new size.
-    dismissFontChoices();
+    dismissSheet();
     ui::Panel::resizeEvent(event);
 }
 
@@ -2054,6 +2477,83 @@ void SettingsPanel::showDictionaries(bool visible)
     if (!visible && settingsPages->currentIndex() == int(SettingsPage::Dictionaries))
         settingsPages->setCurrentIndex(int(SettingsPage::Display));
     fitRail();
+}
+
+void SettingsPanel::updateFeatureOptions()
+{
+    const char *names[] = { "navigate", "stats", "annotations", "bookmarks", "kosync", "words" };
+    static_assert(sizeof(names) == sizeof(features::keys), "A feature without a name");
+    QStringList hidden;
+    for (int i = 0; i < int(sizeof(names) / sizeof(*names)); ++i)
+        if (featurePreferences.value(features::keys[i]).toBool(false))
+            hidden.append(strings::get((QString("features.") + names[i]).toUtf8().constData()));
+    disabledFeaturesButton->setCaption(
+            hidden.isEmpty() ? strings::get("settings.hidden_features_none") : hidden.join(", "));
+    const bool navigate = features::enabled(featurePreferences, features::Navigate);
+    const bool stats = features::enabled(featurePreferences, features::Stats);
+    navigationBarButton->setVisible(navigate);
+    menuViewButton->setVisible(navigate || stats);
+    denseGraphOption->setVisible(stats);
+    saveWordsOption->setVisible(features::enabled(featurePreferences, features::Words));
+    findChild<QWidget *>("rrDisplayGraphsSection")->setVisible(stats);
+    auto *syncTab = settingsTabButtons[int(SettingsPage::Kosync)];
+    syncTab->setVisible(features::enabled(featurePreferences, features::Kosync));
+    if (syncTab->isHidden() && settingsPages->currentIndex() == int(SettingsPage::Kosync))
+        settingsPages->setCurrentIndex(int(SettingsPage::System));
+}
+
+void SettingsPanel::showDisabledFeatures()
+{
+    if (sheet)
+        return;
+    sheet = new ui::ModalOverlay(parentWidget());
+    sheet->setObjectName("rrDisabledFeaturesPopup");
+    sheet->setDimmed(true);
+    sheet->setGeometry(parentWidget()->rect());
+    sheet->dismissed = [this] { dismissSheet(); };
+    auto *card = sheet->card();
+    auto *rows = card->rows();
+    rows->setContentsMargins(metrics::control::border, metrics::notice::cardMargins.top(),
+                             metrics::control::border, metrics::control::border);
+    rows->setSpacing(0);
+    card->heading(strings::get("settings.disable_features"),
+                  strings::get("settings.disable_features_description"));
+    auto draft = std::make_shared<QJsonObject>(featurePreferences);
+    const char *names[] = { "navigate", "stats", "annotations", "bookmarks", "kosync", "words" };
+    QVector<ui::DescribedOption *> options;
+    for (int i = 0; i < int(sizeof(names) / sizeof(*names)); ++i) {
+        const auto *key = features::keys[i];
+        const auto prefix = QString("features.") + names[i];
+        auto *option = checklistOption(card, QString("rrDisableFeature_%1").arg(key),
+                                       strings::get(prefix.toUtf8().constData()),
+                                       strings::get((prefix + "_description").toUtf8().constData()),
+                                       i == 0);
+        option->setChecked(draft->value(key).toBool(false));
+        rows->addWidget(option);
+        options.append(option);
+        connect(option, &QCheckBox::clicked, card,
+                [draft, key](bool hidden) { (*draft)[key] = hidden; });
+    }
+    auto *cancel = ui::makeModalButton(
+            card, { strings::get("common.cancel"), "rrDisabledFeaturesCancel" }, false);
+    auto *done = ui::makeModalButton(
+            card, { strings::get("common.done"), "rrDisabledFeaturesDone" }, true);
+    card->adaptiveActions({ cancel, done });
+    connect(cancel, &QPushButton::clicked, this, [this] { dismissSheet(); });
+    connect(done, &QPushButton::clicked, this, [this, draft] {
+        featurePreferences = *draft;
+        dismissSheet();
+        updateFeatureOptions();
+        if (refitRequested)
+            refitRequested();
+    });
+    const int width =
+            qMin<int>(ui::px(1064), parentWidget()->width() - 2 * metrics::notice::sideClearance);
+    for (auto *option : options)
+        option->setFixedHeight(option->heightForWidth(width - 2 * metrics::control::border));
+    card->fitToWidth(width);
+    sheet->centerCard();
+    presentSheet();
 }
 
 void SettingsPanel::showPowerManagement(bool visible)

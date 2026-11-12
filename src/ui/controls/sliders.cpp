@@ -471,8 +471,11 @@ SettingSlider *sliderRow(QWidget *parent, QVBoxLayout *rows, const char *name,
     auto *caption = row->caption();
     auto *captionRows = new QVBoxLayout(caption);
     const int labelHeight = markerLabels.isEmpty() ? 0 : int(metrics::control::sliderLabelHeight);
-    captionRows->setContentsMargins(0, labelHeight, metrics::control::captionRight, 0);
+    captionRows->setContentsMargins(0, labelHeight, 0, 0);
     row->setMarkerBand(labelHeight);
+    // The caption includes the gap before the controls. The title keeps it
+    // free; the "Currently:" line below may use it.
+    row->setCaptionOverhang(true);
     captionRows->setSpacing(px(2));
     auto *heading = new QHBoxLayout;
     heading->setContentsMargins(0, 0, 0, 0);
@@ -495,16 +498,29 @@ SettingSlider *sliderRow(QWidget *parent, QVBoxLayout *rows, const char *name,
             styles::font(metrics::control::captionValueText) + "color:palette(placeholder-text);";
     readerStyle(prefixLabel, secondary);
     readerStyle(value, secondary);
-    current->addWidget(prefixLabel);
-    current->addWidget(value);
+    prefixLabel->setSecondaryInk(true);
+    value->setSecondaryInk(true);
+    // "Currently:" and its value are two labels. Align both to the top of the
+    // line and their text to the top of each label, so they share a baseline
+    // even when the row gives them different heights.
+    for (auto *part : { prefixLabel, value })
+        part->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    // "Currently:" keeps the width of its text. A label that may shrink loses
+    // its colon when the line is too wide for the caption, as "Currently:
+    // 11.5 pt" is at 150% text. The line then takes the room it needs from
+    // the caption's right margin and the gap before the controls.
+    prefixLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
+    current->addWidget(prefixLabel, 0, Qt::AlignTop);
+    current->addWidget(value, 0, Qt::AlignTop);
     current->addStretch(1);
     // A caption above the controls has the full width. Its value moves up
     // beside the title, which keeps the row one line shorter.
-    row->stackedChanged = [captionRows, heading, current, prefixLabel, value](bool stacked) {
+    row->stackedChanged = [heading, current, prefixLabel, value](bool stacked) {
         // Above the controls, the value ends at the plus button's edge.
-        auto margins = captionRows->contentsMargins();
-        margins.setRight(stacked ? 0 : int(metrics::control::captionRight));
-        captionRows->setContentsMargins(margins);
+        // Beside them, the title stays clear of the controls.
+        heading->setContentsMargins(
+                0, 0, stacked ? 0 : int(metrics::control::captionRight + metrics::control::itemGap),
+                0);
         // Collapse "Currently:" rather than hide it: some rows hide it
         // themselves, and that choice must survive the move. It takes no
         // height either, so the emptied second line adds no gap.
@@ -515,7 +531,7 @@ SettingSlider *sliderRow(QWidget *parent, QVBoxLayout *rows, const char *name,
             heading->addWidget(value, 0, Qt::AlignRight | Qt::AlignVCenter);
         } else {
             heading->removeWidget(value);
-            current->insertWidget(1, value);
+            current->insertWidget(1, value, 0, Qt::AlignTop);
         }
     };
     row->stackedChanged(row->property("caption_stacked").toBool());
@@ -555,6 +571,7 @@ SettingSlider *sliderRow(QWidget *parent, QVBoxLayout *rows, const char *name,
     QObject::connect(less, &QPushButton::clicked, slider, [slider] { slider->nudge(-1); });
     QObject::connect(more, &QPushButton::clicked, slider, [slider] { slider->nudge(1); });
     slider->committed = std::move(apply);
+    slider->setRowParts(value, less, more);
     return slider;
 }
 } // namespace kobalt::ui

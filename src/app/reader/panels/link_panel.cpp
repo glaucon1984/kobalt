@@ -99,6 +99,14 @@ void LinkPanel::open(const LinkDetails &details, const QRect &reference, const Q
     arrange();
 }
 
+void LinkPanel::dismiss()
+{
+    if (isHidden())
+        return;
+    hide();
+    text->clear();
+}
+
 void LinkPanel::resizeEvent(QResizeEvent *)
 {
     arrange();
@@ -166,13 +174,14 @@ public:
 } // namespace
 
 WebsiteDialog::WebsiteDialog(QWidget *parent)
-    : ui::ChoiceModal(parent, { " ", strings::get("link_panel.browser_confirmation"), {} },
-                      { strings::get("common.cancel"), "rrLinkNo" },
-                      { strings::get("link_panel.open_browser"), "rrLinkOpen" })
+    : ui::ChoiceModal(
+              parent,
+              { " ", strings::get("link_panel.browser_confirmation"), {}, "rrBrowserPrompt" },
+              { strings::get("common.cancel"), "rrLinkNo" },
+              { strings::get("link_panel.open_browser"), "rrLinkOpen" })
 {
     setObjectName("rrBrowserConfirmation");
     auto *content = card();
-    content->findChild<QLabel *>("rrModalTitle")->setObjectName("rrBrowserPrompt");
     address = descriptionLabel();
     address->setObjectName("rrBrowserUrl");
     auto *heading = address->parentWidget();

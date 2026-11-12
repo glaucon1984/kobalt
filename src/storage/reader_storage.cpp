@@ -55,6 +55,11 @@ QString Paths::annotations() const
     return child(directory, "annotations");
 }
 
+QString Paths::customPins() const
+{
+    return child(directory, "custom-pins");
+}
+
 QString Paths::database() const
 {
     return child(directory, "kobalt.sqlite");
@@ -68,6 +73,11 @@ QString Paths::layoutCache() const
 QString Paths::sleepScreen() const
 {
     return child(directory, "cache/sleep-screen.png");
+}
+
+QString Paths::previews() const
+{
+    return child(directory, "cache/previews");
 }
 
 QString Paths::documentCache() const

@@ -8,6 +8,7 @@
 #include <QResizeEvent>
 #include "ui/controls/buttons.h"
 #include "ui/controls/rows.h"
+#include "ui/controls/options.h"
 #include "ui/controls/paging.h"
 #include "ui/controls/text.h"
 #include <QKeyEvent>
@@ -57,6 +58,16 @@ PopupCard::Heading PopupCard::heading(const QString &text, const QString &descri
         result.description = label(description, descriptionName, false);
     contentRows->addWidget(header);
     return result;
+}
+
+void PopupCard::mousePressEvent(QMouseEvent *event)
+{
+    event->accept();
+}
+
+void PopupCard::mouseReleaseEvent(QMouseEvent *event)
+{
+    event->accept();
 }
 
 QLabel *PopupCard::message(const QString &text, const QString &name)
@@ -116,11 +127,16 @@ public:
     {
         setObjectName(action.name);
         setFocusPolicy(Qt::StrongFocus);
-        setProperty("reader_primary_action", primary);
-        readerStyle(this,
-                    "QPushButton{border:none;padding:0;min-height:0;"
-                            + styles::font(metrics::chrome::labelText, primary) + "}");
+        setModalActionPrimary(this, primary);
         setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    }
+
+    void setTopDivider(bool shown)
+    {
+        if (topDivider == shown)
+            return;
+        topDivider = shown;
+        update();
     }
 
     QSize sizeHint() const override
@@ -139,7 +155,7 @@ protected:
         const auto paper = palette().color(QPalette::Window);
         const auto ink = palette().color(isEnabled() ? QPalette::WindowText : QPalette::Mid);
         painter.fillRect(rect(), isEnabled() && isDown() ? sectionColor(this) : paper);
-        auto edges = Edges(Qt::TopEdge);
+        auto edges = topDivider ? Edges(Qt::TopEdge) : Edges{};
         if (property("reader_modal_left_rule").toBool())
             edges |= Qt::LeftEdge;
         paintEdges(painter, rect(), edges, dividerColor(this), metrics::control::border);
@@ -152,17 +168,75 @@ protected:
                                                  -metrics::control::outlinedVerticalPadding),
                                  text(), Qt::AlignCenter);
     }
+
+private:
+    bool topDivider = true;
 };
 
-QLabel *modalContent(PopupCard *card, const ModalContent &content)
+PopupCard::Heading modalContent(PopupCard *card, const ModalContent &content)
 {
     Q_ASSERT(!content.title.trimmed().isEmpty());
     if (!content.image.isNull())
         card->image(content.image);
-    return card->heading(content.title, content.description, "rrModalTitle", "rrModalDescription")
-            .description;
+    return card->heading(content.title, content.description,
+                         content.titleName.isEmpty() ? QStringLiteral("rrModalTitle")
+                                                     : content.titleName,
+                         "rrModalDescription");
 }
 } // namespace
+
+void PopupCard::updateListDividers()
+{
+    // Lists own their bottom rule. The card supplies a top rule only when
+    // the preceding visible content does not already close that boundary.
+    const auto visit = [](auto &&visit, QBoxLayout *layout, bool preceded,
+                          bool previousBottom) -> bool {
+        for (int i = 0; i < layout->count(); ++i) {
+            auto *widget = layout->itemAt(i)->widget();
+            if (!widget || widget->isHidden())
+                continue;
+            const bool top = preceded && (!previousBottom || layout->spacing() > 0);
+            if (auto *row = dynamic_cast<ListRow *>(widget)) {
+                row->setTopDivider(top);
+                previousBottom = true;
+            } else if (auto *list = dynamic_cast<RadioList *>(widget)) {
+                list->setTopDivider(top);
+                previousBottom = !list->options().isEmpty()
+                        && list->heightForWidth(list->width()) == list->height();
+            } else if (auto *header = dynamic_cast<ListHeader *>(widget)) {
+                header->setTopDivider(top);
+                previousBottom = true;
+            } else if (auto *pager = dynamic_cast<PagerBar *>(widget)) {
+                pager->setTopDivider(top);
+                previousBottom = false;
+            } else if (auto *nested = dynamic_cast<QBoxLayout *>(widget->layout());
+                       nested && nested->direction() == QBoxLayout::TopToBottom) {
+                previousBottom = visit(visit, nested, preceded,
+                                       previousBottom && layout->spacing() == 0
+                                               && nested->contentsMargins().top() == 0);
+                if (nested->contentsMargins().bottom() > 0)
+                    previousBottom = false;
+            } else {
+                previousBottom = false;
+            }
+            preceded = true;
+        }
+        return previousBottom;
+    };
+    const bool bottom = visit(visit, contentRows, false, false);
+    if (actionRows) {
+        int visible = 0;
+        for (int i = 0; i < actionRows->count(); ++i) {
+            auto *button = dynamic_cast<ModalButton *>(actionRows->itemAt(i)->widget());
+            if (!button || button->isHidden())
+                continue;
+            const bool stacked = actionRows->direction() == QBoxLayout::TopToBottom;
+            button->setTopDivider(!bottom || contentRows->spacing() > 0
+                                  || (stacked && visible > 0));
+            ++visible;
+        }
+    }
+}
 
 void PopupCard::fitToWidth(int width)
 {
@@ -238,23 +312,20 @@ void PopupCard::fitToWidth(int width)
         label->setMaximumHeight(QWIDGETSIZE_MAX);
         label->setFixedHeight(qMax(0, label->heightForWidth(textWidth)));
     }
-    // The heading's labels sit in a nested row and are measured by its layout. When a label's
-    // text changed after the last fit (the KOSync comparison fills its description once the
-    // positions are compared), the row's layout item and this layout still hold the heights of
-    // the previous text, so the card would keep its old, shorter height and clip the new text.
-    // Drop those caches before measuring.
-    for (auto *row : findChildren<QWidget *>(QString(), Qt::FindDirectChildrenOnly)) {
-        if (auto *rowLayout = row->layout()) {
-            rowLayout->invalidate();
-            row->updateGeometry();
-        }
-    }
-    contentRows->invalidate();
+    // A changed label invalidates its own layout immediately, but the parent
+    // layout still caches the heading widget's height until LayoutRequest is
+    // delivered. fitCard() can run in that same callback, so invalidate the
+    // enclosing widget measurements before asking for the card's height.
+    for (auto *widget : findChildren<QWidget *>(QString(), Qt::FindDirectChildrenOnly))
+        if (widget->layout())
+            widget->updateGeometry();
     // Measure nested wrapped content at the fixed width. adjustSize() uses
     // the layout's natural width and can leave too little height for a footer.
     const int height = contentRows->hasHeightForWidth() ? contentRows->totalHeightForWidth(width)
                                                         : contentRows->totalSizeHint().height();
     resize(width, height);
+    contentRows->activate();
+    updateListDividers();
 }
 
 void PopupCard::fitToHeight(int height)
@@ -274,6 +345,8 @@ void PopupCard::fitToHeight(int height)
     const int natural = measure();
     if (natural <= height) {
         resize(width(), natural);
+        contentRows->activate();
+        updateListDividers();
         return;
     }
     if (!rowPager) {
@@ -345,6 +418,7 @@ void PopupCard::showRowPage(int page)
     resize(width(), height);
     // Place the page's rows now, so they take touches where they are drawn.
     contentRows->activate();
+    updateListDividers();
 }
 
 namespace {
@@ -367,7 +441,12 @@ protected:
         const qreal base = below ? height() : 0;
         const qreal tip = below ? 1 : height() - 1;
         QPolygonF triangle;
-        triangle << QPointF(1, base) << QPointF(width() / 2.0, tip) << QPointF(width() - 1, base);
+        if (property("card_left").toBool())
+            triangle << QPointF(0, 1) << QPointF(width() - 1, height() / 2.0)
+                     << QPointF(0, height() - 1);
+        else
+            triangle << QPointF(1, base) << QPointF(width() / 2.0, tip)
+                     << QPointF(width() - 1, base);
         painter.setPen(Qt::NoPen);
         painter.setBrush(palette().color(QPalette::Window));
         painter.drawPolygon(triangle);
@@ -376,6 +455,55 @@ protected:
     }
 };
 } // namespace
+
+ButtonFeedback::ButtonFeedback(QWidget *parent) : ModalOverlay(parent), hideTimer(this)
+{
+    setInputBarrier(false);
+    setAttribute(Qt::WA_TransparentForMouseEvents);
+    label = card()->message({}, "rrButtonFeedbackText");
+    readerStyle(label, styles::font(metrics::chrome::labelText));
+    hideTimer.setSingleShot(true);
+    hideTimer.setInterval(1500);
+    connect(&hideTimer, &QTimer::timeout, this, &QWidget::hide);
+    hide();
+}
+
+void ButtonFeedback::showFor(QWidget *button, const QString &text, const Placement &placement)
+{
+    if (!button || !button->isVisible())
+        return;
+    target = button;
+    this->placement = placement;
+    label->setText(text);
+    setGeometry(parentWidget()->rect());
+    reposition();
+    show();
+    raise();
+    hideTimer.start();
+}
+
+void ButtonFeedback::reposition()
+{
+    if (!target)
+        return;
+    const auto margins = card()->rows()->contentsMargins();
+    const int wanted =
+            interfaceTextWidth(label->text(), label->font()) + margins.left() + margins.right();
+    card()->fitToWidth(qMin<int>(wanted, width() - 2 * metrics::notice::sideClearance));
+    const QRect area = placement.area.isEmpty() ? target->rect() : placement.area;
+    QRect bounds(mapFromParent(target->mapTo(parentWidget(), area.topLeft())), area.size());
+    // Overlap the bar with the card's border as well as its triangle.
+    const int overlap = qMin(px(24), bounds.height() / 4);
+    if (placement.side != AnchorSide::Left)
+        bounds.adjust(0, overlap, 0, -overlap);
+    anchorTo(bounds, placement.side, placement.sideOffset);
+}
+
+void ButtonFeedback::hideEvent(QHideEvent *event)
+{
+    hideTimer.stop();
+    ModalOverlay::hideEvent(event);
+}
 
 ModalOverlay::ModalOverlay(QWidget *parent) : QWidget(parent)
 {
@@ -490,15 +618,34 @@ void ModalOverlay::centerCard()
         return;
     }
     const int gap = ui::px(16), inset = ui::px(24);
+    const int half = ui::px(16);
+    const int left = anchor.left() - content->width() - gap;
+    if (anchorSide == AnchorSide::Left && left >= inset) {
+        const int x = qBound(inset, left + anchorOffset.x(), anchor.left() - content->width() - 4);
+        const int y = qBound(inset, anchor.center().y() - content->height() / 2 + anchorOffset.y(),
+                             qMax(inset, height() - content->height() - inset));
+        content->move(x, y);
+        const int center =
+                qBound(y + half + 2, anchor.center().y(), content->geometry().bottom() - half - 2);
+        pointer->setProperty("card_left", true);
+        const int base = content->geometry().right() - 1;
+        pointer->setGeometry(base, center - half, anchor.left() - base, 2 * half);
+        pointer->show();
+        pointer->raise();
+        pointer->update();
+        updateInputRegion();
+        return;
+    }
+    pointer->setProperty("card_left", false);
     const int x = qBound(inset, anchor.center().x() - content->width() / 2,
                          qMax(inset, width() - content->width() - inset));
     const int below = anchor.bottom() + gap;
-    const int y = below + content->height() <= height() - inset
-            ? below
-            : anchor.top() - content->height() - gap;
+    const int above = anchor.top() - content->height() - gap;
+    const int y = anchorSide != AnchorSide::Below && above >= inset ? above
+            : below + content->height() <= height() - inset         ? below
+                                                                    : above;
     content->move(x, qBound(inset, y, qMax(inset, height() - content->height() - inset)));
     const bool cardBelow = content->y() > anchor.center().y();
-    const int half = ui::px(16);
     const int center = qBound(content->x() + half + 2, anchor.center().x(),
                               content->geometry().right() - half - 2);
     pointer->setProperty("card_below", cardBelow);
@@ -591,6 +738,7 @@ void ModalOverlay::mousePressEvent(QMouseEvent *event)
     event->accept();
 }
 
+// The card accepts its own taps, so only a tap on the backdrop arrives here.
 void ModalOverlay::mouseReleaseEvent(QMouseEvent *event)
 {
     if (dismissed)
@@ -615,6 +763,14 @@ bool ModalOverlay::focusNextPrevChild(bool next)
     return true;
 }
 
+void setModalActionPrimary(QPushButton *button, bool primary)
+{
+    button->setProperty("reader_primary_action", primary);
+    readerStyle(button,
+                "QPushButton{border:none;padding:0;min-height:0;"
+                        + styles::font(metrics::chrome::labelText, primary) + "}");
+}
+
 QPushButton *makeModalButton(QWidget *parent, const ModalAction &action, bool primary)
 {
     return new ModalButton(action, primary, parent);
@@ -624,7 +780,9 @@ NoticeModal::NoticeModal(QWidget *parent, const ModalContent &content, const Mod
     : ModalOverlay(parent)
 {
     setDimmed(true);
-    description = modalContent(card(), content);
+    const auto heading = modalContent(card(), content);
+    title = heading.title;
+    description = heading.description;
     primary = makeModalButton(card(), action, true);
     card()->adaptiveActions({ primary });
     setProperty("reader_standard_modal", true);
@@ -636,7 +794,9 @@ ChoiceModal::ChoiceModal(QWidget *parent, const ModalContent &content,
     : ModalOverlay(parent)
 {
     setDimmed(true);
-    description = modalContent(card(), content);
+    const auto heading = modalContent(card(), content);
+    title = heading.title;
+    description = heading.description;
     secondary = makeModalButton(card(), secondaryAction, false);
     primary = makeModalButton(card(), primaryAction, true);
     card()->adaptiveActions({ secondary, primary });

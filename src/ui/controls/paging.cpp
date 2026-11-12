@@ -250,7 +250,13 @@ void PagerBar::updateHint()
 
 void PagerBar::resizeEvent(QResizeEvent *)
 {
-    const int top = metrics::control::border, cell = metrics::chrome::cellWidth;
+    arrange();
+}
+
+void PagerBar::arrange()
+{
+    const int top = topDivider ? int(metrics::control::border) : 0;
+    const int cell = metrics::chrome::cellWidth;
     previous->setGeometry(0, top, cell, height() - top);
     next->setGeometry(width() - cell, top, cell, height() - top);
     counter->setGeometry(cell, top, qMax(1, width() - 2 * cell), height() - top);
@@ -260,10 +266,11 @@ void PagerBar::paintEvent(QPaintEvent *)
 {
     QPainter painter(this);
     painter.fillRect(rect(), palette().color(QPalette::Window));
-    painter.fillRect(0, 0, width(), metrics::control::border, dividerColor(this));
+    if (topDivider)
+        painter.fillRect(0, 0, width(), metrics::control::border, dividerColor(this));
 }
 
-void PagerBar::setPage(int page, int count, const QString &label, bool wrap)
+void PagerBar::setPage(int page, int count, const QString &label, bool wrap, const QRect &blank)
 {
     count = qMax(1, count);
     page = qBound(0, page, count - 1);
@@ -273,7 +280,7 @@ void PagerBar::setPage(int page, int count, const QString &label, bool wrap)
     this->page = page;
     this->count = count;
     this->wrap = wrap;
-    blankArea = {};
+    blankArea = blank;
     updateHint();
     previous->setEnabled(count > 1 && (wrap || page > 0));
     next->setEnabled(count > 1 && (wrap || page + 1 < count));

@@ -1,4 +1,5 @@
 #pragma once
+#include <QVector>
 #include "storage/reader_storage.h"
 #include "reading/sleep_screen.h"
 #include "platform/api/window_presentation.h"
@@ -14,6 +15,8 @@ public:
     void forget();
     void prepare(bool enabled, bool powerOff = false);
     void preparePowerOff(sleep::Snapshot);
+    // Rebuild from the last book's durable privacy choice, never a cached image.
+    bool preparePrivateScreen(bool powerOff = false, const QString &identity = {});
     void persistPowerOff(const QString &identity);
     void present();
     void clear();
@@ -28,6 +31,8 @@ private:
     void updateBattery();
     storage::Paths paths;
     sleep::Snapshot snapshot, shutdownBackdrop;
+    // What lies under the status, so a battery change repaints only that.
+    QVector<QImage> underlay;
     void save(const sleep::Snapshot &, const QString &identity);
     bool poweredOff = false, invalidated = false;
     void compose();

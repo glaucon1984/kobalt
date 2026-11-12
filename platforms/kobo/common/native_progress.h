@@ -1,5 +1,5 @@
 #pragma once
-#include "reading/reading_progress.h"
+#include "reading/native_save_result.h"
 #include <QObject>
 #include <QPointer>
 #include <QVariantMap>
@@ -17,10 +17,9 @@ public:
     ~NativeProgress() override;
     static bool available();
     ReadingProgress read(QString *error = nullptr) const;
-    bool write(const ReadingProgress &expected, const QString &location, double percent,
-               bool finished, ReadingProgress *verified, QString *error,
-               const ReadingEstimates *estimates = nullptr,
-               const ReadingActivity *activity = nullptr);
+    NativeSaveResult write(const ReadingProgress &expected, const QString &location, double percent,
+                           bool finished, const ReadingEstimates *estimates = nullptr,
+                           const ReadingActivity *activity = nullptr);
     bool markReading();
     // Records the book as recently read for Nickel's Home screen, as Nickel's
     // reader does when a book closes. Best effort; a busy database skips it.
@@ -41,6 +40,10 @@ public:
         changed = false;
         return value;
     }
+
+    // Counts the changes that takeChange() reports. A caller that keeps
+    // Nickel data of its own compares it to know when to read that data again.
+    quint64 changes() const { return changeCount; }
 
     // Called on the GUI thread, inside Nickel's sync or USB signal, once
     // takeChange() has a change to report.
@@ -73,6 +76,7 @@ private:
     void noteChange()
     {
         changed = true;
+        ++changeCount;
         if (changeAvailable)
             changeAvailable();
     }
@@ -83,6 +87,7 @@ private:
 #endif
     QString book;
     quint64 connectionId;
+    quint64 changeCount = 0;
     bool transitioning = false, processing = false, changed = true, signalled = false;
     QVariantMap persisted(QString *error) const;
 };

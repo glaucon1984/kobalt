@@ -1,3 +1,4 @@
+#include "render/page_content.h"
 #include "ui/controls/rows.h"
 #include "ui/controls/text.h"
 #include "ui/panel_timing.h"
@@ -39,8 +40,8 @@ void Reader::refreshRenderNotice()
     }
     const auto text = strings::get(message);
     const int percent = progress.overallPercent();
-    const QRect progressRect = showNotice && !property("reader_dark").toBool()
-                    && page->image.text("kobalt.animation_text_only") == "true"
+    const QRect progressRect =
+            showNotice && !property("reader_dark").toBool() && pageTextOnly(page->image)
             ? busyNotice->progressUpdateRect(percent, text)
             : QRect();
     setProperty("reader_progress_update", progressRect);
@@ -55,12 +56,13 @@ void Reader::refresh()
     if (lifecycleHidden)
         return;
     // A KOSync result that waited while the reader was hidden continues now.
-    if (kosyncReaderReady && !kosyncReaderRetry.isActive() && isVisible() && !services.suspended())
-        continueKosyncWhenReady(std::move(kosyncReaderReady));
+    if (syncCoordinator && isVisible() && !services.suspended())
+        syncCoordinator->resume();
     const bool darkReady = publishPendingDarkMode();
     if (general->isVisible())
         static_cast<SettingsPanel *>(general)->updateButtonControls(
-                buttonControls(), preferences, savingButtonControls || savingDarkMode >= 0);
+                buttonControls(), preferences,
+                savingButtonControls || savingDarkMode >= 0 || savingDenseGraph);
     const bool dark = savingDarkMode >= 0 ? bool(savingDarkMode)
             : pendingDarkMode >= 0        ? bool(pendingDarkMode)
                                           : session->state().value("dark_mode").toBool(false);
@@ -69,8 +71,7 @@ void Reader::refresh()
     if (!restoringDefaults)
         darkOption->setChecked(dark);
     darkOption->setEnabled(darkEnabled);
-    lightPopup->setDarkModeShortcut(preferences.value("light_dark_mode_shortcut").toBool(false),
-                                    dark, darkEnabled);
+    lightPopup->setDarkModeShortcut(services.lightAvailable(), dark, darkEnabled);
     if (recordedOpening && !kosyncStarted)
         synchronizeKosync();
     showKosyncChoice();
@@ -85,6 +86,8 @@ void Reader::refresh()
     // new page is painted, in the refresh that paintTurn() requests.
     if (!turnFrame)
         syncKosyncWhileReading();
+    // The refresh that paintTurn() requested: the same page, already painted.
+    const bool afterTurn = turnPainted && !turnFrame;
     if (!turnFrame)
         turnPainted = false;
     if (!darkReady)
@@ -111,6 +114,12 @@ void Reader::refresh()
         page->setViewportTransition(false);
     const auto nextImage = session->image();
     const auto previousPageImage = page->image.cacheKey();
+    // Zen mode's reading stats count each turn that reaches the screen once,
+    // also a page button turn with the menu open. Taps buffered during a
+    // render do not count.
+    if (!session->busy() && session->turnDirection() != 0
+        && nextImage.cacheKey() != previousPageImage)
+        book->countPageTurn();
     showPageImage(nextImage);
     syncAppearancePreview();
     syncLinkDiscovery();
@@ -119,26 +128,41 @@ void Reader::refresh()
     // The panel needs far longer to draw a page than this function needs
     // for the rest of its work. On a plain page turn, paint now and let the
     // controls, the chapter graph and the saved position follow.
-    const bool readingTurn = !resizePending && isVisible() && !appearanceEdit.panelOpen()
-            && !topControls->isVisible() && !general->isVisible() && !choices->isVisible()
-            && !syncDialog && !kosyncDialog && !finishDialog && !services.suspended()
-            && !applyingText && !session->busy() && session->turnDirection() != 0
-            && nextImage.cacheKey() != previousPageImage;
+    // Nothing covers the page and its image changed. Asked again further
+    // down, after the control syncs have run.
+    const auto pageExposed = [&] {
+        return isVisible() && !sheetOpen() && !topControls->isVisible() && !positionPromptOpen()
+                && !services.suspended() && !applyingText
+                && nextImage.cacheKey() != previousPageImage;
+    };
+    const bool readingTurn =
+            !resizePending && pageExposed() && !session->busy() && session->turnDirection() != 0;
     if (readingTurn) {
         paintTurn();
         return;
     }
-    syncAppearanceControls(pickingFont);
-    syncReadingControls();
+    if (afterTurn && controlsHidden()) {
+        // A page turn changes only what the hidden menu and panels show.
+        // They sync when they open; see syncStaleControls().
+        controlsStale = true;
+        syncReadingState();
+    } else {
+        controlsStale = false;
+        syncAppearanceControls(pickingFont);
+        syncReadingControls();
+    }
     // Jumps and layout changes join the activity batch. Layout memory is
     // saved separately because it is a user setting.
     saveSoon();
     // Wait for the selected preview page before clearing the dimmed frame.
     // Settings can also close the menu later than the tap, after applying.
-    if ((flashAfterMenu || flashAfterPagePreview) && (!flashAfterPagePreview || !session->busy())
-        && isVisible() && !appearanceEdit.panelOpen()
-        && (flashAfterPagePreview || !topControls->isVisible()) && !general->isVisible()
-        && !choices->isVisible()) {
+    // Search opened from the Zen menu covers the page; the flash waits for
+    // the page it returns to. A chapter chosen in the menu is still
+    // rendering when the menu closes: flash the new page, not the old one,
+    // so the jump is one flash and not a flash and then the page.
+    if ((flashAfterMenu || flashAfterPagePreview) && !session->busy() && isVisible() && !sheetOpen()
+        && (flashAfterPagePreview || !topControls->isVisible())
+        && !(searchPanel && searchPanel->isVisible())) {
         const bool preview = std::exchange(flashAfterPagePreview, false);
         flashAfterMenu = false;
         requestFlash(preview ? "page-preview" : "menu");
@@ -147,11 +171,7 @@ void Reader::refresh()
     // Panels invalidate their own pixels. Repaint the reading area only
     // when its content changes, including a completed typography preview.
     if (!readingTurn)
-        page->refreshContent(isVisible() && !appearanceEdit.panelOpen() && !topControls->isVisible()
-                             && !general->isVisible() && !choices->isVisible() && !syncDialog
-                             && !kosyncDialog && !finishDialog && !services.suspended()
-                             && !applyingText && (session->turnDirection() != 0 || passageFrame)
-                             && nextImage.cacheKey() != previousPageImage);
+        page->refreshContent(pageExposed() && (session->turnDirection() != 0 || passageFrame));
     if (!recordedOpening && pagePainted)
         recordOpening();
     publishResize();
@@ -206,7 +226,7 @@ void Reader::syncFrameState()
     // A new page or layout invalidates the held text, but not the gesture.
     // A decoded image keeps the text geometry and its pending lookup.
     if (!appearanceEdit.panelOpen()
-        && (session->busy() || annotationViewportFrame != annotationViewportKey()))
+        && (session->busy() || annotationDraft->viewport() != annotationViewportKey()))
         dismissLookup(true);
     if (!session->busy() && !pendingPassage.position.isEmpty()) {
         // Accept the visit only after the engine confirms a different passage.
@@ -303,8 +323,10 @@ void Reader::syncAppearancePreview()
         appearancePreviewAxis = Axis::None;
     if ((!layoutOpen && !textOpen) || !appearancePreviewFits()) {
         // Navigation can cancel this request without changing the reading image.
-        previewPageRequested = 0;
+        previewPageKey = previewPageRequested = 0;
+        previewPage = {};
         appearancePreview->hide();
+        appearancePreview->clear();
         return;
     }
     // Each kind of preview draws its own bookmark page.
@@ -380,15 +402,14 @@ void Reader::showPageImage(const QImage &nextImage)
     page->setPageAnimationStyle(services.softwarePageAnimations ? pageTurn::selected(preferences)
                                                                 : pageTurn::Style::Off);
     auto displayedImage = nextImage;
-    QPointer<ReaderSession> displayedSource = session;
     if (appearanceEdit.edited() && appearanceEdit.ready() && appearanceEdit.preview()) {
         const auto *preview = appearanceEdit.preview();
         // Opening a panel keeps the current book frame. Use the isolated
         // preview only after appearance or viewport dimensions change.
-        if (session->busy() || !appearance::same(preview->state(), session->state())
+        if (session->busy()
+            || preview->displayedAppearance().settings != session->displayedAppearance().settings
             || preview->image().size() != nextImage.size()) {
             displayedImage = preview->image();
-            displayedSource = appearanceEdit.preview();
         }
     }
     if (displayedImage.cacheKey() != page->image.cacheKey()) {
@@ -406,31 +427,32 @@ void Reader::showPageImage(const QImage &nextImage)
                 ? session->turnDirection()
                 : 0;
     }
-    if (!page->viewportTransition()) {
-        const bool changed = displayedImage.cacheKey() != page->image.cacheKey();
+    if (!page->viewportTransition())
         page->image = std::move(displayedImage);
-        if (changed) {
-            page->setReflowText({});
-            const auto key = page->image.cacheKey();
-            const auto source = displayedSource;
-            // Prepare the sample only after the page is visible. Engine access
-            // stays on the worker thread and never delays this frame's paint.
-            ui::afterNextPaint(page, [this, source, key] {
-                if (!source || source->busy() || page->image.cacheKey() != key
-                    || page->viewportTransition() || lifecycleHidden || closing)
-                    return;
-                const QPointer<Reader> guard(this);
-                source->pageSummary(source->page(), [guard, key](QString, QString text) {
-                    if (guard && guard->page->image.cacheKey() == key
-                        && !guard->page->viewportTransition())
-                        guard->page->setReflowText(text);
-                });
-            });
-        }
-    }
     // Only a turn forward counts towards the session's pace; jumps and reflows do not.
     if (!session->busy())
         book->pace().observe(session->page(), session->turnDirection() > 0);
+}
+
+// The reflow placeholder repeats the word lengths of the displayed page. Read
+// that text only now, when a viewport change is about to show the placeholder:
+// a page turn never asks for it. The engine thread reads it and this thread
+// does not wait; until the answer arrives the placeholder draws plain lines.
+void Reader::sampleReflowText()
+{
+    page->setReflowText({});
+    auto *preview = appearanceEdit.preview();
+    ReaderSession *source =
+            preview && preview->image().cacheKey() == page->image.cacheKey() ? preview : session;
+    if (source->busy() || source->image().cacheKey() != page->image.cacheKey() || lifecycleHidden
+        || closing)
+        return;
+    const auto key = page->image.cacheKey();
+    const QPointer<Reader> guard(this);
+    source->displayedText(source->page(), [guard, key](QString text) {
+        if (guard && guard->page->image.cacheKey() == key && guard->page->viewportTransition())
+            guard->page->setReflowText(text);
+    });
 }
 
 void Reader::paintTurn()
@@ -498,9 +520,9 @@ void Reader::syncAppearanceControls(bool pickingFont)
     if (!sizeSlider->interacting()) {
         const int halfPoints = kobalt::pixelHalfPoints(settings->fontSize());
         sizeSlider->setValue(halfPoints);
-        findChild<QLabel *>("rrTextSizeValue")
-                ->setText(strings::get("reader.text_size_value")
-                                  .arg(QString::number(halfPoints / 2.0, 'f', halfPoints % 2)));
+        sizeSlider->valueLabel()->setText(
+                strings::get("reader.text_size_value")
+                        .arg(QString::number(halfPoints / 2.0, 'f', halfPoints % 2)));
     }
     const auto optical = settings->opticalSizeAxis();
     ui::controlRowOf(opticalSizeSlider)->setVisible(optical.available());
@@ -517,7 +539,7 @@ void Reader::syncAppearanceControls(bool pickingFont)
         opticalSizeSlider->setValue(qRound(settings->opticalSize()));
         const auto caption = strings::get("reader.text_size_value")
                                      .arg(QString::number(opticalSizeSlider->value()));
-        findChild<QLabel *>("rrOpticalSizeValue")->setText(caption);
+        opticalSizeSlider->valueLabel()->setText(caption);
     }
     const auto bionic = settings->state().value("bold_reading").toString("off");
     const bool normalWeight = bionic == "off";
@@ -529,20 +551,18 @@ void Reader::syncAppearanceControls(bool pickingFont)
     };
     choices->setFontAppearance(sampleAppearance);
     fontButton->setAppearance(sampleAppearance);
-    for (const auto *name : { "rrFontWeight", "rrLighter", "rrHeavier", "rrVariableFontWeight",
-                              "rrVariableLighter", "rrVariableHeavier" })
-        if (auto *widget = findChild<QWidget *>(name))
-            widget->setEnabled(normalWeight);
+    for (auto *control : weightControls)
+        control->setEnabled(normalWeight);
     ui::controlRowOf(variableWeightSlider)->setVisible(weightAxis.available());
+    syncTextPresets();
     // Navigation places this panel above the bottom bar. Moving it below
     // the toolbar here would invalidate it before navigation moves it back.
     fitAppearance();
     if (!weightSlider->interacting()) {
         weightSlider->setValue(normalWeight ? settings->thickness() : 0);
-        findChild<QLabel *>("rrFontWeightValue")
-                ->setText(normalWeight
-                                  ? strings::get("reader.weight_value").arg(settings->thickness())
-                                  : strings::get("reader.bionic_weight_locked"));
+        weightSlider->valueLabel()->setText(
+                normalWeight ? strings::get("reader.weight_value").arg(settings->thickness())
+                             : strings::get("reader.bionic_weight_locked"));
     }
     if (weightAxis.available() && !variableWeightSlider->interacting()) {
         variableWeightSlider->setRange(weightAxis.minimum, weightAxis.maximum);
@@ -556,30 +576,56 @@ void Reader::syncAppearanceControls(bool pickingFont)
         variableWeightSlider->setMarkers(stops, ui::SettingSlider::MarkerMode::Stops);
         variableWeightSlider->setPageStep(50);
         variableWeightSlider->setValue(normalWeight ? settings->weight() : weightAxis.defaultValue);
-        findChild<QLabel *>("rrVariableFontWeightValue")
-                ->setText(normalWeight ? QString::number(settings->weight())
-                                       : strings::get("reader.bionic_weight_locked"));
+        variableWeightSlider->valueLabel()->setText(
+                normalWeight ? QString::number(settings->weight())
+                             : strings::get("reader.bionic_weight_locked"));
     }
     if (!spacingSlider->interacting()) {
         spacingSlider->setValue(settings->spacing());
-        findChild<QLabel *>("rrLineSpacingValue")
-                ->setText(strings::get("common.percent").arg(settings->spacing()));
+        spacingSlider->valueLabel()->setText(
+                strings::get("common.percent").arg(settings->spacing()));
     }
     if (!marginSlider->interacting()) {
         marginSlider->setValue(kobalt::marginDesign(settings->margin()));
-        findChild<QLabel *>("rrMarginsValue")
-                ->setText(QString("%1").arg(kobalt::marginDesign(settings->margin())));
+        marginSlider->valueLabel()->setText(
+                QString("%1").arg(kobalt::marginDesign(settings->margin())));
     }
     if (!verticalMarginSlider->interacting()) {
         verticalMarginSlider->setValue(kobalt::marginDesign(settings->topMargin()));
-        findChild<QLabel *>("rrVerticalMarginsValue")
-                ->setText(QString::number(kobalt::marginDesign(settings->topMargin())));
+        verticalMarginSlider->valueLabel()->setText(
+                QString::number(kobalt::marginDesign(settings->topMargin())));
     }
     fontButton->setFace(settings->fontFace());
     for (auto *button : hyphenButtons)
         button->setChecked(button->property("hyphenation").toString() == settings->hyphenation());
     for (auto *button : alignmentButtons)
         button->setChecked(button->property("alignment").toString() == settings->alignment());
+}
+
+bool Reader::controlsHidden() const
+{
+    return !topControls->isVisible() && !bottomControls->isVisible() && !menu->isVisible()
+            && !sheetOpen() && !chapterGraph->isVisible();
+}
+
+void Reader::syncStaleControls()
+{
+    if (!std::exchange(controlsStale, false))
+        return;
+    syncAppearanceControls(choosingTypography && choices->isVisible() && choices->isFontPicker());
+    syncReadingControls();
+}
+
+// The part of syncReadingControls() that does not depend on a visible control.
+void Reader::syncReadingState()
+{
+    if (session->busy())
+        pageScrubber->cancel();
+    page->progressFraction = pageProgressFraction(session->page(), session->pages());
+    if (!session->busy())
+        applyingText = false;
+    refreshRenderNotice();
+    updateOrientationBlock();
 }
 
 void Reader::syncReadingControls()
@@ -601,37 +647,59 @@ void Reader::syncReadingControls()
     if (!session->busy())
         applyingText = false;
     refreshRenderNotice();
-    findChild<QPushButton *>("rrLight")->setEnabled(services.lightAvailable() && !session->busy()
-                                                    && !appearanceEdit.applying());
-    findChild<QPushButton *>("rrLight")->setChecked(lightPopup->isVisible()
-                                                    || appearanceEdit.destination()
-                                                            == AppearanceDestination::Light);
-    findChild<QPushButton *>("rrTypography")->setEnabled(!session->busy());
-    findChild<QPushButton *>("rrLayout")->setEnabled(!session->busy());
+    toolbarButtons.light->setEnabled(services.lightAvailable() && !session->busy()
+                                     && !appearanceEdit.applying());
+    toolbarButtons.light->setChecked(lightPopup->isVisible()
+                                     || appearanceEdit.destination()
+                                             == AppearanceDestination::Light);
+    toolbarButtons.typography->setEnabled(!session->busy());
+    toolbarButtons.layout->setEnabled(!session->busy());
     // Settings applies the newest draft, or waits for the preview to open.
     // Its click handler ignores taps while a panel's changes apply.
-    findChild<QPushButton *>("rrSettings")
-            ->setEnabled(!session->busy() || appearanceEdit.applying());
-    findChild<QPushButton *>("rrTypography")
-            ->setChecked(!general->isVisible() && appearanceEdit.panelOpen()
-                         && panels->currentIndex() == 0);
-    findChild<QPushButton *>("rrLayout")
-            ->setChecked(!general->isVisible() && appearanceEdit.panelOpen()
-                         && panels->currentIndex()
-                                 != int(kobalt::reader::AppearancePage::Typography));
-    findChild<QPushButton *>("rrSettings")->setChecked(general->isVisible());
+    toolbarButtons.settings->setEnabled(!session->busy() || appearanceEdit.applying());
+    toolbarButtons.typography->setChecked(!general->isVisible() && appearanceEdit.panelOpen()
+                                          && panels->currentIndex() == 0);
+    toolbarButtons.layout->setChecked(!general->isVisible() && appearanceEdit.panelOpen()
+                                      && panels->currentIndex()
+                                              != int(kobalt::reader::AppearancePage::Typography));
+    toolbarButtons.settings->setChecked(general->isVisible());
     const bool settingsOpen = general->isVisible();
-    for (auto *action : std::initializer_list<QWidget *>{
-                 toolbarComposition.exitAction, toolbarComposition.settings,
-                 toolbarComposition.bookmarks, toolbarComposition.annotate,
-                 toolbarComposition.search })
+    // Zen mode moves Search, Annotate and Bookmarks to the bottom tabs.
+    const bool zen = zenMode();
+    for (auto *action : std::initializer_list<QWidget *>{ toolbarComposition.exitAction,
+                                                          toolbarComposition.settings })
         if (action)
             action->setVisible(!settingsOpen);
-    toolbarComposition.formattingWarning->setVisible(!settingsOpen && session->formattingWarning());
-    findChild<QPushButton *>("rrGraph")->setEnabled(!session->busy() && !appearanceEdit.applying());
-    findChild<QPushButton *>("rrGraph")->setChecked(chapterGraph->isVisible()
-                                                    || appearanceEdit.destination()
-                                                            == AppearanceDestination::Stats);
+    toolbarComposition.search->setVisible(!settingsOpen && !zen);
+    const bool bookmarksShown = features::enabled(preferences, features::Bookmarks);
+    const bool annotationsShown = features::enabled(preferences, features::Annotations);
+    const bool wordsShown = savedWords && features::enabled(preferences, features::Words);
+    const auto marksLabel = strings::get(bookmarksShown && annotationsShown ? "reader.bookmarks"
+                                                 : bookmarksShown           ? "bookmarks.title"
+                                                 : annotationsShown         ? "annotations.tab"
+                                                 : wordsShown               ? "words.title"
+                                                                            : "reader.bookmarks");
+    if (toolbarComposition.bookmarks->accessibleName() != marksLabel) {
+        toolbarComposition.bookmarks->setAccessibleName(marksLabel);
+        toolbarComposition.bookmarks->setToolTip(marksLabel);
+        // Change only the icon. ui::iconAction would also reset the toolbar
+        // button to the outlined action style.
+        if (auto *button = dynamic_cast<ui::Button *>(toolbarComposition.bookmarks))
+            button->setIconConfiguration(
+                    { bookmarksShown ? ui::ControlIcon::Bookmark : ui::ControlIcon::Note,
+                      ui::IconRendition::Action });
+    }
+    toolbarComposition.annotate->setVisible(
+            !settingsOpen && !zen && features::enabled(preferences, features::Annotations));
+    toolbarComposition.bookmarks->setVisible(!settingsOpen && !zen
+                                             && (bookmarksShown || annotationsShown || wordsShown));
+    toolbarComposition.formattingWarning->setVisible(!settingsOpen && !zen
+                                                     && session->formattingWarning());
+    toolbarButtons.graph->setEnabled(!session->busy() && !appearanceEdit.applying());
+    toolbarButtons.graph->setChecked(chapterGraph->isVisible()
+                                     || appearanceEdit.destination()
+                                             == AppearanceDestination::Stats);
+    chapterGraph->setModeEnabled(!savingButtonControls && savingDarkMode < 0 && !savingDenseGraph);
     if (chapterGraph->isVisible())
         updateGraph();
     updateOrientationBlock();
@@ -742,9 +810,13 @@ void Reader::updateMenuStatus()
             : QString();
     if (menuSession->text() != session)
         menuSession->setText(session);
-    menuSession->setVisible(!hideNativeStatus() && !session.isEmpty());
+    menuSession->setVisible(!hideNativeStatus() && !zenMode() && !session.isEmpty());
     if (clockChanged && navigation && topControls->isVisible())
         navigation->updateSessionGeometry();
+    // Zen mode centers the clock in its group and shows a low battery, and
+    // its reading stats follow the minutes read.
+    if (clockChanged && navigation && topControls->isVisible() && zenMode())
+        syncNavigation();
     if (chapterGraph && chapterGraph->isVisible())
         updateReadingStats();
 }
@@ -755,7 +827,8 @@ void Reader::updateReadingStats()
     const auto reading = book->sessionReadingMilliseconds();
     const auto estimates = book->estimates();
     chapterGraph->setReading(int(reading / 60000), session->totalWords(),
-                             estimates.chapterMilliseconds, estimates.bookMilliseconds);
+                             estimates.chapterMilliseconds, estimates.bookMilliseconds,
+                             book->sessionPageTurns());
 }
 
 } // namespace kobalt::reader

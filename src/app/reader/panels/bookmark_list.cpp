@@ -18,6 +18,7 @@
 #include <climits>
 #include <QLineEdit>
 #include <QGridLayout>
+#include <QStackedLayout>
 #include <QVBoxLayout>
 #include <QTimer>
 #include <QStyle>
@@ -28,7 +29,6 @@
 
 namespace kobalt {
 namespace chrome = ui::metrics::chrome;
-namespace strip = ui::metrics::contents;
 
 BookmarkList::BookmarkList(QWidget *parent, KeyboardFactory factory)
     : Panel(parent), makeKeyboard(std::move(factory))
@@ -37,25 +37,12 @@ BookmarkList::BookmarkList(QWidget *parent, KeyboardFactory factory)
     setObjectName("rrBookmarkList");
     close = new ui::CellButton(ui::ControlIcon::Close, this);
     close->setObjectName("rrBookmarkListClose");
-    close->setRule(Qt::RightEdge);
+    close->setRule(Qt::LeftEdge);
     close->setAccessibleName(strings::get("bookmarks.close"));
     connect(close, &QPushButton::clicked, this, [this] {
         if (back)
             back();
     });
-    listHeader = new ui::ListHeader(this);
-    listHeader->setTrailingInset(chrome::cellWidth);
-    summary = listHeader->leftLabel();
-    summary->setObjectName("rrBookmarkListSummary");
-    pageHeading = listHeader->rightLabel();
-    pageHeading->setObjectName("rrBookmarkListPageHeading");
-    for (auto *label : { summary, pageHeading }) {
-        label->setFont(ui::interfaceFont(chrome::captionText));
-        ui::readerStyle(
-                label,
-                ui::styles::font(chrome::captionText)
-                        + "background:transparent;border:none;color:palette(placeholder-text);");
-    }
     empty = new ui::InterfaceLabel(strings::get("bookmarks.empty"), this);
     empty->setObjectName("rrBookmarkListEmpty");
     empty->setTextFormat(Qt::PlainText);
@@ -104,19 +91,29 @@ BookmarkList::BookmarkList(QWidget *parent, KeyboardFactory factory)
         if (tabRequested)
             tabRequested(true);
     });
-    sortButton = new ui::CellButton(ui::ControlIcon::Sort, this);
+    // The strip below the tabs, as in the Library: the sort on the left and
+    // the tab's action on the right. paintEvent draws its divider.
+    sortButton = new ui::CaptionDropdown(this);
+    sortButton->label = strings::get("marks.sort_title");
     moreButton = new ui::CellButton(ui::ControlIcon::More, this);
     moreButton->setObjectName("rrAnnotationMore");
     moreButton->setAccessibleName(strings::get("annotations.more"));
-    moreButton->setRule(Qt::LeftEdge);
+    // The cell carries the strip's divider; a button's usual minimum height
+    // would reach under the rows.
+    moreButton->setRule(ui::Edges(Qt::LeftEdge) | Qt::BottomEdge);
+    ui::readerStyle(moreButton, "QPushButton{min-height:0;}");
+    moreButton->setMinimumHeight(0);
     connect(moreButton, &QPushButton::clicked, this, [this] {
         closeSort();
-        if (actionsRequested)
+        if (words) {
+            if (allWordsRequested)
+                allWordsRequested();
+        } else if (actionsRequested) {
             actionsRequested();
+        }
     });
     sortButton->setObjectName("rrMarksSort");
     sortButton->setAccessibleName(strings::get("marks.sort_title"));
-    sortButton->setRule(Qt::LeftEdge);
     connect(sortButton, &QPushButton::clicked, this, [this] { openSort(); });
     hide();
 }
@@ -138,8 +135,144 @@ BookmarkList::~BookmarkList()
     closePin();
 }
 
+void BookmarkList::setWordsView(QWidget *view)
+{
+    wordsView = view;
+    wordsTab = new ui::Button(strings::get("words.tab"), this);
+    wordsTab->setObjectName("rrWordsTab");
+    wordsTab->setCheckable(true);
+    static_cast<ui::Button *>(wordsTab)->setPaintMode(ui::ButtonPaintMode::ToolbarCell);
+    wordsTab->setFont(ui::brandFont(chrome::titleText));
+    ui::readerStyle(wordsTab,
+                    "QPushButton{border:none;padding:0;min-height:0;"
+                            + ui::styles::brand(chrome::titleText) + "}");
+    connect(wordsTab, &QPushButton::clicked, this, [this] {
+        if (wordsRequested)
+            wordsRequested();
+    });
+    arrange();
+}
+
+void BookmarkList::addCoveringPanel(QWidget *panel)
+{
+    coveringPanels.append(panel);
+    panel->setGeometry(rect());
+}
+
+void BookmarkList::showWords()
+{
+    if (!wordsView)
+        return;
+    if (loading && annotations && loadingCancelled)
+        loadingCancelled();
+    closePin();
+    closeSort();
+    words = true;
+    annotations = loading = false;
+    arrange();
+    redraw();
+    show();
+    raise();
+    wordsView->show();
+    wordsView->raise();
+}
+
+void BookmarkList::showPinHelp()
+{
+    if (pinHelp)
+        return;
+    if (keyboard)
+        keyboard->hide();
+    placePin();
+#if defined(KOBALT_CONFIG_DIR)
+    const auto location = strings::get("bookmarks.custom_help_kobo");
+#elif defined(Q_OS_ANDROID)
+    const auto location = strings::get("bookmarks.custom_help_android");
+#else
+    const auto location = strings::get("bookmarks.custom_help_desktop").arg(customPinDirectory);
+#endif
+    const auto description = location + "\n\n" + strings::get("bookmarks.custom_help_reload")
+            + "\n\n" + strings::get("bookmarks.custom_help_limits");
+    auto *notice = new ui::NoticeModal(
+            parentWidget(), { description, strings::get("bookmarks.custom_help_title"), {} },
+            { strings::get("common.ok"), "rrPinHelpClose" });
+    pinHelp = notice;
+    notice->setObjectName("rrPinHelpPopup");
+    notice->setGeometry(parentWidget()->rect());
+    connect(notice->primaryButton(), &QPushButton::clicked, this, [this] { closePinHelp(); });
+    notice->dismissed = [this] { closePinHelp(); };
+    notice->show();
+    notice->raise();
+    notice->fitCard();
+}
+
+void BookmarkList::showPinErrors()
+{
+    if (pinHelp)
+        return;
+    if (keyboard)
+        keyboard->hide();
+    placePin();
+    auto *notice = new ui::ChoiceModal(
+            parentWidget(), { {}, strings::get("bookmarks.custom_errors_title"), {} },
+            { strings::get("bookmarks.custom_help_action"), "rrPinErrorsHelp" },
+            { strings::get("common.ok"), "rrPinErrorsClose" });
+    pinHelp = notice;
+    notice->setObjectName("rrPinErrorsPopup");
+    notice->setGeometry(parentWidget()->rect());
+    auto *card = notice->card();
+    const auto message = [card](const QString &text, const QString &name = QString()) {
+        auto *label = card->message(text, name);
+        label->setTextFormat(Qt::PlainText);
+        label->setContentsMargins(ui::metrics::chrome::inset, ui::metrics::notice::cardGap,
+                                  ui::metrics::chrome::inset, ui::metrics::notice::cardGap);
+        ui::readerStyle(label, ui::styles::font(chrome::descriptionText));
+        card->rows()->removeWidget(label);
+        card->rows()->insertWidget(card->rows()->count() - 1, label);
+    };
+    if (customPins.skipped) {
+        message(strings::get("bookmarks.custom_errors_count").arg(customPins.skipped));
+        for (int i = 0; i < customPins.failedFiles.size(); ++i) {
+            auto *row = new ui::ListRow(card);
+            row->setTitle(customPins.failedFiles[i]);
+            row->titleLabel()->setObjectName(QString("rrPinFailedFile%1").arg(i));
+            row->setTitlePixels(chrome::descriptionText);
+            row->setFocusPolicy(Qt::NoFocus);
+            row->setAttribute(Qt::WA_TransparentForMouseEvents);
+            row->setFixedHeight(row->sizeHint().height());
+            card->rows()->insertWidget(card->rows()->count() - 1, row);
+        }
+        const int remaining = customPins.skipped - customPins.failedFiles.size();
+        if (remaining > 0)
+            message(strings::get("bookmarks.custom_errors_more").arg(remaining));
+    }
+    if (customPins.truncated)
+        message(strings::get("bookmarks.custom_errors_limit"));
+    connect(notice->secondaryButton(), &QPushButton::clicked, this, [this] {
+        closePinHelp();
+        showPinHelp();
+    });
+    connect(notice->primaryButton(), &QPushButton::clicked, this, [this] { closePinHelp(); });
+    notice->dismissed = [this] { closePinHelp(); };
+    notice->show();
+    notice->raise();
+    notice->fitCard();
+}
+
+void BookmarkList::closePinHelp()
+{
+    if (!pinHelp)
+        return;
+    pinHelp->hide();
+    pinHelp->deleteLater();
+    pinHelp.clear();
+    if (pinPopup)
+        pinPopup->setFocus();
+}
+
 void BookmarkList::closePin()
 {
+    closePinHelp();
     if (keyboard) {
         keyboard->hide();
         keyboard->submitted = {};
@@ -177,6 +310,19 @@ void BookmarkList::placePin()
         pinPopup->card()->fitToWidth(cardWidth);
     }
     pinPopup->centerCard();
+    if (heading) {
+        for (const auto *name : { "rrPinHelp", "rrPinErrors" }) {
+            if (auto *button = heading->findChild<QWidget *>(name)) {
+                button->setGeometry(heading->width() - chrome::cellWidth, 0, chrome::cellWidth,
+                                    heading->height());
+                button->raise();
+            }
+        }
+    }
+    if (pinHelp) {
+        pinHelp->setGeometry(parentWidget()->rect());
+        pinHelp->fitCard();
+    }
 }
 
 bool BookmarkList::eventFilter(QObject *object, QEvent *event)
@@ -256,6 +402,21 @@ void BookmarkList::openPin(const BookmarkRow &row)
     dialog->setDimmed(true);
     dialog->installEventFilter(this);
     auto *card = dialog->card();
+    auto *heading = dialog->titleLabel()->parentWidget();
+    dialog->titleLabel()->setContentsMargins(chrome::cellWidth, 0, chrome::cellWidth, 0);
+    const bool failed = customPins.skipped || customPins.truncated;
+    auto *info = new ui::CellButton(failed ? ui::ControlIcon::Warning : ui::ControlIcon::Question,
+                                    heading);
+    info->setObjectName(failed ? "rrPinErrors" : "rrPinHelp");
+    info->setRule(ui::Edges(Qt::LeftEdge) | Qt::BottomEdge);
+    info->setAccessibleName(
+            strings::get(failed ? "bookmarks.custom_errors_title" : "bookmarks.custom_help_title"));
+    connect(info, &QPushButton::clicked, this, [this, failed] {
+        if (failed)
+            showPinErrors();
+        else
+            showPinHelp();
+    });
     auto *input = new QLineEdit(card);
     kobalt::ui::prepareNativeEditor(input);
     input->setObjectName("rrPinName");
@@ -279,64 +440,102 @@ void BookmarkList::openPin(const BookmarkRow &row)
     inputLayout->addWidget(input);
     card->rows()->insertWidget(1, inputRow);
     auto selected = std::make_shared<QString>(
-            row.pinIcon.isEmpty() ? ui::bookmarkIconNames().first() : row.pinIcon);
+            row.pinIcon.isEmpty() ? (customPins.icons.isEmpty() ? ui::bookmarkIconNames().first()
+                                                                : customPins.icons.first().id)
+                                  : row.pinIcon);
     auto *iconSection = new QWidget(card);
     iconSection->setObjectName("rrPinIconSection");
     auto *sectionLayout = new QVBoxLayout(iconSection);
     sectionLayout->setContentsMargins(0, 0, 0, 0);
     sectionLayout->setSpacing(0);
-    auto *gridWidget = new QWidget(iconSection);
+    auto *gridRow = new QWidget(iconSection);
+    auto *padding = new QVBoxLayout(gridRow);
+    padding->setContentsMargins(ui::metrics::notice::cardMargins.left(), 0,
+                                ui::metrics::notice::cardMargins.right(),
+                                ui::metrics::notice::cardMargins.bottom());
+    auto *gridWidget = new ui::Panel(gridRow);
+    gridWidget->setObjectName("rrPinIconGrid");
+    gridWidget->setFill(QPalette::Mid);
+    padding->addWidget(gridWidget);
     auto *grid = new QGridLayout(gridWidget);
-    grid->setContentsMargins(ui::metrics::notice::cardMargins.left(), 0,
-                             ui::metrics::notice::cardMargins.right(),
-                             ui::metrics::notice::cardMargins.bottom());
-    grid->setSpacing(ui::px(12));
+    const int border = ui::metrics::control::border;
+    grid->setContentsMargins(border, border, border, border);
+    grid->setSpacing(border);
     // A short screen, such as a phone in landscape, has room for one row of
     // icons between the name and the buttons. It shows six per page.
     const bool shortScreen = isShortHeight(parentWidget()->height(), ui::density());
     const int columns = shortScreen ? 6 : 4, iconRows = shortScreen ? 1 : 3;
+    // Reserve the dividers as well as the fixed-height cells.
+    gridWidget->setFixedHeight(iconRows * int(chrome::actionHeight) + (iconRows + 1) * border);
     for (int row = 0; row < iconRows; ++row)
         grid->setRowMinimumHeight(row, chrome::actionHeight);
+    for (int column = 0; column < columns; ++column)
+        grid->setColumnStretch(column, 1);
     auto *group = new QButtonGroup(gridWidget);
     group->setExclusive(true);
-    const auto icons = ui::bookmarkIconNames();
+    QStringList icons;
+    for (const auto &icon : customPins.icons)
+        icons.append(icon.id);
+    // Retain a removed icon as one selected placeholder in its own pin editor.
+    if (row.pinIcon.startsWith("custom:") && !customPins.find(row.pinIcon))
+        icons.append(row.pinIcon);
+    icons.append(ui::bookmarkIconNames());
     const int pageSize = columns * iconRows;
     const int pageCount = (icons.size() + pageSize - 1) / pageSize;
     auto page = std::make_shared<int>(qMax(0, int(icons.indexOf(*selected))) / pageSize);
     QVector<ui::CellButton *> iconButtons;
+    QVector<QStackedLayout *> cells;
     for (int i = 0; i < pageSize; ++i) {
-        auto *button = new ui::CellButton(ui::ControlIcon::Star, gridWidget,
+        auto *cell = new QWidget(gridWidget);
+        cell->setFixedHeight(chrome::actionHeight);
+        auto *stack = new QStackedLayout(cell);
+        stack->setContentsMargins(0, 0, 0, 0);
+        cells.append(stack);
+        grid->addWidget(cell, i / columns, i % columns);
+        auto *button = new ui::CellButton(ui::ControlIcon::Star, cell,
                                           qRound(1.2 * int(chrome::cellIcon)));
-        button->setRule(ui::Edges(Qt::LeftEdge) | Qt::TopEdge | Qt::RightEdge | Qt::BottomEdge);
         button->setCheckable(true);
         button->setFixedHeight(chrome::actionHeight);
         group->addButton(button);
-        grid->addWidget(button, i / columns, i % columns);
+        stack->addWidget(button);
         iconButtons.append(button);
+        auto *empty = new ui::Panel(cell);
+        empty->setFixedHeight(chrome::actionHeight);
+        stack->addWidget(empty);
         connect(button, &QPushButton::clicked, this, [selected, page, icons, i, pageSize] {
             const int index = *page * pageSize + i;
             if (index < icons.size())
                 *selected = icons[index];
         });
     }
-    sectionLayout->addWidget(gridWidget);
+    sectionLayout->addWidget(gridRow);
     auto *pager = new ui::PagerBar(iconSection, "rrPinIcons");
     sectionLayout->addWidget(pager);
     pager->setVisible(pageCount > 1);
-    const auto showPage = [this, page, icons, selected, iconButtons, group, pager, pageCount,
+    const auto showPage = [this, page, icons, selected, iconButtons, cells, group, pager, pageCount,
                            pageSize] {
         group->setExclusive(false);
         for (int i = 0; i < iconButtons.size(); ++i) {
             auto *button = iconButtons[i];
             const int index = *page * pageSize + i;
-            button->setVisible(index < icons.size());
+            cells[i]->setCurrentIndex(index < icons.size() ? 0 : 1);
             if (index >= icons.size())
                 continue;
             const auto token = icons[index];
             button->setObjectName("rrPinIcon_" + token);
-            button->setAccessibleName(
-                    strings::get(("bookmarks.icon_" + token).toLatin1().constData()));
-            button->setGlyph(ui::bookmarkIcon(token));
+            const auto *custom = customPins.find(token);
+            const bool missing = !custom && token.startsWith("custom:");
+            if (custom)
+                button->setAccessibleName(custom->name);
+            else if (missing)
+                button->setAccessibleName(
+                        strings::get("bookmarks.custom_missing").arg(token.mid(7)));
+            else
+                button->setAccessibleName(
+                        strings::get(("bookmarks.icon_" + token).toLatin1().constData()));
+            button->setToolTip("<p>" + button->accessibleName().toHtmlEscaped() + "</p>");
+            button->setGlyph(missing ? ui::ControlIcon::Question : ui::bookmarkIcon(token));
+            button->setGlyphMask(custom ? custom->mask : QImage());
             button->setChecked(*selected == token);
         }
         group->setExclusive(true);
@@ -412,7 +611,6 @@ void BookmarkList::openSort()
     card->heading(strings::get("marks.sort_title"));
     auto *options = new ui::RadioList(card);
     options->setMinimumRowHeight(chrome::listActionHeight);
-    options->setTopDivider(true);
     const QStringList values{ "position", "newest", "oldest" };
     const QStringList keys{ "marks.sort_position", "marks.sort_newest", "marks.sort_oldest" };
     for (int i = 0; i < values.size(); ++i) {
@@ -497,7 +695,16 @@ int BookmarkList::pageCount() const
 
 int BookmarkList::listTop() const
 {
-    return chrome::actionHeight + strip::stripHeight;
+    return chrome::actionHeight + chrome::toolStripHeight;
+}
+
+void BookmarkList::setFeatures(bool bookmarks, bool annotations, bool words)
+{
+    bookmarksTab->setVisible(bookmarks);
+    annotationsTab->setVisible(annotations);
+    if (wordsTab)
+        wordsTab->setVisible(words);
+    arrange();
 }
 
 void BookmarkList::showAnnotations(QVector<BookmarkRow> list, bool pending)
@@ -514,8 +721,11 @@ void BookmarkList::showItems(QVector<BookmarkRow> list, bool annotationTab, bool
 {
     if (loading && annotations && !annotationTab && loadingCancelled)
         loadingCancelled();
-    const bool reopening = !isVisible() || annotations != annotationTab;
+    const bool reopening = !isVisible() || annotations != annotationTab || words;
     annotations = annotationTab;
+    words = false;
+    if (wordsView)
+        wordsView->hide();
     loading = pending;
     visibleDetailIds.clear();
     visibleDetails.clear();
@@ -577,6 +787,14 @@ void BookmarkList::paintEvent(QPaintEvent *event)
     QPainter painter(this);
     painter.fillRect(0, chrome::actionHeight - chrome::heavyRule, width(), chrome::heavyRule,
                      palette().color(QPalette::WindowText));
+    // The gaps between neighbouring tabs are their dividers.
+    QVector<QPushButton *> shown;
+    for (auto *tab : { bookmarksTab, annotationsTab, wordsTab })
+        if (tab && !tab->isHidden())
+            shown.append(tab);
+    for (int i = 0; i + 1 < shown.size(); ++i)
+        painter.fillRect(shown[i]->geometry().right() + 1, 0, ui::metrics::control::border,
+                         chrome::actionHeight - chrome::heavyRule, ui::dividerColor(this));
     painter.fillRect(0, listTop() - ui::metrics::control::border, width(),
                      ui::metrics::control::border, ui::dividerColor(this));
 }
@@ -643,16 +861,45 @@ void BookmarkList::arrange()
         ++page;
     rows = (page + 1 < pageStarts.size() ? pageStarts[page + 1] : items.size()) - pageStarts[page];
     const int barHeight = chrome::actionHeight - chrome::heavyRule;
-    moreButton->setEnabled(bool(actionsRequested) && !loading);
-    const int reserved = 3 * chrome::cellWidth;
-    const int tabWidth = qMax(1, (width() - reserved) / 2);
-    close->setGeometry(0, 0, chrome::cellWidth, barHeight);
-    annotationsTab->setGeometry(chrome::cellWidth, 0, tabWidth, barHeight);
-    bookmarksTab->setGeometry(chrome::cellWidth + tabWidth, 0,
-                              qMax(1, width() - reserved - tabWidth), barHeight);
-    moreButton->setGeometry(width() - chrome::cellWidth, 0, chrome::cellWidth, barHeight);
-    listHeader->setGeometry(0, chrome::actionHeight, width(), ui::metrics::list::headerHeight);
-    sortButton->setGeometry(width() - 2 * chrome::cellWidth, 0, chrome::cellWidth, barHeight);
+    moreButton->setEnabled(words || (bool(actionsRequested) && !loading));
+    // The bar holds the tabs, then close on the right, as in Text Presets.
+    // A divider separates neighbouring tabs. Each tab takes its label and an
+    // equal share of the rest, so a short label leaves room for a long one;
+    // without room for padding, the labels touch before any is shortened.
+    QVector<QPushButton *> tabs;
+    for (auto *tab : { bookmarksTab, annotationsTab, wordsTab })
+        if (tab && !tab->isHidden())
+            tabs.append(tab);
+    const int rule = ui::metrics::control::border;
+    const int room = qMax(1, width() - chrome::cellWidth);
+    QVector<int> widths;
+    int text = 0;
+    for (auto *tab : tabs) {
+        widths.append(ui::interfaceTextWidth(tab->text(), tab->font()));
+        text += widths.last();
+    }
+    const int count = qMax(1, int(tabs.size()));
+    const int padding = text + 2 * count * int(chrome::inset) <= room ? 2 * int(chrome::inset) : 0;
+    const int needed = text + count * padding;
+    int x = 0;
+    for (int i = 0; i < tabs.size(); ++i) {
+        const bool last = i + 1 == tabs.size();
+        const int share = needed <= room ? widths[i] + padding + (room - needed) / count
+                                         : widths[i] * room / qMax(1, needed);
+        const int tabWidth = last ? room - x : share;
+        tabs[i]->setGeometry(x, 0, qMax(1, tabWidth - (last ? 0 : rule)), barHeight);
+        x += tabWidth;
+    }
+    close->setGeometry(width() - chrome::cellWidth, 0, chrome::cellWidth, barHeight);
+    const int strip = chrome::toolStripHeight;
+    sortButton->setGeometry(0, chrome::actionHeight, width() - chrome::cellWidth, strip - rule);
+    moreButton->setGeometry(width() - chrome::cellWidth, chrome::actionHeight, chrome::cellWidth,
+                            strip);
+    if (wordsView)
+        wordsView->setGeometry(0, top, width(), qMax(1, height() - top));
+    for (const auto &panel : coveringPanels)
+        if (panel)
+            panel->setGeometry(rect());
     if (sortPopup) {
         sortPopup->setGeometry(rect());
         sortPopup->centerCard();
@@ -704,15 +951,34 @@ void BookmarkList::redraw()
             details = visibleDetails;
         }
     }
-    bookmarksTab->setChecked(!annotations);
+    bookmarksTab->setChecked(!annotations && !words);
     annotationsTab->setChecked(annotations);
+    if (wordsTab)
+        wordsTab->setChecked(words);
+    sortButton->setText(strings::get(order == "newest"           ? "marks.sort_newest"
+                                             : order == "oldest" ? "marks.sort_oldest"
+                                                                 : "marks.sort_position"));
     const bool currentBookmarked = std::any_of(items.cbegin(), items.cend(),
                                                [](const BookmarkRow &row) { return row.current; });
-    moreButton->setGlyph(annotations                 ? ui::ControlIcon::ExportAction
+    moreButton->setGlyph(words                       ? ui::ControlIcon::Books
+                                 : annotations       ? ui::ControlIcon::ExportAction
                                  : currentBookmarked ? ui::ControlIcon::BookmarkRemove
                                                      : ui::ControlIcon::BookmarkAdd);
-    moreButton->setAccessibleName(
-            strings::get(annotations ? "annotations.export" : "bookmarks.actions"));
+    moreButton->setAccessibleName(strings::get(words                 ? "words.all_books"
+                                                       : annotations ? "annotations.export"
+                                                                     : "bookmarks.actions"));
+    if (words) {
+        // The word list draws its own rows below the strip.
+        for (auto *widget : std::initializer_list<QWidget *>{ empty, emptyHint, pager })
+            widget->hide();
+        for (int row = 0; row < buttons.size(); ++row) {
+            buttons[row]->hide();
+            removes[row]->hide();
+        }
+        sortButton->setEnabled(true);
+        update();
+        return;
+    }
     empty->setText(strings::get(loading               ? "annotations.loading"
                                         : annotations ? "annotations.empty"
                                                       : "bookmarks.empty"));
@@ -722,13 +988,6 @@ void BookmarkList::redraw()
     empty->setVisible(items.isEmpty());
     emptyHint->setVisible(items.isEmpty() && !loading);
     sortButton->setEnabled(!loading);
-    pageHeading->setVisible(!items.isEmpty());
-    const auto caption = annotations && items.size() == 1
-            ? strings::get("annotations.summary_one")
-            : strings::get(annotations ? "annotations.summary" : "bookmarks.summary")
-                      .arg(items.size());
-    listHeader->setCaptions(loading ? QString() : caption,
-                            items.isEmpty() ? QString() : strings::get("chapter_contents.page"));
     pager->setVisible(pageCount() > 1);
     pager->setPage(page, pageCount(), {}, true);
     int used = listTop();
@@ -798,7 +1057,7 @@ void BookmarkList::redraw()
         removes[row]->setEnabled(detailsReady);
         button->setGeometry(0, y, width(), itemHeight);
         auto *itemRow = static_cast<ui::ListRow *>(button);
-        itemRow->setActionIcon(annotations ? ui::ControlIcon::Close : ui::ControlIcon::More);
+        itemRow->setActionIcon(annotations ? ui::ControlIcon::Trash : ui::ControlIcon::More);
         itemRow->setDetailFont(excerptFont());
         itemRow->setMetadataFont(ui::interfaceFont(chrome::captionText));
         itemRow->setTitle(item.pinName.isEmpty() ? chapter : item.pinName);

@@ -181,6 +181,9 @@ namespace chrome {
 // The status strip holds one line of status text and grows with it.
 inline constexpr TextPx statusHeight{ 60 };
 inline constexpr Px actionHeight{ 112 }, heavyRule{ 3 };
+// The strip below a bar that holds a list's choices, such as the Library's
+// sort and views or the Bookmarks list's sort and action.
+inline constexpr Px toolStripHeight{ 100 };
 
 inline int headerHeight()
 {
@@ -200,6 +203,8 @@ inline constexpr TextPx labelText{ 30 }, descriptionText{ 25 }, countText{ 28 },
 inline constexpr IconPx tabIcon{ 48 };
 inline constexpr Px tabGap{ 10 };
 inline constexpr TextPx captionText{ 22 }, numberText{ 22 };
+// The small label above a caption dropdown's value.
+inline constexpr TextPx captionLabelText{ 17 };
 inline constexpr Px captionSpacing{ 2 };
 inline constexpr Px listActionHeight{ list::twoLines }, menuActionHeight{ 128 },
         optionHeight{ list::twoLines }, checkSize{ 48 };
@@ -211,11 +216,21 @@ inline constexpr TextPx queryText{ 36 };
 inline constexpr Px selectorGap{ 16 }, selectorIcon{ 36 };
 // A label and its description, or a caption and the text below it.
 inline constexpr Px textGap{ 12 }, blockTop{ 28 };
+// Zen mode's reading menu: centered groups of cells at today's six-inch tab
+// width, with rounded outer corners and a rule heavier than the regular bars'.
+inline constexpr Px zenCellWidth{ 214 }, zenCorner{ 28 }, zenRule{ 5 };
+// The top group's cells are wider, so the reading stats below them have room.
+// The stats panel holds one row of figures with their captions and grows with
+// large text. The ≈ of an estimate sits between the number and unit sizes.
+inline constexpr Px zenTopCellWidth{ 250 };
+inline constexpr TextPx zenStatsHeight{ 150 }, zenStatText{ 46 }, zenStatUnit{ 24 },
+        zenStatApproximate{ 34 };
 } // namespace chrome
 
 namespace chapters {
 // Stats: the chapter row, the chart of every chapter and three figure cells.
-inline constexpr Px rowHeight{ 120 }, captionTop{ 20 }, titleTop{ 60 }, chartHeight{ 248 };
+inline constexpr Px rowHeight{ 120 }, headingGap{ 4 }, chartHeight{ 248 };
+inline constexpr Px growthShortEdge{ 1072 }, maximumGrowth{ 150 }, exposedPaper{ 180 };
 inline constexpr Px barsTop{ 30 }, barsHeight{ 150 }, tickGap{ 4 }, tickHeight{ 8 }, tickWidth{ 2 },
         numberTop{ 14 };
 // Cells have the same padding above the caption and below the detail, which
@@ -227,9 +242,10 @@ inline constexpr TextPx unitText{ chrome::descriptionText };
 inline constexpr Px graphHeight{ rowHeight + chartHeight + cellHeight };
 // Dense charts show every chapter. Past that, and in the sparse chart, a pager
 // bar appears between the chart and the cells.
-inline constexpr int wideChapters = 30, mediumChapters = 60, sparseBars = 20, scaleCap = 3;
+inline constexpr int wideChapters = 30, mediumChapters = 60, sparseBars = 20;
 inline constexpr Px gapWide{ 8 }, gapMedium{ 6 }, gapNarrow{ 4 };
-inline constexpr Px minimumBarWidth{ 6 }, maximumBarWidth{ 64 }, narrowBarWidth{ 16 };
+inline constexpr Px minimumBarHeight{ 20 }, minimumBarWidth{ 6 }, maximumBarWidth{ 64 },
+        narrowBarWidth{ 16 };
 inline constexpr Px sparseGap{ 12 };
 inline constexpr Px outline{ 2 }, fillInset{ 4 }, narrowFillInset{ 2 };
 } // namespace chapters
@@ -244,9 +260,9 @@ inline constexpr Px leadingWidth{ 72 }, lineInset{ 18 };
 namespace contents {
 inline constexpr Px stripHeight{ list::headerHeight };
 inline constexpr Px pageGap{ 24 }, indent{ 40 };
-// Exit Kobalt ignores taps this soon after the list closes from the same spot.
+// The Settings button ignores taps this soon after a panel closes from the same spot.
 // A first guess at a double tap on e-ink; not yet measured on a device.
-inline constexpr int exitGuardMilliseconds = 400;
+inline constexpr int closeGuardMilliseconds = 400;
 } // namespace contents
 
 namespace reading {
@@ -302,24 +318,19 @@ namespace opening {
 inline constexpr int hintDelayMilliseconds = 4000;
 inline constexpr qreal referenceWidth = 402, referenceHeight = 543;
 inline constexpr qreal brandText = 40.5, labelText = 14.25, hintText = 8;
-inline const QRectF icon{ 172, 166, 58.5, 63 };
-inline const QRectF cover{ 91, 63, 220, 330 };
+inline const QRectF icon{ 172, 160, 58.5, 63 };
+inline const QRectF cover{ 91, 57, 220, 330 };
 inline constexpr qreal iconBarHeight = 6.5, iconBarPitch = 11.3, finalBarWidth = 42.3;
-inline const QRectF brand{ 100, 248, 202, 58 };
-inline const QRectF label{ 60, 418, 282, 24 };
-inline const QRectF progress{ 102, 457, 198, 4.5 };
-inline const QRectF hint{ 60, 474, 282, 18 };
-inline constexpr qreal failureText = 23, handoffText = 19, detailText = 13;
+inline const QRectF brand{ 100, 242, 202, 58 };
+inline const QRectF label{ 60, 412, 282, 24 };
+inline const QRectF progress{ 102, 451, 198, 4.5 };
+inline const QRectF hint{ 60, 468, 282, 18 };
+inline constexpr qreal failureText = 23, handoffGap = 6, handoffIconDrop = 2;
 inline const QRectF failureBrandIcon{ 172, 58, 58.5, 63 };
 inline const QRectF failureBrand{ 100, 139, 202, 58 };
 inline const QRectF failureIcon{ 183, 255, 36, 36 };
 inline const QRectF failureLabel{ 28, 301, 346, 32 };
-inline const QRectF failureDetail{ 28, 341, 346, 48 };
 inline const QRectF backButton{ 28, 459, 346, 44 };
-inline const QRectF handoffIcon{ 183, 384, 36, 36 };
-inline const QRectF handoffLabel{ 28, 429, 346, 28 };
-inline const QRectF handoffDetail{ 28, 463, 346, 24 };
-inline const QRectF handoffHint{ 28, 499, 346, 18 };
 } // namespace opening
 
 namespace actionMenu {
@@ -342,6 +353,22 @@ inline QRect centered(const QSize &size)
     return { (size.width() - w) / 2, (size.height() - height) / 2, w, height };
 }
 } // namespace notice
+
+namespace syncChoice {
+// The KOSync position choice: a jump graph over From, To, Device and Synced rows.
+// Lines stay at least 4 px on a 300 ppi e-ink screen.
+inline constexpr int pageJump = 12; // Larger jumps leave the page boxes for a track.
+// The graph keeps the width it has on an e-reader card and is centered on wider cards.
+inline constexpr Px graphWidth{ 688 };
+inline constexpr Px graphGap{ 36 }, labelGap{ 14 }, rowGap{ 16 }, captionGap{ 36 }, ruleGap{ 22 },
+        bottomGap{ 40 };
+inline constexpr Px track{ 6 }, arrow{ 10 }, arrowHead{ 28 }, here{ 13 }, hereLine{ 5 };
+inline constexpr Px tick{ 4 }, tickReach{ 14 }, minimumTickGap{ 14 }, dot{ 3 }, dotPitch{ 10 },
+        trackEnd{ 32 };
+inline constexpr Px pageWidth{ 40 }, pageHeight{ 54 }, pageGap{ 12 }, pageLine{ 2 },
+        currentPageLine{ 5 }, jumpLine{ 5 }, jumpHead{ 18 }, jumpLift{ 36 }, startLine{ 3 },
+        startDash{ 6 }, startReach{ 12 };
+} // namespace syncChoice
 
 namespace acknowledgments {
 inline constexpr Px textMargin{ 12 }, captionGap{ 40 };

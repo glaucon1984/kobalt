@@ -1,3 +1,6 @@
+#include "display_format.h"
+#include "../common/diagnostics.h"
+#include "platforms/kobo/common/native_symbol.h"
 #include "support/qt_compat.h"
 #include "hooks.h"
 #include "platforms/kobo/common/native_tile_cover.h"
@@ -41,12 +44,6 @@ ReaderEnvironment &environment()
 {
     static ReaderEnvironment value;
     return value;
-}
-
-template <class T>
-T symbol(const char *name)
-{
-    return reinterpret_cast<T>(dlsym(RTLD_DEFAULT, name));
 }
 
 std::function<bool(const void *, const void *)> beginOpening;
@@ -111,9 +108,17 @@ bool enabled()
 #endif
 }
 
+#if defined(KOBALT_BENCHMARK_API) || defined(KOBALT_SCENARIO_PLAYER)
+int benchmarkReader = -1;
+#endif
+
 // A reader preference is independent of the installation and recovery markers.
 bool alternativeEnabled()
 {
+#if defined(KOBALT_BENCHMARK_API) || defined(KOBALT_SCENARIO_PLAYER)
+    if (benchmarkReader >= 0)
+        return benchmarkReader != 0;
+#endif
     if (!QFile::exists(selectionPath))
         return true;
     return readJson(selectionPath).value("enabled").toBool(false);
@@ -151,14 +156,54 @@ void updatePrerendering()
     nh_log("reader: background prerendering %s", next ? "suppressed" : "returned to native policy");
 }
 
-bool setAlternativeEnabled(bool on)
+#if defined(KOBALT_BENCHMARK_API) || defined(KOBALT_SCENARIO_PLAYER)
+bool setBenchmarkReader(int choice)
+{
+    if (choice < -1 || choice > 1)
+        return false;
+    benchmarkReader = choice;
+    updatePrerendering();
+    return true;
+}
+#endif
+
+// The reader choice changes only on a user's tap: on Kobalt's Settings >
+// System or on Nickel's Reading Settings. Log which one, so a book opening
+// in the other reader can be traced back to the tap.
+void logReaderChoice(bool previous, bool on, const char *source)
+{
+    if (previous != on)
+        kobalt::diagnostic(
+                "setting-changed",
+                kobalt::qt::object({ { "setting", QStringLiteral("open_books_in_kobalt") },
+                                     { "previous", previous },
+                                     { "value", on },
+                                     { "source", QString::fromLatin1(source) } }),
+                kobalt::DiagnosticSeverity::Activity);
+}
+
+bool setAlternativeEnabled(bool on, const char *source)
 {
     auto config = readJson(selectionPath);
+    // Reuse this read for the log. An empty object is a missing file, which
+    // means Kobalt opens books, as alternativeEnabled() treats it.
+    const bool previous = config.value("enabled").toBool(config.isEmpty());
     config["enabled"] = on;
     if (!writeJson(selectionPath, config))
         return false;
+    logReaderChoice(previous, on, source);
     updatePrerendering();
     return true;
+}
+
+bool setAlternativeFromKobalt(bool on)
+{
+    return setAlternativeEnabled(on, "kobalt");
+}
+
+bool setAlternativeFromNickel(bool on)
+{
+    return setAlternativeEnabled(on, "nickel");
 }
 
 extern "C" __attribute__((visibility("default"))) void kobalt_settings_constructor(QWidget *view,
@@ -167,7 +212,7 @@ extern "C" __attribute__((visibility("default"))) void kobalt_settings_construct
     settingsConstructor(view, parent);
     if (!settingsReady)
         return;
-    kobalt::installNativeReaderSetting(view, alternativeEnabled, setAlternativeEnabled);
+    kobalt::installNativeReaderSetting(view, alternativeEnabled, setAlternativeFromNickel);
 }
 #ifdef KOBALT_READER_HARDWARE
 #  ifdef KOBALT_READER_TEMPORARY
@@ -375,7 +420,10 @@ public:
         }
         CoordinatorBindings bindings{ enabled };
         bindings.automaticBookOpening = alternativeEnabled;
-        bindings.setAutomaticBookOpening = setAlternativeEnabled;
+        bindings.setAutomaticBookOpening = setAlternativeFromKobalt;
+#if defined(KOBALT_BENCHMARK_API) || defined(KOBALT_SCENARIO_PLAYER)
+        bindings.setBenchmarkReader = setBenchmarkReader;
+#endif
         auto *candidate = new ReaderCoordinator(environment(), bindings, qApp);
         if (!candidate->available() || reentered) {
             delete candidate;
@@ -439,6 +487,7 @@ int initialize()
     kobalt::installCrashReports(QString::fromLatin1(configDir) + "/crash-reporting",
                                 QStringLiteral("/mnt/onboard"));
 #endif
+    kobalt::setDiagnosticSystem(kobalt::nickel::diagnosticSystem());
     kobalt::initializeDiagnostics(QString::fromLatin1(configDir) + "/diagnostics",
                                   kobalt::diagnosticsRequested(QString::fromLatin1(configDir)));
     kobalt::initializeStandbyDiagnostics();
@@ -469,9 +518,9 @@ int initialize()
         kobalt::diagnostic("firmware-rejected", {}, kobalt::DiagnosticSeverity::Warning);
         return 0;
     }
-    prerenderManager =
-            symbol<decltype(prerenderManager)>("_ZN26IPrerenderToPersistManager8instanceEv");
-    stopPrerendering = symbol<decltype(stopPrerendering)>(
+    prerenderManager = kobalt::symbol<decltype(prerenderManager)>(
+            "_ZN26IPrerenderToPersistManager8instanceEv");
+    stopPrerendering = kobalt::symbol<decltype(stopPrerendering)>(
             "_ZThn8_N25PrerenderToPersistManager16stopPrerenderingEv");
     if (!kobalt::NativeOpening::available() || !kobalt::NativePublication::available()
         || !kobalt::NativeProgress::available() || !kobalt::NativeLifecycle::powerAvailable()
@@ -494,6 +543,7 @@ int initialize()
     kobalt::diagnostic("installation", { { "temporary", false } });
 #  endif
 #endif
+    kobalt::installDisplayFormatHook();
     kobalt::initializeNativeTileCoverProbe();
     auto *startup = new Startup(qApp);
     beginOpening = [startup](const void *volume, const void *context) {

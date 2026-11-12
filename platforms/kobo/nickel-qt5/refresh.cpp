@@ -2,6 +2,7 @@
 #include "../display/annotation_damage.h"
 #include "platform/api/kobo_refresh.h"
 #include "refresh.h"
+#include "platforms/kobo/display/single_update.h"
 #include "platforms/kobo/display/page_animation.h"
 #include "platforms/kobo/display/keyboard_refresh.h"
 #include "platforms/kobo/display/panel_damage.h"
@@ -19,6 +20,7 @@
 #include <QWindow>
 #include <QSettings>
 #include <algorithm>
+#include <functional>
 #include <dlfcn.h>
 #include <limits>
 
@@ -53,8 +55,7 @@ ImxCapabilities imxCapabilities()
     if (readerWindow
         && (readerWindow->property("reader_regal_supported").isValid()
             || readerWindow->property("reader_eclipse_supported").isValid())) {
-        return { readerWindow->property("reader_regal_supported").toBool()
-                         && !readerWindow->property("reader_regal_disabled").toBool(),
+        return { readerWindow->property("reader_regal_supported").toBool(),
                  readerWindow->property("reader_eclipse_supported").toBool() };
     }
     static const ImxCapabilities capabilities = [] {
@@ -140,9 +141,41 @@ void setReaderRefreshWindow(QWidget *widget)
 
 template <class Submit>
 static void flushReaderUsing(QBackingStore *store, const QRegion &region, QWindow *target,
-                             const QPoint &offset, const FlushFlags &flags, Submit submit,
+                             const QPoint &offset, const FlushFlags &flags, Submit deliver,
                              bool wide = true)
 {
+    // On MTK, every update of one reader paint is collected and sent as one
+    // screen update when the flush ends; see singleUpdate.
+    QList<QPair<QRegion, FlushFlags>> batch;
+    bool batching = false;
+    auto submit = [&](const QRegion &damage, const FlushFlags &chosen) {
+        if (batching)
+            batch.append({ damage, chosen });
+        else
+            deliver(damage, chosen);
+    };
+
+    struct SendAtEnd
+    {
+        std::function<void()> send;
+
+        ~SendAtEnd() { send(); }
+    } sendAtEnd{ [&] {
+        if (batch.isEmpty())
+            return;
+        const bool darkUpdate = readerWindow && readerWindow->property("reader_dark").toBool();
+        UpdateBits bits;
+        bits.waveforms = automatic | autoText | autoImage | glr16 | glkw16 | gl16 | gc16 | gck16;
+        bits.cleanups = autoImage | gc16 | gck16;
+        bits.modes = heuristic | full | partialMode;
+        bits.full = full;
+        bits.partial = partialMode;
+        bits.text = ordinaryPolicy(darkUpdate, wide) & bits.waveforms;
+        bits.kept = darkFlag | bit(128);
+        for (const auto &call : singleUpdate(batch, bits))
+            deliver(call.first, call.second);
+    } };
+
     cancelPageAnimation();
     if (qApp && QThread::currentThread() == qApp->thread() && readerWindow
         && ((readerWindow->property("reader_preparing_handoff").toBool()
@@ -174,6 +207,7 @@ static void flushReaderUsing(QBackingStore *store, const QRegion &region, QWindo
         submit(region, flags);
         return;
     }
+    batching = refreshBackend(readerWindow) == RefreshBackend::Mtk;
     const int direction = readerWindow->property("reader_animation_direction").toInt();
     readerWindow->setProperty("reader_animation_direction", 0);
     const QRect progressUpdate = readerWindow->property("reader_progress_update").toRect();
@@ -323,6 +357,17 @@ static void flushReaderUsing(QBackingStore *store, const QRegion &region, QWindo
         submit(QRegion(bounds), { { bounds, policy } });
         return;
     }
+    if (!dark && !pageTurn && !direction && compatible && ordinaryControls
+        && refreshBackend(readerWindow) == RefreshBackend::Mtk) {
+        // Typing with Nickel's keyboard: refresh the edited text in partial
+        // mode, as Nickel refreshes its own keys, not every pixel of the field.
+        const auto *editor = QApplication::focusWidget();
+        if (editor && editor->property("reader_native_keyboard_editor").toBool()
+            && editor->isVisible() && readerWindow->isAncestorOf(editor))
+            partialEditorPolicies(policies,
+                                  QRect(editor->mapTo(readerWindow, QPoint()), editor->size()),
+                                  heuristic | full | partialMode, partialMode);
+    }
     const bool progressDamage = !progressUpdate.isEmpty()
             && progressUpdate.contains(region.boundingRect())
             && std::all_of(policies.cbegin(), policies.cend(),
@@ -349,7 +394,7 @@ static void flushReaderUsing(QBackingStore *store, const QRegion &region, QWindo
                                          // Submit now so the animation hook runs before the sweep is cancelled.
                                          for (const auto &part : parts.rects())
                                              selected.append({ part, policy | bit(128) });
-                                         submit(parts, selected);
+                                         deliver(parts, selected);
                                      }))
                 return;
         }
@@ -451,7 +496,7 @@ static void flushReaderUsing(QBackingStore *store, const QRegion &region, QWindo
             damage = bounds;
             selected.append({ bounds, policy });
         } else {
-            for (const auto &part : panelDamage(readerWindow, pageWidget, region)) {
+            for (const auto &part : panelDamage(readerWindow, pageWidget, region, keyboardBounds)) {
                 damage += part;
                 selected.append({ part, policy });
             }
@@ -463,7 +508,7 @@ static void flushReaderUsing(QBackingStore *store, const QRegion &region, QWindo
         && region.rectCount() > 1 && region.subtracted(policyCoverage).isEmpty()) {
         // Qt can include a window-sized policy rectangle even when its damage
         // has a gap. Submit each panel's painted region with policies clipped to it.
-        for (const auto &part : panelDamage(readerWindow, pageWidget, region)) {
+        for (const auto &part : panelDamage(readerWindow, pageWidget, region, keyboardBounds)) {
             FlushFlags selected;
             for (const auto &entry : policies) {
                 const QRect clipped = entry.first.intersected(part);
@@ -518,6 +563,16 @@ void textRefresh(QWidget *widget)
         widget->setAttribute(static_cast<Qt::WidgetAttribute>(attribute), false);
     widget->setAttribute(Qt::WA_KoboEpdWfModeAutomatic);
     widget->setAttribute(Qt::WA_KoboEpdUpdateModeHeuristic);
+}
+
+void coverRefresh(QWidget *widget)
+{
+    textRefresh(widget);
+    widget->setAttribute(Qt::WA_KoboEpdUpdateModeHeuristic, false);
+    widget->setAttribute(Qt::WA_KoboEpdUpdateModePartial);
+    widget->setAttribute(Qt::WA_KoboEpdWfModeAutomatic, false);
+    const bool dark = widget->window()->property("reader_dark").toBool();
+    widget->setAttribute(static_cast<Qt::WidgetAttribute>(dark ? 141 : 137));
 }
 
 void pageRefresh(QWidget *widget, bool clean, bool)

@@ -2,6 +2,7 @@
 #include "engine/crengine/engine_document.h"
 #include "open_request.h"
 #include "highlight_geometry.h"
+#include "storage/custom_pins.h"
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QObject>
@@ -109,6 +110,8 @@ struct SyncedPositionDescription
 {
     PositionComparison comparison;
     QString chapter;
+    // Compared only: the page of the synced position in this layout, or -1.
+    int page = -1;
 };
 
 // GUI-side settings and immutable frame copies. The worker owns engine access.
@@ -127,7 +130,8 @@ public:
     // Call after deleting sessions and cancelling their resources.
     static void drain(std::function<void()> finished);
     void open(OpenRequest request, std::function<void(OpeningResult)> finished,
-              OpeningProgress progress = {}, std::function<void(QImage)> coverReady = {});
+              OpeningProgress progress = {}, std::function<void(QImage)> coverReady = {},
+              std::function<void()> reusing = {});
     // A fresh facade prevents callbacks from the closed reader reaching a reopen.
     std::unique_ptr<ReaderSession> retained();
     void cancelSource();
@@ -139,6 +143,9 @@ public:
 
     QByteArray syncFilenameDigest() const { return syncFilenameDigest_; }
 
+    // The file name that filename matching hashes, for KOSync document metadata.
+    QString syncFilename() const { return syncFilename_; }
+
     // Whether the saved state passed to open belongs to this version of the book.
     bool savedStateMatched() const { return savedMatched; }
 
@@ -146,7 +153,8 @@ public:
 
     void openPreview(const ReaderSession &source, QSize size,
                      std::function<void(QString)> finished);
-    void apply(const QJsonObject &settings, QSize size = {});
+    void requestAppearance(const appearance::Requested &settings, QSize size = {});
+    void editAppearance(const appearance::Patch &patch, QSize size = {});
     std::function<void()> updated;
     RenderProgress renderProgress() const;
     // Appearance and viewport work reports progress separately from frames.
@@ -154,6 +162,10 @@ public:
     std::function<void()> renderProgressChanged;
     // A buffered request reached the first or final page without moving.
     std::function<void(int direction)> turnBoundary;
+    // The engine drew the pages beside the current one and has nothing else
+    // queued for this session. Work that may wait, such as preview tiles,
+    // starts here instead of on a timer.
+    std::function<void()> idle;
     bool style(int pixels, int spacing);
     bool style(int pixels, int spacing, const QString &face, int margin);
     bool style(int pixels, int spacing, const QString &face, int margin, const QString &alignment);
@@ -170,7 +182,7 @@ public:
     bool goTo(const QString &anchor);
     bool goToNative(const QString &location, std::function<void(QString)> finished);
     bool goToSyncedPosition(const QString &position, std::function<void(QString)> finished);
-    // Resolves chapter and source order without navigating or rendering another page.
+    // Resolves chapter, page and source order without navigating or rendering another page.
     void describeSyncedPosition(const QString &position,
                                 std::function<void(SyncedPositionDescription)> finished);
     void nativePosition(std::function<void(QString, QString)> finished);
@@ -188,6 +200,11 @@ public:
     void bookmarkPages(QStringList positions, std::function<void(QVector<int>)> finished,
                        bool rangeEndpoints = false);
     void pageSummary(int page, std::function<void(QString position, QString excerpt)> finished);
+    // The start of the text on `page` in the layout shown now. A layout that
+    // is requested after this call does not discard the answer, because the
+    // engine thread reads the text before it starts that layout. Call it only
+    // while the session is not busy.
+    void displayedText(int page, std::function<void(QString text)> finished);
     // Renders a bounded thumbnail with saved highlights without moving the reading position. Only
     // the latest request can finish; navigation, reflow and cancellation drop it.
     void previewPage(int page, QSize bounds, std::function<void(QImage)> finished);
@@ -207,17 +224,24 @@ public:
                          bool startTokenPolicy = false);
     void annotationRange(const QString &start, const QString &end,
                          std::function<void(TextRange)> finished);
+    // `withContext` also reads the sentence around the range.
     void textRange(const QString &start, const QString &end,
-                   std::function<void(TextRange)> finished);
+                   std::function<void(TextRange)> finished, bool withContext = false);
     void wordAt(QPoint point, std::function<void(WordSelection)> finished);
     void imageAt(QPoint point, std::function<void(QImage)> finished);
     void linkDetails(const QString &source, std::function<void(LinkDetails)> finished);
 
     const QVector<PageLink> &pageLinks() const { return frame.links; }
 
-    // Layout changes restart an unfinished query. Its first batch replaces prior results.
+    // Layout changes restart unfinished queries and completed deferred-detail queries.
+    // Their first batch replaces prior results.
     // Explicit cancellation or a new source discards both running and queued searches.
-    void search(const QString &query, std::function<void(SearchBatch)> finished);
+    void search(const QString &query, std::function<void(SearchBatch)> finished,
+                SearchScope scope = SearchScope::Book, const QString &origin = {},
+                bool details = true);
+    void searchDetails(QVector<SearchHit> hits, SearchScope scope, const QString &origin,
+                       std::function<void(QVector<SearchHit>)> finished);
+    void prepareSearch();
     void cancelSearch();
     void annotationGeometry(const QString &start, const QString &end,
                             std::function<void(AnnotationGeometry)> finished);
@@ -243,6 +267,8 @@ public:
     QString error() const { return frame.error; }
 
     bool formattingWarning() const { return formattingWarning_; }
+
+    const storage::CustomPins &customPins() const { return customPins_; }
 
     QString imageWarning() const { return frame.resources.value("image_error").toString(); }
 
@@ -271,11 +297,19 @@ public:
     QJsonObject state() const { return frame.state; }
 
     // The newest requested settings, including any whose frame is still rendering.
-    QJsonObject requestedState() const { return desired; }
+    appearance::Requested requestedAppearance() const
+    {
+        return appearance::Requested::fromResolvedState(desired);
+    }
+
+    appearance::Displayed displayedAppearance() const
+    {
+        return { appearance::Requested::fromResolvedState(frame.state), frame.renderId };
+    }
 
     bool temporaryTypography() const { return !temporaryAppearance.isEmpty(); }
 
-    QJsonObject persistentState() const;
+    appearance::SavedInput persistentAppearance() const;
 
     // Captured with the displayed frame, so sleep never waits for the engine worker.
     QString savedNativePosition(QString *error) const
@@ -382,6 +416,7 @@ public:
 
 private:
     bool formattingWarning_ = false;
+    storage::CustomPins customPins_;
     QJsonObject formattingDetails_;
     ReaderSession(std::shared_ptr<EngineDocument> retainedEngine, QString placeholderFamily);
     EngineFontInputs fonts_;
@@ -399,6 +434,7 @@ private:
     QByteArray fingerprint;
     QByteArray syncDigest_;
     QByteArray syncFilenameDigest_;
+    QString syncFilename_;
     bool importPosition(const QString &location, bool native,
                         std::function<void(QString)> finished);
     bool savedMatched = false;
@@ -407,7 +443,8 @@ private:
     QString identity_;
     PositionCodec positions_;
     QJsonObject desired;
-    QJsonObject temporaryAppearance, originalAppearance;
+    QJsonObject temporaryAppearance;
+    appearance::SavedInput originalAppearance;
     QSize desiredSize;
     QString destination;
     int pageDelta = 0;
@@ -433,11 +470,14 @@ private:
     std::shared_ptr<std::atomic<quint64>> newestPreview = std::make_shared<std::atomic<quint64>>(0);
     std::shared_ptr<std::atomic_int> neighbourJobs = std::make_shared<std::atomic_int>(0);
     std::shared_ptr<std::atomic_bool> searchCancelled;
-    QString searchQuery;
+    QString searchQuery, searchOrigin;
+    SearchScope searchScope = SearchScope::Book;
+    bool searchWithDetails = true;
+    void prepareSearchNext(quint64 job, std::shared_ptr<std::atomic_bool> cancelled);
     std::function<void(SearchBatch)> searchFinished;
     void interruptSearch();
     void startPendingSearch();
-    void searchNext(QString query, int page, int count, quint64 job,
+    void searchNext(QString query, SearchCursor cursor, int count, quint64 job,
                     std::shared_ptr<std::atomic_bool> cancelled,
                     std::function<void(SearchBatch)> finished, bool reset);
     void request(bool appearanceChange = false, RenderReason reason = RenderReason::Appearance);

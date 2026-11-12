@@ -27,14 +27,9 @@ set(source "${KOBALT_ROOT}/src")
 file(READ "${KOBALT_ASSETS}/manifest.json" assets)
 string(JSON KOBALT_VERSION GET "${assets}" version)
 
-file(READ "${CRENGINE_SOURCE}/cr3gui/data/html5.css" READER_HTML_CSS)
-configure_file("${source}/engine/crengine/reader_styles.h.in" reader_styles.h @ONLY)
-file(GLOB patterns RELATIVE "${CRENGINE_SOURCE}/cr3gui/data/hyph" "${CRENGINE_SOURCE}/cr3gui/data/hyph/*.pattern")
-list(SORT patterns)
-list(TRANSFORM patterns PREPEND "\"")
-list(TRANSFORM patterns APPEND "\"")
-list(JOIN patterns ", " READER_HYPHENATION_PATTERNS)
-configure_file("${source}/engine/crengine/reader_hyphenation.h.in" reader_hyphenation.h @ONLY)
+# The generated engine headers, the cache policy, the annotation storage default,
+# kobalt_shared_definitions and kobalt_notice_resources, as on the other platforms.
+include("${KOBALT_ROOT}/platforms/shared-inputs.cmake")
 set(KOBALT_COMMIT "")
 option(KOBALT_COMMIT_MODIFIED "" OFF)
 configure_file("${source}/support/build_info.h.in" build_info.h @ONLY)
@@ -42,16 +37,11 @@ configure_file("${source}/support/build_info.h.in" build_info.h @ONLY)
 # Everything portable, including the library and the Qt Sensors based orientation code.
 file(GLOB_RECURSE shared CONFIGURE_DEPENDS "${source}/*.cpp" "${source}/*.h")
 add_library(kobalt-check OBJECT ${shared})
-set_source_files_properties("${source}/storage/annotation_database.cpp" PROPERTIES
-    COMPILE_DEFINITIONS KOBALT_SQLITE_ANNOTATIONS_DEFAULT=1)
 target_include_directories(kobalt-check PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_include_directories(kobalt-check SYSTEM PRIVATE "${CRENGINE_SOURCE}/crengine/include" "${CRENGINE_BUILD}"
     "${prefix}/include" "${prefix}/include/harfbuzz" "${prefix}/include/freetype2" "${prefix}/include/fribidi")
 target_compile_options(kobalt-check PRIVATE -Wall -Wextra -Wno-missing-field-initializers -fvisibility=hidden
     "-iquote${KOBALT_ROOT}" "-iquote${source}")
-target_compile_definitions(kobalt-check PRIVATE KOBALT_READER_HARDWARE KOBALT_PAGE_ANIMATIONS
-    KOBALT_VERSION="${KOBALT_VERSION}"
+target_compile_definitions(kobalt-check PRIVATE ${kobalt_shared_definitions} KOBALT_PAGE_ANIMATIONS
     KOBALT_CONFIG_DIR="/mnt/ext1/system/config/kobalt" KOBALT_SYSTEM_FONT_DIRECTORY="/ebrmain/share/fonts")
-include("${KOBALT_ROOT}/platforms/cache-policy.cmake")
-target_compile_definitions(kobalt-check PRIVATE KOBALT_LAYOUT_POLICY="${layout_policy}")
 target_link_libraries(kobalt-check PRIVATE Qt5::Widgets Qt5::GuiPrivate Qt5::Network Qt5::Sql Qt5::Sensors)
