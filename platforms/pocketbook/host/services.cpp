@@ -375,6 +375,15 @@ ReaderHostServices readerServices() {
     // Transparent PNGs for the "PNG over text" sleep screen, next to the profile (the installer
     // leaves the folder alone; the user reaches it over USB).
     result.sleepOverlayDirectories = QStringList{ QStringLiteral("/mnt/ext1/applications/kobalt/screensaver") };
+    // Lua plugins and what they save, next to the profile as on Kobo (.adds/kobalt/plugins): the
+    // installer leaves both folders alone. Books are files on user storage, so sidecars stay on.
+    result.pluginDirectory = [] {
+        return QStringLiteral("/mnt/ext1/applications/kobalt/plugins");
+    };
+    result.pluginDataDirectory = [] {
+        return QStringLiteral("/mnt/ext1/applications/kobalt/plugin-data");
+    };
+    result.pluginFolderLabel = QStringLiteral("applications/kobalt/plugins");
     result.colorDisplay = [] {
         return false;
     };

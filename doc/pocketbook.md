@@ -51,6 +51,10 @@ page covers installing and using it. [Building](building.md#pocketbook) covers t
   sync at book open and at wake connects in the background: when the home network is out of
   reach (travel, a router down), the reader stays usable while the firmware gives up.
 - Dictionary downloads from Kobalt's catalogue inside the app, and user fonts from a folder.
+- [Lua plugins](plugins.md), such as Dave Allie's
+  [X-Ray](https://github.com/daveallie/kobalt-plugins), from `applications/kobalt/plugins/`,
+  with sidecar files beside the books. The plugin system is his too, merged here from
+  [his branch](https://github.com/daveallie/kobalt/tree/feature/plugins) ahead of upstream.
 
 Not done: a proper PocketBook package format (installation is by copying files), landscape has
 had little testing, and the port has only been run on one device model.
@@ -111,7 +115,8 @@ What the installer does, in case you prefer to do it by hand:
   `cacert.pem`) and the launcher script `kobalt.app` in `applications/` and in `system/bin/`.
   The firmware runs file handlers from `system/bin`, that is why the launcher is in both places.
   Kobalt's settings, bookmarks and dictionaries live in `applications/kobalt/profile/` and
-  `applications/kobalt/dictionaries/`; those are kept across updates.
+  `applications/kobalt/dictionaries/`; those are kept across updates, as are the plugins in
+  `applications/kobalt/plugins/` and their data in `applications/kobalt/plugin-data/`.
 - Adds `kobalt.app` to the EPUB line of `system/config/extensions.cfg` (the "Open with" list),
   first on the line, since the first app listed is what opens a book that has no "Open with"
   choice of its own; after the existing default with the keep-default option. A copy of the
@@ -143,6 +148,13 @@ would for the built-in reader; a copy from before Kobalt's first write is
   app (Wi-Fi is turned on for it). Without Wi-Fi, download the `<id>.zip` on a computer and put
   it in `applications/kobalt/dictionaries/`; it is installed at the next start.
 - **A dictionary of your own**: see [Your own dictionaries](#your-own-dictionaries) below.
+- **Plugins**: copy a plugin's folder, named after its id, into `applications/kobalt/plugins/`
+  (for X-Ray, `applications/kobalt/plugins/xray/` with `plugin.json` and `main.lua`); it loads
+  when the next book opens, and Settings → System → Plugins lists it. A sidecar file goes
+  beside its book in the library folder, for example `Count Zero.xray.json` next to
+  `Count Zero.epub`; the library does not list `.json` files. What plugins save is in
+  `applications/kobalt/plugin-data/`. Updates leave both folders alone. See
+  [Lua plugins](plugins.md).
 - **KOsync**: Settings → Sync. Signing in and syncing bring Wi-Fi up through the firmware,
   which may show its network dialog the first time. Automatic sync checks the server when a
   book opens and when the device wakes, using a known network silently.

@@ -102,7 +102,8 @@ target_link_libraries(kobalt-pb PRIVATE
     "${engine}"
     "${prefix}/lib/libharfbuzz.a" "${prefix}/lib/libxxhash.a" "${prefix}/lib/libutf8proc.a"
     "${prefix}/lib/libjpeg.a" "${prefix}/lib/liblunasvg.a" "${prefix}/lib/libfreetype.a"
-    "${prefix}/lib/libfribidi.a" "${prefix}/lib/libunibreak.a" "${prefix}/lib/libpng16.a"
+    "${prefix}/lib/libfribidi.a" "${prefix}/lib/libunibreak.a" "${prefix}/lib/liblua.a"
+    "${prefix}/lib/libpng16.a"
     inkview z dl pthread)
 target_link_options(kobalt-pb PRIVATE
     "LINKER:--whole-archive,${prefix}/lib/libfreetype.a,--no-whole-archive")

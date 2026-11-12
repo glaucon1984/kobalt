@@ -1083,3 +1083,37 @@ is due (the moment within 15 s before to 60 s after; the timer was seen from 6 s
 late), and logs both (`due in 610 s (-3 s by the standby's reckoning): staying asleep`). A press
 inside that window is held like the power-off's wake and wakes by its own input or the 4 s
 fallback, as before.
+
+## Lua plugins (2026-11-12)
+
+Dave Allie's plugin system (`daveallie/kobalt`, branch `feature/plugins` at ca1ce6b: a sandboxed
+Lua 5.4 runtime on a thread of its own, one hook that offers a card beside a dictionary
+definition, per-plugin saved data, a Plugins list in Settings > System; [Lua plugins](plugins.md))
+merged into the port ahead of upstream. It is based on upstream develop 2a708d1, three commits
+past the port's last merge, so those came with it. No conflicts.
+
+What the port needed:
+
+- `host/services.cpp`: `pluginDirectory` is `/mnt/ext1/applications/kobalt/plugins`,
+  `pluginDataDirectory` is `/mnt/ext1/applications/kobalt/plugin-data`, the label Settings shows
+  is `applications/kobalt/plugins`. Both sit beside `profile/` and `screensaver/`, as Kobo's sit
+  in `.adds/kobalt/`, and the installers leave them alone (they replace only the binary, `assets/`
+  and the CA bundle). `bookSidecars` stays on: a book is a file in the library and the reader's
+  identity for it is that file's URL (`platforms/standalone/reader.cpp`), so
+  `kobalt.read_sidecar("xray.json")` reads `<book name>.xray.json` beside it.
+- `CMakeLists.txt`: `liblua.a` on the link line. The sources under `src/plugins/` were already
+  taken by the glob.
+- Dependencies: Lua 5.4.9 with upstream's three patches is a new member of the set.
+  `remote-rebuild-deps.sh` built set `1a5fffc8b0df6ccc` and reported the install prefix headers
+  as different; the difference is Lua's five headers and nothing else, so Qt was not rebuilt.
+
+Firmware facts that matter here: the library indexes `*.txt` but not `.json` or `.lua`, so
+plugin folders, saved data and sidecars do not show up as books.
+
+The package builds and the binary carries the runtime and both folders. Not yet run on the
+device: the Plugins list, a lookup with X-Ray installed, and whether a lookup still answers when
+the device light-sleeps right after the long press (the plugin thread is not the main thread;
+the host keeps the device awake for 2 s after a release).
+
+X-Ray itself (`daveallie/kobalt-plugins`, no licence file, so it is not copied into this
+repository) is installed by copying its `xray/` folder to `applications/kobalt/plugins/xray/`.

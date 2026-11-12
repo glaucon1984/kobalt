@@ -9,10 +9,11 @@ Each plugin is a folder of its own that holds `plugin.json` and `main.lua`. The 
 | Platform | Plugin folder |
 | --- | --- |
 | Kobo | `.adds/kobalt/plugins/<id>/` on user storage |
+| PocketBook | `applications/kobalt/plugins/<id>/` on user storage |
 | Android | `plugins/<id>/` in the app's external files folder |
 | Desktop | `plugins/<id>/` in the profile folder |
 
-Kobalt reads the folders when the reader opens a book, on the plugin thread. A package install or upgrade never touches the Kobo folder.
+Kobalt reads the folders when the reader opens a book, on the plugin thread. A package install or upgrade never touches the Kobo or PocketBook folder.
 
 ## `plugin.json`
 
@@ -82,6 +83,7 @@ Reads come from memory. Kobalt loads both stores when the book opens, before `ma
 | Platform | Plugin data folder |
 | --- | --- |
 | Kobo | `.adds/kobalt/plugin-data/<id>/` on user storage |
+| PocketBook | `applications/kobalt/plugin-data/<id>/` on user storage |
 | Android | `plugin-data/<id>/` in the app's external files folder |
 | Desktop | `plugin-data/<id>/` in the profile folder |
 
