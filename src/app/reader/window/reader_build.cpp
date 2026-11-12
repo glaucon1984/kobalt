@@ -9,6 +9,7 @@
 #include "storage/annotation_database.h"
 #include "assets/bundled_fonts.h"
 #include "reader_p.h"
+#include "app/reader/settings/plugins_section.h"
 #include "dictionaries/manager.h"
 #include "support/qt_compat.h"
 #include "support/strings.h"
@@ -477,8 +478,24 @@ void Reader::buildReadingPage()
         dictionaryPanel->open(lookupText, result, lookupBounds);
         // An edited word keeps the sentence and position of the selection.
         recordLookup(lookupText, result);
+        askPlugins(lookupText);
     };
     dictionaryPanel->searchRequested = [this](const QString &query) { openSearch(query); };
+    if (services.pluginDirectory) {
+        const QUrl source(book->identity());
+        kobalt::plugins::Context context;
+        context.bookFile = source.isLocalFile() ? source.toLocalFile() : QString();
+        context.sidecars = services.bookSidecars;
+        kobalt::plugins::Book about;
+        about.identity = book->identity();
+        about.title = session->title();
+        about.language = session->state().value("language").toString();
+        about.key = BookmarkStore::bookKey(book->identity(), book->fingerprint());
+        appliedPluginSwitches = kobalt::plugins::switchesFrom(preferences);
+        plugins = std::make_unique<kobalt::plugins::PluginHost>(
+                services.pluginDirectory, services.pluginDataDirectory, context, about,
+                appliedPluginSwitches);
+    }
     dictionaryPanel->chosen = [this](const QString &id) {
         if (lifecycleHidden || services.suspended() || closing)
             return;
@@ -1378,7 +1395,24 @@ void Reader::buildSettings()
     settingsInputs.wifiPowerSaverSupported = bool(services.turnOffWifi);
     settingsInputs.readerStandbySupported = services.readerStandbySupported;
     settingsInputs.debugProgressAvailable = bool(services.development.simulateProgress);
+    settingsInputs.plugins = bool(services.pluginDirectory);
+    settingsInputs.pluginFolderLabel = services.pluginFolderLabel;
     auto *settings = new kobalt::reader::SettingsPanel(this, settingsInputs);
+    if (auto *section = settings->pluginsSection) {
+        section->setApplied(appliedPluginSwitches);
+        if (plugins) {
+            section->setBlocked(plugins->pluginsBlocked());
+            section->setStatuses(plugins->statuses());
+            plugins->statusChanged = [section](const QVector<kobalt::plugins::PluginStatus> &list) {
+                section->setStatuses(list);
+            };
+            section->deleteRequested = [this](const QString &id,
+                                              std::function<void(bool, QString)> done) {
+                if (plugins)
+                    plugins->deleteData(id, std::move(done));
+            };
+        }
+    }
     general = settings;
     kosyncPage = settings->kosync;
     buildKosync();

@@ -337,6 +337,10 @@
 "dictionary_panel.edit_hint" = "Update the word or phrase to look up in the dictionary.";
 /* Arguments: %1 */
 "dictionary_panel.definition_for" = "Definition for %1";
+/* Arguments: %1 */
+"dictionary_panel.plugin_card_for" = "Plugin card for %1";
+"dictionary_panel.plugins_heading" = "Plugins";
+"dictionary_panel.plugin_answer" = "A plugin has an answer";
 "dictionary_panel.dictionary_unavailable" = "Dictionary unavailable";
 
 /* error */
@@ -740,15 +744,11 @@
 "search_panel.find_a_word_or_phrase" = "Find a word or phrase";
 /* Arguments: %1 */
 "search_panel.matches" = "%1 matches";
-/* Arguments: %1, %2 */
-"search_panel.matches_searching" = "%1 matches · Searching…";
 "search_panel.no_matches_found" = "No matches";
 /* Arguments: %1, %2 */
 "search_panel.page_detail" = "Page %1: %2";
 "search_panel.return_to_original_position" = "Return to original position";
 "search_panel.search" = "Search";
-/* Arguments: %1 */
-"search_panel.search_stopped_matches" = "Search stopped · %1 matches";
 "search_panel.searching" = "Searching…";
 
 /* settings */
@@ -758,6 +758,27 @@
 "settings.unsupported_description" = "Disabled because this option is not supported on this device.";
 "settings.dark_description" = "Light text on a dark background.";
 "settings.section_opening" = "Opening books";
+"settings.section_plugins" = "Plugins";
+"settings.use_plugins" = "Use plugins";
+"settings.use_plugins_description" = "Turn off to open books without loading any plugin.";
+"settings.plugins_install" = "No plugins are installed. Copy a plugin's folder into %1, then open a book.";
+"settings.plugins_blocked" = "Plugins are off until the plugin from the previous book finishes or Kobalt restarts.";
+"settings.plugin_status_running" = "Running";
+"settings.plugin_status_off" = "Turned off";
+"settings.plugin_status_stopped" = "Stopped after 3 errors in this book";
+"settings.plugin_status_data_only" = "Not installed, has saved data";
+"settings.plugin_status_not_loaded" = "Not loaded: %1";
+"settings.plugin_status_next_book" = "Changes apply when the next book opens";
+"settings.plugin_version" = "Version %1";
+"settings.plugin_data_only_details" = "This plugin's folder is gone, but its saved data remains.";
+"settings.plugin_enabled" = "Enabled";
+"settings.plugin_enabled_description" = "Takes effect when the next book opens.";
+"settings.plugin_delete_data" = "Delete saved data";
+"settings.plugin_delete_data_title" = "Delete saved data?";
+"settings.plugin_delete_data_warning" = "%1 loses everything it has saved, for every book. This cannot be undone.";
+"settings.plugin_delete" = "Delete";
+"settings.plugin_data_deleted" = "Saved data deleted.";
+"settings.plugin_data_not_deleted" = "Saved data was not deleted: %1";
 "settings.opening_cover" = "Do not show book cover while opening";
 "settings.opening_cover_description" = "Always show the Kobalt logo when opening a book.";
 "settings.display" = "Display";
@@ -979,9 +1000,6 @@
 /* search_panel */
 /* Arguments: %1 */
 "search_panel.empty_query" = "No matches for “%1”";
-/* Arguments: %1 */
-/* Arguments: %1, %2 */
-"search_panel.result_range" = "Results %1–%2";
 /* Arguments: %1 */
 "search_panel.page_number" = "Page %1";
 
@@ -1619,3 +1637,13 @@
 "library.icon_folder" = "Custom icons";
 "library.folder_not_selected" = "Choose a folder";
 "library.clear_folder" = "Clear folder choice";
+
+/* Search match counts use localized numbers and the existing scope labels. */
+"search_panel.match" = "%1 match";
+"search_panel.matches_in_scope" = "%1 in %2";
+"search_panel.matches_so_far_in_scope" = "%1 so far in %2";
+"search_panel.search_complete" = "Search complete";
+"search_panel.search_stopped" = "Search stopped";
+/* These pages contain search results, not EPUB pages. */
+"search_panel.result_pages" = "Page %1 of %2";
+"search_panel.result_pages_so_far" = "Page %1 of at least %2";

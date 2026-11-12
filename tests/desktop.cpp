@@ -1570,6 +1570,173 @@ void swipeChoices(Fixture &fixture, const QString &name = {})
              QString("swipes_only"));
 }
 
+// Points the reader at one fixture plugin folder under tests/fixtures/plugins/reader.
+std::function<void(ReaderHostServices &)> pluginServices(const QString &folder)
+{
+    return [folder](ReaderHostServices &services) {
+        services.pluginDirectory = nullptr;
+        if (!folder.isEmpty())
+            services.pluginDirectory = [path = QStringLiteral(KOBALT_TEST_PLUGIN_FIXTURES) + '/'
+                                                + folder] { return path; };
+    };
+}
+
+void openPluginBook(Fixture &fixture)
+{
+    QVERIFY(fixture.prepared);
+    QSignalSpy opened(&fixture.window, &desktop::Window::bookOpened);
+    fixture.window.openBook(book);
+    QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 10000);
+    QTRY_VERIFY(!fixture.state().value("busy").toBool());
+    openPrologueBody(fixture);
+}
+
+// The text of the word under `point`, as the reader resolves a long press.
+QString wordText(Fixture &fixture, QPoint point)
+{
+    auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+    const auto body = point - QPoint(0, page ? page->topHeight() : 0);
+    return fixture.coordinateQuery(book, QString(), [body](EngineDocument &coordinates) {
+        return coordinates.wordAt(body).text;
+    });
+}
+
+// The card from tests/fixtures/plugins/reader/card.
+const QString pluginCardName = QStringLiteral("Card fixture");
+const QString pluginCardTitle = QStringLiteral("Maren Holt");
+const QString pluginCardFooter = QStringLiteral("X-Ray fixture: known up to this page");
+
+bool pluginCardShown(Fixture &fixture)
+{
+    auto *headword = qobject_cast<QLabel *>(fixture.widget("rrDictionaryWord"));
+    return fixture.visible("rrDictionary") && headword && headword->text() == pluginCardTitle;
+}
+
+// The normal dictionary sheet with its definition actions.
+bool dictionaryShown(Fixture &fixture)
+{
+    return fixture.visible("rrDictionary") && fixture.visible("rrDictionaryEdit")
+            && fixture.visible("rrDictionarySelect") && fixture.visible("rrDictionarySearch");
+}
+
+bool pluginMarkerShown(Fixture &fixture)
+{
+    return fixture.visible("rrDictionary") && fixture.visible("rrDictionaryPluginMarker");
+}
+
+// The object name of the open chooser's row titled `name`, or empty.
+QString pluginChoice(Fixture &fixture, const QString &name)
+{
+    auto *choices = fixture.widget("rrDictionaryChoices");
+    if (!choices || !choices->isVisible())
+        return {};
+    for (auto *row : choices->findChildren<QPushButton *>())
+        if (row->isVisible() && row->toolTip() == name && !row->objectName().isEmpty())
+            return row->objectName();
+    return {};
+}
+
+QString checkedChoice(Fixture &fixture)
+{
+    auto *choices = fixture.widget("rrDictionaryChoices");
+    if (!choices)
+        return {};
+    for (auto *row : choices->findChildren<QPushButton *>())
+        if (row->isVisible() && row->isChecked() && !row->objectName().isEmpty())
+            return row->objectName();
+    return {};
+}
+
+bool pluginChoiceHeading(Fixture &fixture)
+{
+    return fixture.visible("rrDictionaryPluginsHeading");
+}
+
+// Counts paint events of one widget.
+class PaintCounter final : public QObject
+{
+public:
+    explicit PaintCounter(QWidget *widget) : widget(widget) { widget->installEventFilter(this); }
+
+    ~PaintCounter() override
+    {
+        if (widget)
+            widget->removeEventFilter(this);
+    }
+
+    int count = 0;
+
+protected:
+    bool eventFilter(QObject *object, QEvent *event) override
+    {
+        if (object == widget && event->type() == QEvent::Paint)
+            ++count;
+        return false;
+    }
+
+private:
+    QPointer<QWidget> widget;
+};
+
+int pluginReplies(Fixture &fixture)
+{
+    auto *reader = fixture.window.readerWindow();
+    return reader ? reader->property("reader_plugin_replies").toInt() : 0;
+}
+
+// Runs `posted` once, synchronously, as soon as the reader has posted a lookup
+// to its plugins. The reply is a queued main-thread call, so it cannot arrive first.
+class PluginRequestWatch final : public QObject
+{
+public:
+    PluginRequestWatch(QObject *reader, std::function<void()> posted)
+        : reader(reader), posted(std::move(posted))
+    {
+        reader->installEventFilter(this);
+    }
+
+    ~PluginRequestWatch() override
+    {
+        if (reader)
+            reader->removeEventFilter(this);
+    }
+
+    bool fired = false;
+
+protected:
+    bool eventFilter(QObject *object, QEvent *event) override
+    {
+        if (!fired && object == reader && event->type() == QEvent::DynamicPropertyChange
+            && static_cast<QDynamicPropertyChangeEvent *>(event)->propertyName()
+                    == "reader_plugin_requests") {
+            fired = true;
+            posted();
+        }
+        return false;
+    }
+
+private:
+    QPointer<QObject> reader;
+    std::function<void()> posted;
+};
+
+// An early review image of the reader, rendered as the gallery renders it.
+bool saveReaderImage(Fixture &fixture, const QString &directory, const QString &name)
+{
+    if (directory.isEmpty())
+        return true;
+    QCoreApplication::processEvents();
+    auto *surface = fixture.window.readerWindow();
+    if (!surface || !QDir().mkpath(directory))
+        return false;
+    QImage pixels(surface->size(), QImage::Format_ARGB32_Premultiplied);
+    pixels.fill(Qt::transparent);
+    surface->render(&pixels);
+    pixels.setDotsPerMeterX(qRound(300 / 0.0254));
+    pixels.setDotsPerMeterY(qRound(300 / 0.0254));
+    return pixels.save(QDir(directory).filePath(name + ".png"));
+}
+
 // Exercises the real EPUB hierarchy, disclosure hit areas, navigation and reopening.
 void chapterGroups(Fixture &fixture, const QString &name = {})
 {
@@ -1754,6 +1921,43 @@ bool revealSettingsOption(Fixture &fixture, const char *name)
             return false;
     }
     return false;
+}
+
+// Points the reader at a plugin folder and a plugin data folder by path.
+std::function<void(ReaderHostServices &)> pluginFolders(const QString &plugins, const QString &data)
+{
+    return [plugins, data](ReaderHostServices &services) {
+        services.pluginDirectory = [plugins] { return plugins; };
+        services.pluginDataDirectory = [data] { return data; };
+        services.pluginFolderLabel = QStringLiteral("the test plugin folder");
+    };
+}
+
+const QString pluginStatusFixtures =
+        QStringLiteral(KOBALT_TEST_PLUGIN_FIXTURES "/../host/statuses");
+
+// Opens Settings > System with the Plugins section in view.
+bool openPluginSettings(Fixture &fixture, const char *row = "rrSystemPluginsSection")
+{
+    return fixture.press("rrPage") && fixture.press("rrSettings")
+            && fixture.press("rrSettingsSystem") && revealSettingsOption(fixture, row);
+}
+
+QString pluginRowStatus(Fixture &fixture, const char *row)
+{
+    auto *button = fixture.widget(row);
+    return button ? button->accessibleDescription() : QString();
+}
+
+void reopenPluginBook(Fixture &fixture)
+{
+    QSignalSpy opened(&fixture.window, &desktop::Window::bookOpened);
+    fixture.window.readerWindow()->close();
+    QTRY_VERIFY(!fixture.window.readerWindow());
+    fixture.window.openBook(book);
+    QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 10000);
+    QTRY_VERIFY(!fixture.state().value("busy").toBool());
+    openPrologueBody(fixture);
 }
 
 void inpageFootnotesTour(Fixture &fixture, const QString &name, bool screenshots)
@@ -2189,7 +2393,7 @@ void textPresetsTour(Fixture &fixture, const Scene &scene, bool screenshots)
     if (!screenshots) {
         // A preset applies to the preview; closing the panel keeps it.
         const auto applied = [&](const char *card, const QString &face, const QString &label) {
-            QVERIFY(fixture.press(card));
+            QVERIFY(fixture.press(qPrintable(card)));
             QTRY_COMPARE(fixture.widget("rrTextPresetToggle")->accessibleDescription(), label);
             QTRY_VERIFY_WITH_TIMEOUT(settled(), 30000);
             QVERIFY(fixture.press("rrPage"));
@@ -6672,6 +6876,505 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
         QVERIFY(!android::takeRefreshFrame(reader, canvas->viewport(), damage).clean);
     }
 
+    // Checks that the definition opens before any plugin answers, and the answer becomes a choice.
+    void pluginDefinitionOpensFirst()
+    {
+        Fixture fixture(false, false, false, true, false, false, pluginServices("card"));
+        openPluginBook(fixture);
+        auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+        auto *reader = fixture.window.readerWindow();
+        bool openFirst = false;
+        PluginRequestWatch watch(reader, [&] {
+            openFirst = dictionaryShown(fixture) && !pluginMarkerShown(fixture)
+                    && pluginReplies(fixture) == 0;
+        });
+        QVERIFY(fixture.selectWord(page, fixture.wordPoint()));
+        QTRY_VERIFY(watch.fired);
+        QVERIFY(openFirst);
+        QTRY_VERIFY(pluginMarkerShown(fixture));
+        QVERIFY(dictionaryShown(fixture));
+        QVERIFY(fixture.press("rrDictionarySelect"));
+        QTRY_VERIFY(!pluginChoice(fixture, pluginCardName).isEmpty());
+        QVERIFY(pluginChoiceHeading(fixture));
+    }
+
+    // Checks that choosing the plugin shows its card, and choosing the dictionary shows the definition again.
+    void pluginChoiceShowsCard()
+    {
+        const auto capture = qEnvironmentVariable("KOBALT_PLUGIN_CAPTURE");
+        Fixture fixture(false, false, false, true, false, false, pluginServices("card"));
+        if (!capture.isEmpty())
+            selectPreview(fixture, 1);
+        openPluginBook(fixture);
+        auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+        const auto position = fixture.state().value("position");
+        const auto point = fixture.wordPoint();
+        const auto word = wordText(fixture, point);
+        QVERIFY(fixture.selectWord(page, point));
+        QTRY_VERIFY(pluginMarkerShown(fixture));
+        auto *headword = qobject_cast<QLabel *>(fixture.widget("rrDictionaryWord"));
+        auto *definition = dynamic_cast<ui::PagedText *>(fixture.widget("rrDefinition"));
+        QVERIFY(headword && definition);
+        QCOMPARE(headword->text(), word);
+        const auto definitionHtml = definition->html();
+        const auto dictionaryChoice = fixture.state().value("dictionary");
+        QVERIFY(saveReaderImage(fixture, capture, "plugin-marker"));
+        QVERIFY(fixture.press("rrDictionarySelect"));
+        const auto card = pluginChoice(fixture, pluginCardName);
+        QTRY_VERIFY(!card.isEmpty());
+        const auto checked = checkedChoice(fixture);
+        QVERIFY(!checked.isEmpty());
+        QVERIFY(saveReaderImage(fixture, capture, "plugin-choices"));
+        QVERIFY(fixture.press(qPrintable(card)));
+        QTRY_VERIFY(pluginCardShown(fixture));
+        QVERIFY(definition->html().contains("Harbourmaster of Saltmarsh."));
+        QVERIFY(definition->html().contains(pluginCardFooter.toHtmlEscaped()));
+        QVERIFY(fixture.visible("rrDictionarySelect"));
+        QVERIFY(!fixture.visible("rrDictionaryEdit"));
+        QVERIFY(!fixture.visible("rrDictionarySearch"));
+        QVERIFY(saveReaderImage(fixture, capture, "plugin-card"));
+        QVERIFY(fixture.press("rrDictionarySelect"));
+        QTRY_VERIFY(!pluginChoice(fixture, pluginCardName).isEmpty());
+        QCOMPARE(checkedChoice(fixture), pluginChoice(fixture, pluginCardName));
+        QVERIFY(fixture.press(qPrintable(checked)));
+        QTRY_VERIFY(dictionaryShown(fixture));
+        QCOMPARE(headword->text(), word);
+        QCOMPARE(definition->html(), definitionHtml);
+        QVERIFY(pluginMarkerShown(fixture));
+        QCOMPARE(fixture.state().value("dictionary"), dictionaryChoice);
+        QCOMPARE(fixture.state().value("position"), position);
+    }
+
+    // Checks that the next lookup opens on the definition after a card was chosen.
+    // Checks that choosing the shown definition again, when it has no dictionary id, keeps it.
+    void pluginDefinitionEntryKeepsDefinition()
+    {
+        Fixture fixture(false, false, false, true, false, false, pluginServices("card"));
+        openPluginBook(fixture);
+        auto *panel = dynamic_cast<DictionaryPanel *>(fixture.widget("rrDictionary"));
+        QVERIFY(panel);
+        DictionaryResult result;
+        result.word = "type";
+        result.dictionary = "Saved definition";
+        result.received = result.restored = true;
+        result.html = "<p><b>type</b> A printed character.</p>";
+        panel->open("type", result, { 100, 100, 50, 40 });
+        QTRY_VERIFY(panel->isVisible());
+        auto *definition = dynamic_cast<ui::PagedText *>(fixture.widget("rrDefinition"));
+        QVERIFY(definition);
+        const auto html = definition->html();
+        panel->addPluginCard({ "card", pluginCardName, "Card", "<p>Card</p>", {} });
+        QVERIFY(fixture.press("rrDictionarySelect"));
+        QTRY_VERIFY(fixture.visible("rrDictionaryChoices"));
+        const auto current = checkedChoice(fixture);
+        QVERIFY(!current.isEmpty());
+        QVERIFY(fixture.press(qPrintable(current)));
+        QTRY_VERIFY(!fixture.visible("rrDictionaryChoices"));
+        QCOMPARE(definition->html(), html);
+    }
+
+    void pluginChoiceNotRemembered()
+    {
+        Fixture fixture(false, false, false, true, false, false, pluginServices("card"));
+        openPluginBook(fixture);
+        auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+        const auto point = fixture.wordPoint();
+        QVERIFY(fixture.selectWord(page, point));
+        QTRY_VERIFY(pluginMarkerShown(fixture));
+        QVERIFY(fixture.press("rrDictionarySelect"));
+        QTRY_VERIFY(!pluginChoice(fixture, pluginCardName).isEmpty());
+        QVERIFY(fixture.press(qPrintable(pluginChoice(fixture, pluginCardName))));
+        QTRY_VERIFY(pluginCardShown(fixture));
+        QVERIFY(fixture.press("rrDictionaryClose"));
+        QTRY_VERIFY(!fixture.visible("rrDictionary"));
+        QVERIFY(fixture.selectWord(page, point));
+        QTRY_VERIFY(dictionaryShown(fixture));
+        auto *headword = qobject_cast<QLabel *>(fixture.widget("rrDictionaryWord"));
+        QCOMPARE(headword->text(), wordText(fixture, point));
+        QTRY_VERIFY(pluginMarkerShown(fixture));
+        QVERIFY(dictionaryShown(fixture));
+    }
+
+    // Checks that a slow plugin's card joins the open sheet without repainting the definition.
+    void pluginLateCardAddsChoice()
+    {
+        Fixture fixture(false, false, false, true, false, false, pluginServices("slow"));
+        openPluginBook(fixture);
+        auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+        auto *reader = fixture.window.readerWindow();
+        std::unique_ptr<PaintCounter> paints;
+        PluginRequestWatch watch(reader, [&] {
+            paints = std::make_unique<PaintCounter>(fixture.widget("rrDefinition"));
+        });
+        QVERIFY(fixture.selectWord(page, fixture.wordPoint()));
+        QTRY_VERIFY(watch.fired);
+        QVERIFY(dictionaryShown(fixture));
+        QCoreApplication::processEvents();
+        QVERIFY(!pluginMarkerShown(fixture));
+        const int before = paints->count;
+        QTRY_VERIFY_WITH_TIMEOUT(pluginMarkerShown(fixture), 10000);
+        QCoreApplication::processEvents();
+        QCOMPARE(paints->count, before);
+        QVERIFY(fixture.widget("rrDictionarySelect")
+                        ->isAncestorOf(fixture.widget("rrDictionaryPluginMarker")));
+        QVERIFY(dictionaryShown(fixture));
+        QVERIFY(fixture.press("rrDictionarySelect"));
+        QTRY_VERIFY(!pluginChoice(fixture, QStringLiteral("slow")).isEmpty());
+    }
+
+    // Checks that a submitted edit asks the plugins again for the new word.
+    void pluginEditAsksAgain()
+    {
+        Fixture fixture(false, false, false, true, false, false, pluginServices("card"));
+        openPluginBook(fixture);
+        auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+        auto *reader = fixture.window.readerWindow();
+        QVERIFY(fixture.selectWord(page, fixture.wordPoint()));
+        QTRY_VERIFY(pluginMarkerShown(fixture));
+        const int requests = reader->property("reader_plugin_requests").toInt();
+        QVERIFY(fixture.press("rrDictionaryEdit"));
+        auto *query = qobject_cast<QLineEdit *>(fixture.widget("rrDictionaryQuery"));
+        QVERIFY(query);
+        query->setText(QStringLiteral("harbour"));
+        bool cleared = false;
+        PluginRequestWatch watch(reader, [&] { cleared = !pluginMarkerShown(fixture); });
+        QTest::keyClick(query, Qt::Key_Return);
+        QTRY_VERIFY(watch.fired);
+        QVERIFY(cleared);
+        QCOMPARE(reader->property("reader_plugin_requests").toInt(), requests + 1);
+        QTRY_VERIFY(pluginMarkerShown(fixture));
+        auto *headword = qobject_cast<QLabel *>(fixture.widget("rrDictionaryWord"));
+        QCOMPARE(headword->text(), QStringLiteral("harbour"));
+    }
+
+    // Checks that a plugin without a card leaves the sheet without a plugin choice.
+    void pluginSilentOpensDictionary()
+    {
+        Fixture fixture(false, false, false, true, false, false, pluginServices("silent"));
+        openPluginBook(fixture);
+        auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+        QVERIFY(fixture.selectWord(page, fixture.wordPoint()));
+        QTRY_VERIFY(dictionaryShown(fixture));
+        QTRY_COMPARE(pluginReplies(fixture), 1);
+        QCoreApplication::processEvents();
+        QVERIFY(!pluginMarkerShown(fixture));
+    }
+
+    // Checks that a failing plugin leaves the sheet without a plugin choice.
+    void pluginErrorOpensDictionary()
+    {
+        Fixture fixture(false, false, false, true, false, false, pluginServices("broken"));
+        openPluginBook(fixture);
+        auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+        QVERIFY(fixture.selectWord(page, fixture.wordPoint()));
+        QTRY_VERIFY(dictionaryShown(fixture));
+        QTRY_COMPARE(pluginReplies(fixture), 1);
+        QCoreApplication::processEvents();
+        QVERIFY(!pluginMarkerShown(fixture));
+    }
+
+    // Checks that a card arriving after a page tap dismissed the sheet shows nothing.
+    void pluginReplyAfterPageTurnDropped()
+    {
+        Fixture fixture(false, false, false, true, false, false, pluginServices("slow"));
+        openPluginBook(fixture);
+        auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+        auto *reader = fixture.window.readerWindow();
+        const auto word = fixture.wordPoint();
+        const QPoint tap(9 * page->width() / 10, page->height() / 2);
+        QVERIFY(!page->annotationContains(tap - QPoint(0, page->topHeight())));
+        bool tapped = false;
+        PluginRequestWatch watch(reader, [&] {
+            QCOMPARE(pluginReplies(fixture), 0);
+            tapped = fixture.click(page, tap);
+        });
+        QVERIFY(fixture.selectWord(page, word));
+        QTRY_VERIFY(watch.fired);
+        QVERIFY(tapped);
+        QTRY_VERIFY_WITH_TIMEOUT(pluginReplies(fixture) == 1, 10000);
+        QCoreApplication::processEvents();
+        QVERIFY(!fixture.visible("rrDictionary"));
+        QVERIFY(!pluginMarkerShown(fixture));
+        QVERIFY(fixture.turnPage(1));
+        QVERIFY(!fixture.visible("rrDictionary"));
+    }
+
+    // Checks that a card arriving while the app is suspended is dropped.
+    void pluginSuspendCancelsLookup()
+    {
+        auto suspended = std::make_shared<bool>(false);
+        Fixture fixture(false, false, false, true, false, false,
+                        [suspended](ReaderHostServices &services) {
+                            pluginServices("card")(services);
+                            services.suspended = [suspended, host = services.suspended] {
+                                return *suspended || (host && host());
+                            };
+                        });
+        openPluginBook(fixture);
+        auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+        auto *reader = fixture.window.readerWindow();
+        const auto word = fixture.wordPoint();
+        PluginRequestWatch watch(reader, [suspended] { *suspended = true; });
+        QVERIFY(fixture.selectWord(page, word));
+        QTRY_VERIFY(watch.fired);
+        QTRY_COMPARE(pluginReplies(fixture), 1);
+        *suspended = false;
+        QCoreApplication::processEvents();
+        QVERIFY(!pluginMarkerShown(fixture));
+        if (fixture.visible("rrDictionary"))
+            QVERIFY(fixture.press("rrDictionaryClose"));
+        QTRY_VERIFY(!fixture.visible("rrDictionary"));
+        QVERIFY(fixture.turnPage(1));
+        QVERIFY(!fixture.visible("rrDictionary"));
+    }
+
+    void pluginCardDismissal_data()
+    {
+        QTest::addColumn<int>("action");
+        const QStringList actions{ "left", "centre", "right", "close", "hide-reader" };
+        for (int action = 0; action < actions.size(); ++action)
+            QTest::newRow(qPrintable(actions[action])) << action;
+    }
+
+    // Checks that the dictionary sheet's dismissal actions also close a plugin card.
+    void pluginCardDismissal()
+    {
+        QFETCH(int, action);
+        Fixture fixture(false, false, false, true, false, false, pluginServices("card"));
+        openPluginBook(fixture);
+        auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+        auto *reader = fixture.window.readerWindow();
+        const auto word = fixture.wordPoint();
+        const auto position = fixture.state().value("position");
+        QVERIFY(fixture.selectWord(page, word));
+        QTRY_VERIFY(pluginMarkerShown(fixture));
+        QVERIFY(fixture.press("rrDictionarySelect"));
+        QTRY_VERIFY(!pluginChoice(fixture, pluginCardName).isEmpty());
+        QVERIFY(fixture.press(qPrintable(pluginChoice(fixture, pluginCardName))));
+        QTRY_VERIFY(pluginCardShown(fixture));
+        if (action == 4) {
+            auto *dictionary = fixture.widget("rrDictionary");
+            reader->hide();
+            const bool dismissedWhileHidden = dictionary->isHidden();
+            reader->show();
+            QVERIFY(dismissedWhileHidden);
+            QTRY_VERIFY(!fixture.visible("rrDictionary"));
+            QCOMPARE(fixture.state().value("position"), position);
+            return;
+        }
+        if (action == 3) {
+            QVERIFY(fixture.press("rrDictionaryClose"));
+        } else {
+            auto *dictionary = fixture.widget("rrDictionary");
+            const int y = dictionary->y() > 0 ? dictionary->y() - ui::px(24)
+                                              : dictionary->geometry().bottom() + ui::px(24);
+            const auto point =
+                    page->mapFrom(reader, QPoint((1 + 4 * action) * reader->width() / 10, y));
+            QVERIFY(!page->annotationContains(point - QPoint(0, page->topHeight())));
+            QCOMPARE(reader->childAt(page->mapTo(reader, point)), page);
+            QVERIFY(fixture.click(page, point));
+        }
+        QTRY_VERIFY(!fixture.visible("rrDictionary"));
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        QCOMPARE(fixture.state().value("position"), position);
+        QVERIFY(!fixture.visible("rrControlsTop"));
+        QTRY_VERIFY(!page->annotationContains(word - QPoint(0, page->topHeight())));
+    }
+
+    // Checks that without a plugin folder the dictionary opens without asking any plugin.
+    void pluginNoDirectoryUnchanged()
+    {
+        QVERIFY(!ReaderHostServices().pluginDirectory);
+        Fixture fixture(false, false, false, true, false, false, pluginServices({}));
+        openPluginBook(fixture);
+        auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+        QVERIFY(fixture.selectWord(page, fixture.wordPoint()));
+        QTRY_VERIFY(dictionaryShown(fixture));
+        QCOMPARE(pluginReplies(fixture), 0);
+        QVERIFY(!pluginMarkerShown(fixture));
+    }
+
+    // Checks that the Plugins section lists every plugin folder and saved data with its status.
+    void pluginListShowsStatuses()
+    {
+        QTemporaryDir data;
+        QDir(data.path()).mkpath("ghost");
+        Fixture fixture(false, false, false, true, false, false,
+                        pluginFolders(pluginStatusFixtures, data.path()));
+        if (!qEnvironmentVariable("KOBALT_PLUGIN_CAPTURE").isEmpty())
+            selectPreview(fixture, 1);
+        openPluginBook(fixture);
+        QVERIFY(openPluginSettings(fixture, "rrPlugin_ok"));
+        auto *ok = dynamic_cast<ui::CaptionButton *>(fixture.widget("rrPlugin_ok"));
+        QVERIFY(ok);
+        QCOMPARE(ok->text(), QStringLiteral("Okay"));
+        QCOMPARE(pluginRowStatus(fixture, "rrPlugin_ok"), QStringLiteral("Running"));
+        QVERIFY(pluginRowStatus(fixture, "rrPlugin_no_main").startsWith("Not loaded:"));
+        QVERIFY(pluginRowStatus(fixture, "rrPlugin_mismatch_dir")
+                        .contains("folder name must match id"));
+        QVERIFY(pluginRowStatus(fixture, "rrPlugin_load_error").startsWith("Not loaded:"));
+        QCOMPARE(pluginRowStatus(fixture, "rrPlugin_ghost"),
+                 QStringLiteral("Not installed, has saved data"));
+        auto *use = qobject_cast<QCheckBox *>(fixture.widget("rrUsePlugins"));
+        QVERIFY(use && use->isChecked());
+        const auto capture = qEnvironmentVariable("KOBALT_PLUGIN_CAPTURE");
+        if (capture.isEmpty())
+            return;
+        QVERIFY(saveReaderImage(fixture, capture, "plugins-rows"));
+        QVERIFY(revealSettingsOption(fixture, "rrUsePlugins"));
+        QVERIFY(saveReaderImage(fixture, capture, "plugins-section"));
+        QVERIFY(revealSettingsOption(fixture, "rrPlugin_ok"));
+        QVERIFY(fixture.press("rrPlugin_ok"));
+        QTRY_VERIFY(fixture.visible("rrPluginDetails"));
+        QVERIFY(saveReaderImage(fixture, capture, "plugin-details"));
+        QVERIFY(fixture.press("rrPluginDeleteData"));
+        QTRY_VERIFY(fixture.visible("rrPluginDataConfirmation"));
+        QVERIFY(saveReaderImage(fixture, capture, "plugin-delete"));
+    }
+
+    // Checks that turning one plugin off is saved and applies when the next book opens.
+    void pluginSwitchAppliesNextBook()
+    {
+        QTemporaryDir data;
+        Fixture fixture(false, false, false, true, false, false,
+                        pluginFolders(pluginStatusFixtures, data.path()));
+        openPluginBook(fixture);
+        QVERIFY(openPluginSettings(fixture, "rrPlugin_ok"));
+        QVERIFY(fixture.press("rrPlugin_ok"));
+        QTRY_VERIFY(fixture.visible("rrPluginDetails"));
+        // The folder is named as the reader knows it, not by its path on this computer.
+        auto *about = qobject_cast<QLabel *>(fixture.widget("rrPluginDetailsDescription"));
+        QVERIFY(about);
+        QVERIFY2(about->text().contains("the test plugin folder/ok"), qPrintable(about->text()));
+        QVERIFY(!about->text().contains(pluginStatusFixtures));
+        auto *enabled = qobject_cast<QCheckBox *>(fixture.widget("rrPluginEnabled"));
+        QVERIFY(enabled && enabled->isChecked());
+        QVERIFY(fixture.press("rrPluginEnabled"));
+        QVERIFY(!enabled->isChecked());
+        QVERIFY(fixture.press("rrPluginDone"));
+        QTRY_VERIFY(!fixture.visible("rrPluginDetails"));
+        QCOMPARE(pluginRowStatus(fixture, "rrPlugin_ok"),
+                 QStringLiteral("Changes apply when the next book opens"));
+        QVERIFY(fixture.press("rrSettingsClose"));
+        QTRY_COMPARE(storage::readJson(fixture.paths.preferences()).value("plugins_disabled"),
+                     QJsonValue(QJsonArray{ "ok" }));
+        // The fixture's "off" plugin also answers, so its entry shows that plugins ran.
+        auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+        QVERIFY(fixture.selectWord(page, fixture.wordPoint()));
+        QTRY_VERIFY(pluginMarkerShown(fixture));
+        QVERIFY(fixture.press("rrDictionarySelect"));
+        QTRY_VERIFY(!pluginChoice(fixture, QStringLiteral("off")).isEmpty());
+        QVERIFY(!pluginChoice(fixture, QStringLiteral("Okay")).isEmpty());
+        QVERIFY(fixture.press("rrDictionarySelect"));
+        QVERIFY(fixture.press("rrDictionaryClose"));
+        reopenPluginBook(fixture);
+        page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+        QVERIFY(fixture.selectWord(page, fixture.wordPoint()));
+        QTRY_VERIFY(pluginMarkerShown(fixture));
+        QVERIFY(fixture.press("rrDictionarySelect"));
+        QTRY_VERIFY(!pluginChoice(fixture, QStringLiteral("off")).isEmpty());
+        QVERIFY(pluginChoice(fixture, QStringLiteral("Okay")).isEmpty());
+        QVERIFY(fixture.press("rrDictionarySelect"));
+        QVERIFY(fixture.press("rrDictionaryClose"));
+        QVERIFY(openPluginSettings(fixture, "rrPlugin_ok"));
+        QCOMPARE(pluginRowStatus(fixture, "rrPlugin_ok"), QStringLiteral("Turned off"));
+    }
+
+    // Checks that Use plugins off loads no plugin but keeps the list and data deletion.
+    void usePluginsOff()
+    {
+        QTemporaryDir data;
+        QDir(data.path()).mkpath("ok");
+        Fixture fixture(false, false, false, true, false, false,
+                        pluginFolders(pluginStatusFixtures, data.path()));
+        openPluginBook(fixture);
+        QVERIFY(openPluginSettings(fixture, "rrUsePlugins"));
+        QVERIFY(fixture.press("rrUsePlugins"));
+        QVERIFY(fixture.press("rrSettingsClose"));
+        QTRY_COMPARE(storage::readJson(fixture.paths.preferences()).value("plugins_enabled"),
+                     QJsonValue(false));
+        reopenPluginBook(fixture);
+        auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+        QVERIFY(fixture.selectWord(page, fixture.wordPoint()));
+        QTRY_VERIFY(dictionaryShown(fixture));
+        QTest::qWait(50);
+        QVERIFY(!pluginMarkerShown(fixture));
+        QVERIFY(fixture.press("rrDictionaryClose"));
+        QVERIFY(openPluginSettings(fixture, "rrPlugin_ok"));
+        QCOMPARE(pluginRowStatus(fixture, "rrPlugin_ok"), QStringLiteral("Turned off"));
+        QVERIFY(fixture.press("rrPlugin_ok"));
+        QTRY_VERIFY(fixture.visible("rrPluginDetails"));
+        QVERIFY(fixture.press("rrPluginDeleteData"));
+        QTRY_VERIFY(fixture.visible("rrPluginDataConfirmation"));
+        QVERIFY(fixture.press("rrConfirmDeletePluginData"));
+        QTRY_VERIFY(!QDir(data.path() + "/ok").exists());
+    }
+
+    // Checks that deleting saved data asks first, and Cancel keeps it.
+    void pluginDeleteData()
+    {
+        QTemporaryDir data;
+        QDir(data.path()).mkpath("ok");
+        Fixture fixture(false, false, false, true, false, false,
+                        pluginFolders(pluginStatusFixtures, data.path()));
+        openPluginBook(fixture);
+        QVERIFY(openPluginSettings(fixture, "rrPlugin_ok"));
+        QVERIFY(fixture.press("rrPlugin_ok"));
+        QTRY_VERIFY(fixture.visible("rrPluginDetails"));
+        QVERIFY(fixture.press("rrPluginDeleteData"));
+        QTRY_VERIFY(fixture.visible("rrPluginDataConfirmation"));
+        QVERIFY(fixture.press("rrKeepPluginData"));
+        QTRY_VERIFY(!fixture.visible("rrPluginDataConfirmation"));
+        QVERIFY(QDir(data.path() + "/ok").exists());
+        QVERIFY(fixture.press("rrPluginDeleteData"));
+        QTRY_VERIFY(fixture.visible("rrPluginDataConfirmation"));
+        QVERIFY(fixture.press("rrConfirmDeletePluginData"));
+        QTRY_VERIFY(!QDir(data.path() + "/ok").exists());
+    }
+
+    // Checks that saved data without a plugin folder has a row that offers only deletion.
+    void pluginDataOnlyRow()
+    {
+        QTemporaryDir data;
+        QDir(data.path()).mkpath("ghost");
+        Fixture fixture(false, false, false, true, false, false,
+                        pluginFolders(pluginStatusFixtures, data.path()));
+        openPluginBook(fixture);
+        QVERIFY(openPluginSettings(fixture, "rrPlugin_ghost"));
+        QVERIFY(fixture.press("rrPlugin_ghost"));
+        QTRY_VERIFY(fixture.visible("rrPluginDetails"));
+        QVERIFY(!fixture.visible("rrPluginEnabled"));
+        QVERIFY(fixture.visible("rrPluginDeleteData"));
+        QVERIFY(fixture.press("rrPluginDeleteData"));
+        QVERIFY(fixture.press("rrConfirmDeletePluginData"));
+        QTRY_VERIFY(!QDir(data.path() + "/ghost").exists());
+        QTRY_VERIFY(!fixture.widget("rrPlugin_ghost"));
+    }
+
+    // Checks that an empty plugin folder explains how to install a plugin.
+    void pluginSectionEmpty()
+    {
+        QTemporaryDir plugins, data;
+        Fixture fixture(false, false, false, true, false, false,
+                        pluginFolders(plugins.path(), data.path()));
+        openPluginBook(fixture);
+        QVERIFY(openPluginSettings(fixture, "rrPluginsInstallHint"));
+        auto *hint = qobject_cast<QLabel *>(fixture.widget("rrPluginsInstallHint"));
+        QVERIFY(hint && hint->text().contains("the test plugin folder"));
+    }
+
+    // Checks that a host without a plugin folder has no Plugins section.
+    void pluginSectionHidden()
+    {
+        Fixture fixture(false, false, false, true, false, false, pluginServices({}));
+        openPluginBook(fixture);
+        QVERIFY(fixture.press("rrPage"));
+        QVERIFY(fixture.press("rrSettings"));
+        QVERIFY(fixture.press("rrSettingsSystem"));
+        QVERIFY(!fixture.widget("rrSystemPluginsSection"));
+        QVERIFY(!fixture.widget("rrUsePlugins"));
+    }
+
     // Checks word lookup with adjustment handles, then entering annotation mode and saving the range, for one density and theme.
     void wordSelection_data() { annotationSelection_data(); }
 
@@ -10666,8 +11369,10 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
             return preview && preview->property("sample_ready").toBool();
         };
         const auto closeStyling = [&fixture] {
-            if (!fixture.press("rrWordSpacingClose")
-                || !QTest::qWaitFor([&] { return !fixture.visible("rrWordSpacingPopup"); })
+            // Wait for retirement before another sheet reuses its control names.
+            const QPointer<QWidget> sheet = fixture.widget("rrWordSpacingPopup");
+            if (!sheet || !fixture.press("rrWordSpacingClose")
+                || !QTest::qWaitFor([&] { return sheet.isNull(); })
                 || !fixture.press("rrSettingsClose"))
                 return false;
             return QTest::qWaitFor([&] {
@@ -10682,14 +11387,16 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
         QVERIFY(!ready());
         QTRY_VERIFY_WITH_TIMEOUT(ready(), 10000);
         const auto portrait = fixture.widget("rrStylingPreview")->grab().toImage();
-        QVERIFY(closeStyling());
-
-        // Settings forgets its samples when it closes. The reader keeps them.
-        QVERIFY(openStyling());
         {
+            // Hold the engine before closing, so reopening cannot rely on the
+            // gate's wait to process the old sheet's deferred deletion.
             const auto gate = holdEngine();
             const auto unblock = qScopeGuard([gate] { gate->release.release(); });
             QTRY_VERIFY(gate->entered.load());
+            QVERIFY(closeStyling());
+
+            // Settings forgets its samples when it closes. The reader keeps them.
+            QVERIFY(openStyling());
             QVERIFY(fixture.press("rrWordSpacing"));
             QVERIFY(ready());
             QCOMPARE(fixture.widget("rrStylingPreview")->grab().toImage(), portrait);
@@ -11781,6 +12488,15 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
             QCOMPARE(image.pixelColor(ribbon.center().x(), 0), marked ? ink : paper);
             QCOMPARE(image.pixelColor(ribbon.center().x(), page->y() - 1), marked ? ink : paper);
             QCOMPARE(image.pixelColor(ribbon.left() - 2, 0), paper);
+            if (marked) {
+                QVERIFY(fixture.press("rrPage"));
+                QVERIFY(fixture.press("rrSearchOpen"));
+                const auto searchImage = reader->grab().toImage();
+                QCOMPARE(searchImage.pixelColor(ribbon.center().x(), 0), paper);
+                QCOMPARE(searchImage.pixelColor(ribbon.center().x(), 1), paper);
+                QVERIFY(fixture.press("rrSearchBack"));
+                QVERIFY(!fixture.visible("rrSearch"));
+            }
         }
     }
 
@@ -12978,6 +13694,14 @@ private slots:
         QTRY_VERIFY(fixture.visible("rrNavSearch"));
         const auto name = screenshotVariant(preset, dark);
         QVERIFY(capture(fixture, name + "-zen-menu"));
+        QVERIFY(fixture.press("rrNavSearch"));
+        QTRY_VERIFY(fixture.visible("rrSearch"));
+        QVERIFY(fixture.visible("rrMenuClock"));
+        QVERIFY(fixture.visible("rrMenuBattery"));
+        QVERIFY(fixture.widget("rrControlsTop")->mask().isEmpty());
+        QVERIFY(fixture.press("rrSearchBack"));
+        QVERIFY(fixture.press("rrPage"));
+        QTRY_VERIFY(fixture.visible("rrZenStats"));
         QVERIFY(fixture.press("rrZenStats"));
         QTRY_VERIFY(fixture.visible("rrZenStatsPanel"));
         QVERIFY(capture(fixture, name + "-zen-stats"));
@@ -13078,6 +13802,34 @@ private slots:
         QVERIFY(capture(fixture, name + "-settings-standby-confirmation"));
         QVERIFY(fixture.press("rrKeepReaderStandby"));
         QTRY_VERIFY(!fixture.visible("rrStandbyConfirmation"));
+    }
+
+    void pluginSettings_data() { screenshotVariants(); }
+
+    void pluginSettings()
+    {
+        QFETCH(int, preset);
+        QFETCH(bool, dark);
+        QTemporaryDir data;
+        const auto folders =
+                pluginFolders(QStringLiteral(KOBALT_TEST_PLUGIN_FIXTURES "/gallery"), data.path());
+        Fixture fixture(dark, false, false, true, false, false,
+                        [&folders](ReaderHostServices &services) {
+                            folders(services);
+                            services.pluginFolderLabel = QStringLiteral(".adds/kobalt/plugins");
+                        });
+        QVERIFY(fixture.prepared);
+        selectPreview(fixture, preset);
+        openPluginBook(fixture);
+        const auto name = screenshotVariant(preset, dark);
+        QVERIFY(openPluginSettings(fixture));
+        QVERIFY(capture(fixture, name + "-settings-plugins"));
+        QVERIFY(revealSettingsOption(fixture, "rrPlugin_xray"));
+        QVERIFY(fixture.press("rrPlugin_xray"));
+        QTRY_VERIFY(fixture.visible("rrPluginDetails"));
+        QVERIFY(capture(fixture, name + "-settings-plugin-details"));
+        QVERIFY(fixture.press("rrPluginDone"));
+        QTRY_VERIFY(!fixture.visible("rrPluginDetails"));
     }
 
     void automaticOpeningConfirmation_data() { screenshotVariants(); }
@@ -14532,6 +15284,23 @@ private slots:
         panel->open("type", result, { 100, 100, 50, 40 });
         QTRY_VERIFY(panel->isVisible());
         QVERIFY(capture(fixture, name + "-definition"));
+        panel->addPluginCard({ "xray", "X-Ray", "Maren Holt",
+                               "<p>Harbourmaster of Grey Quay.</p><h4>Relationships</h4><p>Corin "
+                               "Holt \u2014 Estranged brother</p><p><b>Last seen:</b> Ch. 4</p>",
+                               "X-Ray \u00b7 revealed up to 18%" });
+        QVERIFY(fixture.press("rrDictionarySelect"));
+        QTRY_VERIFY(fixture.visible("rrDictionaryChoices"));
+        // A short sheet puts the plugin entry on a later page.
+        for (int page = 0; page < 4 && pluginChoice(fixture, "X-Ray").isEmpty(); ++page)
+            QVERIFY(fixture.press("rrDictionaryChoicesNext"));
+        QVERIFY(!pluginChoice(fixture, "X-Ray").isEmpty());
+        QVERIFY(capture(fixture, name + "-plugin-choice"));
+        QVERIFY(fixture.press(qPrintable(pluginChoice(fixture, "X-Ray"))));
+        QTRY_VERIFY(panel->isVisible());
+        QVERIFY(capture(fixture, name + "-plugin-card"));
+        panel->clearPluginCards();
+        panel->open("type", result, { 100, 100, 50, 40 });
+        QTRY_VERIFY(panel->isVisible());
         QVERIFY(fixture.lookupAction("rrDictionaryEdit", "rrDictionaryMenuEdit"));
         QVERIFY(capture(fixture, name + "-edit"));
         QVERIFY(fixture.press("rrDictionaryClose"));

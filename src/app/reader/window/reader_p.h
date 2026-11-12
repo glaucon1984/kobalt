@@ -50,6 +50,9 @@
 #include "app/reader/views/navigation.h"
 #include "platform/api/reader_host_services.h"
 #include "platform/api/reader_orientation.h"
+#include "plugins/plugin_host.h"
+#include "plugins/plugin_switches.h"
+#include "ui/panel_timing.h"
 #include "render/screen_refresh.h"
 #include "support/main_thread.h"
 #include <QCheckBox>
@@ -687,6 +690,14 @@ private:
     void showAllWords();
     void reloadWords();
     void openWord(const kobalt::SavedWord &word);
+    void openDictionary(const QString &query, kobalt::ui::PanelTiming timing);
+    // Destroyed in ~Reader, where joining its thread may block.
+    std::unique_ptr<kobalt::plugins::PluginHost> plugins;
+    void askPlugins(const QString &query);
+    // Numbers plugin lookups, so that a card for an earlier one is dropped.
+    quint64 pluginRequest = 0;
+    // The switches this book's plugins loaded with.
+    kobalt::plugins::Switches appliedPluginSwitches;
     void resizeText();
     // The host's cutout and corner bands for the current size.
     kobalt::SafeArea safeArea() const;

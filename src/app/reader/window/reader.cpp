@@ -9,6 +9,7 @@
 #include "ui/style/theme.h"
 #include "reader_p.h"
 #include "support/qt_compat.h"
+#include "plugins/plugin_position.h"
 #include "support/strings.h"
 #include "ui/input/input.h"
 #include "ui/style/fonts.h"
@@ -66,6 +67,7 @@ Reader::~Reader()
     appearancePreview->followPanel(nullptr, {});
     static_cast<SettingsPanel *>(general)->stylingHidden = {};
     cancelStylingSamples();
+    plugins.reset();
     if (kosyncClient)
         kosyncClient->persistSyncTime();
     if (closeWithoutSaving)
@@ -587,6 +589,8 @@ void Reader::sleepReader()
     if (imageViewer && imageViewer->isVisible())
         imageViewer->closeImage();
     book->retryFailedReadingSave();
+    if (plugins)
+        plugins->flush();
     if (orientation) {
         orientation->freeze();
     }
@@ -1644,6 +1648,8 @@ void Reader::closeSearch()
         searchPanel->stop();
         searchPanel->hide();
     }
+    if (searchOpen)
+        topControls->hide();
     updateOrientationBlock();
     syncNavigation();
     // Search opened from the Zen menu clears the panel as it closes, also
@@ -1711,6 +1717,11 @@ void Reader::openSearch(const QString &query)
     searchPanel->setGeometry(rect().adjusted(0, safe.top, 0, -safe.bottom));
     searchPanel->open(session->state().value("position").toString() != searchOriginal,
                       searchOriginalPage, query);
+    topControls->show();
+    updateMenuStatus();
+    syncNavigation();
+    topControls->raise();
+    searchPanel->raise();
     if (orientation)
         orientation->setBlocked(true);
     for (auto *widget : searchPanel->findChildren<QWidget *>())
@@ -1954,23 +1965,66 @@ void Reader::lookupSelection()
                 guard->lookupText = query;
                 guard->lookupBounds = bounds.translated(
                         guard->page->mapTo(guard, QPoint(0, guard->page->topHeight())));
-                const auto result = guard->dictionary->lookup(guard->book->identity(), query);
-                if (!guard || guard->lookupEpoch != epoch || guard->lifecycleHidden)
-                    return;
-                timing.stage("lookup");
-                timing.field("chars", result.html.size());
-                guard->dictionaryPanel->setChoices(guard->dictionary->choices());
-                guard->dictionaryPanel->setBookFont(guard->bookFace());
-                guard->dictionaryPanel->open(query, result, guard->lookupBounds);
                 guard->lookupContext = range.context;
                 guard->lookupPosition = range.start;
-                guard->recordLookup(query, result);
-                timing.finish(guard->dictionaryPanel);
-                guard->syncAnnotationControls();
-                guard->updateOrientationBlock();
-                guard->updateLinkReturn();
+                guard->openDictionary(query, timing);
+                if (guard && guard->dictionaryPanel->isVisible())
+                    guard->askPlugins(query);
             },
             true);
+}
+
+// Plugin answers join the open sheet as choices; the definition never waits for them.
+void Reader::askPlugins(const QString &query)
+{
+    dictionaryPanel->clearPluginCards();
+    if (!plugins || plugins->skipsLookups())
+        return;
+    const quint64 request = ++pluginRequest;
+    const auto epoch = lookupEpoch;
+    kobalt::plugins::Lookup lookup;
+    lookup.epoch = request;
+    lookup.word = query;
+    lookup.position = kobalt::plugins::position(book->readingActivity());
+    // An endnote or other link target is not reached until the reader stays there.
+    if (!linkHistory.isEmpty())
+        lookup.position = kobalt::plugins::capAtPage(lookup.position, linkHistory.first().page + 1);
+    QPointer<Reader> guard(this);
+    plugins->lookup(
+            lookup,
+            [guard, request, epoch](quint64, kobalt::plugins::Card card) {
+                if (!guard || guard->pluginRequest != request || guard->lookupEpoch != epoch
+                    || guard->closing || guard->lifecycleHidden || guard->services.suspended()
+                    || !guard->dictionaryPanel->isVisible())
+                    return;
+                guard->dictionaryPanel->addPluginCard(card);
+            },
+            [guard](quint64) {
+                if (guard)
+                    guard->setProperty("reader_plugin_replies",
+                                       guard->property("reader_plugin_replies").toInt() + 1);
+            });
+    setProperty("reader_plugin_requests", property("reader_plugin_requests").toInt() + 1);
+}
+
+void Reader::openDictionary(const QString &query, kobalt::ui::PanelTiming timing)
+{
+    const auto epoch = lookupEpoch;
+    lookupText = query;
+    QPointer<Reader> guard(this);
+    const auto result = dictionary->lookup(book->identity(), query);
+    if (!guard || lookupEpoch != epoch || lifecycleHidden)
+        return;
+    timing.stage("lookup");
+    timing.field("chars", result.html.size());
+    dictionaryPanel->setChoices(dictionary->choices());
+    dictionaryPanel->setBookFont(bookFace());
+    dictionaryPanel->open(query, result, lookupBounds);
+    recordLookup(query, result);
+    timing.finish(dictionaryPanel);
+    syncAnnotationControls();
+    updateOrientationBlock();
+    updateLinkReturn();
 }
 
 int Reader::millisecondsOfDay() const
@@ -2388,7 +2442,8 @@ void Reader::syncNavigation()
                           ? -1
                           : int(qMax<qint64>(1, (estimates.chapterMilliseconds + 30000) / 60000)),
                   estimates.learningPace,
-                  !features::enabled(preferences, features::Bookmarks) });
+                  !features::enabled(preferences, features::Bookmarks),
+                  searchPanel->isVisible() });
         // The Zen menu leaves the page visible beside its groups, so the
         // header and footer hide while it is open. The page does not reflow.
         page->setStripsHidden(zen && topControls->isVisible());
@@ -2420,6 +2475,11 @@ void Reader::syncNavigation()
         }
         headerFooterView->setGeometry(0, bottom - sheetHeight, width(), sheetHeight);
         headerFooterView->raise();
+    }
+    if (searchPanel->isVisible()) {
+        const auto safe = safeArea();
+        searchPanel->setGeometry(rect().adjusted(0, navigation->statusHeight(), 0, -safe.bottom));
+        searchPanel->raise();
     }
     // Use the current toolbar and tab bounds, including after rotation.
     syncPinnedBookmarks();
