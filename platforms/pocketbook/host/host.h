@@ -55,6 +55,10 @@ public:
     static QElapsedTimer rotationClock;
     // Started when a KOsync dialog hides; the page paint that restores the page gets a full flash.
     QElapsedTimer dialogClock;
+    // Started when Settings hides; the page paint that shows the page again, with the menu gone,
+    // gets a full flash. Kobalt asks for none when Settings closes through its close button
+    // (Kobo clears the panel with a non-flashing full update; inkview's partial leaves a ghost).
+    QElapsedTimer settingsClock;
     void flashAfterTurn();
     // Last page turn from a physical button; paces the turns of a held button.
     QElapsedTimer heldTurnClock;

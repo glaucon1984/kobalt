@@ -842,11 +842,26 @@ void Host::flashAfterTurn() {
         rotationClock.invalidate();
     if (dialogClock.isValid() && dialogClock.elapsed() >= 10000)
         dialogClock.invalidate();
-    if (!rotationClock.isValid() && !dialogClock.isValid())
+    if (settingsClock.isValid() && settingsClock.elapsed() >= 10000)
+        settingsClock.invalidate();
+    if (!rotationClock.isValid() && !dialogClock.isValid() && !settingsClock.isValid())
         return;
     auto *reader = controller.window();
     if (!reader || !reader->readyForPresentation())
         return;
+    if (settingsClock.isValid()) {
+        // Settings left for the menu (Light, Stats): the page is still under the bars, and
+        // closing the menu flashes on its own.
+        const auto *bars = reader->findChild<QWidget *>("rrControlsTop");
+        if (bars && bars->isVisible()) {
+            settingsClock.invalidate();
+            if (!rotationClock.isValid() && !dialogClock.isValid())
+                return;
+        }
+    }
+    if (settingsClock.isValid())
+        qInfo("kobalt-pb: full flash for the page under the closed Settings, %lld ms after it hid",
+              static_cast<long long>(settingsClock.elapsed()));
     if (rotationClock.isValid())
         qInfo("kobalt-pb: full flash for the reflowed page, %lld ms after the turn",
               static_cast<long long>(rotationClock.elapsed()));
@@ -855,6 +870,7 @@ void Host::flashAfterTurn() {
               static_cast<long long>(dialogClock.elapsed()));
     rotationClock.invalidate();
     dialogClock.invalidate();
+    settingsClock.invalidate();
     platform::flashNextFrame();
 }
 
@@ -906,12 +922,19 @@ bool Host::eventFilter(QObject *object, QEvent *event) {
         const auto name = object->objectName();
         if (name == "rrKosyncOpening" || name == "rrKosyncChoice" || name == "rrKosyncManualPrompt")
             dialogClock.start();
+        // Settings closing (its close button, the toolbar's Settings button, a tap on the page):
+        // the same, once the page is back without the menu (flashAfterTurn).
+        if (name == "rrGeneralSettings" && object->isWidgetType() && controller.window() &&
+            controller.window()->isAncestorOf(static_cast<QWidget *>(object)))
+            settingsClock.start();
     }
     // Kobalt's full-refresh request (as the Kobo flush hook and the Android canvas consume it).
     if (event->type() == QEvent::DynamicPropertyChange) {
         auto *change = static_cast<QDynamicPropertyChangeEvent *>(event);
         if (change->propertyName() == "reader_full_flash" && object->property("reader_full_flash").toBool()) {
             object->setProperty("reader_full_flash", false);
+            // Kobalt's own flash (closing the menu with a tap) also clears Settings.
+            settingsClock.invalidate();
             platform::flashNextFrame();
         } else if (change->propertyName() == "reader_animation_direction") {
             const int direction = object->property("reader_animation_direction").toInt();

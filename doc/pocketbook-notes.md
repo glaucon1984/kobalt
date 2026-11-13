@@ -1140,3 +1140,24 @@ Nothing in `platforms/pocketbook/` needed to change:
   wired.
 
 Dependencies: only the CREngine patch list moved, so `remote-rebuild-deps.sh` rebuilt the set.
+
+### Ghosting after Settings closes (2026-11-13)
+
+Found on the device after 0.11.0: closing the menu flashed the page clean (`refresh 2` in the
+log), but closing Settings with its close button (or the toolbar's Settings button in the same
+place) went back to the page with a partial update of the whole screen (`refresh 0`) and left
+Settings' ghost behind.
+
+Upstream behaviour, not a merge regression. The reader asks for its cleanup flash through
+`flashAfterMenu`, which only a tap on the page or the header sets; the close button goes through
+`applySettings()` and `finishAppearanceApply()`, which hide Settings and the bars without it. Kobo
+does not show the ghost because its refresh hook sends the hidden panel as a non-flashing full
+update (REAGL/GL16 over every pixel, `doc/reader/display.md`); the pbink plugin turns that frame
+into inkview's partial update.
+
+Fixed in the host, shared code unchanged: when `rrGeneralSettings` hides, `settingsClock` starts,
+and the next `rrPage` paint with the reader ready and the menu bars (`rrControlsTop`) hidden gets
+a full flash (`flashAfterTurn`, as for the closing KOSync dialogs), logged as "full flash for the
+page under the closed Settings". Settings left for Light or Stats (bars still up) drops the clock,
+since closing the menu flashes anyway, and so does a flash Kobalt asks for itself (a tap on the
+page closes Settings with `reader_full_flash`), so that path still flashes once.
