@@ -1,3 +1,4 @@
+#include "reading/header_footer.h"
 #include "support/host_presentation.h"
 #include "platform/posix/diagnostics.h"
 #include "app/reader/views/annotation_exporter.h"
@@ -16,6 +17,9 @@
 #include "app/reader/views/kosync_notice.h"
 #include "app/reader/views/sync_choice.h"
 #include "platforms/desktop/window.h"
+#include "platforms/desktop/engine_monitor.h"
+#include "engine/engine_worker.h"
+#include <QTableWidget>
 #include "platforms/desktop/services.h"
 #include "app/reader/views/opening.h"
 #include "support/diagnostics.h"
@@ -33,6 +37,7 @@
 #include "reading/reading_density.h"
 #include "reading/appearance_settings.h"
 #include "reading/text_presets.h"
+#include "reading/rendering_mode.h"
 #include "app/reader/settings/text_presets_panel.h"
 #include "storage/profile_database.h"
 #include "storage/reader_storage.h"
@@ -54,8 +59,9 @@
 #include "support/screenshot_gallery.h"
 #include "support/screenshot_runner.h"
 #include "support/strings.h"
-#include "engine/crengine/engine_document.h"
+#include "engine/blaze/adapter/engine_document.h"
 #include "ui/controls/page_scrubber.h"
+#include "ui/controls/rows.h"
 #include "ui/controls/loading.h"
 #include "app/reader/settings/dictionaries_page.h"
 #include "app/reader/panels/dictionary_panel.h"
@@ -117,8 +123,8 @@
 
 #include "app/reader/panels/word_list.h"
 #include "storage/saved_words.h"
-#include "engine/crengine/engine_activity.h"
-#include "engine/crengine/engine_worker.h"
+#include "engine/engine_activity.h"
+#include "engine/engine_worker.h"
 #include "support/qt_compat.h"
 #include <QScopeGuard>
 #include <QSemaphore>
@@ -2876,6 +2882,12 @@ void tour(Fixture &fixture, const QString &name, bool screenshots)
         QVERIFY(scene("settings-time-remaining-format"));
         QVERIFY(fixture.press("rrTimeRemainingFormat_detailed"));
         QTRY_VERIFY(!fixture.visible("rrTimeRemainingFormatPopup"));
+        QVERIFY(revealSettingsOption(fixture, "rrRendering"));
+        QVERIFY(fixture.press("rrRendering"));
+        QTRY_VERIFY(fixture.visible("rrRenderingPopup"));
+        QVERIFY(scene("settings-rendering"));
+        QVERIFY(fixture.press("rrRendering_hybrid"));
+        QTRY_VERIFY(!fixture.visible("rrRenderingPopup"));
         QVERIFY(revealSettingsOption(fixture, "rrSessionTimeout"));
         QVERIFY(fixture.press("rrSessionTimeout"));
         QTRY_VERIFY(fixture.visible("rrSessionTimeoutPopup"));
@@ -3048,6 +3060,107 @@ void tour(Fixture &fixture, const QString &name, bool screenshots)
 } // namespace
 
 namespace {
+void checkPercentageFormat(int preset, bool dark, bool screenshots)
+{
+    Fixture fixture(dark);
+    QVERIFY(fixture.prepared);
+    auto layout = headerfooter::presetLayout(headerfooter::Preset::Default);
+    layout.slotFields[2] = headerfooter::Field::BookPercent;
+    layout.slotFields[0] = headerfooter::Field::ChapterPercent;
+    auto saved = storage::readJson(fixture.paths.preferences());
+    saved[headerfooter::presetKey] = "custom";
+    saved[headerfooter::customKey] = headerfooter::toJson(layout);
+    QVERIFY(storage::writeJson(fixture.paths.preferences(), saved));
+    selectPreview(fixture, preset);
+    QSignalSpy opened(&fixture.window, &desktop::Window::bookOpened);
+    fixture.window.openBook(book);
+    QTRY_COMPARE(opened.count(), 1);
+    QTRY_VERIFY(!fixture.state().value("busy").toBool());
+    openPrologueBody(fixture);
+    auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+    QVERIFY(page);
+    const auto before = fixture.state();
+    const auto progress = page->progressFraction;
+    const auto name = screenshotVariant(preset, dark);
+    QVERIFY(fixture.press("rrPage"));
+    QVERIFY(fixture.press("rrSettings"));
+    QVERIFY(fixture.press("rrSettingsSystem"));
+    QVERIFY(revealSettingsOption(fixture, "rrPercentageFormat"));
+    auto *button = dynamic_cast<ui::CaptionButton *>(fixture.widget("rrPercentageFormat"));
+    auto *time = dynamic_cast<ui::CaptionButton *>(fixture.widget("rrTimeRemainingFormat"));
+    QVERIFY(button && time);
+    QCOMPARE(button->font(), time->font());
+    QCOMPARE(button->height(), time->height());
+    QCOMPARE(button->caption(), strings::get("settings.percentage_whole").toUpper());
+    if (screenshots)
+        QVERIFY(capture(fixture, name + "-settings-progress-percentages"));
+    QVERIFY(fixture.press("rrPercentageFormat"));
+    QTRY_VERIFY(fixture.visible("rrPercentageFormatPopup"));
+    if (screenshots)
+        QVERIFY(capture(fixture, name + "-settings-percentage-format"));
+    QVERIFY(fixture.press("rrPercentageFormat_decimal"));
+    QTRY_VERIFY(!fixture.visible("rrPercentageFormatPopup"));
+    QCOMPARE(button->caption(), strings::get("settings.percentage_decimal").toUpper());
+    QVERIFY(!storage::readJson(fixture.paths.preferences())
+                     .contains(headerfooter::percentageFormatKey));
+    QVERIFY(fixture.press("rrSettingsClose"));
+    QTRY_VERIFY(!fixture.visible("rrGeneralSettings"));
+    QTRY_VERIFY(!fixture.state().value("busy").toBool());
+    QTRY_COMPARE(
+            storage::readJson(fixture.paths.preferences()).value(headerfooter::percentageFormatKey),
+            QJsonValue("decimal"));
+    QVERIFY(page->slotContents[5].text.contains('.'));
+    QCOMPARE(page->slotContents[2].text, page->slotContents[5].text);
+    QVERIFY(page->slotContents[0].text.contains('.'));
+    QCOMPARE(page->progressFraction, progress);
+    QCOMPARE(fixture.state().value("page"), before.value("page"));
+    QCOMPARE(fixture.state().value("pages"), before.value("pages"));
+    QCOMPARE(fixture.state().value("position"), before.value("position"));
+    if (screenshots)
+        QVERIFY(capture(fixture, name + "-reading-decimal-progress"));
+    QVERIFY(fixture.press("rrPage"));
+    QVERIFY(fixture.press("rrNavLayout"));
+    QVERIFY(fixture.press("rrHeaderFooter"));
+    QTRY_VERIFY(fixture.visible("rrHeaderFooterView"));
+    auto *sample = fixture.widget("rrHeaderFooterSlot5");
+    QVERIFY(sample);
+    QVERIFY(sample->accessibleName().contains(page->slotContents[5].text));
+    if (screenshots) {
+        capturePages(fixture, name + "-header-footer-decimal-progress", "rrHeaderFooter");
+        while (fixture.visible("rrHeaderFooterPrevious")
+               && fixture.widget("rrHeaderFooterPrevious")->isEnabled())
+            QVERIFY(fixture.press("rrHeaderFooterPrevious"));
+        QVERIFY(fixture.press("rrHeaderFooterSlot5"));
+        QTRY_VERIFY(fixture.visible("rrHeaderFooterChooser"));
+        QVERIFY(capture(fixture, name + "-header-footer-decimal-fields"));
+        QVERIFY(fixture.press("rrHeaderFooterFieldsClose"));
+    }
+    QVERIFY(fixture.press("rrHeaderFooterClose"));
+    fixture.window.readerWindow()->close();
+    QTRY_VERIFY(!fixture.window.readerWindow());
+    fixture.window.openBook(book);
+    QTRY_COMPARE(opened.count(), 2);
+    QTRY_VERIFY(!fixture.state().value("busy").toBool());
+    page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+    QVERIFY(page->slotContents[5].text.contains('.'));
+    QVERIFY(fixture.press("rrPage"));
+    QVERIFY(fixture.press("rrSettings"));
+    QVERIFY(fixture.press("rrSettingsSystem"));
+    QVERIFY(revealSettingsOption(fixture, "rrPercentageFormat"));
+    button = dynamic_cast<ui::CaptionButton *>(fixture.widget("rrPercentageFormat"));
+    QVERIFY(button);
+    QCOMPARE(button->caption(), strings::get("settings.percentage_decimal").toUpper());
+    QVERIFY(fixture.press("rrPercentageFormat"));
+    QTRY_VERIFY(fixture.visible("rrPercentageFormatPopup"));
+    QVERIFY(fixture.press("rrPercentageFormat_whole"));
+    QVERIFY(fixture.press("rrSettingsClose"));
+    QTRY_VERIFY(!fixture.visible("rrGeneralSettings"));
+    QTRY_COMPARE(
+            storage::readJson(fixture.paths.preferences()).value(headerfooter::percentageFormatKey),
+            QJsonValue("whole"));
+    QVERIFY(!page->slotContents[5].text.contains('.'));
+}
+
 void checkHeaderFooterSizes(int preset, bool dark)
 {
     using namespace headerfooter;
@@ -5004,6 +5117,104 @@ private slots:
         checkPageAnimationCompatibility(preset, dark);
     }
 
+    // Checks persisted animation preferences and theme changes through Settings and Light.
+    void pageAnimationDarkMode_data() { bookmarks_data(); }
+
+    void pageAnimationDarkMode()
+    {
+        QFETCH(bool, dark);
+        for (auto support : { PageAnimationSupport::Uncertain, PageAnimationSupport::Supported,
+                              PageAnimationSupport::Unavailable }) {
+            auto light = std::make_shared<GestureLightState>();
+            Fixture fixture(dark, false, false, true, false, false,
+                            [support, light](ReaderHostServices &services) {
+                                services.animationSupport = [support] { return support; };
+                                services.lightAvailable = [] { return true; };
+                                services.light = [light](QWidget *) {
+                                    return std::make_unique<GestureLight>(light);
+                                };
+                            });
+            QVERIFY(fixture.prepared);
+            auto saved = storage::readJson(fixture.paths.preferences());
+            saved["page_animations"] = true;
+            saved["screen_refresh"] = "manual";
+            QVERIFY(storage::writeJson(fixture.paths.preferences(), saved));
+            QSignalSpy opened(&fixture.window, &desktop::Window::bookOpened);
+            fixture.window.openBook(book);
+            QTRY_COMPARE(opened.count(), 1);
+            QTRY_VERIFY(!fixture.state().value("busy").toBool());
+            openPrologueBody(fixture);
+            auto *reader = fixture.window.readerWindow();
+
+            struct TurnWatch final : QObject
+            {
+                bool animated = false;
+                // A later refresh clears the one-frame marker. Observe it
+                // when published instead of sampling it after paint.
+                bool frame = false;
+
+                bool eventFilter(QObject *object, QEvent *event) override
+                {
+                    if (event->type() == QEvent::DynamicPropertyChange
+                        && static_cast<QDynamicPropertyChangeEvent *>(event)->propertyName()
+                                == "reader_page_turn") {
+                        frame = frame || object->property("reader_page_turn").toBool();
+                    }
+                    if (event->type() == QEvent::DynamicPropertyChange
+                        && static_cast<QDynamicPropertyChangeEvent *>(event)->propertyName()
+                                == "reader_animation_direction"
+                        && object->property("reader_animation_direction").toInt())
+                        animated = true;
+                    return false;
+                }
+            } watch;
+
+            reader->installEventFilter(&watch);
+            const auto turn = [&](bool configured, bool theme) {
+                if (fixture.visible("rrControlsTop"))
+                    QVERIFY(fixture.press("rrPage"));
+                reader->setProperty("reader_animation_direction", 0);
+                reader->setProperty("reader_page_turn", false);
+                watch.animated = watch.frame = false;
+                QVERIFY(fixture.turnPage(1));
+                QTRY_VERIFY(watch.frame);
+                const bool expected = configured && support != PageAnimationSupport::Unavailable
+                        && !(theme && support == PageAnimationSupport::Uncertain);
+                QCOMPARE(watch.animated, expected);
+                QCOMPARE(storage::readJson(fixture.paths.preferences())
+                                 .value("page_animations")
+                                 .toBool(),
+                         configured);
+            };
+            turn(true, dark);
+            toggleTheme(fixture);
+            turn(true, !dark);
+            // The Light shortcut uses a separate save/apply path.
+            QVERIFY(fixture.press("rrPage"));
+            QVERIFY(fixture.press("rrNavLight"));
+            QTRY_VERIFY(fixture.visible("rrLightDarkMode"));
+            QVERIFY(fixture.press("rrLightDarkMode"));
+            QTRY_COMPARE(fixture.state().value("dark_mode").toBool(), dark);
+            QTRY_VERIFY(fixture.widget("rrLightDarkMode")->isEnabled());
+            QVERIFY(fixture.press("rrPage"));
+            turn(true, dark);
+            if (support != PageAnimationSupport::Unavailable) {
+                for (bool configured : { false, true }) {
+                    QVERIFY(fixture.press("rrPage"));
+                    QVERIFY(fixture.press("rrSettings"));
+                    QVERIFY(revealSettingsOption(fixture, "rrPageAnimations"));
+                    auto *option = qobject_cast<QCheckBox *>(fixture.widget("rrPageAnimations"));
+                    QVERIFY(option && option->isChecked() == !configured);
+                    QVERIFY(fixture.press("rrPageAnimations"));
+                    QVERIFY(fixture.press("rrSettingsClose"));
+                    QTRY_VERIFY(!fixture.visible("rrControlsTop"));
+                    turn(configured, dark);
+                }
+            }
+            reader->removeEventFilter(&watch);
+        }
+    }
+
     // Checks that a failed gallery worker stops the run quickly, ends the other workers and leaves no captures.
     void galleryWorkerFailure()
     {
@@ -5913,6 +6124,569 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
         checkPinnedBookmarks(preset, dark);
     }
 
+    // Fast mode keeps contents and saved-list labels usable after leaving a sliced chapter.
+    void fastSavedLists()
+    {
+        renderingMode::setOverride(1);
+        const auto previousPages = qgetenv("KOBALT_CHAPTER_PAGES");
+        qputenv("KOBALT_CHAPTER_PAGES", "2");
+        const auto restore = qScopeGuard([previousPages] {
+            renderingMode::setOverride(-1);
+            if (previousPages.isNull())
+                qunsetenv("KOBALT_CHAPTER_PAGES");
+            else
+                qputenv("KOBALT_CHAPTER_PAGES", previousPages);
+        });
+        Fixture fixture;
+        QVERIFY(fixture.prepared);
+        selectPreview(fixture, 1);
+        const auto saveCapture = [&](const QString &name) {
+            const auto output = qEnvironmentVariable("KOBALT_TEST_CAPTURE_DIR");
+            if (output.isEmpty())
+                return true;
+            QCoreApplication::processEvents();
+            return QDir().mkpath(output)
+                    && fixture.window.readerWindow()->grab().save(output + '/' + name + ".png");
+        };
+        QSignalSpy opened(&fixture.window, &desktop::Window::bookOpened);
+        fixture.window.openBook(book);
+        QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 30000);
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        QVERIFY(fixture.press("rrPage"));
+        QTRY_VERIFY(fixture.visible("rrNavChapters"));
+        QVERIFY(fixture.press("rrNavChapters"));
+        QTRY_VERIFY(fixture.visible("rrChapter1"));
+        QTRY_VERIFY(fixture.widget("rrChapter1Page")
+                    && fixture.widget("rrChapter1Page")->property("text").toString().toInt() > 0);
+        QVERIFY(saveCapture("fast-contents"));
+        QVERIFY(fixture.press("rrChapter1"));
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        advanceIntoBody(fixture);
+        for (int i = 0; i < 3; ++i)
+            QVERIFY(fixture.turnPage(1));
+        auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+        QVERIFY(fixture.click(page, page->bookmarkCorner().center()));
+        QTRY_COMPARE(fixture.stored("bookmarks.json", "bookmarks").size(), 1);
+        const auto bookmark = fixture.stored("bookmarks.json", "bookmarks").first().toObject();
+        QVERIFY(!bookmark.value("chapter").toString().isEmpty());
+        const auto savedPage = fixture.state().value("position");
+        QVERIFY(fixture.press("rrPage"));
+        QTRY_VERIFY(fixture.visible("rrAnnotate"));
+        QVERIFY(fixture.press("rrAnnotate"));
+        const auto word = fixture.wordPoint();
+        QVERIFY(word.x() >= 0);
+        QVERIFY(fixture.selectWord(page, word));
+        QTRY_VERIFY(!page->annotationHandleRect(true).isEmpty());
+        QVERIFY(fixture.click(page, word));
+        QTRY_VERIFY(fixture.visible("rrAnnotationSave"));
+        QVERIFY(fixture.press("rrAnnotationSave"));
+        QTRY_COMPARE(fixture.stored("highlights.json", "highlights").size(), 1);
+        const auto highlight = fixture.stored("highlights.json", "highlights").first().toObject();
+        QVERIFY(!highlight.value("chapter").toString().isEmpty());
+        QTRY_VERIFY(!fixture.visible("rrAnnotationPopover"));
+        QVERIFY(fixture.press("rrPage"));
+        QTRY_VERIFY(fixture.visible("rrAnnotate"));
+        QVERIFY(fixture.press("rrAnnotate"));
+        const auto leaveChapter = [&] {
+            const auto before = fixture.state().value("position");
+            if (!fixture.visible("rrNavChapters") && !fixture.press("rrPage"))
+                return false;
+            if (!fixture.press("rrNavChapters"))
+                return false;
+            return QTest::qWaitFor([&] { return fixture.visible("rrChapter8"); })
+                    && fixture.press("rrChapter8") && QTest::qWaitFor([&] {
+                           const auto state = fixture.state();
+                           return !state.value("busy").toBool()
+                                   && state.value("position") != before;
+                       });
+        };
+        QVERIFY(leaveChapter());
+        QVERIFY(fixture.state().value("position") != savedPage);
+        QVERIFY(fixture.press("rrPage"));
+        QTRY_VERIFY(fixture.visible("rrBookmarks"));
+        QVERIFY(fixture.press("rrBookmarks"));
+        QTRY_VERIFY(fixture.visible("rrBookmark0") && fixture.widget("rrBookmark0")->isEnabled());
+        auto *bookmarkRow = static_cast<ui::ListRow *>(fixture.widget("rrBookmark0"));
+        QCOMPARE(bookmarkRow->titleLabel()->text(), bookmark.value("chapter").toString());
+        QVERIFY(bookmarkRow->trailingLabel()->text().toInt() > 0);
+        QVERIFY(saveCapture("fast-bookmarks"));
+        QVERIFY(fixture.press("rrBookmark0"));
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        QTRY_COMPARE(fixture.state().value("position"), savedPage);
+        QVERIFY(leaveChapter());
+        QVERIFY(fixture.press("rrPage"));
+        QTRY_VERIFY(fixture.visible("rrBookmarks"));
+        QVERIFY(fixture.press("rrBookmarks"));
+        QVERIFY(fixture.press("rrAnnotationsTab"));
+        QTRY_VERIFY(fixture.visible("rrAnnotation0")
+                    && fixture.widget("rrAnnotation0")->isEnabled());
+        auto *annotationRow = static_cast<ui::ListRow *>(fixture.widget("rrAnnotation0"));
+        QCOMPARE(annotationRow->titleLabel()->text(), highlight.value("chapter").toString());
+        QVERIFY(annotationRow->trailingLabel()->text().toInt() > 0);
+        QVERIFY(saveCapture("fast-highlights"));
+        QVERIFY(fixture.press("rrAnnotation0"));
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        QTRY_COMPARE(fixture.state().value("position"), highlight.value("start"));
+    }
+
+    // Contents and Stats show whole-book page estimates after a Fast chapter jump.
+    // Fast mode offers Finish only after the final page of the Type Tester.
+    void fastBookEnd()
+    {
+        renderingMode::setOverride(1);
+        const auto previousPages = qgetenv("KOBALT_CHAPTER_PAGES");
+        qputenv("KOBALT_CHAPTER_PAGES", "2");
+        const auto restore = qScopeGuard([previousPages] {
+            renderingMode::setOverride(-1);
+            if (previousPages.isNull())
+                qunsetenv("KOBALT_CHAPTER_PAGES");
+            else
+                qputenv("KOBALT_CHAPTER_PAGES", previousPages);
+        });
+        Fixture fixture;
+        QVERIFY(fixture.prepared);
+        selectPreview(fixture, 1);
+        QSignalSpy opened(&fixture.window, &desktop::Window::bookOpened);
+        fixture.window.openBook(book);
+        QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 30000);
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        QVERIFY(fixture.press("rrPage"));
+        QTRY_VERIFY(fixture.visible("rrNavChapters"));
+        QVERIFY(fixture.press("rrNavChapters"));
+        for (int page = 0; page < 3 && !fixture.visible("rrChapter10"); ++page)
+            QVERIFY(fixture.press("rrContentsNext"));
+        QTRY_VERIFY(fixture.visible("rrChapter10"));
+        const auto opening = fixture.state().value("position");
+        QVERIFY(fixture.press("rrChapter10"));
+        QTRY_VERIFY(!fixture.state().value("busy").toBool()
+                    && fixture.state().value("position") != opening);
+        for (int turns = 0; turns < 100; ++turns) {
+            QVERIFY(!fixture.visible("rrFinishBook"));
+            const auto state = fixture.state();
+            if (!state.value("continues_after").toBool()
+                && state.value("next_page").toInt() == state.value("page").toInt())
+                break;
+            const auto position = state.value("position");
+            test::skipPageTurnWindow();
+            fixture.window.readerWindow()->pageButton(1);
+            QTRY_VERIFY(!fixture.state().value("busy").toBool()
+                        && fixture.state().value("position") != position);
+        }
+        const auto end = fixture.state();
+        QVERIFY(!end.value("continues_after").toBool());
+        QCOMPARE(end.value("next_page"), end.value("page"));
+        QVERIFY(!fixture.visible("rrFinishBook"));
+        test::skipPageTurnWindow();
+        fixture.window.readerWindow()->pageButton(1);
+        QTRY_VERIFY(fixture.visible("rrFinishBook"));
+        QVERIFY(fixture.widget("rrMarkFinished")->isEnabled());
+        const auto output = qEnvironmentVariable("KOBALT_TEST_CAPTURE_DIR");
+        if (!output.isEmpty()) {
+            QVERIFY(QDir().mkpath(output));
+            QVERIFY(fixture.window.readerWindow()->grab().save(output + "/fast-finish.png"));
+        }
+        QVERIFY(fixture.press("rrStillReading"));
+        QTRY_VERIFY(!fixture.visible("rrFinishBook"));
+    }
+
+    void engineMonitor()
+    {
+        desktop::EngineMonitor monitor;
+        monitor.show();
+        const auto sink = monitor.observer();
+        auto send = [&](const char *name, double time, QJsonObject fields = {}) {
+            fields["event"] = QString::fromLatin1(name);
+            fields["monotonic_ms"] = time;
+            sink(fields);
+        };
+        send("render-queued", 1000, { { "render_id", 1 } });
+        send("render-start", 1005, { { "render_id", 1 }, { "page_turn", true } });
+        send("render-end", 1047, { { "render_id", 1 }, { "elapsed_ms", 42 } });
+        send("engine-work-start", 1050, { { "work_id", 2 }, { "work", "Neighbour pages and chapters" } });
+        send("engine-work-end", 1080, { { "work_id", 2 }, { "work", "Neighbour pages and chapters" },
+                { "elapsed_ms", 30 }, { "completed", false }, { "cached_pages", 3 }, { "book_fraction", .4 } });
+        send("page-turn-painted", 1085, { { "render_id", 1 }, { "elapsed_ms", 85 }, { "paint_ms", 4 } });
+        send("monitor-memory", 1085, { { "rss_kib", 65536 }, { "peak_rss_kib", 70000 } });
+        monitor.refresh();
+        auto *table = monitor.findChild<QTableWidget *>("engineMonitorEvents");
+        auto *summary = monitor.findChild<QLabel *>("engineMonitorSummary");
+        auto *resources = monitor.findChild<QLabel *>("engineMonitorResources");
+        QVERIFY(table && summary && resources);
+        QCOMPARE(table->rowCount(), 3);
+        QVERIFY(summary->text().contains("Last 42 ms"));
+        QVERIFY(summary->text().contains("Interrupted 1"));
+        QVERIFY(summary->text().contains("queue wait 5.0 ms"));
+        QVERIFY(summary->text().contains("Input to paint 85 ms"));
+        QVERIFY(resources->text().contains("64.0 MiB"));
+        QVERIFY(resources->text().contains("40.0%"));
+        send("operation-end", 1086, { { "operation_id", 3 }, { "operation", "chapter-load" },
+                { "elapsed_ms", 10 }, { "interrupted", true } });
+        send("operation-end", 1087, { { "operation_id", 4 }, { "operation", "engine-open" },
+                { "elapsed_ms", 10 } });
+        monitor.refresh();
+        QCOMPARE(table->item(0, 4)->text(), QStringLiteral("Ended"));
+        QCOMPARE(table->item(1, 4)->text(), QStringLiteral("Interrupted"));
+        auto *pause = monitor.findChild<QPushButton *>("engineMonitorPause");
+        pause->click();
+        send("image-load-end", 1090, { { "elapsed_ms", 2 } });
+        monitor.refresh();
+        QCOMPARE(table->rowCount(), 5);
+        pause->click();
+        for (int i = 0; i < 1100; ++i)
+            send("image-load-end", 1100 + i, { { "elapsed_ms", 2 } });
+        monitor.refresh();
+        QCOMPARE(table->rowCount(), 150);
+        QVERIFY(monitor.findChild<QLabel *>("engineMonitorStatus")->text().contains("76 events dropped"));
+        monitor.findChild<QPushButton *>("engineMonitorClear")->click();
+        QCOMPARE(table->rowCount(), 0);
+        monitor.hide();
+        send("image-load-end", 3000, { { "elapsed_ms", 2 } });
+        monitor.refresh();
+        QCOMPARE(table->rowCount(), 0);
+        std::function<void(const QJsonObject &)> detached;
+        { desktop::EngineMonitor other; other.show(); detached = other.observer(); }
+        detached({ { "event", "render-start" }, { "render_id", 99 } });
+    }
+
+    void engineMonitorSlowdown()
+    {
+        const auto restore = qScopeGuard([] { setEngineSlowdownEnabled(false); });
+        desktop::EngineMonitor monitor;
+        monitor.show();
+        auto *slow = monitor.findChild<QPushButton *>("engineMonitorSlowdown");
+        QVERIFY(slow && !slow->isChecked());
+        slow->click();
+        QVERIFY(engineSlowdownEnabled());
+        auto *range = monitor.findChild<QComboBox *>("engineMonitorRange");
+        monitor.findChild<QPushButton *>("engineMonitorZoomIn")->click();
+        QCOMPARE(range->currentData().toInt(), 5);
+        monitor.findChild<QPushButton *>("engineMonitorZoomOut")->click();
+        QCOMPARE(range->currentData().toInt(), 10);
+        struct Result { std::atomic_bool done{ false }; qint64 elapsed = 0, work = 0; };
+        const auto run = [&](bool scoped, bool cancel) {
+            auto result = std::make_shared<Result>();
+            kobalt::qt::invoke(engineWorker(), [result, scoped, cancel] {
+                QElapsedTimer timer;
+                timer.start();
+                {
+                    EngineSlowdownScope scope(scoped, [cancel, &timer, result] {
+                        return cancel && timer.nsecsElapsed() > result->work * 3;
+                    });
+                    // A small fixed CPU workload makes the added delay observable.
+                    // A nested chapter scope must not multiply it a second time.
+                    EngineSlowdownScope nested(scoped);
+                    while (timer.nsecsElapsed() < 2000000) {}
+                    result->work = timer.nsecsElapsed();
+                }
+                result->elapsed = timer.nsecsElapsed();
+                result->done = true;
+            }, Qt::QueuedConnection);
+            return result;
+        };
+        const auto scaled = run(true, false);
+        QTRY_VERIFY(scaled->done.load());
+        QVERIFY(scaled->elapsed >= scaled->work * 18);
+        QVERIFY(scaled->elapsed < scaled->work * 80);
+        const auto ordinary = run(false, false);
+        QTRY_VERIFY(ordinary->done.load());
+        QVERIFY(ordinary->elapsed < ordinary->work * 5);
+        const auto cancelled = run(true, true);
+        QTRY_VERIFY(cancelled->done.load());
+        QVERIFY(cancelled->elapsed >= cancelled->work * 3);
+        QVERIFY(cancelled->elapsed < cancelled->work * 10);
+        monitor.hide();
+        QVERIFY(!engineSlowdownEnabled());
+        monitor.show();
+        QVERIFY(!slow->isChecked());
+    }
+
+    void engineMonitorReading()
+    {
+        renderingMode::setOverride(1);
+        const auto restore = qScopeGuard([] { setDiagnosticObserver({}); pauseDiagnostics(true); renderingMode::setOverride(-1); });
+        QTemporaryDir logs;
+        QVERIFY(logs.isValid());
+        initializeDiagnostics(logs.path());
+        setDiagnosticSystem(platform::processDiagnosticSystem());
+        desktop::EngineMonitor monitor;
+        monitor.show();
+        setDiagnosticObserver(monitor.observer());
+        Fixture fixture;
+        QVERIFY(fixture.prepared);
+        QSignalSpy requested(&fixture.window, &desktop::Window::engineMonitorRequested);
+        fixture.window.findChild<QAction *>("desktopEngineMonitor")->trigger();
+        QCOMPARE(requested.count(), 1);
+        QSignalSpy opened(&fixture.window, &desktop::Window::bookOpened);
+        fixture.window.openBook(book);
+        QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 30000);
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        const auto position = fixture.state().value("position");
+        fixture.window.readerWindow()->pageButton(1);
+        QTRY_VERIFY(fixture.state().value("position") != position);
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        auto *table = monitor.findChild<QTableWidget *>("engineMonitorEvents");
+        const auto has = [&](const QString &text) {
+            monitor.refresh();
+            for (int row = 0; row < table->rowCount(); ++row)
+                if (table->item(row, 2)->text() == text) return true;
+            return false;
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(has("Page turn"), 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(has("Neighbour pages and chapters"), 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(has("Page estimates"), 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(has("engine-open"), 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(!monitor.findChild<QLabel *>("engineMonitorResources")->text().contains("Process RSS Unavailable"), 10000);
+        auto injectedDelay = std::make_shared<std::atomic<double>>(0);
+        const auto monitorSink = monitor.observer();
+        setDiagnosticObserver([monitorSink, injectedDelay](const QJsonObject &event) {
+            monitorSink(event);
+            if (event.value("event") == "render-end")
+                injectedDelay->store(event.value("emulated_wait_ms").toDouble());
+        });
+        monitor.findChild<QPushButton *>("engineMonitorSlowdown")->click();
+        const auto beforeSlowedTurn = fixture.state().value("position");
+        fixture.window.readerWindow()->pageButton(1);
+        QTRY_VERIFY_WITH_TIMEOUT(fixture.state().value("position") != beforeSlowedTurn, 30000);
+        QTRY_VERIFY_WITH_TIMEOUT(!fixture.state().value("busy").toBool(), 30000);
+        QVERIFY(injectedDelay->load() > 0);
+        monitor.refresh();
+        const auto capture = qgetenv("KOBALT_MONITOR_CAPTURE");
+        if (!capture.isEmpty()) {
+            QVERIFY(QDir().mkpath(QString::fromUtf8(capture)));
+            QVERIFY(monitor.grab().save(QString::fromUtf8(capture) + "/engine-monitor.png"));
+            QVERIFY(fixture.window.grab().save(QString::fromUtf8(capture) + "/reader.png"));
+            auto *view = fixture.window.findChild<QMenu *>("desktopViewMenu");
+            QVERIFY(view);
+            view->popup(fixture.window.mapToGlobal(QPoint(20, 40)));
+            QTRY_VERIFY(view->isVisible());
+            QVERIFY(view->grab().save(QString::fromUtf8(capture) + "/engine-monitor-menu.png"));
+            view->hide();
+        }
+        monitor.findChild<QPushButton *>("engineMonitorSlowdown")->click();
+    }
+
+    // New chapter jumps cancel adjacent previews, including the simulated Kobo delay.
+    void fastConsecutiveChapterJumps()
+    {
+        renderingMode::setOverride(1);
+        QTemporaryDir logs;
+        initializeDiagnostics(logs.path());
+        pauseDiagnostics(false);
+        const auto restore = qScopeGuard([] {
+            setDiagnosticObserver({}); pauseDiagnostics(true);
+            setEngineSlowdownEnabled(false); renderingMode::setOverride(-1);
+        });
+        struct Trace {
+            std::atomic_bool preview{ false }, boundary{ false };
+            std::atomic<double> queued{ -1 }, waited{ -1 };
+        };
+        auto trace = std::make_shared<Trace>();
+        setDiagnosticObserver([trace](const QJsonObject &event) {
+            const auto name = event.value("event").toString();
+            if (event.value("work") == "Adjacent page preview") {
+                trace->preview = name == "engine-work-start";
+                if (name == "engine-work-end") trace->boundary = false;
+            }
+            if (trace->preview && name == "operation-start" && event.value("operation") == "chapter-turn")
+                trace->boundary = true;
+            if (name == "render-queued") {
+                trace->queued = event.value("monotonic_ms").toDouble(); trace->waited = -1;
+            }
+            if (name == "render-start" && trace->queued >= 0)
+                trace->waited = event.value("monotonic_ms").toDouble() - trace->queued.load();
+        });
+        Fixture fixture;
+        QVERIFY(fixture.prepared);
+        selectPreview(fixture, 1);
+        QSignalSpy opened(&fixture.window, &desktop::Window::bookOpened);
+        fixture.window.openBook(book);
+        QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 30000);
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        fixture.window.readerWindow()->pageButton(1);
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        QVERIFY(fixture.press("rrPage"));
+        QVERIFY(fixture.press("rrNavSeek"));
+        auto *navigator = dynamic_cast<ui::PageScrubber *>(fixture.widget("rrPageScrubber"));
+        QVERIFY(navigator);
+        QTRY_VERIFY(navigator->previewReady());
+        setEngineSlowdownEnabled(true);
+        for (int jump = 0; jump < 3; ++jump) {
+            trace->boundary = false;
+            navigator->chapterRequested(9);
+            QTRY_VERIFY_WITH_TIMEOUT(trace->boundary.load(), 30000);
+            QVERIFY(!fixture.state().value("busy").toBool());
+            const auto position = fixture.state().value("position");
+            trace->waited = -1;
+            QVERIFY(fixture.press("rrNavigationNext"));
+            QTRY_VERIFY_WITH_TIMEOUT(trace->waited.load() >= 0, 10000);
+            QVERIFY2(trace->waited.load() < 100, "A cancelled adjacent preview delayed the next chapter jump");
+            QTRY_VERIFY_WITH_TIMEOUT(fixture.state().value("position") != position, 30000);
+            QTRY_VERIFY_WITH_TIMEOUT(!fixture.state().value("busy").toBool(), 30000);
+            QVERIFY(navigator->isVisible());
+            QTRY_VERIFY_WITH_TIMEOUT(navigator->previewReady(), 10000);
+        }
+    }
+
+    void fastFirstNavigateJump()
+    {
+        renderingMode::setOverride(1);
+        const auto restore = qScopeGuard([] { renderingMode::setOverride(-1); });
+        Fixture fixture;
+        QVERIFY(fixture.prepared);
+        selectPreview(fixture, 1);
+        QSignalSpy opened(&fixture.window, &desktop::Window::bookOpened);
+        fixture.window.openBook(book);
+        QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 30000);
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        const auto cover = fixture.state().value("position").toString();
+        fixture.window.readerWindow()->pageButton(1);
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        QTRY_VERIFY(fixture.state().value("position").toString() != cover);
+        QVERIFY(fixture.press("rrPage"));
+        QVERIFY(fixture.press("rrNavSeek"));
+        auto *navigator = dynamic_cast<ui::PageScrubber *>(fixture.widget("rrPageScrubber"));
+        QVERIFY(navigator);
+        QTRY_VERIFY(navigator->previewReady());
+
+        class PreviewGeometryWatch : public QObject
+        {
+        public:
+            ui::PageScrubber *navigator;
+            QRect original;
+            bool movedWhileLoading = false;
+
+            bool eventFilter(QObject *, QEvent *event) override
+            {
+                if (event->type() == QEvent::Paint && !navigator->previewReady()
+                    && navigator->previewBounds() != original)
+                    movedWhileLoading = true;
+                return false;
+            }
+        } watch;
+
+        watch.navigator = navigator;
+        navigator->installEventFilter(&watch);
+        QVERIFY(!fixture.visible("rrScrubberReturn"));
+        for (const auto *button : { "rrNavigationNext", "rrNavigationPrevious" }) {
+            watch.original = navigator->previewBounds();
+            watch.movedWhileLoading = false;
+            QVERIFY(fixture.press(button));
+            QTRY_VERIFY(!fixture.state().value("busy").toBool());
+            QTRY_VERIFY(navigator->previewReady());
+            QVERIFY(!watch.movedWhileLoading);
+            QVERIFY(fixture.visible("rrScrubberReturn"));
+        }
+    }
+
+    void fastProgressSurfaces()
+    {
+        renderingMode::setOverride(1);
+        const auto previousPages = qgetenv("KOBALT_CHAPTER_PAGES");
+        qputenv("KOBALT_CHAPTER_PAGES", "2");
+        const auto restore = qScopeGuard([previousPages] {
+            renderingMode::setOverride(-1);
+            if (previousPages.isNull())
+                qunsetenv("KOBALT_CHAPTER_PAGES");
+            else
+                qputenv("KOBALT_CHAPTER_PAGES", previousPages);
+        });
+        Fixture fixture;
+        QVERIFY(fixture.prepared);
+        selectPreview(fixture, 1);
+        QSignalSpy opened(&fixture.window, &desktop::Window::bookOpened);
+        fixture.window.openBook(book);
+        QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 30000);
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        const auto coverPosition = fixture.state().value("position").toString();
+        QVERIFY(fixture.press("rrPage"));
+        QVERIFY(fixture.press("rrNavSeek"));
+        auto *navigator = dynamic_cast<ui::PageScrubber *>(fixture.widget("rrPageScrubber"));
+        QVERIFY(navigator);
+        QTRY_VERIFY(navigator->previewReady());
+        QVERIFY(!fixture.visible("rrBookPosition"));
+        QVERIFY(fixture.visible("rrBookPositionIndicator"));
+        QVERIFY(!fixture.visible("rrPreviewPreviousPage"));
+        auto *nextPage = fixture.widget("rrPreviewNextPage");
+        QVERIFY(nextPage && nextPage->isVisible());
+        const auto previousPreview = navigator->grab(navigator->previewBounds()).toImage();
+        QVERIFY(fixture.click(nextPage, QPoint(10, nextPage->height() / 2)));
+        QCOMPARE(navigator->grab(navigator->previewBounds()).toImage(), previousPreview);
+        QVERIFY(navigator->selecting());
+        QVERIFY(navigator->testAttribute(Qt::WA_OpaquePaintEvent));
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        QTRY_COMPARE(fixture.state().value("chapter_title").toString(), QString("Title Page"));
+        QVERIFY(navigator->isVisible());
+        QTRY_VERIFY(navigator->previewReady());
+        auto *previousPage = fixture.widget("rrPreviewPreviousPage");
+        QVERIFY(previousPage && previousPage->isVisible());
+        QVERIFY(fixture.click(previousPage,
+                              QPoint(previousPage->width() - 10, previousPage->height() / 2)));
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        QTRY_COMPARE(fixture.state().value("position").toString(), coverPosition);
+        QVERIFY(navigator->isVisible());
+        QTRY_VERIFY(navigator->previewReady());
+        QVERIFY(fixture.press("rrNavigationNext"));
+        QVERIFY(navigator->selecting());
+        QVERIFY(navigator->testAttribute(Qt::WA_OpaquePaintEvent));
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        QTRY_COMPARE(fixture.state().value("chapter_title").toString(), QString("Title Page"));
+        QVERIFY(navigator->isVisible());
+        QTRY_VERIFY(fixture.visible("rrNavChapters"));
+        QVERIFY(fixture.press("rrNavChapters"));
+        QTRY_VERIFY(fixture.visible("rrChapter2"));
+        QVERIFY(fixture.press("rrChapter2"));
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        QTRY_VERIFY(fixture.state().value("rough_pages").toInt() > 0);
+        QVERIFY(fixture.press("rrPage"));
+        QTRY_VERIFY(fixture.visible("rrNavChapters"));
+        QVERIFY(fixture.press("rrNavChapters"));
+        QTRY_VERIFY(fixture.visible("rrContentsPosition"));
+        QTRY_COMPARE(fixture.widget("rrContentsPosition")->property("text").toString(),
+                     strings::get("stats.page_of")
+                             .arg(fixture.state().value("rough_page").toInt())
+                             .arg(headerfooter::pageTotal(
+                                     fixture.state().value("rough_pages").toInt(),
+                                     fixture.state().value("rough_pages_estimated").toBool())));
+        // The total of a book that is not counted is an estimate, with its mark.
+        QVERIFY(fixture.state().value("rough_pages_estimated").toBool());
+        QVERIFY(fixture.widget("rrContentsPosition")->property("text").toString().contains('~'));
+        QVERIFY(fixture.press("rrContentsClose"));
+        if (!fixture.visible("rrNavStats"))
+            QVERIFY(fixture.press("rrPage"));
+        QTRY_VERIFY(fixture.visible("rrNavStats"));
+        QVERIFY(fixture.press("rrNavStats"));
+        QTRY_VERIFY(fixture.visible("rrGraphBookFigure"));
+        QTRY_COMPARE(fixture.widget("rrGraphBookFigure")->property("text").toString().toInt(),
+                     qMax(0,
+                          fixture.state().value("rough_pages").toInt()
+                                  - fixture.state().value("rough_page").toInt() + 1));
+        QVERIFY(fixture.press("rrNavSeek"));
+        QTRY_VERIFY(fixture.visible("rrBookPositionIndicator"));
+        QTRY_VERIFY(navigator->previewReady());
+        QVERIFY(!fixture.visible("rrBookPosition"));
+        auto *track = fixture.widget("rrBookPositionIndicator");
+        QVERIFY(!fixture.visible("rrScrubberZoomIn"));
+        const auto chapterPosition = fixture.state().value("position").toString();
+        const auto chapterTitle = fixture.state().value("chapter_title").toString();
+        QTest::mousePress(track, Qt::LeftButton, Qt::NoModifier, QPoint(1, track->height() / 2));
+        QTest::mouseMove(track, QPoint(track->width() - 1, track->height() / 2));
+        QTest::mouseRelease(track, Qt::LeftButton, Qt::NoModifier,
+                            QPoint(track->width() - 1, track->height() / 2));
+        QCOMPARE(fixture.state().value("position").toString(), chapterPosition);
+        const auto center = navigator->previewBounds().center();
+        QVERIFY(fixture.drag(navigator, center + QPoint(80, 0), center - QPoint(80, 0)));
+        QCOMPARE(fixture.state().value("position").toString(), chapterPosition);
+        QVERIFY(fixture.press("rrNavigationNext"));
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        QTRY_VERIFY(fixture.state().value("chapter_title").toString() != chapterTitle);
+        QVERIFY(navigator->isVisible());
+        QTRY_VERIFY(navigator->previewReady());
+        QTRY_VERIFY(fixture.visible("rrNavigationPrevious"));
+        QVERIFY(fixture.press("rrNavigationPrevious"));
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        QTRY_COMPARE(fixture.state().value("chapter_title").toString(), chapterTitle);
+    }
+
     void bookmarks()
     {
         QFETCH(bool, dark);
@@ -6646,7 +7420,9 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
         QTRY_VERIFY(fixture.visible("rrDictionary"));
         const auto looked = qobject_cast<QLabel *>(fixture.widget("rrDictionaryWord"))->text();
         auto *save = qobject_cast<QPushButton *>(fixture.widget("rrDictionarySave"));
-        QVERIFY(save);
+        QVERIFY(save && save->isCheckable());
+        if (!disabled)
+            QTRY_COMPARE(save->isChecked(), !switchDictionary);
         if (switchDictionary) {
             QVERIFY(fixture.press("rrDictionarySelect"));
             QTRY_VERIFY(fixture.visible("rrDictionaryChoice1"));
@@ -6738,6 +7514,7 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
         QTRY_VERIFY(save->isVisible());
         QVERIFY(fixture.press("rrDictionarySave"));
         QTRY_COMPARE(save->accessibleName(), strings::get("dictionary_panel.save_to_words"));
+        QVERIFY(!save->isChecked());
         QTRY_VERIFY(fixture.visible("rrWordNotice"));
         QCOMPARE(qobject_cast<QLabel *>(fixture.widget("rrButtonFeedbackText"))->text(),
                  QString("Removed from My Words"));
@@ -6751,6 +7528,7 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
         QVERIFY(pointer->geometry().bottom() > anchor.top());
         QVERIFY(fixture.press("rrDictionarySave"));
         QTRY_COMPARE(save->accessibleName(), strings::get("dictionary_panel.remove_from_words"));
+        QVERIFY(save->isChecked());
         QTRY_COMPARE(qobject_cast<QLabel *>(fixture.widget("rrButtonFeedbackText"))->text(),
                      QString("Added to My Words!"));
         QTRY_VERIFY(!fixture.visible("rrWordNotice"));
@@ -6774,8 +7552,10 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
                      QString("Kaladin"));
         QTRY_VERIFY(save->isVisible());
         QTRY_COMPARE(save->accessibleName(), strings::get("dictionary_panel.save_to_words"));
+        QVERIFY(!save->isChecked());
         QVERIFY(fixture.press("rrDictionarySave"));
         QTRY_COMPARE(save->accessibleName(), strings::get("dictionary_panel.remove_from_words"));
+        QVERIFY(save->isChecked());
         QVERIFY(fixture.press("rrDictionaryClose"));
         QTRY_VERIFY(!fixture.visible("rrDictionary"));
         QVERIFY(fixture.press("rrPage"));
@@ -8374,6 +9154,15 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
     }
 
     // Checks both strip-size sliders through the canvas: steps, Off, preset changes, the sheet layout and persistence after reopening.
+    void percentageFormat_data() { screenshotVariants(); }
+
+    void percentageFormat()
+    {
+        QFETCH(int, preset);
+        QFETCH(bool, dark);
+        checkPercentageFormat(preset, dark, false);
+    }
+
     void headerFooterSizes_data() { screenshotVariants(); }
 
     void headerFooterSizes()
@@ -8463,7 +9252,291 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
         QCOMPARE(page->chrome.slotFields[2], Field::BatteryPercentOnly);
     }
 
-    // Checks that the header and footer sheet stays open across screenshot, toolbar, page and tab taps, and closes to Layout.
+    // The six-inch reader in the light theme, at 100% and at 150% interface
+    // text. The "-large" tag makes the Fixture pick 150%.
+    // Checks that Hybrid rendering builds the whole book in a quiet moment and switches on a page turn.
+    void hybridCountsPages()
+    {
+        using namespace headerfooter;
+        for (const int mode : { 2, 1 }) {
+            Fixture fixture(false);
+            QVERIFY(fixture.prepared);
+            auto layout = presetLayout(Preset::Default);
+            layout.slotFields = { Field::BookTitle, Field::Nothing, Field::BookPage,
+                                  Field::Chapter,   Field::Nothing, Field::ChapterPage };
+            auto preferences = storage::readJson(fixture.paths.preferences());
+            preferences[presetKey] = presetValue(Preset::Custom);
+            preferences[customKey] = toJson(layout);
+            QVERIFY(storage::writeJson(fixture.paths.preferences(), preferences));
+            renderingMode::setOverride(mode);
+            // A quiet time that the test can wait for.
+            const int quiet = renderingMode::buildQuietMilliseconds();
+            renderingMode::setBuildQuietMilliseconds(400);
+            const auto restore = qScopeGuard([quiet] {
+                renderingMode::setOverride(-1);
+                renderingMode::setBuildQuietMilliseconds(quiet);
+            });
+            QSignalSpy opened(&fixture.window, &desktop::Window::bookOpened);
+            fixture.window.openBook(book);
+            QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 30000);
+            QTRY_VERIFY_WITH_TIMEOUT(!fixture.state().value("busy").toBool(), 30000);
+            auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+            QVERIFY(page);
+            const auto estimated = [&] { return page->slotContents[2].text.contains('~'); };
+            // The estimate comes first, also without a page turn.
+            QTRY_VERIFY_WITH_TIMEOUT(estimated(), 10000);
+            for (int turn = 0; turn < 4; ++turn) {
+                const auto before = fixture.state().value("position").toString();
+                test::skipPageTurnWindow();
+                fixture.window.readerWindow()->pageButton(1);
+                const bool turned = QTest::qWaitFor(
+                        [&] {
+                            return !fixture.state().value("busy").toBool()
+                                    && fixture.state().value("position").toString() != before;
+                        },
+                        5000);
+                QVERIFY2(turned,
+                         qPrintable(QString("mode %1 turn %2: busy %3, chapter mode %4, page %5 "
+                                            "of %6, at %7")
+                                            .arg(mode)
+                                            .arg(turn)
+                                            .arg(fixture.state().value("busy").toBool())
+                                            .arg(fixture.state().contains("book_fraction"))
+                                            .arg(fixture.state().value("page").toInt())
+                                            .arg(fixture.state().value("pages").toInt())
+                                            .arg(before)));
+            }
+            if (mode == 2) {
+                // The build starts only after a quiet moment. Quick page
+                // turns do not start it: the reader stays in the chapter.
+                bool ready = false;
+                QTemporaryDir logs;
+                QVERIFY(logs.isValid());
+                initializeDiagnostics(logs.path());
+                pauseDiagnostics(false);
+                setDiagnosticObserver([&](const QJsonObject &event) {
+                    ready = ready || event.value("event") == QLatin1String("full-document-ready");
+                });
+                const auto quietLog = qScopeGuard([] {
+                    setDiagnosticObserver({});
+                    pauseDiagnostics(true);
+                });
+                const auto turnOne = [&] {
+                    const auto before = fixture.state().value("position").toString();
+                    test::skipPageTurnWindow();
+                    fixture.window.readerWindow()->pageButton(1);
+                    return QTest::qWaitFor(
+                            [&] {
+                                return !fixture.state().value("busy").toBool()
+                                        && fixture.state().value("position").toString() != before;
+                            },
+                            5000);
+                };
+                for (int turn = 0; turn < 6; ++turn)
+                    QVERIFY(turnOne());
+                QVERIFY(!ready);
+                QVERIFY(fixture.state().contains("book_fraction"));
+                // Left alone, the reader builds the whole book. The switch
+                // rides on the next page turn: that turn still turns one
+                // page, and from then on the reader shows the document of
+                // the whole book.
+                QTRY_VERIFY_WITH_TIMEOUT(ready, 15000);
+                QVERIFY(fixture.state().contains("book_fraction"));
+                // The turn that is already on its way when the document
+                // becomes ready stays in the chapter; the one after it
+                // switches.
+                bool whole = false;
+                for (int turn = 0; turn < 3 && !whole; ++turn) {
+                    QVERIFY(turnOne());
+                    whole = !fixture.state().contains("book_fraction");
+                }
+                QVERIFY(whole);
+                QTRY_VERIFY2(!estimated(), qPrintable(page->slotContents[2].text));
+                QVERIFY(!fixture.state().value("rough_pages_estimated").toBool());
+                QVERIFY(!page->slotContents[5].text.contains('~'));
+                QCOMPARE(opened.count(), 1);
+                // The next turn is an ordinary turn of the whole book.
+                const int shown = fixture.state().value("page").toInt();
+                test::skipPageTurnWindow();
+                fixture.window.readerWindow()->pageButton(1);
+                QTRY_COMPARE_WITH_TIMEOUT(fixture.state().value("page").toInt(), shown + 1, 5000);
+                // Another text size in the menu goes back to the chapter
+                // instead of laying out the whole book again.
+                const int size = fixture.state().value("font_pixels").toInt();
+                QVERIFY(fixture.press("rrPage"));
+                QTRY_VERIFY(fixture.visible("rrNavText"));
+                QVERIFY(fixture.press("rrNavText"));
+                QTRY_VERIFY(fixture.visible("rrLarger"));
+                QVERIFY(fixture.press("rrLarger"));
+                QVERIFY(fixture.press("rrPage"));
+                QTRY_VERIFY_WITH_TIMEOUT(!fixture.state().value("busy").toBool()
+                                                 && fixture.state().value("font_pixels").toInt()
+                                                         > size,
+                                         30000);
+                QVERIFY(fixture.state().contains("book_fraction"));
+                QTRY_VERIFY_WITH_TIMEOUT(estimated(), 10000);
+            } else {
+                // Fast never counts: the idle work ends and the mark stays.
+                QTest::qWait(100);
+                QVERIFY2(estimated(), qPrintable(page->slotContents[2].text));
+            }
+        }
+    }
+
+    void headerFooterChapterMode_data()
+    {
+        QTest::addColumn<int>("preset");
+        QTest::addColumn<bool>("dark");
+        QTest::newRow("1-light") << 1 << false;
+        QTest::newRow("1-large") << 1 << false;
+    }
+
+    // In chapter mode the page fields show rough page numbers with their
+    // totals, and the time fields show the page turn and the chapter load.
+    // KOBALT_CHAPTER_PAGE_CAPTURES names a folder for the reader at a
+    // chapter start, in its middle and after the next chapter starts.
+    void headerFooterChapterMode()
+    {
+        using namespace headerfooter;
+        QFETCH(int, preset);
+        QFETCH(bool, dark);
+        Fixture fixture(dark);
+        QVERIFY(fixture.prepared);
+        QCOMPARE(ui::textScale(), largeTextVariant() ? 1.5 : 1.0);
+        auto layout = presetLayout(Preset::Default);
+        layout.slotFields = { Field::BookTitle, Field::PageTurnTime,    Field::BookPage,
+                              Field::Chapter,   Field::ChapterLoadTime, Field::ChapterPage };
+        // Default sets its center header slot in uppercase, which would read 12 MS.
+        layout.uppercase[1] = false;
+        auto preferences = storage::readJson(fixture.paths.preferences());
+        preferences[presetKey] = presetValue(Preset::Custom);
+        preferences[customKey] = toJson(layout);
+        QVERIFY(storage::writeJson(fixture.paths.preferences(), preferences));
+        selectPreview(fixture, preset);
+        renderingMode::setOverride(1);
+        const auto restore = qScopeGuard([] { renderingMode::setOverride(-1); });
+        QSignalSpy opened(&fixture.window, &desktop::Window::bookOpened);
+        fixture.window.openBook(book);
+        QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 30000);
+        QTRY_VERIFY_WITH_TIMEOUT(!fixture.state().value("busy").toBool(), 30000);
+        QVERIFY(fixture.press("rrPage"));
+        QTRY_VERIFY(fixture.visible("rrNavChapters"));
+        QVERIFY(fixture.press("rrNavChapters"));
+        QTRY_VERIFY(fixture.visible("rrChapter1"));
+        QVERIFY(fixture.press("rrChapter1"));
+        QTRY_VERIFY_WITH_TIMEOUT(!fixture.state().value("busy").toBool(), 30000);
+        auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+        QVERIFY(page);
+        // A page and its total.
+        // A total that is an estimate has a mark before it.
+        const QRegularExpression pageForm("^(\\d+) / ~?(\\d+)$");
+        const QRegularExpression timeForm("^\\d+ ms$");
+        // The chapter title no longer carries the load time.
+        QVERIFY2(!page->slotContents[3].text.contains(QStringLiteral(" · ")),
+                 qPrintable(page->slotContents[3].text));
+        QVERIFY2(timeForm.match(page->slotContents[4].text).hasMatch(),
+                 qPrintable(page->slotContents[4].text));
+
+        struct Shown
+        {
+            int book = 0, books = 0, chapter = 0, chapters = 0;
+        };
+
+        const auto shown = [&] {
+            Shown result;
+            const auto bookPage = pageForm.match(page->slotContents[2].text);
+            const auto chapterPage = pageForm.match(page->slotContents[5].text);
+            if (bookPage.hasMatch() && chapterPage.hasMatch()) {
+                result = { bookPage.captured(1).toInt(), bookPage.captured(2).toInt(),
+                           chapterPage.captured(1).toInt(), chapterPage.captured(2).toInt() };
+            }
+            return result;
+        };
+        const QString folder = qEnvironmentVariable("KOBALT_CHAPTER_PAGE_CAPTURES");
+        const auto save = [&](const QString &name) {
+            if (folder.isEmpty())
+                return true;
+            QCoreApplication::processEvents();
+            auto *surface = fixture.window.readerWindow();
+            QImage pixels(surface->size(), QImage::Format_ARGB32_Premultiplied);
+            pixels.fill(Qt::transparent);
+            surface->render(&pixels);
+            pixels.setDotsPerMeterX(qRound(300 / 0.0254));
+            pixels.setDotsPerMeterY(qRound(300 / 0.0254));
+            return QDir().mkpath(folder)
+                    && pixels.save(folder + '/' + screenshotVariant(preset, dark) + '-' + name
+                                   + ".png");
+        };
+        const auto turn = [&] {
+            const auto before = page->slotContents[2].text;
+            test::skipPageTurnWindow();
+            fixture.window.readerWindow()->pageButton(1);
+            return QTest::qWaitFor(
+                    [&] {
+                        return !fixture.state().value("busy").toBool()
+                                && page->slotContents[2].text != before;
+                    },
+                    5000);
+        };
+        auto current = shown();
+        QVERIFY2(current.books > 0 && current.chapters > 0,
+                 qPrintable(page->slotContents[2].text + " | " + page->slotContents[5].text));
+        QCOMPARE(current.chapter, 1);
+        // On to the first chapter that is long enough for the turns below.
+        for (int step = 0; step < 200 && (current.chapter != 1 || current.chapters < 8); ++step) {
+            QVERIFY(turn());
+            const auto next = shown();
+            QVERIFY(next.book > current.book);
+            current = next;
+        }
+        QCOMPARE(current.chapter, 1);
+        QVERIFY(current.book <= current.books && current.chapter <= current.chapters);
+        QVERIFY(save("chapter-start"));
+        // Forward turns inside the chapter add one page to both numbers.
+        for (int step = 0; step < 5; ++step) {
+            QVERIFY(turn());
+            const auto next = shown();
+            QCOMPARE(next.book, current.book + 1);
+            QCOMPARE(next.chapter, current.chapter + 1);
+            current = next;
+        }
+        // After a turn the header shows how long it took.
+        QVERIFY2(timeForm.match(page->slotContents[1].text).hasMatch(),
+                 qPrintable(page->slotContents[1].text));
+        QVERIFY(!page->slotContents[3].text.contains(QStringLiteral(" ms")));
+        QVERIFY(save("chapter-middle"));
+        // On to the start of the next chapter. The book page never goes back.
+        for (int step = 0; step < 200; ++step) {
+            QVERIFY(turn());
+            const auto next = shown();
+            QVERIFY(next.book > current.book);
+            current = next;
+            if (current.chapter == 1)
+                break;
+        }
+        QCOMPARE(current.chapter, 1);
+        QVERIFY(save("next-chapter"));
+        // The field list offers both times at its end. The list pages by
+        // height, so the two rows can fall on two pages.
+        QVERIFY(fixture.press("rrPage"));
+        QTRY_VERIFY(fixture.visible("rrNavLayout"));
+        QVERIFY(fixture.press("rrNavLayout"));
+        QVERIFY(fixture.press("rrHeaderFooter"));
+        QTRY_VERIFY(fixture.visible("rrHeaderFooterView"));
+        QVERIFY(fixture.press("rrHeaderFooterSlot1"));
+        QTRY_VERIFY(fixture.visible("rrHeaderFooterChooser"));
+        for (const auto field : { Field::PageTurnTime, Field::ChapterLoadTime }) {
+            const auto name = "rrHeaderFooterField_" + fieldValue(field);
+            for (int turns = 0; !fixture.visible(qPrintable(name)) && turns < 10; ++turns)
+                QVERIFY(fixture.press("rrHeaderFooterFieldsNext"));
+            auto *row = qobject_cast<QCheckBox *>(fixture.widget(qPrintable(name)));
+            QVERIFY(row && row->isVisible());
+            QCOMPARE(row->text(), fieldLabel(field));
+            QVERIFY(save("field-list-" + fieldValue(field)));
+        }
+        QVERIFY(fixture.press("rrHeaderFooterFieldsClose"));
+    }
+
     void headerFooterDismissal_data() { bookmarks_data(); }
 
     void headerFooterDismissal()
@@ -9217,13 +10290,29 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
     }
 
     // Checks the direct link-tap choices: footnote and website routing, target sizes, page-tap priority and link reveal.
-    void tappableLinks_data() { bookmarks_data(); }
+    void tappableLinks_data()
+    {
+        QTest::addColumn<bool>("dark");
+        QTest::addColumn<bool>("hideHighlightLinks");
+        for (bool dark : { false, true })
+            for (bool hidden : { false, true })
+                QTest::newRow(qPrintable(
+                        QString("%1-%2").arg(dark ? "dark" : "light", hidden ? "hidden" : "shown")))
+                        << dark << hidden;
+    }
 
+    // Checks direct taps and long presses in every link mode, with link discovery shown or hidden.
     void tappableLinks()
     {
         QFETCH(bool, dark);
+        QFETCH(bool, hideHighlightLinks);
         Fixture fixture(dark);
         QVERIFY(fixture.prepared);
+        if (hideHighlightLinks) {
+            auto preferences = storage::readJson(fixture.paths.preferences());
+            preferences["disable_highlight_links"] = true;
+            QVERIFY(storage::writeJson(fixture.paths.preferences(), preferences));
+        }
         QVERIFY(writeBook(fixture.directory.path(), "direct.epub", test::linkBook()));
         const auto path = fixture.directory.path() + "/direct.epub";
         QSignalSpy opened(&fixture.window, &desktop::Window::bookOpened);
@@ -9247,6 +10336,8 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
                 QVERIFY(fixture.press("rrPage"));
             QTRY_VERIFY(fixture.visible("rrSettings"));
             QVERIFY(fixture.press("rrSettings"));
+            QVERIFY(!fixture.visible("rrScrubberLinks"));
+            QVERIFY(!fixture.visible("rrLinkDiscovery"));
             QVERIFY(fixture.press("rrSettingsControls"));
             auto *linkRow = fixture.widget("rrTappableLinks");
             QVERIFY(linkRow);
@@ -9321,14 +10412,23 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
             const auto note = fixture.linkPoint(path, "short note");
             QVERIFY(fixture.selectWord(page, note));
             QTRY_VERIFY(fixture.visible("rrSelectionLink"));
-            QVERIFY(fixture.press("rrAnnotationCancel"));
-            // Manual reveal still includes ordinary links with the persistent option off or footnotes-only.
+            QVERIFY(fixture.press("rrSelectionLink"));
+            QTRY_VERIFY(fixture.visible("rrLinkPanel"));
+            QVERIFY(fixture.press("rrLinkClose"));
+            QTRY_VERIFY(!fixture.visible("rrLinkPanel"));
+            // Hiding discovery is independent of direct taps and long presses.
             QVERIFY(fixture.press("rrPage"));
-            QTRY_VERIFY(fixture.visible("rrScrubberLinks"));
-            QVERIFY(fixture.press("rrScrubberLinks"));
-            QVERIFY(fixture.click(page, fixture.linkPoint(path, "website")));
-            QTRY_VERIFY(fixture.visible("rrBrowserConfirmation"));
-            QVERIFY(fixture.press("rrLinkNo"));
+            QTRY_VERIFY(fixture.visible("rrControlsTop"));
+            QCOMPARE(fixture.visible("rrScrubberLinks"), !hideHighlightLinks);
+            if (hideHighlightLinks) {
+                QVERIFY(!fixture.visible("rrLinkDiscovery"));
+                QVERIFY(fixture.press("rrPage"));
+            } else {
+                QVERIFY(fixture.press("rrScrubberLinks"));
+                QVERIFY(fixture.click(page, fixture.linkPoint(path, "website")));
+                QTRY_VERIFY(fixture.visible("rrBrowserConfirmation"));
+                QVERIFY(fixture.press("rrLinkNo"));
+            }
             QCOMPARE(fixture.state().value("position"), origin);
         }
         // Direct links also win over normal tap zones, but annotation mode keeps its input.
@@ -9774,7 +10874,8 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
         auto *option = qobject_cast<QCheckBox *>(fixture.widget("rrDisableReaderStandby"));
         QCOMPARE(bool(option), supported);
         if (!supported) {
-            QVERIFY(!fixture.widget("rrSystemAdvancedSection"));
+            QVERIFY(fixture.widget("rrSystemSleepSection"));
+            QVERIFY(!fixture.widget("rrStandbyConfirmation"));
             return;
         }
         QVERIFY(revealSettingsOption(fixture, "rrDisableReaderStandby"));
@@ -9996,6 +11097,148 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
             fixture.window.readerWindow()->close();
             QTRY_VERIFY(!fixture.window.readerWindow());
         }
+    }
+
+    // The six-inch reader in the light theme, at 100% and at 150% interface
+    // text. The "-large" tag makes the Fixture pick 150%.
+    void settingsRendering_data()
+    {
+        QTest::addColumn<int>("preset");
+        QTest::newRow("1-light") << 1;
+        QTest::newRow("1-large") << 1;
+    }
+
+    // Rendering is Fast without a saved choice. A new choice is saved when
+    // Settings closes and applies to the open book, which keeps the reading
+    // position in both directions. KOBALT_RENDERING_CAPTURES names a folder
+    // for the System page with the row, and with its choices open.
+    void settingsRendering()
+    {
+        QFETCH(int, preset);
+        // The test runner pins Accurate. Let the preference decide here.
+        const auto pinned = qgetenv("KOBALT_CHAPTER_MODE");
+        qunsetenv("KOBALT_CHAPTER_MODE");
+        const auto restore = qScopeGuard([pinned] {
+            if (pinned.isEmpty())
+                qunsetenv("KOBALT_CHAPTER_MODE");
+            else
+                qputenv("KOBALT_CHAPTER_MODE", pinned);
+        });
+        Fixture fixture(false);
+        QVERIFY(fixture.prepared);
+        selectPreview(fixture, preset);
+        QSignalSpy opened(&fixture.window, &desktop::Window::bookOpened);
+        const auto open = [&](bool fast) {
+            const int count = opened.count();
+            fixture.window.openBook(book);
+            if (!QTest::qWaitFor([&] { return opened.count() == count + 1; }, 30000)
+                || !QTest::qWaitFor([&] { return !fixture.state().value("busy").toBool(); }, 30000))
+                return false;
+            // Only a book that opens in chapter mode reports its chapter load time.
+            return fixture.state().contains("chapter_load_ms") == fast;
+        };
+        // In chapter mode the page index starts again in every chapter, so
+        // wait for the reading position to move.
+        const auto turn = [&] {
+            const auto before = fixture.state().value("position").toString();
+            test::skipPageTurnWindow();
+            fixture.window.readerWindow()->pageButton(1);
+            return QTest::qWaitFor(
+                    [&] {
+                        const auto current = fixture.state();
+                        return !current.value("busy").toBool()
+                                && current.value("position").toString() != before;
+                    },
+                    5000);
+        };
+        const auto close = [&] {
+            fixture.window.readerWindow()->close();
+            return QTest::qWaitFor([&] { return !fixture.window.readerWindow(); }, 30000);
+        };
+        const QString folder = qEnvironmentVariable("KOBALT_RENDERING_CAPTURES");
+        const auto save = [&](const QString &name) {
+            if (folder.isEmpty())
+                return true;
+            QCoreApplication::processEvents();
+            auto *surface = fixture.window.readerWindow();
+            QImage pixels(surface->size(), QImage::Format_ARGB32_Premultiplied);
+            pixels.fill(Qt::transparent);
+            surface->render(&pixels);
+            pixels.setDotsPerMeterX(qRound(300 / 0.0254));
+            pixels.setDotsPerMeterY(qRound(300 / 0.0254));
+            return QDir().mkpath(folder)
+                    && pixels.save(folder + '/' + screenshotVariant(preset, false) + '-' + name
+                                   + ".png");
+        };
+        const auto choose = [&](const char *mode, const QString &before, const QString &after) {
+            QVERIFY(fixture.press("rrPage"));
+            QVERIFY(fixture.press("rrSettings"));
+            QVERIFY(fixture.press("rrSettingsSystem"));
+            QVERIFY(revealSettingsOption(fixture, "rrRendering"));
+            auto *row = dynamic_cast<ui::CaptionButton *>(fixture.widget("rrRendering"));
+            QVERIFY(row);
+            QVERIFY(fixture.visible("rrSystemEngineSection"));
+            QCOMPARE(row->text(), strings::get("settings.rendering"));
+            QCOMPARE(row->caption(), before.toUpper());
+            // The captures show the default choice.
+            const bool capture = before == strings::get("settings.rendering_hybrid");
+            QVERIFY(!capture || save("rendering-row"));
+            QVERIFY(fixture.press("rrRendering"));
+            QTRY_VERIFY(fixture.visible("rrRenderingPopup"));
+            QVERIFY(!capture || save("rendering-choices"));
+            QVERIFY(fixture.press(qPrintable(QString("rrRendering_%1").arg(mode))));
+            QTRY_VERIFY(!fixture.visible("rrRenderingPopup"));
+            QCOMPARE(row->caption(), after.toUpper());
+            QVERIFY(fixture.press("rrSettingsClose"));
+            QTRY_COMPARE(storage::readJson(fixture.paths.preferences())
+                                 .value(renderingMode::preferenceKey),
+                         QJsonValue(mode));
+        };
+        const auto hybrid = strings::get("settings.rendering_hybrid"),
+                   accurate = strings::get("settings.rendering_accurate");
+
+        QVERIFY(!storage::readJson(fixture.paths.preferences())
+                         .contains(renderingMode::preferenceKey));
+        QVERIFY(open(true));
+        for (int turns = 0; turns < 3; ++turns)
+            QVERIFY(turn());
+        const auto fastPosition = fixture.state().value("position").toString();
+        QVERIFY(!fastPosition.isEmpty());
+        choose("accurate", hybrid, accurate);
+        if (QTest::currentTestFailed())
+            return;
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        QTRY_VERIFY(!fixture.state().contains("chapter_load_ms"));
+        QCOMPARE(opened.count(), 1);
+        QCOMPARE(fixture.state().value("position").toString(), fastPosition);
+        QVERIFY(close());
+        QVERIFY(open(false));
+        QCOMPARE(fixture.state().value("position").toString(), fastPosition);
+
+        QVERIFY(turn());
+        const auto accuratePosition = fixture.state().value("position").toString();
+        QVERIFY(accuratePosition != fastPosition);
+        // Hybrid keeps the whole book that is laid out: nothing reloads.
+        // The next opening starts with the chapter.
+        choose("hybrid", accurate, hybrid);
+        if (QTest::currentTestFailed())
+            return;
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        QVERIFY(!fixture.state().contains("chapter_load_ms"));
+        QCOMPARE(opened.count(), 2);
+        QCOMPARE(fixture.state().value("position").toString(), accuratePosition);
+        QVERIFY(close());
+        QVERIFY(open(true));
+        QCOMPARE(fixture.state().value("position").toString(), accuratePosition);
+        // Faster is not offered for now.
+        QVERIFY(fixture.press("rrPage"));
+        QVERIFY(fixture.press("rrSettings"));
+        QVERIFY(fixture.press("rrSettingsSystem"));
+        QVERIFY(revealSettingsOption(fixture, "rrRendering"));
+        QVERIFY(fixture.press("rrRendering"));
+        QTRY_VERIFY(fixture.visible("rrRenderingPopup"));
+        QVERIFY(fixture.widget("rrRendering_hybrid") && fixture.widget("rrRendering_accurate"));
+        QVERIFY(!fixture.window.findChild<QWidget *>("rrRendering_fast"));
     }
 
     // Checks that turning automatic opening off in Kobalt asks first and turning it on does not.
@@ -10582,16 +11825,19 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
     {
         Fixture fixture;
         QVERIFY(fixture.prepared);
+        QVERIFY(writeBook(fixture.directory.path(), "links.epub", test::linkBook()));
+        const auto path = fixture.directory.path() + "/links.epub";
         auto saved = storage::readJson(fixture.paths.preferences());
         saved["default_menu_view"] = "stats";
         saved["dense_stats_chart"] = true;
         saved["navigation_bar_buttons"] = "pages";
         QVERIFY(storage::writeJson(fixture.paths.preferences(), saved));
-        const char *keys[] = { "disable_navigate",  "disable_stats",  "disable_annotations",
-                               "disable_bookmarks", "disable_kosync", "disable_words" };
+        const char *keys[] = { "disable_navigate",       "disable_stats",  "disable_annotations",
+                               "disable_bookmarks",      "disable_kosync", "disable_words",
+                               "disable_highlight_links" };
         for (int pass = 0; pass < 2; ++pass) {
             QSignalSpy opened(&fixture.window, &desktop::Window::bookOpened);
-            fixture.window.openBook(book);
+            fixture.window.openBook(path);
             QTRY_COMPARE(opened.count(), 1);
             QTRY_VERIFY(!fixture.state().value("busy").toBool());
             QVERIFY(fixture.press("rrPage"));
@@ -10600,18 +11846,20 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
                 QVERIFY(!fixture.visible("rrNavStats"));
                 QVERIFY(!fixture.visible("rrAnnotate"));
                 QVERIFY(!fixture.visible("rrBookmarks"));
+                QVERIFY(!fixture.visible("rrScrubberLinks"));
             }
             QVERIFY(fixture.press("rrSettings"));
             QVERIFY(fixture.press("rrSettingsSystem"));
             QVERIFY(revealSettingsOption(fixture, "rrDisabledFeatures"));
             auto *featuresButton =
                     static_cast<ui::CaptionButton *>(fixture.widget("rrDisabledFeatures"));
-            const QString allHidden = "Navigation, Stats, Annotations, Bookmarks, KOSync, My Words";
+            const QString allHidden =
+                    "Navigation, Stats, Annotations, Bookmarks, KOSync, My Words, Highlight links";
             QCOMPARE(featuresButton->caption(), pass ? allHidden : QString("None"));
             QVERIFY(fixture.press("rrDisabledFeatures"));
             QTRY_VERIFY(fixture.visible("rrDisabledFeaturesPopup"));
             if (!pass) {
-                QVERIFY(fixture.press("rrDisableFeature_disable_stats"));
+                QVERIFY(fixture.press("rrDisableFeature_disable_highlight_links"));
                 QVERIFY(fixture.press("rrDisabledFeaturesCancel"));
                 QTRY_VERIFY(!fixture.widget("rrDisabledFeaturesPopup"));
                 QCOMPARE(featuresButton->caption(), QString("None"));
@@ -10641,6 +11889,7 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
             QCOMPARE(fixture.visible("rrNavStats"), pass == 1);
             QCOMPARE(fixture.visible("rrAnnotate"), pass == 1);
             QCOMPARE(fixture.visible("rrBookmarks"), pass == 1);
+            QCOMPARE(fixture.visible("rrScrubberLinks"), pass == 1);
             const auto preferences = storage::readJson(fixture.paths.preferences());
             QCOMPARE(preferences.value("default_menu_view").toString(), QString("none"));
             QVERIFY(!preferences.value("dense_stats_chart").toBool());
@@ -13856,7 +15105,8 @@ void checkPageAnimationCompatibility(int preset, bool dark)
 
 // The screens of the light gallery. It runs primaryViews only, so this list
 // changes with that case.
-const QSet<QString> primaryScreens{ "library-home",
+const QSet<QString> primaryScreens{ "navigate",
+                                    "library-home",
                                     "reading",
                                     "menu",
                                     "chapters",
@@ -14334,6 +15584,15 @@ private slots:
         QFETCH(int, preset);
         QFETCH(bool, dark);
         checkPinnedBookmarks(preset, dark);
+    }
+
+    void percentageFormat_data() { screenshotVariants(); }
+
+    void percentageFormat()
+    {
+        QFETCH(int, preset);
+        QFETCH(bool, dark);
+        checkPercentageFormat(preset, dark, true);
     }
 
     void headerFooterSizes_data() { screenshotVariants(); }
@@ -14862,6 +16121,12 @@ private slots:
                 QCOMPARE(fixture.widget(tab)->property("labels_hidden").toBool(), preset == 3);
         }
 
+        QVERIFY(fixture.press("rrNavSeek"));
+        auto *navigator = dynamic_cast<ui::PageScrubber *>(fixture.widget("rrPageScrubber"));
+        QVERIFY(navigator);
+        QTRY_VERIFY(navigator->previewReady());
+        QVERIFY(capture(fixture, name + "-navigate"));
+        QVERIFY(fixture.press("rrNavSeek"));
         QVERIFY(scene("rrNavChapters", "rrContents", "chapters"));
         QVERIFY(fixture.press("rrChapter1"));
         QTRY_VERIFY(!fixture.state().value("busy").toBool());
@@ -14906,7 +16171,13 @@ private slots:
         QVERIFY(fixture.press("rrSearchScope"));
         QVERIFY(fixture.press("rrSearchScope3"));
         query->setText("Trevelyan");
-        QVERIFY(scene("rrSearchSubmit", "rrSearchResult0", "search"));
+        QVERIFY(fixture.press("rrSearchSubmit"));
+        auto *searchStatus = qobject_cast<QLabel *>(fixture.widget("rrSearchStatus"));
+        QVERIFY(searchStatus);
+        QTRY_COMPARE(searchStatus->text(), strings::get("search_panel.search_complete"));
+        QTRY_VERIFY(fixture.searchResultsReady());
+        QVERIFY(fixture.widget("rrSearchResult0")->accessibleName().contains("Trevelyan"));
+        QVERIFY(capture(fixture, name + "-search"));
         QVERIFY(fixture.pressSearchResult());
         QTRY_VERIFY(!fixture.state().value("busy").toBool());
         openPrologueBody(fixture);
@@ -15312,6 +16583,12 @@ private slots:
         QVERIFY(baseline->window()->findChild<QLabel *>("rrOpeningBrand")->isVisible());
         QVERIFY(capture(fixture, name + "-loading-no-cover", baseline->window()));
         baseline.reset();
+        auto logo = createOpeningSurface(reader, dark, desktop::readerHostServices().presentation);
+        logo->window()->setGeometry(reader->rect());
+        logo->window()->show();
+        logo->window()->raise();
+        QVERIFY(capture(fixture, name + "-loading-logo-splash", logo->window()));
+        logo.reset();
         auto splash =
                 createEmbeddedOpening(reader, desktop::readerHostServices().presentation, false);
         splash->window()->setGeometry(reader->rect());
@@ -16018,11 +17295,13 @@ private slots:
         const auto *mode = graph->findChild<QPushButton *>("rrGraphMode");
         const auto *position = graph->findChild<QLabel *>("rrGraphChapterPosition");
         QVERIFY(mode && position);
-        QVERIFY(qAbs(mode->geometry().center().y() - position->geometry().center().y()) <= 1);
         QVERIFY(!position->geometry().intersects(mode->geometry()));
         const auto *caption = graph->findChild<QLabel *>("rrGraphChapterNumber");
         const auto *title = graph->findChild<QLabel *>("rrGraphChapterTitle");
         QVERIFY(caption && title);
+        // The page in the chapter follows the contents position on its line.
+        QCOMPARE(position->y(), caption->y());
+        QVERIFY(position->x() > caption->geometry().right());
         const auto heading = caption->geometry().united(title->geometry());
         QVERIFY(qAbs(heading.center().y() - mode->geometry().center().y()) <= 1);
         QVERIFY(caption->geometry().bottom() < title->y());
@@ -16510,6 +17789,15 @@ private slots:
         QVERIFY(fixture.press("rrSleepScreen"));
         QTRY_VERIFY(fixture.visible("rrSleepGallery"));
         capturePages(fixture, name + "-sleep-gallery", "rrSleepGallery");
+        while (fixture.widget("rrSleepGalleryPrevious")->isEnabled())
+            QVERIFY(fixture.press("rrSleepGalleryPrevious"));
+        QVERIFY(fixture.press("rrSleepFollowOrientation"));
+        QVERIFY(capture(fixture, name + "-sleep-gallery-portrait"));
+        QVERIFY(fixture.press("rrSleepFollowOrientation"));
+        QVERIFY(capture(fixture, name + "-sleep-gallery-rotation"));
+        auto *notice = fixture.widget("rrSleepOrientationNotice");
+        QVERIFY(notice);
+        notice->hide();
         // Capture the hidden greeting editor on Night, on page three.
         while (fixture.widget("rrSleepGalleryPrevious")->isEnabled())
             QVERIFY(fixture.press("rrSleepGalleryPrevious"));
@@ -16534,8 +17822,7 @@ private slots:
         QCOMPARE(shot.mode, sleep::Mode::Plain);
         // A native power view fills the screen, including a phone's safe area.
         const auto screen = screenshotSize(preset);
-        shot.image = shot.image.scaled(QSize(qMin(screen.width(), screen.height()),
-                                             qMax(screen.width(), screen.height())));
+        shot.image = shot.image.scaled(screen);
         QLabel preview;
         preview.resize(shot.image.size());
         preview.show();
@@ -16549,7 +17836,7 @@ private slots:
         for (const auto design : sleep::designs) {
             QJsonObject preferences;
             sleep::setDesign(preferences, design);
-            auto privateShot = sleep::privateSnapshot(shot.image.size(), preferences, shot);
+            auto privateShot = sleep::privateSnapshot(shot.image.size(), preferences, shot, true);
             preview.setPixmap(QPixmap::fromImage(reader::sleepDesignImage(
                     privateShot.image, privateShot, 67, reader::SleepStatus::Sleeping)));
             QVERIFY(capture(fixture, name + "-sleep-private-" + sleep::value(design), &preview));

@@ -10,7 +10,7 @@ namespace kobalt {
 // Everything one opening needs, copied on the GUI thread before the job starts.
 struct OpeningJob
 {
-    std::shared_ptr<EngineDocument> engine;
+    std::shared_ptr<Engine> engine;
     QString path;
     QSize size;
     // The saved book state. mergeSavedState edits it in place.
@@ -109,7 +109,13 @@ void logOpeningPhases(const OpeningJob &job, const OpeningState &state);
 OpeningOutput runOpening(OpeningJob &job);
 
 // Defined in reader_session.cpp, which uses them for every later frame too.
-void captureChapters(ReaderFrame &result, EngineDocument &engine);
-ReaderFrame capture(EngineDocument &engine, const PositionCodec &positions, bool neighbours = true,
-                    const ReaderMarkupRequest &markup = {}, quint64 markupGeneration = 0);
+void captureChapters(ReaderFrame &result, Engine &engine);
+BookmarkLocations captureBookmarkLocations(Engine &engine, const QStringList &positions,
+                                           bool rangeEndpoints, bool sourceOrder,
+                                           const std::function<bool()> &current = {});
+// `times` gets the milliseconds of each step, for the diagnostics of a slow
+// page turn.
+ReaderFrame capture(Engine &engine, const PositionCodec &positions, bool neighbours = true,
+                    const ReaderMarkupRequest &markup = {}, quint64 markupGeneration = 0,
+                    QJsonObject *times = nullptr);
 } // namespace kobalt

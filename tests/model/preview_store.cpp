@@ -1,13 +1,44 @@
 #include "storage/preview_store.h"
 #include <QDir>
+#include <QCryptographicHash>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QGuiApplication>
 #include <QTemporaryDir>
+#include <atomic>
+#include <cstdlib>
+#include <dlfcn.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "check.h"
 
 using namespace kobalt;
 using kobalt::storage::PreviewStore;
+
+namespace {
+QString swappedProfile, movedProfile, outsideProfile;
+std::atomic<bool> swapOnUnlink{ false };
+bool swapTriggered = false;
+} // namespace
+
+// Replace an ancestor at the deletion boundary. Production must keep using
+// its opened directory, rather than following the replacement pathname.
+extern "C" int unlinkat(int directory, const char *name, int flags)
+#if defined(__linux__)
+        noexcept
+#endif
+{
+    using Unlink = int (*)(int, const char *, int);
+    static const auto original = reinterpret_cast<Unlink>(dlsym(RTLD_NEXT, "unlinkat"));
+    if (!original)
+        std::abort();
+    if (QByteArray(name) == "race.png" && swapOnUnlink.exchange(false)) {
+        require(QDir().rename(swappedProfile, movedProfile), "Could not move cache ancestor");
+        require(QFile::link(outsideProfile, swappedProfile), "Could not replace cache ancestor");
+        swapTriggered = true;
+    }
+    return original(directory, name, flags);
+}
 
 namespace {
 // A preview tile: opaque, with a few shades of grey, or one coloured pixel.
@@ -37,6 +68,20 @@ bool waitFor(const std::function<bool()> &condition)
     while (!condition() && timer.elapsed() < 10000)
         QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
     return condition();
+}
+
+QString cacheName(const QByteArray &key, const char *version = "kobalt-preview-1")
+{
+    return QString::fromLatin1(
+            QCryptographicHash::hash(QByteArray(version) + '\0' + key, QCryptographicHash::Sha256)
+                    .toHex());
+}
+
+void writeBytes(const QString &path, const QByteArray &bytes)
+{
+    QFile file(path);
+    require(file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size(),
+            "Could not write fixture");
 }
 } // namespace
 
@@ -68,6 +113,163 @@ int main(int argc, char **argv)
                     == colour,
             "A coloured preview changed through storage");
     require(storage::readPreview(directory, "missing").isNull(), "A missing key was found");
+    require(QDir(directory).entryList({ "*.png" }, QDir::Files).isEmpty()
+                    && QFile::exists(QDir(directory).filePath(cacheName("grey") + ".preview")),
+            "Previews still have importable image names");
+    require(storage::readPreview(directory, "grey-with-changed-inputs").isNull(),
+            "Changed rendering inputs reused a tile");
+
+    // Every regular PNG in this disposable directory is obsolete, including
+    // damaged files. Other extensions, directories and links stay untouched.
+    const auto legacy = root.filePath("legacy/cache/previews");
+    require(QDir().mkpath(legacy), "Could not create legacy cache");
+    const QDir old(legacy);
+    const auto stale = old.filePath(cacheName("deleted-preset") + ".png");
+    const auto obsolete = old.filePath(cacheName("old-format", "kobalt-preview-0") + ".png");
+    require(grey.save(stale, "PNG") && colour.save(obsolete, "PNG"),
+            "Could not create old generated tiles");
+    const auto unrelated = root.filePath("personal.png");
+    require(grey.save(unrelated, "PNG"), "Could not create unrelated image");
+    const auto hidden = old.filePath(".legacy.png");
+    writeBytes(hidden, "hidden legacy tile");
+    const auto malformed = old.filePath("damaged.png");
+    writeBytes(malformed, "damaged PNG bytes");
+    const auto oversized = old.filePath(cacheName("oversized") + ".png");
+    writeBytes(oversized, QByteArray(1024 * 1024 + 1, 'x'));
+    const auto linked = old.filePath(cacheName("linked") + ".png");
+    require(QFile::link(unrelated, linked), "Could not create legacy symlink");
+    const auto subdirectory = old.filePath(cacheName("directory") + ".png");
+    require(QDir().mkpath(subdirectory), "Could not create legacy subdirectory");
+    require(storage::writePreview(legacy, "current", grey, PreviewStore::storageLimit),
+            "Could not create current tile");
+    require(storage::migratePreviews(legacy) && storage::migratePreviews(legacy),
+            "Legacy cleanup failed or was not repeatable");
+    require(!QFile::exists(stale) && !QFile::exists(obsolete) && !QFile::exists(malformed)
+                    && !QFile::exists(oversized) && !QFile::exists(hidden),
+            "Stale generated PNGs survived cleanup");
+    require(QFile::exists(unrelated) && QFileInfo(linked).isSymLink()
+                    && QFileInfo(subdirectory).isDir()
+                    && !storage::readPreview(legacy, "current").isNull(),
+            "Cleanup touched unrelated files or current previews");
+    writeBytes(old.filePath("personal.preview"), "keep this");
+    require(storage::writePreview(legacy, "another", grey, 1)
+                    && QFile::exists(old.filePath("personal.preview")) && QFile::exists(unrelated)
+                    && QFileInfo(linked).isSymLink(),
+            "Cache eviction touched unrelated files");
+
+    // Completion is persistent. Later startups must not enumerate PNGs again.
+    const auto late = old.filePath("added-after-migration.png");
+    writeBytes(late, "keep after completed migration");
+    require(storage::migratePreviews(legacy, true) && QFile::exists(late)
+                    && !storage::previewMigrationNeedsScan(legacy),
+            "Completed migration ran again");
+    const auto pendingDirectory = root.filePath("pending");
+    require(QDir().mkpath(pendingDirectory), "Could not create pending migration");
+    const auto pendingPng = QDir(pendingDirectory).filePath("old.png");
+    writeBytes(pendingPng, "damaged PNG");
+    require(storage::migratePreviews(pendingDirectory, true) && !QFile::exists(pendingPng)
+                    && storage::previewMigrationNeedsScan(pendingDirectory),
+            "Removal did not retain a pending native scan");
+    require(storage::migratePreviews(pendingDirectory, true)
+                    && storage::previewMigrationNeedsScan(pendingDirectory),
+            "Restart lost the pending scan after PNG removal");
+    writeBytes(QDir(pendingDirectory).filePath("png-migration"), "remove\n");
+    require(storage::migratePreviews(pendingDirectory, true)
+                    && storage::previewMigrationNeedsScan(pendingDirectory),
+            "Interruption after removal lost the pending native scan");
+    const auto duringScan = QDir(pendingDirectory).filePath("added-during-scan.png");
+    writeBytes(duringScan, "do not repeat removal while scan is pending");
+    require(storage::migratePreviews(pendingDirectory, true) && QFile::exists(duringScan),
+            "A pending scan reran PNG cleanup");
+    storage::completePreviewMigration(pendingDirectory);
+    require(waitFor([&] { return !storage::previewMigrationNeedsScan(pendingDirectory); }),
+            "Native scan completion was not saved");
+    writeBytes(pendingPng, "added after native scan");
+    require(storage::migratePreviews(pendingDirectory, true) && QFile::exists(pendingPng),
+            "Native migration completion did not survive reopening");
+
+    const auto blockedDirectory = root.filePath("blocked-migration");
+    require(QDir().mkpath(blockedDirectory), "Could not create blocked migration");
+    const auto blockedPng = QDir(blockedDirectory).filePath("old.png");
+    writeBytes(blockedPng, "old tile");
+    require(QFile::link(unrelated, QDir(blockedDirectory).filePath("png-migration")),
+            "Could not link migration marker");
+    require(!storage::migratePreviews(blockedDirectory, true) && QFile::exists(blockedPng),
+            "Cleanup deleted files without first saving its pending scan");
+
+    const auto unreadableDirectory = root.filePath("unreadable-marker");
+    require(QDir().mkpath(unreadableDirectory), "Could not create marker fixture");
+    const auto unreadableMarker = QDir(unreadableDirectory).filePath("png-migration");
+    writeBytes(unreadableMarker, "scan\n");
+    const auto markerPermissions = QFile::permissions(unreadableMarker);
+    require(QFile::setPermissions(unreadableMarker, QFile::WriteOwner),
+            "Could not make marker unreadable");
+    // Elevated test runners may still read a write-only file. Check whether
+    // this filesystem actually enforces the read failure being exercised.
+    QFile markerProbe(unreadableMarker);
+    const bool unreadable = !markerProbe.open(QIODevice::ReadOnly);
+    markerProbe.close();
+    const bool refusedUnreadable = !storage::migratePreviews(unreadableDirectory, true);
+    require(QFile::setPermissions(unreadableMarker, markerPermissions),
+            "Could not restore marker permissions");
+    require((!unreadable || refusedUnreadable)
+                    && storage::previewMigrationNeedsScan(unreadableDirectory),
+            "Unreadable marker lost the pending native scan");
+
+    const auto invalidDirectory = root.filePath("invalid-marker");
+    require(QDir().mkpath(invalidDirectory), "Could not create invalid marker fixture");
+    const auto invalidPng = QDir(invalidDirectory).filePath("keep.png");
+    const auto invalidMarker = QDir(invalidDirectory).filePath("png-migration");
+    writeBytes(invalidPng, "keep with unknown migration state");
+    writeBytes(invalidMarker, "future\n");
+    require(!storage::migratePreviews(invalidDirectory, true) && QFile::exists(invalidPng),
+            "An unknown marker restarted destructive migration");
+    require(QFile::remove(invalidMarker)
+                    && ::mkfifo(QFile::encodeName(invalidMarker).constData(), 0600) == 0,
+            "Could not create special marker fixture");
+    require(!storage::migratePreviews(invalidDirectory, true) && QFile::exists(invalidPng),
+            "A special marker restarted migration");
+
+    swappedProfile = root.filePath("race/profile");
+    movedProfile = root.filePath("race/original-profile");
+    outsideProfile = root.filePath("outside-profile");
+    const auto raceCache = QDir(swappedProfile).filePath("cache/previews");
+    const auto outsideCache = QDir(outsideProfile).filePath("cache/previews");
+    require(QDir().mkpath(raceCache) && QDir().mkpath(outsideCache),
+            "Could not create replacement race fixture");
+    writeBytes(QDir(raceCache).filePath("race.png"), "disposable tile");
+    const auto outsidePng = QDir(outsideCache).filePath("race.png");
+    writeBytes(outsidePng, "unrelated PNG");
+    const auto outsideMarker = QDir(outsideCache).filePath("png-migration");
+    writeBytes(outsideMarker, "unrelated marker");
+    swapOnUnlink = true;
+    require(storage::migratePreviews(raceCache, true) && swapTriggered,
+            "The directory replacement was not exercised");
+    require(QFile::exists(outsidePng)
+                    && !QFile::exists(QDir(movedProfile).filePath("cache/previews/race.png"))
+                    && storage::previewMigrationNeedsScan(
+                            QDir(movedProfile).filePath("cache/previews")),
+            "Directory replacement redirected PNG cleanup");
+    QFile preservedMarker(outsideMarker);
+    require(preservedMarker.open(QIODevice::ReadOnly)
+                    && preservedMarker.readAll() == "unrelated marker",
+            "Directory replacement redirected migration state");
+
+    // A linked directory or ancestor must never redirect cache cleanup or IO.
+    const auto alias = root.filePath("alias");
+    require(QFile::link(root.filePath("legacy"), alias), "Could not link profile");
+    const auto redirected = QDir(alias).filePath("cache/previews");
+    require(!storage::migratePreviews(redirected)
+                    && !storage::writePreview(redirected, "escape", grey, 1)
+                    && storage::readPreview(redirected, "another").isNull()
+                    && QFile::exists(unrelated),
+            "A linked ancestor redirected preview IO");
+    const auto destinationLink = old.filePath(cacheName("destination-link") + ".preview");
+    require(QFile::link(unrelated, destinationLink), "Could not link destination");
+    require(!storage::writePreview(legacy, "destination-link", grey, 1)
+                    && storage::readPreview(legacy, "destination-link").isNull()
+                    && QFileInfo(destinationLink).isSymLink(),
+            "A linked tile redirected preview IO");
 
     // A damaged file is a miss.
     for (const auto &info : QDir(directory).entryInfoList(QDir::Files)) {

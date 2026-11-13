@@ -4,6 +4,7 @@
 #include "page_navigation.h"
 #include "header_footer.h"
 #include "sleep_screen.h"
+#include "rendering_mode.h"
 #include "session_timeout.h"
 #include "text_presets.h"
 #include <QStringList>
@@ -153,6 +154,7 @@ QJsonObject cleanPreferences(QJsonObject preferences)
                              "edge_light_gestures",
                              "show_light_gesture_feedback",
                              "show_opening_cover",
+                             sleep::followOrientationKey,
                              "dense_stats_chart",
                              "hanging_punctuation",
                              "hide_nonlinear_fragments",
@@ -195,6 +197,8 @@ QJsonObject cleanPreferences(QJsonObject preferences)
         preferences.remove(sleep::greetingKey);
     textpresets::clean(preferences);
     choice("time_remaining_format", { "detailed", "approximate" });
+    choice(headerfooter::percentageFormatKey, { "whole", "decimal" });
+    choice(renderingMode::preferenceKey, { "hybrid", "fast", "accurate" });
     if (preferences.contains(sessionTimeout::preferenceKey)
         && !sessionTimeout::valid(preferences.value(sessionTimeout::preferenceKey)))
         preferences.remove(sessionTimeout::preferenceKey);

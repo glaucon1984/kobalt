@@ -259,8 +259,8 @@ void writeFinished(NativeProgress &progress)
 
 void writeTimeOnly(NativeProgress &progress)
 {
-    // A plain EPUB position that Nickel cannot store: the time, the status
-    // and the percentage only.
+    // An unmappable KEPUB position: update activity without replacing the
+    // bookmark or requesting an upload.
     {
         QSqlQuery query(pewter::database());
         query.exec(QStringLiteral("UPDATE content SET ReadStateSynced = 1 WHERE ContentID = '%1'")
@@ -277,8 +277,33 @@ void writeTimeOnly(NativeProgress &progress)
     require(row.value("DateLastRead").toString() > before.value("DateLastRead").toString(),
             "the book still becomes the most recently read one");
     require(row.value("ReadStateSynced").toBool(), "only the bookmark call clears the sync flag");
+    requireSame(row.value("adobe_location"), before.value("adobe_location"),
+                "activity-only saving preserves the secondary native location");
     require(!pewter::find("BookmarkSyncManager::sendBookmark"),
             "a time-only record asks for no upload");
+}
+
+void refuseUnmappedTolinoPosition(NativeProgress &progress)
+{
+    if (firmware4)
+        return;
+    const auto expected = current(progress);
+    const auto before = pewter::row(book);
+    const auto shown = activity();
+    pewter::options().tolino = true;
+    pewter::clearCalls();
+    NativeSaveResult result;
+    {
+        kobalt::mainthread::AllowBlocking allow("pewter: a lifecycle boundary");
+        result = progress.write(expected, QString(), 20, false, &estimates, &shown);
+    }
+    pewter::options().tolino = false;
+    require(result.status() == NativeSaveResult::Status::Rejected,
+            "an unmapped Tolino position is rejected before native writes");
+    require(!pewter::find("DatabaseAdapter::beginTransaction")
+                    && !pewter::find("VolumeManager::updateBookmark"),
+            "an unmapped Tolino position does not enter a transaction or change its bookmark");
+    requireRefusedWrite(before, "an unmapped Tolino position preserves committed progress");
 }
 
 void refuseFailures(NativeProgress &progress)
@@ -445,6 +470,7 @@ int main(int argc, char **argv)
     writeLastPage(progress);
     writeFinished(progress);
     writeTimeOnly(progress);
+    refuseUnmappedTolinoPosition(progress);
     refuseFailures(progress);
     markRecent(progress);
     std::printf("pewter progress checks passed (Qt %s)\n", qVersion());

@@ -232,6 +232,7 @@ private:
     std::unique_ptr<ReadingHistory> history;
     QElapsedTimer speedSaved;
     NativeSaveResult nativeWriteback;
+    QJsonObject nativeFailure;
     QString acceptedFinishedAnchor;
     // The last checkpoint that reached storage. An identical one is not written again.
     QJsonObject savedCheckpoint, layoutPreferences_;

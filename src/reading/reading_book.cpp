@@ -86,6 +86,7 @@ ReadingBook::ReadingBook(std::unique_ptr<ReaderSession> session, QString statePa
     if (this->bridge)
         resetNativeUnread(saved, reconciliation.baseline());
     preservedState = saved;
+    nativeFailure = saved.value("native_writeback_failure").toObject();
     if (saved.value("book").toString() == identity_) {
         for (const auto &value : saved.value("image_views").toArray()) {
             const auto view = value.toObject();
@@ -271,8 +272,8 @@ ReadingActivity ReadingBook::readingActivity() const
     return { session_->state().value("position").toString(),
              // Kobalt's page progress, kept below 100 like every native write of
              // an unfinished book, so the last page never reports a finished read.
-             qMin(99.0, double(pageProgressPercent(session_->page(), session_->pages()))),
-             session_->page(), session_->pages(), session_->turnDirection(), session_->totalWords(),
+             qMin(99.0, double(session_->progressPercent())), session_->bookPage(),
+             session_->bookPages(), session_->turnDirection(), session_->totalWords(),
              session_->chapterGraph(), session_->graphSelection(),
              error.isEmpty() ? nativePosition : QString() };
 }
@@ -291,8 +292,10 @@ ReadingEstimates ReadingBook::estimates() const
     const int chapterLeft = session_->chapterPages() > 0
             ? session_->chapterPages() - session_->chapterPage() + 1
             : -1;
-    return { pace_.estimate(chapterLeft, reading),
-             pace_.estimate(session_->pages() - session_->page(), reading),
+    const int bookLeft = session_->bookPages() > 0 && session_->bookPage() >= 0
+            ? session_->bookPages() - session_->bookPage()
+            : -1;
+    return { pace_.estimate(chapterLeft, reading), pace_.estimate(bookLeft, reading),
              pace_.estimate(0, reading) < 0 };
 }
 
@@ -641,8 +644,15 @@ bool ReadingBook::canFinish() const
     const auto anchor = session_->state().value("position").toString();
     if (anchor.isEmpty() || anchor == acceptedFinishedAnchor)
         return false;
+    // The last page that the engine has is not the last page of the book.
+    if (session_->continuesAfter())
+        return false;
     // Nickel asks on exit at 90%. Include the final page of very short books,
     // and the last page of the text before trailing non-linear sections.
+    // With only a part of the book laid out, its pages are not those of the
+    // book: the percent of the whole book decides.
+    if (session_->state().contains("book_fraction"))
+        return session_->progressFraction() >= 0.9 || session_->nextPage() == session_->page();
     return session_->page() * 10 >= session_->pages() * 9
             || session_->nextPage() == session_->page();
 }
@@ -748,7 +758,7 @@ NativeSaveResult ReadingBook::writeNative(const QString &location, const QString
         if (reconciliation.mayWrite(current)) {
             // The same whole percentage as Kobalt's own views. The firmware 4
             // bridge keeps an unfinished book below 100, as Nickel's reader does.
-            const double percent = pageProgressPercent(session_->page(), session_->pages());
+            const double percent = session_->progressPercent();
             const bool preserveFinished = finishedHere();
             diagnostic("native-save-start");
             nativeWriteback = bridge->write(current, timeOnly ? QString() : location, percent,
@@ -774,11 +784,20 @@ NativeSaveResult ReadingBook::writeNative(const QString &location, const QString
                 "error.nickel_save_deferred_while_progress_or_device_state_is_unresolved");
         nativeWriteback = NativeSaveResult::deferred(error);
     }
-    diagnostic("native-save",
-               { { "result", nativeWriteback.diagnosticName() },
-                 { "mapping_failed", timeOnly },
-                 { "failed", !error.isEmpty() } },
-               error.isEmpty() ? DiagnosticSeverity::Activity : DiagnosticSeverity::Error);
+    const bool failed = nativeWriteback.failed() || !error.isEmpty();
+    auto fields = qt::object({ { "result", nativeWriteback.diagnosticName() },
+                               { "mapping_failed", timeOnly },
+                               { "failed", failed },
+                               { "error_code",
+                                 failed && error.isEmpty() ? QStringLiteral("unknown")
+                                                           : diagnosticErrorCode(error) },
+                               { "mapping_error_code", diagnosticErrorCode(mappingError) } });
+    if (failed || timeOnly) {
+        nativeFailure = fields;
+        nativeFailure["utc"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+    }
+    diagnostic("native-save", fields,
+               failed ? DiagnosticSeverity::Error : DiagnosticSeverity::Activity);
     return nativeSaveResult();
 }
 
@@ -863,10 +882,12 @@ QJsonObject ReadingBook::checkpointState() const
     // For the Android and desktop library, which shows progress without
     // opening the book.
     if (session_->pages() > 0)
-        state["percent"] = pageProgressPercent(session_->page(), session_->pages());
+        state["percent"] = session_->progressPercent();
     state["native_writeback"] = QString::fromLatin1(nativeWriteback.diagnosticName());
     state["sync_pending"] = reconciliation.pending();
     state["native_writeback_error"] = nativeWriteback.message();
+    if (!nativeFailure.isEmpty())
+        state["native_writeback_failure"] = nativeFailure;
     return state;
 }
 
@@ -886,15 +907,44 @@ QJsonObject ReadingBook::persistedCheckpoint(const QJsonObject &state) const
     // These describe the displayed frame, not a saved reading position. Drop
     // them from imported records too, before comparing checkpoints or applying
     // the record's byte limit. Diagnostic snapshots above keep the full frame.
-    for (const auto *key : { "chapter_title", "chapter_page", "chapter_pages", "page", "pages",
-                             "next_page", "text_font_face", "embedded_font_count", "cached_pages" })
+    for (const auto *key : { "chapter_title",
+                             "chapter_page",
+                             "chapter_pages",
+                             "page",
+                             "pages",
+                             "next_page",
+                             "text_font_face",
+                             "embedded_font_count",
+                             "cached_pages",
+                             "continues_before",
+                             "continues_after",
+                             "book_fraction",
+                             "slice_start",
+                             "rough_page",
+                             "rough_pages",
+                             "rough_item_page",
+                             "rough_item_pages",
+                             "rough_pages_estimated",
+                             "rough_item_pages_estimated",
+                             "chapter_load_ms" })
         checkpoint.remove(key);
+    const auto fits = [&checkpoint] {
+        return QJsonDocument(checkpoint).toJson(QJsonDocument::Compact).size()
+                <= storage::maxJsonBytes;
+    };
+    // The page estimate is optional and can be rebuilt. Its read spine items
+    // go first, then the whole record.
+    if (checkpoint.contains("page_estimate") && !fits()) {
+        auto estimate = checkpoint.value("page_estimate").toObject();
+        estimate.remove("read");
+        checkpoint["page_estimate"] = estimate;
+        if (!fits())
+            checkpoint.remove("page_estimate");
+    }
     // Image views are optional. Trim their oldest entries rather than letting
     // them prevent a reading-position checkpoint from fitting its record limit.
     auto views = checkpoint.value("image_views").toArray();
-    while (!views.isEmpty()
-           && QJsonDocument(checkpoint).toJson(QJsonDocument::Compact).size()
-                   > storage::maxJsonBytes) {
+    while (!views.isEmpty() && !fits()) {
         views.removeAt(0);
         if (views.isEmpty())
             checkpoint.remove("image_views");

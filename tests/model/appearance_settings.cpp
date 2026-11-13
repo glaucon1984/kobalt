@@ -6,6 +6,8 @@
 #include "reading/sleep_screen.h"
 #include "reading/session_timeout.h"
 #include "reading/remaining_time.h"
+#include "reading/header_footer.h"
+#include "reading/rendering_mode.h"
 #include "support/qt_compat.h"
 #include "check.h"
 #include <QJsonArray>
@@ -98,6 +100,18 @@ int main()
                         && sleep::tile(clean) == sleep::Tile::None,
                 "Invalid sleep design lost the legacy selection");
     }
+    require(sleep::followsReading({}), "Sleep screens must follow reading orientation by default");
+    for (bool follow : { false, true }) {
+        const auto clean =
+                appearance::cleanPreferences({ { sleep::followOrientationKey, follow } });
+        require(sleep::followsReading(clean) == follow, "Sleep orientation choice was lost");
+    }
+    for (const QJsonValue &invalid : { QJsonValue("false"), QJsonValue(0), QJsonValue() }) {
+        const auto clean =
+                appearance::cleanPreferences({ { sleep::followOrientationKey, invalid } });
+        require(!clean.contains(sleep::followOrientationKey) && sleep::followsReading(clean),
+                "Invalid sleep orientation must use the default");
+    }
     for (const int length : { 0, sleep::greetingLength, sleep::greetingLength + 1 }) {
         const auto clean = appearance::cleanPreferences(
                 { { sleep::greetingKey, QString(length, QLatin1Char('a')) } });
@@ -147,6 +161,32 @@ int main()
         require(!appearance::cleanPreferences({ { "chapter_groups", invalid } })
                          .contains("chapter_groups"),
                 "Invalid chapter group choice did not fall back to Current section");
+    require(!headerfooter::decimalPercentages({}),
+            "Older preferences did not retain whole percentages");
+    for (const auto *format : { "whole", "decimal" }) {
+        const auto preferences = appearance::cleanPreferences(
+                { { headerfooter::percentageFormatKey, format }, { "future_option", 42 } });
+        require(preferences.value(headerfooter::percentageFormatKey).toString() == format
+                        && preferences.value("future_option").toInt() == 42,
+                "Percentage format cleanup lost saved preferences");
+        require(headerfooter::decimalPercentages(preferences) == (QString(format) == "decimal"),
+                "Percentage format loaded incorrectly");
+        require(appearance::same({}, preferences), "Percentage format invalidated book layout");
+    }
+    for (const auto &invalid :
+         { QJsonValue("unknown"), QJsonValue(true), QJsonValue(1), QJsonValue(),
+           QJsonValue(QJsonObject()), QJsonValue(QJsonArray()) }) {
+        require(!headerfooter::decimalPercentages(
+                        { { headerfooter::percentageFormatKey, invalid } }),
+                "Invalid percentage format did not use whole percentages");
+        const auto preferences = appearance::cleanPreferences(
+                { { headerfooter::percentageFormatKey, invalid }, { "future_option", 42 } });
+        require(!preferences.contains(headerfooter::percentageFormatKey)
+                        && !headerfooter::decimalPercentages(preferences)
+                        && preferences.value("future_option").toInt() == 42,
+                "Percentage format cleanup lost the default or an unknown field");
+    }
+
     require(!remainingTime::approximate({}), "Older preferences did not retain detailed estimates");
     for (const auto *format : { "detailed", "approximate" }) {
         const auto preferences = appearance::cleanPreferences(
@@ -167,6 +207,63 @@ int main()
                 "Invalid time format did not fall back to detailed estimates");
     }
 
+    {
+        // Rendering is Hybrid without a choice. The test override wins, then
+        // KOBALT_CHAPTER_MODE, then the preference.
+        using renderingMode::Mode;
+        require(renderingMode::fromPreferences({}) == Mode::Hybrid,
+                "Preferences without Rendering did not use Hybrid");
+        for (const auto mode : { Mode::Hybrid, Mode::Fast, Mode::Accurate }) {
+            const auto preferences = appearance::cleanPreferences(
+                    { { renderingMode::preferenceKey, renderingMode::value(mode) },
+                      { "future_option", 42 } });
+            // Settings does not offer Fast for now. Its saved value stays
+            // and opens as Hybrid.
+            const auto opens = mode == Mode::Fast ? Mode::Hybrid : mode;
+            require(renderingMode::fromPreferences(preferences) == opens
+                            && preferences.value(renderingMode::preferenceKey).toString()
+                                    == renderingMode::value(mode)
+                            && preferences.value("future_option").toInt() == 42,
+                    "Rendering cleanup lost a saved choice or an unknown field");
+            require(appearance::same({}, preferences), "Rendering invalidated the book layout");
+        }
+        for (const auto &invalid : { QJsonValue("chapter"), QJsonValue(true), QJsonValue(1) }) {
+            const auto preferences =
+                    appearance::cleanPreferences({ { renderingMode::preferenceKey, invalid } });
+            require(!preferences.contains(renderingMode::preferenceKey)
+                            && renderingMode::fromPreferences(preferences) == Mode::Hybrid,
+                    "Invalid Rendering did not fall back to Hybrid");
+        }
+        const auto pinned = qgetenv("KOBALT_CHAPTER_MODE");
+        qunsetenv("KOBALT_CHAPTER_MODE");
+        require(renderingMode::effective(Mode::Fast) == Mode::Fast
+                        && renderingMode::effective(Mode::Hybrid) == Mode::Hybrid
+                        && renderingMode::effective(Mode::Accurate) == Mode::Accurate,
+                "Without an override the preference must choose the mode");
+        qputenv("KOBALT_CHAPTER_MODE", "2");
+        require(renderingMode::effective(Mode::Accurate) == Mode::Hybrid,
+                "KOBALT_CHAPTER_MODE=2 must be Hybrid");
+        renderingMode::apply({});
+        require(renderingMode::countsInBackground(), "Hybrid must count pages in the background");
+        qputenv("KOBALT_CHAPTER_MODE", "1");
+        require(renderingMode::effective(Mode::Accurate) == Mode::Fast,
+                "KOBALT_CHAPTER_MODE=1 must win over Accurate");
+        qputenv("KOBALT_CHAPTER_MODE", "0");
+        require(renderingMode::effective(Mode::Fast) == Mode::Accurate,
+                "KOBALT_CHAPTER_MODE=0 must win over Fast");
+        renderingMode::setOverride(1);
+        require(renderingMode::effective(Mode::Accurate) == Mode::Fast
+                        && !renderingMode::countsInBackground(),
+                "The test override must win over the environment");
+        renderingMode::setOverride(-1);
+        require(renderingMode::effective(Mode::Fast) == Mode::Accurate,
+                "Removing the override must return to the environment");
+        if (pinned.isEmpty())
+            qunsetenv("KOBALT_CHAPTER_MODE");
+        else
+            qputenv("KOBALT_CHAPTER_MODE", pinned);
+    }
+
     for (int i = 0; i < int(std::size(features::keys)); ++i) {
         const auto feature = features::Feature(i);
         require(features::enabled({}, feature), "A feature was hiddenFeatures by default");
@@ -181,6 +278,8 @@ int main()
                                            { "disable_annotations", true },
                                            { "disable_bookmarks", true },
                                            { "disable_words", true },
+                                           { "disable_highlight_links", true },
+                                           { "tappable_links", "all" },
                                            { "save_looked_up_words", false },
                                            { "default_menu_view", "stats" },
                                            { "dense_stats_chart", true },
@@ -194,6 +293,8 @@ int main()
                     && !hiddenFeatures.contains("minimal_annotation_mode")
                     && !hiddenFeatures.contains("marks_sort")
                     && !hiddenFeatures.contains("save_looked_up_words")
+                    && !features::enabled(hiddenFeatures, features::HighlightLinks)
+                    && hiddenFeatures.value("tappable_links") == "all"
                     && hiddenFeatures.value("future_option").toInt() == 42,
             "Hidden features retained incompatible options or lost unrelated preferences");
     // My Words shares the bookmarks' sort order, so it keeps the order alone.

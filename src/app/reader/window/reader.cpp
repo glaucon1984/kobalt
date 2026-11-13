@@ -1,3 +1,4 @@
+#include "reading/header_footer.h"
 #include "app/reader/settings/sleep_gallery.h"
 #include "render/page_content.h"
 #include "reading/remaining_time.h"
@@ -403,7 +404,8 @@ sleep::Snapshot Reader::powerScreenSnapshot()
                 shot.image = page->snapshot(true);
                 shot.coverArea = {};
                 shot.dimPage = true;
-                portraitSleepSnapshot(shot);
+                if (!sleep::followsReading(preferences))
+                    portraitSleepSnapshot(shot);
             }
             if (!shot.image.isNull())
                 return shot;
@@ -452,7 +454,15 @@ void Reader::loadTodayReading()
 
 sleep::Snapshot Reader::privateSleepSnapshot()
 {
-    auto snapshot = sleep::privateSnapshot(page->size(), preferences, sleepPreviewSample());
+    auto snapshot = sleep::privateSnapshot(page->size(), preferences, sleepPreviewSample(),
+                                           sleep::followsReading(preferences));
+    // Nickel can change orientation after handoff. A later power screen keeps
+    // the direction captured when the reader went to sleep.
+    snapshot.orientation = lifecycleHidden && !sleepImage.isNull()
+            ? sleepOrientation
+            : kobalt::shownOrientation(QGuiApplication::primaryScreen());
+    if (!sleep::followsReading(preferences))
+        portraitSleepSnapshot(snapshot);
     // Transparent artwork keeps its style, but never reveals the reading page.
     if (sleep::design(preferences) == sleep::Design::Overlay && !sleepOverlay.isNull())
         sleep::drawOverlay(snapshot.image, sleepOverlay);
@@ -480,7 +490,9 @@ sleep::Snapshot Reader::captureSleepScreen()
         return {};
     const bool plain = mode == sleep::Mode::Plain;
     const bool useCover = mode == sleep::Mode::Cover && !sleepCover.isNull();
-    const QSize sleepSize(qMin(page->width(), page->height()), qMax(page->width(), page->height()));
+    const QSize sleepSize = sleep::followsReading(preferences)
+            ? page->size()
+            : QSize(qMin(page->width(), page->height()), qMax(page->width(), page->height()));
     QImage frame;
     if (plain) {
         // Designs without a cover draw the whole screen themselves.
@@ -497,8 +509,7 @@ sleep::Snapshot Reader::captureSleepScreen()
         sleep::drawOverlay(frame, sleepOverlay);
     }
     // A book marked as finished is done, wherever its last page sits.
-    const int percent =
-            book->finishedHere() ? 100 : pageProgressPercent(session->page(), session->pages());
+    const int percent = book->finishedHere() ? 100 : session->progressPercent();
     sleep::Snapshot snapshot{ std::move(frame),
                               kobalt::shownOrientation(QGuiApplication::primaryScreen()),
                               strings::get("sleep.percent_read").arg(percent),
@@ -522,7 +533,8 @@ sleep::Snapshot Reader::captureSleepScreen()
         snapshot.coverBytes = sleepCoverSource.size();
         snapshot.coverModified = sleepCoverSource.lastModified().toMSecsSinceEpoch();
     }
-    portraitSleepSnapshot(snapshot);
+    if (!sleep::followsReading(preferences))
+        portraitSleepSnapshot(snapshot);
     return snapshot;
 }
 
@@ -1608,7 +1620,7 @@ void Reader::closeSearch()
 
 void Reader::openSeek()
 {
-    if (!features::enabled(preferences, features::Navigate))
+    if (!navigateAvailable())
         return;
     if (session->busy() || appearanceEdit.applying()) {
         return;
@@ -2152,9 +2164,10 @@ void Reader::syncLinkDiscovery()
 {
     if (!linkDiscovery)
         return;
-    const bool blocked = annotationMode || session->busy() || lifecycleHidden || closing
-            || services.suspended() || sheetOpen() || readingToolOpen() || positionPromptOpen()
-            || menu->isVisible() || bookmarkList->isVisible();
+    const bool blocked = !features::enabled(preferences, features::HighlightLinks) || annotationMode
+            || session->busy() || lifecycleHidden || closing || services.suspended() || sheetOpen()
+            || readingToolOpen() || positionPromptOpen() || menu->isVisible()
+            || bookmarkList->isVisible();
     if (blocked
         || (revealingLinks && revealedPosition != session->state().value("position").toString()))
         hideRevealedLinks();
@@ -2330,14 +2343,16 @@ void Reader::syncNavigation()
                 && !kosyncDialog && !finishDialog && !imageTarget.isEmpty();
         pageScrubber->setImageAction(imageSuggestion ? strings::get("image.zoom_suggestion")
                                                      : QString());
-        pageScrubber->setReturnAction(
-                linkReturnAvailable
-                        ? strings::get("reader.return_page").arg(linkHistory.last().page + 1)
-                        : QString(),
-                linkHistory.isEmpty() || linkHistory.last().chapter.isEmpty()
-                        ? QString()
-                        : strings::get("reader.jumped_from_chapter")
-                                  .arg(linkHistory.last().chapter));
+        pageScrubber->setReturnAction(linkReturnAvailable
+                                              ? (linkHistory.last().page >= 0
+                                                         ? strings::get("reader.return_page")
+                                                                   .arg(linkHistory.last().page + 1)
+                                                         : strings::get("reader.return_to_passage"))
+                                              : QString(),
+                                      linkHistory.isEmpty() || linkHistory.last().chapter.isEmpty()
+                                              ? QString()
+                                              : strings::get("reader.jumped_from_chapter")
+                                                        .arg(linkHistory.last().chapter));
         navigation->update(
                 size(),
                 { bottomControls,
@@ -2352,9 +2367,11 @@ void Reader::syncNavigation()
                   !session->busy() && !appearanceEdit.applying(),
                   services.lightAvailable(),
                   active,
-                  linkReturnAvailable
-                          ? strings::get("reader.return_page").arg(linkHistory.last().page + 1)
-                          : QString(),
+                  linkReturnAvailable ? (linkHistory.last().page >= 0
+                                                 ? strings::get("reader.return_page")
+                                                           .arg(linkHistory.last().page + 1)
+                                                 : strings::get("reader.return_to_passage"))
+                                      : QString(),
                   topActions,
                   general,
                   lightPopup,
@@ -2365,13 +2382,14 @@ void Reader::syncNavigation()
                   seekOpen && !zen,
                   zen ? -1
                           : pageNavigation::menuView(preferences) == pageNavigation::MenuView::Seek
+                                  && navigateAvailable()
                           ? int(Nav::Seek)
                           : pageNavigation::menuView(preferences) == pageNavigation::MenuView::Stats
                           ? int(Nav::Stats)
                           : -1,
                   (isNarrowWidth(width(), ui::density())
                    || preferences.value("hide_tab_labels").toBool(false)),
-                  features::enabled(preferences, features::Navigate),
+                  navigateAvailable(),
                   features::enabled(preferences, features::Stats),
                   zen,
                   features::enabled(preferences, features::Annotations),
@@ -2467,6 +2485,8 @@ void Reader::showControls()
     if (!appearanceEdit.panelDestination() && !zenMode()) {
         switch (pageNavigation::menuView(preferences)) {
         case pageNavigation::MenuView::Seek:
+            if (!navigateAvailable())
+                break;
             seekOpen = true;
             chapterGraph->hide();
             syncNavigation();
@@ -2558,12 +2578,19 @@ void Reader::showChapters()
     for (const auto &chapter : session->chapters()) {
         const int index = items.size();
         const auto name = QString("rrChapter%1").arg(index);
-        items.append({ chapter.title, chapter.position, name, {}, chapter.depth, chapter.page });
+        // The value is the index of the entry: several entries can share a
+        // position until chapter mode loads their text.
+        items.append({ chapter.title,
+                       chapter.position.isEmpty() ? QString() : QString::number(index),
+                       name,
+                       {},
+                       chapter.depth,
+                       chapter.page });
         if (index == session->contentsSelection().current)
             current = name;
     }
-    choices->selected = [this](const QString &position) {
-        if (session->goTo(position))
+    choices->selected = [this](const QString &index) {
+        if (session->goToChapter(index.toInt()))
             dismissControls();
     };
     choosingTypography = false;
@@ -2574,7 +2601,12 @@ void Reader::showChapters()
     choices->setGeometry(0, top, width(),
                          (navigation ? navigation->contentBottom(size()) : height()) - top);
     choices->setChapterPosition(
-            strings::get("stats.page_of").arg(session->page() + 1).arg(session->pages()));
+            session->bookPages() > 0
+                    ? strings::get("stats.page_of")
+                              .arg(session->bookPage() + 1)
+                              .arg(headerfooter::pageTotal(session->bookPages(),
+                                                           session->bookPagesEstimated()))
+                    : strings::get("common.percent").arg(session->progressPercent()));
     const auto groups = preferences.value("chapter_groups").toString();
     choices->showChoices(session->title(), std::move(items), current, ChoiceScreen::Mode::Chapters,
                          groups == "off"           ? ChapterGroups::Off
@@ -2767,12 +2799,9 @@ void Reader::turnPage(int direction, quint32 sourceTime, bool userInput, ui::Inp
                            false);
     if (!accepted)
         return;
-    if (kobalt::diagnosticsActive()) {
-        if (!turnStarted.isValid())
-            turnStarted.start();
-    } else {
-        turnStarted.invalidate();
-    }
+    // A turn buffered behind a running one keeps the time of the first tap.
+    if (!turnStarted.isValid())
+        turnStarted.start();
     if (!annotationMode && !session->busy() && direction > 0
         && session->nextPage() == session->page() && book->offerFinish()) {
         turnStarted.invalidate();
@@ -2803,6 +2832,7 @@ void Reader::syncBookmarks()
     const bool resolved = bookmarks->sync();
     page->bookmarked = features::enabled(preferences, features::Bookmarks) && resolved
             && bookmarks->marked(session->page());
+    pageScrubber->setCurrentPageBookmarked(page->bookmarked);
     pageScrubber->setBookmarkedPages(resolved && features::enabled(preferences, features::Bookmarks)
                                              ? bookmarks->pages()
                                              : QVector<int>());

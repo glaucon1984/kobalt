@@ -27,6 +27,7 @@
 #include <QFontDatabase>
 #include <QJsonObject>
 #include <QLabel>
+#include <QLocale>
 #include <QLineEdit>
 #include <QDir>
 #include <QTemporaryDir>
@@ -1205,8 +1206,8 @@ int main(int argc, char **argv)
         QVector<int> icons;
         for (int id = int(ControlIcon::Search); id <= int(ControlIcon::More); ++id)
             icons.append(id);
-        for (const auto icon :
-             { ControlIcon::SearchChapter, ControlIcon::SearchBefore, ControlIcon::SearchAfter })
+        for (const auto icon : { ControlIcon::SearchChapter, ControlIcon::SearchBefore,
+                                 ControlIcon::SearchAfter, ControlIcon::DeviceRotate })
             icons.append(int(icon));
         for (const int id : icons) {
             const auto black = controlIcon(ControlIcon(id))
@@ -1233,6 +1234,33 @@ int main(int argc, char **argv)
                 }
             require(ink > 20, "Bundled icon is empty");
         }
+    }
+    {
+        using namespace kobalt::ui;
+        const int savedDensity = density();
+        for (int ppi : { 167, 212, 300 }) {
+            setDensity(ppi);
+            CheckCellButton button(ControlIcon::DeviceRotate, nullptr);
+            button.resize(button.sizeHint());
+            button.show();
+            QApplication::processEvents();
+            const auto unchecked = button.grab().toImage();
+            int toggles = 0;
+            QObject::connect(&button, &QPushButton::toggled, &button, [&] { ++toggles; });
+            button.click();
+            require(button.isCheckable() && button.isChecked() && toggles == 1,
+                    "Checkbox header button must toggle once per click");
+            const auto checked = button.grab().toImage();
+            require(checked != unchecked, "Checkbox header button did not show its checked state");
+            const QRect top(0, 0, unchecked.width(), unchecked.height() / 2);
+            require(checked.copy(top) == unchecked.copy(top),
+                    "Checking a header button moved or inverted its icon");
+            button.setEnabled(false);
+            button.click();
+            require(button.isChecked() && toggles == 1,
+                    "Disabled checkbox header button changed its saved choice");
+        }
+        setDensity(savedDensity);
     }
     {
         using namespace kobalt::ui;
@@ -2109,8 +2137,38 @@ int main(int argc, char **argv)
                 "A new session did not clear its displayed page turns");
         require(text("rrGraphChapterNumber") == get("stats.contents_position").arg(13).arg(24)
                         && text("rrGraphSessionFigure") == "23"
-                        && text("rrGraphBookDetail") == get("stats.words").arg("35,706"),
-                "Chapter number, session or word count is missing");
+                        && text("rrGraphBookDetail").isEmpty(),
+                "Chapter number or session is missing, or the book cell kept the word count");
+        // The word totals label the chart, between the bars and the cells.
+        const auto chapterWords = get("stats.words")
+                                          .arg(QLocale(QLocale::English, QLocale::UnitedStates)
+                                                       .toString(chapters[20].words));
+        require(text("rrGraphChapterWords") == get("stats.chapter_words").arg(13).arg(chapterWords)
+                        && text("rrGraphBookWords")
+                                == get("stats.book_words").arg(get("stats.words").arg("35,706")),
+                "The word totals below the chart are missing");
+        graph.setChapterNumber(0, 24);
+        require(text("rrGraphChapterWords") == get("stats.this_chapter_words").arg(chapterWords),
+                "A position before the contents named a chapter number");
+        graph.setChapterNumber(13, 24);
+        graph.setData(chapters, { 20, -1, 1, 1 }, false, {});
+        require(text("rrGraphChapterWords").isEmpty(),
+                "The chapter's word total did not wait for the counts");
+        graph.setData(chapters, { 20, -1, 1, 1 }, true, {});
+        for (int width : { 758, 1072, 1448 }) {
+            graph.resize(width, chapterMetrics::graphHeight);
+            QApplication::processEvents();
+            const auto *bars = graph.findChild<QWidget *>("rrChapterBars");
+            const auto *left = graph.findChild<QLabel *>("rrGraphChapterWords");
+            const auto *right = graph.findChild<QLabel *>("rrGraphBookWords");
+            const auto *cell = graph.findChild<QWidget *>("rrGraphChapterCell");
+            require(left->y() >= bars->geometry().bottom() && left->y() == right->y()
+                            && left->geometry().bottom() < cell->y()
+                            && left->geometry().right() < right->x()
+                            && kobalt::qt::textWidth(right->fontMetrics(), right->text())
+                                    <= right->width(),
+                    "The word totals overlap the chart, the cells or each other");
+        }
         for (int width : { 758, 1072, 1448 }) {
             graph.resize(width, chapterMetrics::graphHeight);
             graph.setProgress("Large book", 1, 3500, 3500, 1, 10000);
@@ -2247,13 +2305,26 @@ int main(int argc, char **argv)
                     const int controls = ui::px(phone ? 224 : 300);
                     QWidget host;
                     host.resize(ui::px(design.width()), ui::px(design.height()));
-                    ChapterGraph graph(&host);
+                    ChapterGraph graph(&host, phone);
                     graph.resize(host.width(), cm::graphHeight);
                     graph.setAvailableHeight(host.height() - controls);
                     graph.setData(balanced, {}, true, {});
+                    graph.setChapterNumber(4, 385);
+                    graph.setProgress("Chapter I", 1, 24, 24, 1, 240);
                     auto *bars = graph.findChild<QWidget *>("rrChapterBars");
                     host.show();
                     graph.open();
+                    const auto *contents = graph.findChild<QLabel *>("rrGraphChapterNumber");
+                    const auto *page = graph.findChild<QLabel *>("rrGraphChapterPosition");
+                    const auto *separator = graph.findChild<QLabel *>("rrGraphPositionSeparator");
+                    require(contents->isVisible() != phone && separator->isVisible() != phone
+                                    && page->isVisible(),
+                            "Phone Stats keeps a contents count or loses its chapter page");
+                    require(!phone
+                                    || (page->x() == int(ui::metrics::chrome::inset)
+                                        && qt::textWidth(page->fontMetrics(), page->text())
+                                                <= page->width()),
+                            "The phone chapter page is clipped or keeps the hidden count's gap");
                     const int bottom = graph.geometry().bottom();
                     const int balancedHeight = bars->height();
                     graph.setData(uneven, {}, true, {});
