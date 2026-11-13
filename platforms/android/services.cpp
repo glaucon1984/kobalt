@@ -13,6 +13,7 @@
 #include <QLineEdit>
 #include <QPointer>
 #include <QTime>
+#include <QJniEnvironment>
 #include <QJniObject>
 
 namespace kobalt::android {
@@ -50,6 +51,21 @@ public:
 
     void acceptHandoff(QDialog &, const std::function<void()> &accept) override { accept(); }
 };
+
+// Runs on the plugin thread: getExternalFilesDir creates the folder when it is
+// missing. Empty when shared storage is unavailable, which leaves plugins off.
+QString externalFilesFolder(const QString &name)
+{
+    const QJniObject application = QNativeInterface::QAndroidApplication::context();
+    const auto folder = application.callObjectMethod("getExternalFilesDir",
+                                                     "(Ljava/lang/String;)Ljava/io/File;",
+                                                     static_cast<jstring>(nullptr));
+    QJniEnvironment env;
+    if (env.checkAndClearExceptions() || !folder.isValid())
+        return {};
+    const auto path = folder.callObjectMethod("getAbsolutePath", "()Ljava/lang/String;").toString();
+    return path.isEmpty() ? QString() : path + '/' + name;
+}
 } // namespace
 
 ReaderHostServices readerHostServices()
@@ -72,6 +88,11 @@ ReaderHostServices readerHostServices()
         result.deviceName = QStringLiteral("Android");
     result.colorDisplay = [] { return true; };
     result.systemRotation = true;
+    result.pluginDirectory = [] { return externalFilesFolder(QStringLiteral("plugins")); };
+    result.pluginDataDirectory = [] { return externalFilesFolder(QStringLiteral("plugin-data")); };
+    result.pluginFolderLabel = QStringLiteral("Android/data/<app>/files/plugins");
+    // Android imports books, so no sidecar sits beside them.
+    result.bookSidecars = false;
     result.browserAvailable = [] { return true; };
     result.openBrowser = [](const QUrl &url, QWidget *) {
         return url.isValid() && !url.host().isEmpty()

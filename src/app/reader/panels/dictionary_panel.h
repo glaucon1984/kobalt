@@ -6,6 +6,7 @@
 #include "ui/style/metrics.h"
 #include "platform/api/dictionary_service.h"
 #include "platform/api/keyboard_controller.h"
+#include "plugins/plugin_types.h"
 #include <QFont>
 #include <QLabel>
 #include "ui/dialogs/modals.h"
@@ -34,6 +35,10 @@ public:
     static int definitionLineHeight(int percent, bool customFont = false);
     void setDefinitionFont(const QString &family, int percent);
     void open(const QString &word, const DictionaryResult &result, const QRect &selection);
+    // Adds a plugin's answer to the chooser and marks the chooser button; a card from the
+    // same plugin replaces its earlier one.
+    void addPluginCard(const plugins::Card &card);
+    void clearPluginCards();
     void place(const QRect &selection);
     void dismiss();
     static QString formatDefinition(const QString &html);
@@ -49,14 +54,31 @@ private:
     std::unique_ptr<KeyboardController> keyboard;
     // On a narrow sheet, `actions` opens a menu with edit, search and save.
     ui::CellButton *dictionary, *close, *edit, *submit, *search, *save, *actions;
+    // Marks the chooser button while a plugin card is available.
+    QWidget *pluginMarker;
     QPointer<ui::ModalOverlay> actionMenu;
     void openActions();
     bool saved = false, saveAvailable = false;
     QLineEdit *query;
     QRect selection;
     bool editing = false;
+    bool showingCard = false;
     QLabel *headword, *editHint;
     QString word, bookFamily, language, definitionFamily;
+    QVector<plugins::Card> cards;
+
+    // The definition shown before a card was chosen, restored when its dictionary is chosen.
+    struct Definition
+    {
+        QString word, html, source, dictionaryId;
+    } beforeCard;
+
+    // The source of the definition the sheet opened with, so that the chooser can always
+    // lead back to it, even when no installed dictionary lists it.
+    DictionaryChoice definitionChoice;
+    void showCard(const plugins::Card &card);
+    void restoreDefinition();
+    void placeMarker();
     QString definitionHtml, sourceText, renderedHtml;
     int definitionPercent = 100;
     QFont headwordFont;
@@ -73,6 +95,7 @@ private:
     int rowTop() const;
     int contentBottom() const;
     void arrange();
+    void setHeadword(const QString &text);
     void updateDefinition();
     void refresh();
     void editQuery();

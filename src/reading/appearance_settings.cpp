@@ -73,6 +73,14 @@ QJsonObject globalPreferences(QJsonObject preferences)
     if (!preferences.contains("bold_reading") && preferences.contains("bionic_reading"))
         preferences["bold_reading"] = preferences.value("bionic_reading");
     preferences.remove("bionic_reading");
+    if (preferences.contains("plugins_disabled")) {
+        const auto ids = preferences.value("plugins_disabled");
+        bool strings = ids.isArray();
+        for (const auto &id : ids.toArray())
+            strings = strings && id.isString();
+        if (!strings)
+            preferences.remove("plugins_disabled");
+    }
     if (preferences.contains("book_beautifier")) {
         const auto rules = beautifierSettings(preferences);
         for (const auto *key : beautifierKeys)
@@ -157,7 +165,8 @@ QJsonObject cleanPreferences(QJsonObject preferences)
                              "show_clock",
                              "auto_rotate",
                              "turn_off_wifi_on_open",
-                             "reverse_page_swipes" })
+                             "reverse_page_swipes",
+                             "plugins_enabled" })
         if (preferences.contains(key) && !preferences.value(key).isBool())
             preferences.remove(key);
     for (const auto *key : beautifierKeys)
