@@ -27,6 +27,8 @@ endif()
 
 include("${KOBALT_ROOT}/dependencies/cache.cmake")
 kobalt_dependencies()
+include("${KOBALT_ROOT}/dependencies/local-engine.cmake")
+kobalt_local_engine()
 add_subdirectory("${KOBALT_ROOT}/assets" "${CMAKE_CURRENT_BINARY_DIR}/assets")
 set(source "${KOBALT_ROOT}/src")
 
@@ -80,6 +82,8 @@ file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/embedded_resources.h" CONTENT
 # in the mod library only.
 add_library(kobalt-code OBJECT ${kobo_shared_sources} ${kobo_adapter_sources} ${kobo_c_sources})
 add_library(kobalt MODULE ${kobo_hook_sources} "${CMAKE_CURRENT_BINARY_DIR}/nhplugin.h")
+option(KOBALT_WIFI_IDLE_DIAGNOSTICS "Record physical Wi-Fi state for an A/B test" OFF)
+option(KOBALT_WIFI_IDLE_FIX "Apply the verified firmware 4 idle correction" ON)
 option(KOBALT_PAGE_ANIMATIONS "Enable page animations on compatible display backends" ON)
 foreach(target kobalt-code kobalt)
     target_include_directories(${target} PRIVATE "${hooks}" "${CMAKE_CURRENT_BINARY_DIR}")
@@ -87,9 +91,21 @@ foreach(target kobalt-code kobalt)
         "${prefix}/include" "${prefix}/include/harfbuzz" "${prefix}/include/freetype2" "${prefix}/include/fribidi")
     target_compile_options(${target} PRIVATE ${kobo_warning_options} ${kobo_code_options}
         "-iquote${KOBALT_ROOT}" "-iquote${source}")
+    if(KOBALT_QT_MAJOR EQUAL 5)
+        if(KOBALT_WIFI_IDLE_DIAGNOSTICS)
+            target_compile_definitions(${target} PRIVATE KOBALT_WIFI_IDLE_DIAGNOSTICS)
+        endif()
+    endif()
     target_compile_definitions(${target} PRIVATE ${kobo_definitions}
         $<$<BOOL:${KOBALT_PAGE_ANIMATIONS}>:${kobo_animation_definitions}>)
 endforeach()
+
+if(KOBALT_QT_MAJOR EQUAL 5 AND NOT KOBALT_WIFI_IDLE_FIX)
+    set_property(SOURCE
+        "${kobo_directory}/nickel-fixes/wifi-idle/wifi_idle.cpp"
+        "${kobo_directory}/nickel-fixes/wifi-idle/wifi_idle_log.cpp"
+        APPEND PROPERTY COMPILE_DEFINITIONS KOBALT_WIFI_IDLE_FIX_DISABLED)
+endif()
 
 set(engine "${CMAKE_CURRENT_BINARY_DIR}/libcrengine-reader.a")
 add_custom_command(OUTPUT "${engine}"
@@ -98,6 +114,11 @@ add_custom_command(OUTPUT "${engine}"
     DEPENDS "${CRENGINE_BUILD}/libcrengine.a" VERBATIM)
 add_custom_target(reader-engine DEPENDS "${engine}")
 add_dependencies(kobalt reader-engine)
+if(TARGET kobalt-local-engine)
+    add_dependencies(reader-engine kobalt-local-engine)
+    add_dependencies(kobalt-code kobalt-local-engine)
+    add_dependencies(kobalt kobalt-local-engine)
+endif()
 set(qt_libraries Qt${KOBALT_QT_MAJOR}::Widgets Qt${KOBALT_QT_MAJOR}::GuiPrivate
     Qt${KOBALT_QT_MAJOR}::Network Qt${KOBALT_QT_MAJOR}::Sensors Qt${KOBALT_QT_MAJOR}::Sql Qt${KOBALT_QT_MAJOR}::DBus)
 if(KOBALT_QT_MAJOR EQUAL 5)
@@ -235,6 +256,33 @@ if(KOBALT_BUILD_TESTS)
     list(APPEND tests kobalt-custom-pins-tests)
     set_tests_properties(pewter.progress PROPERTIES LABELS "pewter;qt${KOBALT_QT_MAJOR}"
         ENVIRONMENT "${test_environment}" TIMEOUT 120)
+
+    if(KOBALT_QT_MAJOR EQUAL 5)
+        add_executable(kobalt-wifi-idle-tests "${KOBALT_ROOT}/tests/pewter/wifi_idle.cpp"
+            ${kobo_wifi_idle_sources})
+        set_target_properties(kobalt-wifi-idle-tests PROPERTIES ENABLE_EXPORTS ON)
+        target_include_directories(kobalt-wifi-idle-tests PRIVATE "${KOBALT_ROOT}" "${source}")
+        target_compile_options(kobalt-wifi-idle-tests PRIVATE ${kobo_warning_options})
+        target_link_libraries(kobalt-wifi-idle-tests PRIVATE Qt5::Network ${CMAKE_DL_LIBS} pthread)
+        add_test(NAME pewter.wifi-idle COMMAND kobalt-wifi-idle-tests)
+        set_tests_properties(pewter.wifi-idle PROPERTIES LABELS "pewter;kobo;qt5"
+            ENVIRONMENT "${test_environment}" TIMEOUT 120)
+        list(APPEND tests kobalt-wifi-idle-tests)
+        add_executable(kobalt-wifi-idle-log-tests
+            "${KOBALT_ROOT}/tests/pewter/wifi_idle_log.cpp"
+            "${kobo_directory}/nickel-fixes/wifi-idle/wifi_idle_log.cpp")
+        set_target_properties(kobalt-wifi-idle-log-tests PROPERTIES AUTOMOC OFF)
+        target_include_directories(kobalt-wifi-idle-log-tests PRIVATE
+            "${KOBALT_ROOT}" "${source}" "${CMAKE_CURRENT_BINARY_DIR}")
+        target_compile_definitions(kobalt-wifi-idle-log-tests PRIVATE
+            KOBALT_WIFI_IDLE_DIAGNOSTICS KOBALT_CONFIG_DIR="/unused-wifi-log-test")
+        target_compile_options(kobalt-wifi-idle-log-tests PRIVATE ${kobo_warning_options})
+        target_link_libraries(kobalt-wifi-idle-log-tests PRIVATE Qt5::Core ${CMAKE_DL_LIBS})
+        add_test(NAME pewter.wifi-idle-log COMMAND kobalt-wifi-idle-log-tests)
+        set_tests_properties(pewter.wifi-idle-log PROPERTIES LABELS "pewter;kobo;qt5"
+            ENVIRONMENT "${test_environment}" TIMEOUT 120)
+        list(APPEND tests kobalt-wifi-idle-log-tests)
+    endif()
 
     # The Qt5 refresh check fakes the display driver call itself and does not
     # use pewter's Nickel.

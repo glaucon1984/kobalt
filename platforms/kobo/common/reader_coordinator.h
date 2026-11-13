@@ -1,7 +1,7 @@
 #pragma once
 #include "app/reader_interface.h"
 #include "native_dialog_overlay.h"
-#include "engine/crengine/engine_document.h"
+#include "engine/blaze/adapter/engine_document.h"
 #include "reading/reading_progress.h"
 #include "storage/reading_history.h"
 #include <QObject>
@@ -59,6 +59,7 @@ public:
                       QObject *parent);
     ~ReaderCoordinator() override;
     bool available() const;
+    void finishPreviewMigration();
     bool idleForBenchmark() const;
 #if defined(KOBALT_BENCHMARK_API) || defined(KOBALT_SCENARIO_PLAYER)
     QJsonObject benchmarkState(const QString &identity) const;
@@ -143,8 +144,9 @@ private:
     void checkProgressSoon();
     void watch();
     void prepareOpening(kobalt::ReaderBookRoute candidate);
+    void prepareOpeningControls();
+    bool openingDark = false;
     void missingAssets(bool assetsReady);
-    bool missingAssetsBeforeOpening(bool assetsReady);
     void load();
 
     void showReader();

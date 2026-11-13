@@ -1,5 +1,6 @@
 #include <QKeyEvent>
 #include "reading/remaining_time.h"
+#include "reading/rendering_mode.h"
 #include "reading/sleep_screen.h"
 #include "ui/controls/buttons.h"
 #include "ui/controls/icons.h"
@@ -92,6 +93,26 @@ kobalt::headerfooter::Values Reader::chromeValues()
     values.chapterPages = session->chapterPages();
     values.page = session->page() + 1;
     values.pages = session->pages();
+    // An engine with the text of only a part of the book shows rough page
+    // numbers from its page estimate. The chapter is the spine item. Before
+    // the estimate has a total, each page field shows its percent form.
+    const auto &state = session->state();
+    if (state.contains("book_fraction") && state.value("rough_pages").toInt() > 0
+        && state.value("rough_item_pages").toInt() > 0) {
+        values.page = state.value("rough_page").toInt();
+        values.pages = state.value("rough_pages").toInt();
+        values.chapterPage = state.value("rough_item_page").toInt();
+        values.chapterPages = state.value("rough_item_pages").toInt();
+        values.pagesEstimated = state.value("rough_pages_estimated").toBool();
+        values.chapterPagesEstimated = state.value("rough_item_pages_estimated").toBool();
+    } else if (state.contains("book_fraction")) {
+        values.page = values.pages = values.chapterPage = values.chapterPages = 0;
+        values.percentRead = session->progressPercent();
+        const int itemPages = session->state().value("rough_item_pages").toInt();
+        if (itemPages > 0)
+            values.chapterPercentRead = pageProgressPercent(
+                    session->state().value("rough_item_page").toInt() - 1, itemPages);
+    }
     const auto battery = services.battery();
     values.battery = battery.percent;
     values.charging = battery.charging;
@@ -101,6 +122,10 @@ kobalt::headerfooter::Values Reader::chromeValues()
     values.bookMilliseconds = estimates.bookMilliseconds;
     values.learningPace = estimates.learningPace;
     values.approximateTime = remainingTime::approximate(preferences);
+    values.decimalPercentages = headerfooter::decimalPercentages(preferences);
+    values.pageTurnMilliseconds = pageTurnMilliseconds;
+    if (state.contains("chapter_load_ms"))
+        values.chapterLoadMilliseconds = qint64(state.value("chapter_load_ms").toDouble());
     return values;
 }
 
@@ -350,6 +375,8 @@ void Reader::openSettings()
     settingsHeaderFooterWeight = ui::headerFooterAddedWeight();
     settingsTimeRemainingFormat =
             remainingTime::approximate(preferences) ? "approximate" : "detailed";
+    settingsPercentageFormat = headerfooter::decimalPercentages(preferences) ? "decimal" : "whole";
+    settingsRenderingMode = renderingMode::value(renderingMode::fromPreferences(preferences));
     hideTabLabelsOption->setChecked(preferences.value("hide_tab_labels").toBool(false));
     saveWordsOption->setChecked(preferences.value("save_looked_up_words").toBool(true));
     zenModeOption->setChecked(preferences.value("zen_mode").toBool(false));
@@ -780,6 +807,8 @@ void Reader::applySettings()
     if (disableStandbyOption)
         next[disableReaderStandbyKey] = disableStandbyOption->isChecked();
     next[remainingTime::preferenceKey] = settingsTimeRemainingFormat;
+    next[headerfooter::percentageFormatKey] = settingsPercentageFormat;
+    next[renderingMode::preferenceKey] = settingsRenderingMode;
     for (const auto *key : appearance::fallbackFontKeys)
         next[key] = settingsFontFaces.value(key).toString();
     next["bold_reading"] =
@@ -915,7 +944,13 @@ void Reader::applySettings()
         for (auto it = defaults.begin(); it != defaults.end(); ++it)
             settings[it.key()] = it.value();
     }
-    session->requestAppearance(requested.edited(appearance::Patch(settings)), bodySize());
+    renderingMode::apply(preferences);
+    const auto rendering = renderingMode::effective(renderingMode::fromPreferences(preferences));
+    session->requestAppearance(requested.edited(appearance::Patch(settings)), bodySize(),
+                               rendering == renderingMode::Mode::Accurate ? 0
+                                       : rendering == renderingMode::Mode::Hybrid
+                                       ? ReaderSession::hybridChapterMode
+                                       : 1);
     applyingText = session->busy();
     if (appearanceEdit.destination() == AppearanceDestination::None)
         appearanceEdit.request(AppearanceDestination::Controls);
@@ -1462,8 +1497,12 @@ void Reader::applyInterfaceFonts()
 void Reader::showSettingsFonts()
 {
     auto *panel = static_cast<SettingsPanel *>(general);
+    panel->percentageFormatButton->setCaption(
+            SettingsPanel::percentageFormatLabel(settingsPercentageFormat).toUpper());
     panel->timeRemainingFormatButton->setCaption(
             SettingsPanel::timeRemainingFormatLabel(settingsTimeRemainingFormat).toUpper());
+    panel->renderingButton->setCaption(
+            SettingsPanel::renderingModeLabel(settingsRenderingMode).toUpper());
     panel->headerFooterWeightButton->setCaption(
             (settingsHeaderFooterWeight ? strings::get("settings.header_footer_weight_heavier")
                                                   .arg(settingsHeaderFooterWeight)

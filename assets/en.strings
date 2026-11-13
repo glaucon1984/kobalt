@@ -294,6 +294,7 @@
 "common.page" = "page";
 /* Arguments: %1, %2 */
 "common.page_fraction" = "%1 / %2";
+"common.estimated_total" = "~%1";
 "common.pages" = "pages";
 /* Arguments: %1 */
 "common.percent" = "%1%";
@@ -497,7 +498,10 @@
 "header_footer.time_left" = "%1 left";
 "header_footer.learning_pace" = "Learning reading speed";
 /* Arguments: %1, %2 */
+"header_footer.calculating" = "Calculating…";
 "header_footer.pages_left" = "%1 %2";
+/* Arguments: %1 */
+"header_footer.milliseconds" = "%1 ms";
 "header_footer.preset.default" = "Kobalt";
 "header_footer.preset.alternative_a" = "Bookish";
 "header_footer.preset.alternative_b" = "Ember";
@@ -537,6 +541,8 @@
 "header_footer.field.chapter_percent" = "Percent of chapter";
 "header_footer.field.book_percent" = "Percent of book";
 "header_footer.field.battery_warning" = "Battery warning";
+"header_footer.field.page_turn_time" = "Page turn time";
+"header_footer.field.chapter_load_time" = "Chapter load time";
 /* Arguments: %1 */
 "header_footer.field_description.battery_warning" = "Shows the battery only below %1%.";
 "header_footer.field_description.time_left" = "Estimated from your reading pace.";
@@ -747,13 +753,14 @@
 "search_panel.no_matches_found" = "No matches";
 /* Arguments: %1, %2 */
 "search_panel.page_detail" = "Page %1: %2";
+"search_panel.chapter_detail" = "%1: %2";
 "search_panel.return_to_original_position" = "Return to original position";
 "search_panel.search" = "Search";
 "search_panel.searching" = "Searching…";
 
 /* settings */
-"settings.animations_uncertain_description" = "Page animations may not be supported on this device. Turn this off if they do not work correctly.";
-"settings.animations_description" = "Page animations are supported on this device.";
+"settings.animations_uncertain_description" = "Animations are only potentially working in light mode on this device. Turn this off if they do not work correctly.";
+"settings.animations_description" = "Animations are fully supported on this device in light and dark mode.";
 "settings.unsupported_caption" = "Disabled: unsupported on this device.";
 "settings.unsupported_description" = "Disabled because this option is not supported on this device.";
 "settings.dark_description" = "Light text on a dark background.";
@@ -779,8 +786,18 @@
 "settings.plugin_delete" = "Delete";
 "settings.plugin_data_deleted" = "Saved data deleted.";
 "settings.plugin_data_not_deleted" = "Saved data was not deleted: %1";
+"settings.section_engine" = "Engine";
 "settings.opening_cover" = "Do not show book cover while opening";
 "settings.opening_cover_description" = "Always show the Kobalt logo when opening a book.";
+"settings.rendering" = "Rendering engine";
+"settings.rendering_summary" = "Hybrid opens books fast and prepares the whole book while you read.";
+"settings.rendering_description" = "A change reloads the book at your position when you close Settings.";
+"settings.rendering_hybrid" = "Hybrid";
+"settings.rendering_fast" = "Faster";
+"settings.rendering_accurate" = "More accurate";
+"settings.rendering_hybrid_description" = "Open fast, then prepare the whole book in the background.";
+"settings.rendering_fast_description" = "Lay out only the chapter you read. Page numbers stay estimates.";
+"settings.rendering_accurate_description" = "Lay out the whole book first. Large books open slower.";
 "settings.display" = "Display";
 "settings.controls" = "Controls";
 "settings.defaults" = "Defaults";
@@ -854,7 +871,9 @@
 "settings.widows_orphans_avoid" = "Avoid both";
 "settings.widows_orphans_allow" = "Allow both";
 "settings.section_reading_menu" = "Reading menu";
-"settings.section_reader" = "Reader";
+"settings.section_feature_visibility" = "Feature visibility";
+"settings.section_system_integration" = "System integration";
+"settings.section_nitpicks" = "Nitpicks";
 "settings.section_sleep" = "Sleep and wake";
 "settings.section_power" = "Power management";
 "settings.wifi_power_saver" = "Smart Wi-Fi power saving";
@@ -1071,6 +1090,12 @@
 "stats.page_turns" = "%1 page turns";
 /* Arguments: %1 */
 "stats.words" = "%1 words";
+/* The current chapter's word total below the Stats chart. %1 is its number in the contents, %2 the total such as "6,500 words". Arguments: %1, %2 */
+"stats.chapter_words" = "Chapter %1 · %2";
+/* The same, for a position before the contents. %1 is the total. Arguments: %1 */
+"stats.this_chapter_words" = "This chapter · %1";
+/* The book's word total below the Stats chart. Arguments: %1 */
+"stats.book_words" = "Book · %1";
 "stats.last_chapter" = "Last chapter";
 "stats.counting" = "Counting words…";
 "reader.dense_graph" = "Compact chapter graphs";
@@ -1256,7 +1281,7 @@
 "settings.menu_view_stats_description" = "Shows chapter and book statistics above the tab bar, as you would normally find using the Stats tab.";
 
 "settings.section_default_global_font" = "Default global font";
-"settings.section_user_interface" = "User Interface";
+"settings.section_user_interface" = "User interface";
 "settings.section_dictionary_ui" = "Dictionary";
 "settings.section_advanced" = "Advanced";
 "settings.disable_reader_standby" = "Disable standby";
@@ -1467,6 +1492,12 @@
 "settings.normalization_text_colors" = "Normalize text colors";
 "settings.normalization_text_colors_description" = "Use black text, or white in dark mode. Remove publisher background colors.";
 
+"settings.percentage_format" = "Progress percentages";
+"settings.percentage_format_description" = "Choose how book and chapter progress appears in the header and footer.";
+"settings.percentage_whole" = "Whole percentages";
+"settings.percentage_decimal" = "One decimal place";
+"settings.percentage_whole_description" = "For example, 8%";
+"settings.percentage_decimal_description" = "For example, 8.1%";
 "settings.time_remaining_format" = "Time remaining format";
 "settings.time_remaining_format_description" = "Applies to reading-time estimates in the header, footer and sleep screen.";
 "settings.time_remaining_detailed" = "Detailed";
@@ -1626,6 +1657,8 @@
 "dictionary_panel.actions" = "Lookup actions";
 "features.words" = "My Words";
 "features.words_description" = "Hides the Words tab, the dictionary's save button and My Words in the Library. Lookups are no longer saved; saved words are kept.";
+"features.highlight_links" = "Highlight links";
+"features.highlight_links_description" = "Hides the Highlight links button and link count in the reading menu. Link taps and long presses still work.";
 "words.no_entry" = "No dictionary entry · Added by you";
 "words.no_entry_detail" = "The dictionary had no entry for this word. You added it to My Words yourself.";
 
@@ -1647,3 +1680,7 @@
 /* These pages contain search results, not EPUB pages. */
 "search_panel.result_pages" = "Page %1 of %2";
 "search_panel.result_pages_so_far" = "Page %1 of at least %2";
+
+"sleep.follow_orientation" = "Follow reading orientation";
+"sleep.rotation_enabled" = "Your sleep screen will now also use landscape.";
+"sleep.rotation_disabled" = "Your sleep screen will only use portrait.";

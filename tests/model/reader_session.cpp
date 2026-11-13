@@ -68,15 +68,13 @@ int run(int argc, char **argv)
         auto session =
                 std::make_unique<ReaderSession>(test::readerFonts(), test::readerPlaceholder());
         auto lease = std::make_shared<SourceLease>();
-        PositionCodec firstPositions{ [](const EngineDocument &model, const QString &, QString *) {
-                                         return model.position();
-                                     },
-                                      [](const EngineDocument &model, QString *) {
-                                          return "first:" + model.position();
-                                      },
-                                      [](const QString &location) { return location; } };
+        PositionCodec firstPositions{
+            [](const Engine &model, const QString &, QString *) { return model.position(); },
+            [](const Engine &model, QString *) { return "first:" + model.position(); },
+            [](const QString &location) { return location; }
+        };
         auto secondPositions = firstPositions;
-        secondPositions.encode = [](const EngineDocument &model, QString *) {
+        secondPositions.encode = [](const Engine &model, QString *) {
             return "second:" + model.position();
         };
 
@@ -1197,12 +1195,28 @@ int run(int argc, char **argv)
             require(!staleProgress && !cancelled->renderProgress().active,
                     "Queued progress revived a cancelled relayout");
         }
-        session->nativePosition([&](QString location, QString error) {
-            require(location.isEmpty() && !error.isEmpty(),
-                    "A later codec-free opening inherited platform mapping");
-            opened.quit();
-        });
-        opened.exec();
+        {
+            QTemporaryDir logs;
+            require(logs.isValid(), "Cannot create native export diagnostics");
+            initializeDiagnostics(logs.path());
+            QJsonObject event;
+            setDiagnosticObserver([&](const QJsonObject &entry) {
+                if (entry.value("event") == "native-export-end")
+                    event = entry;
+            });
+            session->nativePosition([&](QString location, QString error) {
+                require(location.isEmpty() && !error.isEmpty(),
+                        "A later codec-free opening inherited platform mapping");
+                opened.quit();
+            });
+            opened.exec();
+            setDiagnosticObserver({});
+            require(event.value("failed").toBool()
+                            && event.value("error_code")
+                                    == "error.no_supported_native_reading_position",
+                    "Native export omitted its failure code");
+            require(flushDiagnostics(), "Cannot flush native export diagnostics");
+        }
         for (const bool keys : { false, true }) {
             strings::showKeys(keys);
             PositionComparison unplaced;

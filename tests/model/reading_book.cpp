@@ -38,8 +38,12 @@ QJsonObject persistedBook(QJsonObject state)
         state.remove(key);
     for (const auto *key : appearance::marginKeys)
         state.remove(key);
-    for (const auto *key : { "chapter_title", "chapter_page", "chapter_pages", "page", "pages",
-                             "next_page", "text_font_face", "embedded_font_count", "cached_pages" })
+    for (const auto *key :
+         { "chapter_title", "chapter_page", "chapter_pages", "page", "pages", "next_page",
+           "text_font_face", "embedded_font_count", "cached_pages", "continues_before",
+           "continues_after", "book_fraction", "rough_page", "rough_pages", "rough_item_page",
+           "rough_item_pages", "rough_pages_estimated", "rough_item_pages_estimated",
+           "chapter_load_ms" })
         state.remove(key);
     return state;
 }
@@ -130,7 +134,8 @@ public:
         if (calls.failWrite) {
             return calls.failure;
         }
-        calls.current.location = location;
+        if (!location.isEmpty())
+            calls.current.location = location;
         ++calls.current.modified;
         calls.current.status = finished ? 2 : 1;
         return NativeSaveResult::verified(calls.current, location.isEmpty());
@@ -243,8 +248,8 @@ int main(int argc, char **argv)
     {
         Calls calls;
         const PositionCodec positions{
-            [](const EngineDocument &, const QString &location, QString *) { return location; },
-            [](const EngineDocument &model, QString *) { return model.position(); },
+            [](const Engine &, const QString &location, QString *) { return location; },
+            [](const Engine &model, QString *) { return model.position(); },
             [](const QString &location) { return location; }
         };
         auto session = open(QSize(758, 900), {}, "session-event", positions);
@@ -374,6 +379,159 @@ int main(int argc, char **argv)
                                     <= storage::maxJsonBytes,
                     "Image views did not respect the book byte budget or changed unrelated fields");
         }
+        {
+            // The page estimate is optional and can be rebuilt. Over the byte
+            // limit its read spine items go first, then the record, and only
+            // then image views.
+            const auto views = [](int count) {
+                QVector<QPair<QString, QJsonObject>> result;
+                for (int i = 0; i < count; ++i)
+                    result.append({ QString::number(i, 16).rightJustified(64, 'e'),
+                                    { { "zoom", 2 }, { "x", .25 }, { "y", .75 } } });
+                return result;
+            };
+            QJsonArray weights, run{ 0 };
+            for (int i = 0; i < 10; ++i)
+                weights.append(1.0);
+            for (int i = 0; i < 500; ++i)
+                run.append(100000);
+            const QJsonObject estimate{ { "version", 1 },
+                                        { "weights", weights },
+                                        { "layout", "test" },
+                                        { "spine_items", 600 },
+                                        { "page", 7 },
+                                        { "item_page", 2 },
+                                        { "place", QJsonArray{ 0, 0, 1, 4 } },
+                                        { "read", QJsonArray{ run } } };
+            QJsonObject base;
+            {
+                auto session = open(QSize(758, 900), {}, "estimate-base");
+                const auto hash = session->sourceHash();
+                ReadingBook book(std::move(session), finishPaths.bookState("estimate-base"),
+                                 finishPaths, "estimate-base", hash, nullptr, {}, {});
+                QJsonObject snapshot;
+                require(book.checkpoint(&snapshot), "Cannot save the page-estimate base");
+                base = storage::readBookState(finishPaths, "estimate-base").object;
+            }
+            for (const int count : { 20, 64 }) {
+                const QString identity = QString("estimate-budget-%1").arg(count);
+                auto seed = base;
+                seed["book"] = identity;
+                seed["page_estimate"] = estimate;
+                seed["large_optional"] = QString();
+                const int room = int(storage::maxJsonBytes
+                                     - QJsonDocument(seed).toJson(QJsonDocument::Compact).size());
+                seed["large_optional"] = QString(room - 150, 'x');
+                require(storage::writeBookState(finishPaths, identity, seed),
+                        "Cannot seed the page-estimate byte budget");
+                auto session = open(QSize(758, 900), seed, identity);
+                const auto hash = session->sourceHash();
+                ReadingBook book(std::move(session), finishPaths.bookState(identity), finishPaths,
+                                 identity, hash, nullptr, {}, {});
+                for (const auto &view : views(count))
+                    book.rememberImageView(view.first, view.second);
+                QJsonObject snapshot;
+                require(book.checkpoint(&snapshot),
+                        "The page estimate prevented a reading-position checkpoint");
+                const auto saved = storage::readBookState(finishPaths, identity).object;
+                const auto record = saved.value("page_estimate").toObject();
+                const int kept = saved.value("image_views").toArray().size();
+                require(QJsonDocument(saved).toJson(QJsonDocument::Compact).size()
+                                        <= storage::maxJsonBytes
+                                && saved.value("large_optional").toString().size() == room - 150,
+                        "The page estimate broke the byte limit or changed unrelated fields");
+                if (count == 20)
+                    require(!record.isEmpty() && !record.contains("read")
+                                    && record.value("page").toInt() == 7 && kept == 20,
+                            "The read spine items must go first, before image views");
+                else
+                    require(record.isEmpty() && kept > 0 && kept < 64,
+                            "The page estimate must go before image views are trimmed");
+            }
+        }
+#if __has_include(<koblaze.h>)
+        {
+            // Chapter mode saves its page estimate with the reading position,
+            // and the book opens again with the same page numbers.
+            // Keep the Accurate pin of the test runner for the checks after this one.
+            const auto pinned = qgetenv("KOBALT_CHAPTER_MODE");
+            qputenv("KOBALT_CHAPTER_MODE", "1");
+            qputenv("KOBALT_CHAPTER_PAGES", "2");
+            const QString identity = "page-estimate";
+            QJsonObject shown;
+            {
+                // The page numbers come once the idle work has measured the
+                // book, at the next turn.
+                auto session = open(QSize(758, 900), {}, identity);
+                for (int turn = 0; turn < 3 || session->state().value("rough_page").toInt() <= 0;
+                     ++turn) {
+                    require(turn < 20 && session->turn(1), "Cannot turn in chapter mode");
+                    waitUntil([&] { return !session->busy() && !session->preparingNeighbours(); });
+                }
+                shown = session->state();
+                require(shown.value("rough_page").toInt() > 1
+                                && shown.value("page_estimate").isObject(),
+                        "Chapter mode has no page estimate in its frame");
+                require(shown.value("chapter_load_ms").toDouble(-1) >= 0,
+                        "Chapter mode has no chapter load time in its frame");
+                const auto hash = session->sourceHash();
+                ReadingBook book(std::move(session), finishPaths.bookState(identity), finishPaths,
+                                 identity, hash, nullptr, {}, {});
+                QJsonObject snapshot;
+                require(book.checkpoint(&snapshot), "Cannot save the chapter-mode position");
+            }
+            const auto saved = storage::readBookState(finishPaths, identity).object;
+            const auto record = saved.value("page_estimate").toObject();
+            require(record.value("page").toInt() == shown.value("rough_page").toInt()
+                            && record.value("item_page").toInt()
+                                    == shown.value("rough_item_page").toInt()
+                            && !saved.contains("rough_page") && !saved.contains("chapter_load_ms"),
+                    "The saved record must hold the shown page, without the frame values");
+            // Until the book is measured again the reader shows percentages.
+            // The first turn after that continues from the saved numbers.
+            const auto turnOnce = [&](ReaderSession &session) {
+                require(session.state().value("rough_page").toInt() == 0,
+                        "A page number before the book was measured");
+                waitUntil([&] { return !session.busy() && !session.preparingNeighbours(); });
+                require(session.turn(1), "Cannot turn in chapter mode");
+                waitUntil([&] { return !session.busy(); });
+                return session.state();
+            };
+            auto session = open(QSize(758, 900), saved, identity);
+            const auto hash = session->sourceHash();
+            ReadingBook reopened(std::move(session), finishPaths.bookState(identity), finishPaths,
+                                 identity, hash, nullptr, {}, {});
+            const auto again = turnOnce(*reopened.session());
+            require(again.value("rough_page").toInt() == shown.value("rough_page").toInt() + 1
+                            && again.value("rough_item_page").toInt()
+                                    == shown.value("rough_item_page").toInt() + 1,
+                    "The book must open again with the saved page numbers");
+            // A record whose numbers are ahead of the estimate, as after a
+            // correction while reading, opens with its own numbers.
+            auto ahead = saved;
+            auto aheadRecord = record;
+            aheadRecord["page"] = record.value("page").toInt() + 5;
+            aheadRecord["item_page"] = record.value("item_page").toInt() + 5;
+            ahead["page_estimate"] = aheadRecord;
+            ahead["book"] = "page-estimate-ahead";
+            require(storage::writeBookState(finishPaths, "page-estimate-ahead", ahead),
+                    "Cannot seed a page estimate ahead of the estimate");
+            auto aheadSession =
+                    open(QSize(758, 900),
+                         storage::readBookState(finishPaths, "page-estimate-ahead").object,
+                         "page-estimate-ahead");
+            const auto aheadState = turnOnce(*aheadSession);
+            require(aheadState.value("rough_page").toInt() == shown.value("rough_page").toInt() + 6
+                            && aheadState.value("rough_item_page").toInt()
+                                    == shown.value("rough_item_page").toInt() + 6,
+                    "The saved page numbers must come from the record");
+            if (pinned.isEmpty())
+                qunsetenv("KOBALT_CHAPTER_MODE");
+            else
+                qputenv("KOBALT_CHAPTER_MODE", pinned);
+            qunsetenv("KOBALT_CHAPTER_PAGES");
+        }
+#endif
         for (const auto &flag : { QJsonValue(), QJsonValue("invalid"), QJsonValue(true) }) {
             const QString identity = "finish-book";
             QJsonObject original{ { "schema", 1 },
@@ -665,8 +823,8 @@ int main(int argc, char **argv)
                 "Legacy checkpoint fields changed during import");
         {
             const PositionCodec positions{
-                [](const EngineDocument &, const QString &location, QString *) { return location; },
-                [](const EngineDocument &model, QString *) { return model.position(); },
+                [](const Engine &, const QString &location, QString *) { return location; },
+                [](const Engine &model, QString *) { return model.position(); },
                 [](const QString &location) { return location; }
             };
             auto session = open(QSize(758, 900), imported.object, identity, positions);
@@ -707,7 +865,8 @@ int main(int argc, char **argv)
                     "Display-only chapter change affected the saved checkpoint");
             for (const auto *key :
                  { "chapter_title", "chapter_page", "chapter_pages", "page", "pages", "next_page",
-                   "text_font_face", "embedded_font_count", "cached_pages" })
+                   "text_font_face", "embedded_font_count", "cached_pages", "continues_before",
+                   "continues_after", "book_fraction" })
                 require(!saved.contains(key), "Checkpoint persisted a display-only field");
             require(book.session()->turn(1), "Cannot turn before background checkpoint");
             waitUntil([&] { return !book.session()->busy(); });
@@ -1662,14 +1821,36 @@ int main(int argc, char **argv)
             require(book.checkpointState().value("nickel_progress").toObject() == committed.json(),
                     "An unverified write replaced the acknowledged native baseline");
         }
-        calls.failure = NativeSaveResult::unverified("synthetic write failure");
+        calls.failWrite = false;
         const int writes = calls.writes;
-        require(book.writeNative({}, "unmappable store position").status()
-                                == NativeSaveResult::Status::LocalOnly
-                        && calls.writes == writes,
-                "Store book accepted a time-only write");
-        require(book.nativeSaveResult().status() == NativeSaveResult::Status::LocalOnly,
-                "Unsupported store position was reported as a storage failure");
+        const auto bookmark = calls.current.location;
+        const auto modified = calls.current.modified;
+        const auto mappingError = strings::get("error.invalid_source_element_offset");
+        require(book.writeNative({}, mappingError).status()
+                                == NativeSaveResult::Status::ActivityOnly
+                        && calls.writes == writes + 1 && calls.location.isEmpty()
+                        && calls.current.location == bookmark && calls.current.modified > modified,
+                "Unmapped store position did not save activity while preserving the bookmark");
+        const auto failure = book.checkpointState().value("native_writeback_failure").toObject();
+        require(failure.value("mapping_error_code") == "error.invalid_source_element_offset"
+                        && !failure.value("utc").toString().isEmpty()
+                        && !failure.contains("position"),
+                "Mapping failure lost its safe diagnostic code or retained a position");
+        require(book.writeNative("position-after-mapping-failure", {}).saved(),
+                "Mapped save did not recover after an activity-only save");
+        require(book.checkpoint(&snapshot)
+                        && snapshot.value("native_writeback_error").toString().isEmpty()
+                        && snapshot.value("native_writeback_failure").toObject() == failure
+                        && storage::readBookState(paths, "store-id")
+                                        .object.value("native_writeback_failure")
+                                        .toObject()
+                                == failure,
+                "Successful save erased the retained native failure");
+        calls.failWrite = true;
+        calls.failure = NativeSaveResult::unverified("synthetic write failure");
+        require(book.writeNative("position-two", {}).status()
+                        == NativeSaveResult::Status::Unverified,
+                "Cannot prepare a changed checkpoint for the storage failure");
         const auto changeSql = [&](const QString &sql) {
             return storage::profileTransaction(paths.directory, [&](QSqlDatabase &db) {
                 QSqlQuery query(db);
@@ -1759,6 +1940,54 @@ int main(int argc, char **argv)
         book.observeReading();
         require(calls.destroyed == 1 && !book.offerFinish(),
                 "Released book accessed its bridge again");
+    }
+    {
+        const auto retained = storage::readBookState(paths, "store-id")
+                                      .object.value("native_writeback_failure")
+                                      .toObject();
+        require(!retained.isEmpty(), "Native failure was not retained on disk");
+        Calls calls;
+        auto session = open();
+        const auto hash = session->sourceHash();
+        ReadingBook restored(std::move(session), paths.bookState("store-id"), paths, "store-id",
+                             hash, std::make_unique<Bridge>(calls), calls.current, calls.current);
+        require(restored.checkpointState().value("native_writeback_failure").toObject() == retained,
+                "Reopening erased the last native failure");
+        QTemporaryDir logs;
+        require(logs.isValid(), "Cannot create native failure diagnostics");
+        initializeDiagnostics(logs.path());
+        QJsonObject event;
+        setDiagnosticObserver([&](const QJsonObject &entry) {
+            if (entry.value("event") == "native-save")
+                event = entry;
+        });
+        const auto mappingError = strings::get("error.invalid_source_element_offset");
+        require(restored.writeNative({}, mappingError).status()
+                        == NativeSaveResult::Status::ActivityOnly,
+                "Cannot record an activity-only diagnostic");
+        require(event.value("mapping_error_code") == "error.invalid_source_element_offset"
+                        && event.value("error_code").toString().isEmpty()
+                        && event.value("mapping_failed").toBool(),
+                "Activity-only save omitted the mapping error code");
+        calls.failWrite = true;
+        calls.failure = NativeSaveResult::unverified("private/path/to/book.epub");
+        require(restored.writeNative("mapped-position", {}).failed(),
+                "Cannot record a native storage failure");
+        require(event.value("error_code") == "unknown"
+                        && !QJsonDocument(event).toJson().contains("private/path"),
+                "Native failure diagnostics exposed arbitrary error text");
+        calls.failure = NativeSaveResult::rejected();
+        require(restored.writeNative("mapped-position", {}).failed()
+                        && event.value("failed").toBool() && event.value("error_code") == "unknown"
+                        && restored.checkpointState()
+                                   .value("native_writeback_failure")
+                                   .toObject()
+                                   .value("failed")
+                                   .toBool(),
+                "A native failure without a message disappeared from diagnostics");
+        setDiagnosticObserver({});
+        require(flushDiagnostics(), "Cannot flush native failure diagnostics");
+        restored.releaseNative(false);
     }
     bool drained = false;
     ReaderSession::drain([&] { drained = true; });

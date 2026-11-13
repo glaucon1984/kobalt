@@ -7,6 +7,7 @@
 #include "ui/dialogs/modals.h"
 #include "ui/style/theme.h"
 #include "storage/annotation_database.h"
+#include "reading/rendering_mode.h"
 #include "assets/bundled_fonts.h"
 #include "reader_p.h"
 #include "app/reader/settings/plugins_section.h"
@@ -312,6 +313,7 @@ Reader::Reader(std::unique_ptr<kobalt::ReadingBook> openedBook,
     };
     bookmarks->added = [this] {
         page->bookmarked = true;
+        pageScrubber->setCurrentPageBookmarked(true);
         if (bookmarks->resolved()) {
             pageScrubber->setBookmarkedPages(bookmarks->pages());
         }
@@ -901,6 +903,31 @@ void Reader::buildBottomControls()
     pageScrubber->previewRequested = [this](int target, QSize bounds) {
         if (closing || lifecycleHidden || services.suspended())
             return;
+        if (session->state().contains("book_fraction")) {
+            const int current =
+                    int(session->page() > 0 || session->state().value("continues_before").toBool());
+            pageScrubber->setCurrentPageBookmarked(page->bookmarked);
+            QPointer<kobalt::ui::PageScrubber> scrubber(pageScrubber);
+            const auto finished = [scrubber, target](QImage image) {
+                if (scrubber)
+                    scrubber->setPreview(target, std::move(image));
+            };
+            if (target == current)
+                session->previewPage(session->page(), bounds, finished);
+            else {
+                QStringList marked;
+                if (features::enabled(preferences, features::Bookmarks))
+                    for (const auto &bookmark : bookmarks->bookmarks())
+                        marked.append(bookmark.position);
+                session->previewAdjacentPage(target - current, bounds, marked,
+                                             [scrubber, target](QImage image, bool bookmarked) {
+                                                 if (scrubber)
+                                                     scrubber->setPreview(target, std::move(image),
+                                                                          bookmarked);
+                                             });
+            }
+            return;
+        }
         QPointer<kobalt::ui::PageScrubber> scrubber(pageScrubber);
         session->previewPage(target, bounds, [scrubber, target](QImage image) {
             if (scrubber)
@@ -911,10 +938,33 @@ void Reader::buildBottomControls()
         session->cancelPagePreview();
         seekOpen = false;
     };
+    pageScrubber->chapterRequested = [this](int chapter) {
+        if (session->busy() || closing || lifecycleHidden || services.suspended())
+            return;
+        const auto chapters = session->chapters();
+        if (chapter < 0 || chapter >= chapters.size())
+            return;
+        const LinkVisit origin{ session->state().value("position").toString(), session->bookPage(),
+                                session->chapterTitle().toUpper() };
+        session->cancelPagePreview();
+        pageScrubber->beginNavigation();
+        if (session->goToChapter(chapter))
+            pendingPassage = origin;
+        else
+            pageScrubber->showCurrentPage();
+    };
+    pageScrubber->pageRequested = [this](int direction) {
+        if (session->busy() || closing || lifecycleHidden || services.suspended())
+            return;
+        session->cancelPagePreview();
+        pageScrubber->beginNavigation();
+        if (!session->turn(direction))
+            pageScrubber->showCurrentPage();
+    };
     pageScrubber->accepted = [this](int target) {
         if (session->busy() || closing || lifecycleHidden || services.suspended())
             return;
-        if (target == session->page()) {
+        if (session->state().contains("book_fraction") || target == session->page()) {
             dismissControls();
             return;
         }
@@ -978,7 +1028,7 @@ void Reader::buildOverlays()
     linkDiscoveryExit->setObjectName("rrLinkDiscoveryExit");
     linkRow->addWidget(linkDiscoveryExit);
     linkDiscovery->hide();
-    chapterGraph = new kobalt::ChapterGraph(this);
+    chapterGraph = new kobalt::ChapterGraph(this, services.phoneLayout);
     chapterGraph->changed = [this] { saveSoon(); };
     chapterGraph->denseChanged = [this](bool dense) { setDenseGraph(dense); };
     chapterGraph->setDense(preferences.value("dense_stats_chart").toBool(false));
@@ -1013,8 +1063,21 @@ void Reader::buildOverlays()
             return false;
         rows->clear();
         rows->reserve(excerpts.size());
-        for (const auto &excerpt : excerpts)
-            rows->append({ excerpt.id, excerpt.chapter, excerpt.text, {}, -1, false });
+        const auto locations = annotationRows();
+        for (const auto &excerpt : excerpts) {
+            auto chapter = excerpt.chapter;
+            if (chapter.isEmpty()) {
+                for (const auto &row : locations) {
+                    if (row.position != excerpt.id)
+                        continue;
+                    for (const auto &link : session->chapters())
+                        if (link.page >= 0 && row.page >= link.page)
+                            chapter = link.title;
+                    break;
+                }
+            }
+            rows->append({ excerpt.id, chapter, excerpt.text, {}, -1, false });
+        }
         return true;
     };
     bookmarkList->loadingCancelled = [session = QPointer<HighlightSession>(highlights.get())] {
@@ -1593,12 +1656,24 @@ void Reader::buildSettings()
             [this] { openSettingsFont("ui_mono_font_face"); });
     connect(settings->headerFooterFontButton, &QPushButton::clicked, this,
             [this] { openSettingsFont("header_footer_font_face"); });
+    connect(settings->percentageFormatButton, &QPushButton::clicked, this, [this, settings] {
+        settings->showPercentageFormats(settingsPercentageFormat, [this](const QString &format) {
+            settingsPercentageFormat = format;
+            showSettingsFonts();
+        });
+    });
     connect(settings->timeRemainingFormatButton, &QPushButton::clicked, this, [this, settings] {
         settings->showTimeRemainingFormats(settingsTimeRemainingFormat,
                                            [this](const QString &format) {
                                                settingsTimeRemainingFormat = format;
                                                showSettingsFonts();
                                            });
+    });
+    connect(settings->renderingButton, &QPushButton::clicked, this, [this, settings] {
+        settings->showRenderingModes(settingsRenderingMode, [this](const QString &mode) {
+            settingsRenderingMode = mode;
+            showSettingsFonts();
+        });
     });
     connect(settings->headerFooterWeightButton, &QPushButton::clicked, this, [this, settings] {
         auto sampleFont = ui::headerFooterFont(page->headerTextPixels());
@@ -1677,6 +1752,8 @@ void Reader::buildSettings()
         settingsDictionaryFontSize = 100;
         settingsHeaderFooterWeight = 2;
         settingsTimeRemainingFormat = "detailed";
+        settingsPercentageFormat = "whole";
+        settingsRenderingMode = renderingMode::value(renderingMode::Mode::Hybrid);
         hideTabLabelsOption->setChecked(false);
         zenModeOption->setChecked(false);
         if (wifiPowerSaverOption)

@@ -44,7 +44,8 @@
 #include "support/diagnostics.h"
 #include "support/main_thread.h"
 #include <QLocale>
-#include "engine/crengine/engine_activity.h"
+#include "engine/engine_activity.h"
+#include "engine/engine_worker.h"
 #include "storage/profile_database.h"
 #include "storage/reader_storage.h"
 #include "app/messages/recovery_message.h"
@@ -84,12 +85,14 @@
 #include <QProcessEnvironment>
 #include <QPushButton>
 #include <QScreen>
+#include <qpa/qwindowsysteminterface.h>
 #ifndef KOBALT_NO_SENSORS
 #  include <QSensorBackend>
 #  include <QSensorManager>
 #endif
 #include <QSignalSpy>
 #include <QScopeGuard>
+#include <QSemaphore>
 #include <QSlider>
 #include <QStyle>
 #include <QTemporaryDir>
@@ -270,7 +273,7 @@ std::atomic_bool delayUsbEncoding{ false }, releaseUsbEncoding{ false },
 // A delayed encoding holds the engine worker until the test releases it, so
 // the mapping outlasts the reader's deadline without a fixed sleep. The bound
 // keeps a failed test from holding the worker for good.
-QString usbPosition(const EngineDocument &model, QString *error)
+QString usbPosition(const Engine &model, QString *error)
 {
     if (delayUsbEncoding) {
         QElapsedTimer held;
@@ -366,6 +369,7 @@ public:
     std::shared_ptr<test::HostProgress> progress;
     PositionCodec positions;
     ReadingHistory::UtcClock utc;
+    ReadingTimer::Clock readingClock;
     std::function<void(ReaderHostServices &)> configureServices;
 
     void open(const QString &path, QSize size = nativeSize)
@@ -414,7 +418,7 @@ public:
                            auto book = std::make_unique<ReadingBook>(
                                    std::move(opening), statePath, paths, identity, hash,
                                    progress ? test::hostReadingBridge(progress) : nullptr, baseline,
-                                   baseline, QString(), utc);
+                                   baseline, QString(), utc, readingClock);
                            book_ = book.get();
                            auto services = desktop::readerHostServices();
                            services.desktopUi = false;
@@ -3754,6 +3758,80 @@ private slots:
     }
 
 #ifndef KOBALT_NO_SENSORS
+    // A return turn received during reflow must reach the reader and release input.
+    void rotationRoundTripKeepsReadingResponsive_data()
+    {
+        QTest::addColumn<bool>("columns");
+        QTest::newRow("one-column") << false;
+        QTest::newRow("two-columns") << true;
+    }
+
+    void rotationRoundTripKeepsReadingResponsive()
+    {
+        QFETCH(bool, columns);
+        const auto paths = testPaths();
+        QVERIFY(storage::writePreferences(
+                paths.preferences(),
+                { { "auto_rotate", true }, { "two_columns_landscape", columns } }));
+        test::Factory factory;
+        test::SensorRegistration registration("kobalt-round-trip", &factory);
+        QOrientationSensor sensor;
+        sensor.setIdentifier("kobalt-round-trip");
+        QVERIFY(sensor.start());
+        factory.backend->sample(QOrientationReading::TopUp);
+        QPointer<ReaderWindow> window;
+        auto shown = Qt::PortraitOrientation;
+        ReaderOrientation rotation(&sensor, [&](Qt::ScreenOrientation value) {
+            shown = value;
+            const bool landscape =
+                    value == Qt::LandscapeOrientation || value == Qt::InvertedLandscapeOrientation;
+            if (window)
+                window->resize(landscape ? nativeSize.transposed() : nativeSize);
+        });
+        ReaderFixture host(paths, testFonts, testPlaceholder);
+        host.rotation = &rotation;
+        CloseHost cleanup{ host };
+        QSignalSpy opened(&host, &ReaderFixture::opened);
+        host.open(fixture(), nativeSize);
+        QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 30000);
+        window = host.window();
+        window->show();
+        QTRY_VERIFY(window->readyForPresentation());
+        const auto position = host.session()->state().value("position");
+        auto *page = static_cast<ReadingPage *>(window->findChild<QWidget *>("rrPage"));
+        QVERIFY(page);
+        for (auto outward : { QOrientationReading::LeftUp, QOrientationReading::RightUp }) {
+            const auto release = std::make_shared<QSemaphore>();
+            qt::invoke(engineWorker(), [release] { release->acquire(); }, Qt::QueuedConnection);
+            bool held = true;
+            const auto unblock = qScopeGuard([&] {
+                if (held)
+                    release->release();
+            });
+            factory.backend->sample(outward);
+            QTRY_COMPARE(shown,
+                         outward == QOrientationReading::LeftUp ? Qt::LandscapeOrientation
+                                                                : Qt::InvertedLandscapeOrientation);
+            QTRY_VERIFY(host.session()->busy());
+            factory.backend->sample(QOrientationReading::TopUp);
+            auto *debounce = rotation.findChild<QTimer *>("rrOrientationDebounce");
+            QVERIFY(debounce);
+            QTRY_VERIFY(!debounce->isActive());
+            QVERIFY(shown != Qt::PortraitOrientation);
+            held = false;
+            release->release();
+            QTRY_COMPARE(shown, Qt::PortraitOrientation);
+            QTRY_VERIFY(window->readyForPresentation());
+            QVERIFY(!page->viewportTransition());
+            QCOMPARE(host.session()->state().value("position"), position);
+        }
+        const auto currentPage = host.session()->page();
+        test::skipPageTurnWindow();
+        window->pageButton(1);
+        QTRY_VERIFY(host.session()->page() > currentPage);
+        QTRY_VERIFY(window->readyForPresentation());
+    }
+
     // Settings holds rotation, then applies the last permitted sample without another movement.
     void settingsOrientationHandoff_data()
     {
@@ -4572,7 +4650,8 @@ private slots:
         host.window()->show();
         QTRY_VERIFY(host.window()->readyForPresentation());
         host.book()->setHideBookOnSleepScreen(true);
-        const auto backdrop = sleep::privateSnapshot(nativeSize, preferences);
+        const auto backdrop = sleep::privateSnapshot(dark ? nativeSize : nativeSize.transposed(),
+                                                     preferences, {}, true);
         const auto awake = host.window()->powerScreenSnapshot();
         QCOMPARE(awake.image, backdrop.image);
         QCOMPARE(awake.mode, sleep::Mode::Plain);
@@ -5063,10 +5142,43 @@ private slots:
                  "A title containing %3 must not disappear as a template placeholder");
     }
 
-    void sleepFromLandscapeKeepsTheReadingPage()
+    // The reader hands off its portrait direction without changing its reading layout.
+    void sleepHandoffKeepsPortraitDirection_data()
     {
+        QTest::addColumn<int>("readingOrientation");
+        QTest::addColumn<bool>("privateBook");
+        QTest::addColumn<bool>("followReading");
+        for (auto orientation : { Qt::PortraitOrientation, Qt::InvertedPortraitOrientation,
+                                  Qt::LandscapeOrientation, Qt::InvertedLandscapeOrientation }) {
+            for (bool privateBook : { false, true }) {
+                for (bool followReading : { false, true }) {
+                    QTest::newRow(qPrintable(QString("%1-private-%2-follow-%3")
+                                                     .arg(int(orientation))
+                                                     .arg(privateBook)
+                                                     .arg(followReading)))
+                            << int(orientation) << privateBook << followReading;
+                }
+            }
+        }
+    }
+
+    void sleepHandoffKeepsPortraitDirection()
+    {
+        QFETCH(int, readingOrientation);
+        QFETCH(bool, privateBook);
+        QFETCH(bool, followReading);
+        auto *screen = QGuiApplication::primaryScreen();
+        const auto original = screen->orientation();
+        const auto turn = [screen](Qt::ScreenOrientation value) {
+            QWindowSystemInterface::handleScreenOrientationChange(screen, value);
+            QWindowSystemInterface::flushWindowSystemEvents();
+        };
+        const auto restore = qScopeGuard([&] { turn(original); });
+        turn(Qt::ScreenOrientation(readingOrientation));
         const auto paths = testPaths();
-        QVERIFY(storage::writePreferences(paths.preferences(), { { sleep::designKey, "letter" } }));
+        QVERIFY(storage::writePreferences(paths.preferences(),
+                                          { { sleep::designKey, "letter" },
+                                            { sleep::followOrientationKey, followReading } }));
         auto state = std::make_shared<test::SleepPresentationState>();
         ReaderFixture host(paths, testFonts, testPlaceholder);
         host.configureServices = [state](ReaderHostServices &services) {
@@ -5076,19 +5188,30 @@ private slots:
         };
         CloseHost cleanup{ host };
         QSignalSpy opened(&host, &ReaderFixture::opened);
-        host.open(fixture(), QSize(1448, 1072));
+        const bool landscape = readingOrientation == Qt::LandscapeOrientation
+                || readingOrientation == Qt::InvertedLandscapeOrientation;
+        host.open(fixture(), landscape ? QSize(1448, 1072) : QSize(1072, 1448));
         QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 30000);
         host.window()->show();
         QTRY_VERIFY(host.window()->readyForPresentation());
         auto *page = static_cast<ReadingPage *>(host.window()->findChild<QWidget *>("rrPage"));
         QVERIFY(page);
         const auto readingSize = page->size();
-        QVERIFY(readingSize.width() > readingSize.height());
+        QCOMPARE(readingSize.width() > readingSize.height(), landscape);
         const auto readingPage = host.session()->page();
+        host.book()->setHideBookOnSleepScreen(privateBook);
         host.window()->sleepReader();
         host.window()->sleepViewReady();
-        QCOMPARE(state->orientation, Qt::PortraitOrientation);
-        QCOMPARE(state->image.size(), QSize(readingSize.height(), readingSize.width()));
+        const auto expectedOrientation = followReading ? Qt::ScreenOrientation(readingOrientation)
+                : readingOrientation == Qt::InvertedPortraitOrientation
+                ? Qt::InvertedPortraitOrientation
+                : Qt::PortraitOrientation;
+        QCOMPARE(state->orientation, expectedOrientation);
+        QCOMPARE(state->image.size(),
+                 landscape && !followReading ? readingSize.transposed() : readingSize);
+        turn(Qt::PortraitOrientation);
+        QCOMPARE(host.window()->powerScreenSnapshot().orientation, expectedOrientation);
+        turn(Qt::ScreenOrientation(readingOrientation));
         host.window()->wakeReader();
         QTRY_VERIFY(host.window()->readyForPresentation());
         QCOMPARE(page->size(), readingSize);
@@ -5421,7 +5544,8 @@ private slots:
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
         const auto state = std::make_shared<test::SleepPresentationState>();
-        ReaderFixture host(testPaths(), testFonts, testPlaceholder);
+        const auto paths = testPaths();
+        ReaderFixture host(paths, testFonts, testPlaceholder);
         host.configureServices = [&](ReaderHostServices &services) {
             services.sleepOverlayDirectories = { directory.path() };
             services.presentation = [state](QWidget *) {
@@ -5455,6 +5579,23 @@ private slots:
         QTRY_VERIFY(gallery && gallery->isVisible());
         auto *grid = gallery->findChild<QWidget *>("rrSleepGalleryGrid");
         QVERIFY(grid && grid->isVisible());
+        auto *follow = gallery->findChild<QPushButton *>("rrSleepFollowOrientation");
+        QVERIFY(follow);
+        QVERIFY(click(canvas, follow));
+        QTRY_COMPARE(storage::readPreferences(paths.preferences())
+                             .object.value(sleep::followOrientationKey),
+                     QJsonValue(false));
+        auto *notice = gallery->findChild<QWidget *>("rrSleepOrientationNotice");
+        QVERIFY(notice && notice->isVisible());
+        auto *noticeText = notice->findChild<QLabel *>("rrButtonFeedbackText");
+        QVERIFY(noticeText);
+        QCOMPARE(noticeText->text(), strings::get("sleep.rotation_disabled"));
+        QVERIFY(click(canvas, follow));
+        QTRY_COMPARE(storage::readPreferences(paths.preferences())
+                             .object.value(sleep::followOrientationKey),
+                     QJsonValue(true));
+        QCOMPARE(noticeText->text(), strings::get("sleep.rotation_enabled"));
+
         auto *counter = gallery->findChild<QLabel *>("rrSleepGalleryPage");
         QVERIFY(counter);
         const auto firstPage = counter->text();
@@ -5891,6 +6032,134 @@ private slots:
         QTRY_VERIFY(wifi->isVisible());
         wifiChanged({ false, false, -1 });
         QTRY_VERIFY(!wifi->isVisible());
+    }
+
+    // Uses the real reading clock and Settings checklist to hide session text without stopping time collection.
+    void readingTimeStatsVisibility_data()
+    {
+        QTest::addColumn<bool>("hidden");
+        QTest::addColumn<QSize>("size");
+        for (bool hidden : { false, true })
+            for (const QSize size : { QSize(1072, 1448), QSize(720, 1600) })
+                QTest::newRow(qPrintable(
+                        QString("%1-%2").arg(hidden ? "hidden" : "visible").arg(size.width())))
+                        << hidden << size;
+    }
+
+    void readingTimeStatsVisibility()
+    {
+        QFETCH(bool, hidden);
+        QFETCH(QSize, size);
+        const auto paths = testPaths();
+        QVERIFY(storage::writeJson(paths.preferences(), { { "disable_stats", hidden } }));
+        qint64 now = 0;
+        ReaderFixture host(paths, testFonts, testPlaceholder);
+        host.readingClock = [&] { return now; };
+        CloseHost cleanup{ host };
+        QSignalSpy opened(&host, &ReaderFixture::opened);
+        host.open(fixture(), size);
+        QTRY_COMPARE(opened.count(), 1);
+        Canvas canvas(host.window(), size);
+        canvas.resize(900, 900);
+        canvas.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&canvas));
+        QTRY_VERIFY(!host.session()->busy());
+        QTRY_VERIFY(host.book()->readingActive());
+        now += 12 * 60000;
+        QVERIFY(clickAt(canvas, QPoint(size.width() / 2, size.height() / 2)));
+        auto *message = host.window()->findChild<QLabel *>("rrMenuSession");
+        auto *clock = host.window()->findChild<QLabel *>("rrMenuClock");
+        auto *battery = host.window()->findChild<QWidget *>("rrMenuBattery");
+        auto *timer = host.window()->findChild<QTimer *>("rrClockTimer");
+        QVERIFY(message && clock && battery && timer);
+        const auto capture = qEnvironmentVariable("KOBALT_STATS_VISIBILITY_CAPTURE_DIR");
+        if (!capture.isEmpty()) {
+            QVERIFY(QDir().mkpath(capture));
+            QCoreApplication::processEvents();
+            QVERIFY(host.window()->grab().save(
+                    capture
+                    + QString("/%1-menu-stats-%2.png")
+                              .arg(size.width() == 720 ? "phone" : "six-inch")
+                              .arg(hidden ? "hidden" : "visible")));
+        }
+        const auto check = [&] {
+            return message->isVisible() == !hidden
+                    && message->text()
+                    == (hidden ? QString() : strings::get("reader.session_minutes").arg(12))
+                    && clock->isVisible() && battery->isVisible()
+                    && host.book()->sessionReadingMilliseconds() == 12 * 60000;
+        };
+        QVERIFY2(
+                check(),
+                "Session message must follow Stats visibility without changing reading time or status icons");
+        const auto clockBounds = clock->geometry();
+        const auto batteryBounds = battery->geometry();
+        for (int pass = 0; pass < 2; ++pass) {
+            QVERIFY(click(canvas, host.window()->findChild<QPushButton *>("rrSettings")));
+            QVERIFY(click(canvas, host.window()->findChild<QPushButton *>("rrSettingsSystem")));
+            auto *features = host.window()->findChild<QPushButton *>("rrDisabledFeatures");
+            QVERIFY(features);
+            for (int page = 0; !features->isVisible() && page < 10; ++page)
+                QVERIFY(click(canvas,
+                              host.window()->findChild<QPushButton *>("rrSettingsOptionsNext")));
+            QVERIFY(click(canvas, features));
+            auto *option = host.window()->findChild<QCheckBox *>("rrDisableFeature_disable_stats");
+            QVERIFY(option);
+            QCOMPARE(option->isChecked(), hidden);
+            QVERIFY(click(canvas, option));
+            QVERIFY(click(canvas,
+                          host.window()->findChild<QPushButton *>("rrDisabledFeaturesDone")));
+            QTRY_VERIFY(!host.window()->findChild<QWidget *>("rrDisabledFeaturesPopup"));
+            auto *back = host.window()->findChild<QPushButton *>("rrSettingsBack");
+            if (back->isVisible())
+                QVERIFY(click(canvas, back));
+            QVERIFY(click(canvas, host.window()->findChild<QPushButton *>("rrSettingsClose")));
+            QTRY_VERIFY(!host.window()->findChild<QWidget *>("rrGeneralSettings")->isVisible());
+            hidden = !hidden;
+            QTRY_COMPARE(storage::readJson(paths.preferences()).value("disable_stats").toBool(),
+                         hidden);
+            QVERIFY(clickAt(canvas, QPoint(size.width() / 2, size.height() / 2)));
+            QVERIFY2(
+                    check(),
+                    "Session message must follow Stats visibility without changing reading time or status icons");
+            QCOMPARE(clock->geometry(), clockBounds);
+            QCOMPARE(battery->geometry(), batteryBounds);
+            // Timer updates and a later menu presentation must keep the same visibility.
+            QVERIFY(QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection));
+            QVERIFY2(
+                    check(),
+                    "Session message must follow Stats visibility without changing reading time or status icons");
+            QVERIFY(click(canvas, host.window()->findChild<QPushButton *>("rrNavChapters")));
+            QVERIFY2(
+                    check(),
+                    "Session message must follow Stats visibility without changing reading time or status icons");
+            QVERIFY(click(canvas, host.window()->findChild<QPushButton *>("rrNavChapters")));
+            QVERIFY2(
+                    check(),
+                    "Session message must follow Stats visibility without changing reading time or status icons");
+        }
+        // Hiding the feature does not disable the active reading clock.
+        QVERIFY(clickAt(canvas, QPoint(size.width() / 2, size.height() / 2)));
+        QTRY_VERIFY(host.book()->readingActive());
+        now += 60000;
+        QCOMPARE(host.book()->sessionReadingMilliseconds(), qint64(13 * 60000));
+        host.shutdown();
+        QTRY_VERIFY(host.idle());
+        host.open(fixture(), size);
+        QTRY_COMPARE(opened.count(), 2);
+        Canvas reopened(host.window(), size);
+        reopened.resize(900, 900);
+        reopened.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&reopened));
+        QTRY_VERIFY(host.book()->readingActive());
+        now += 12 * 60000;
+        QVERIFY(clickAt(reopened, QPoint(size.width() / 2, size.height() / 2)));
+        message = host.window()->findChild<QLabel *>("rrMenuSession");
+        QVERIFY(message);
+        QCOMPARE(message->isVisible(), !hidden);
+        QCOMPARE(message->text(),
+                 hidden ? QString() : strings::get("reader.session_minutes").arg(12));
+        QCOMPARE(host.book()->sessionReadingMilliseconds(), qint64(12 * 60000));
     }
 
     // Checks that reading-time text fits and centers in the status strip for each minute width and radio icon combination.
@@ -7247,6 +7516,35 @@ private slots:
         host.window()->pageButton(1);
         QTRY_COMPARE(host.session()->page(), start + 2);
         QTRY_VERIFY(scrubber->slider()->value() != open);
+    }
+
+    // Checks that a host with an opening view gets the reader only after the missing text preset previews are drawn.
+    void textPresetsBeforePresentation()
+    {
+        auto paths = testPaths();
+        ReaderFixture host(paths, testFonts, testPlaceholder);
+        host.configureServices = [](ReaderHostServices &services) {
+            services.textPresetsBeforePresentation = true;
+        };
+        CloseHost cleanup{ host };
+        QSignalSpy opened(&host, &ReaderFixture::opened);
+        host.open(textBook, nativeSize);
+        QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 30000);
+        bool presented = false;
+        host.window()->preparePresentation([&](bool ready) { presented = ready; });
+        // A new profile has no stored previews: they are drawn first.
+        QVERIFY(!presented);
+        QTRY_VERIFY_WITH_TIMEOUT(presented, 10000);
+        QVERIFY(host.window()->property("text_presets_prerendered").toBool());
+        const int drawn = host.window()->property("text_preset_prerender_renders").toInt();
+        QVERIFY(drawn > 0);
+        // Nothing is left to draw after the reader is shown.
+        Canvas canvas(host.window(), nativeSize);
+        const int start = host.session()->page();
+        QVERIFY(host.session()->turn(1));
+        QTRY_COMPARE(host.session()->page(), start + 1);
+        QTRY_VERIFY(!host.session()->busy());
+        QCOMPARE(host.window()->property("text_preset_prerender_renders").toInt(), drawn);
     }
 
     // While a book sits open and nobody reads, nothing on the main thread may
