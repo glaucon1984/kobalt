@@ -5455,15 +5455,32 @@ private slots:
         QTRY_VERIFY(gallery && gallery->isVisible());
         auto *grid = gallery->findChild<QWidget *>("rrSleepGalleryGrid");
         QVERIFY(grid && grid->isVisible());
+        auto *counter = gallery->findChild<QLabel *>("rrSleepGalleryPage");
+        QVERIFY(counter);
+        const auto firstPage = counter->text();
+        const auto readingPage = host.session()->state().value("page");
+        host.window()->physicalPageButton(Qt::Key_F23, -1);
+        QCOMPARE(counter->text(), firstPage);
         const int pages = 4;
         for (int index = 0; index < pages; ++index) {
             if (!capture.isEmpty())
                 QVERIFY(host.window()->grab().save(
                         capture + QString("/sleep-gallery-%1.png").arg(index + 1)));
-            if (index + 1 < pages)
-                QVERIFY(click(canvas,
-                              host.window()->findChild<QPushButton *>("rrSleepGalleryNext")));
+            if (index + 1 < pages) {
+                const auto before = counter->text();
+                host.window()->physicalPageButton(Qt::Key_F24, 1);
+                QVERIFY(counter->text() != before);
+            }
         }
+        const auto lastPage = counter->text();
+        host.window()->physicalPageButton(Qt::Key_F24, 1);
+        QCOMPARE(counter->text(), lastPage);
+        for (int index = 1; index < pages; ++index)
+            host.window()->physicalPageButton(Qt::Key_F23, -1);
+        QCOMPARE(counter->text(), firstPage);
+        QCOMPARE(host.session()->state().value("page"), readingPage);
+        for (int index = 1; index < pages; ++index)
+            host.window()->physicalPageButton(Qt::Key_F24, 1);
         // PNG over text is the fourth entry on the last page. Without PNGs it is
         // unavailable, and a tap explains where to add them.
         const auto cell = QPoint(grid->width() * 3 / 4, grid->height() * 3 / 4);
@@ -8836,7 +8853,7 @@ private slots:
         QVERIFY(batteryChanged);
         batteryChanged();
         turn();
-        QVERIFY(!host.window()->flushBeforeStandby());
+        QTRY_VERIFY(!host.window()->flushBeforeStandby());
         QTRY_COMPARE(stored(), current());
         QTRY_VERIFY(host.window()->flushBeforeStandby());
         QVERIFY(!storage::profileHasUnsyncedWrites());
@@ -8846,8 +8863,11 @@ private slots:
         storage::closeProfile();
         QVERIFY(QFile::setPermissions(paths.database(), QFileDevice::ReadOwner));
         turn();
+        // The engine can finish before the queued refresh marks the position
+        // for saving. Keep asking until standby queues the save, or its failure
+        // has already completed.
+        QTRY_VERIFY(!host.window()->flushBeforeStandby() || failures == 1);
         if (completeFailureFirst) {
-            host.window()->flushBeforeStandby();
             QTRY_COMPARE(failures, 1);
         }
         // The failed batch can finish before Nickel asks about standby.

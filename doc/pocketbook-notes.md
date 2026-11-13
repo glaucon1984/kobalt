@@ -1117,3 +1117,26 @@ the host keeps the device awake for 2 s after a release).
 
 X-Ray itself (`daveallie/kobalt-plugins`, no licence file, so it is not copied into this
 repository) is installed by copying its `xray/` folder to `applications/kobalt/plugins/xray/`.
+
+## Upstream v1.0-beta.8 (2026-11-13): the release tag
+
+The beta 8 release (`6791750`, main = tag) is eight commits past develop `2a708d1`, which the port
+already had through the plugins merge. What it brings: pages without height before some chapters
+are left out (a CREngine patch, `crengine-empty-pages.patch`, with `rendering_version` 3, so books
+are repaginated once but not reparsed), HTTP KOSync servers accepted alongside HTTPS, plain ink
+instead of grey for captions and disabled labels in the light theme (`ui::labelInk`; grey is
+dithered on e-ink), the page buttons routed through the gallery's own pagers, and a Kobo standby
+refused while a book opens.
+
+One conflict, in `platforms/desktop/CMakeLists.txt`: the desktop check list and the settings label,
+where the port had added the plugin tests and upstream added `themeChanges` and
+`settingsSectionCaptions`. Both kept.
+
+Nothing in `platforms/pocketbook/` needed to change:
+
+- The standby refusal is Kobo's `NativeLifecycle::openingWorkPending`. The PocketBook host already
+  keeps the device awake while a book opens (`openingBusy` in `Host::updateKeepAwake`).
+- HTTP KOSync goes through the reader's default network manager, since `kosyncHttp` is still not
+  wired.
+
+Dependencies: only the CREngine patch list moved, so `remote-rebuild-deps.sh` rebuilt the set.
