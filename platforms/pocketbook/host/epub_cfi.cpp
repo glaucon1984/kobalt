@@ -1,6 +1,6 @@
 #include "epub_cfi.h"
-#include "engine/crengine/column_view.h"
-#include "engine/crengine/engine_document.h"
+#include "engine/blaze/adapter/column_view.h"
+#include "engine/blaze/adapter/engine_document.h"
 #include "support/strings.h"
 #include <lvdocview.h>
 #include <lvtinydom.h>
@@ -144,12 +144,17 @@ ldomNode *fragmentAt(ldomDocument *doc, int spine) {
     }
     return nullptr;
 }
+// PBReader locations are matched against CREngine's DOM, as Kobo's codec matches Nickel's.
+// Another engine has no such position.
+const EngineDocument *crengine(const Engine &engine) {
+    return qstrcmp(engine.name(), "crengine") == 0 ? static_cast<const EngineDocument *>(&engine) : nullptr;
+}
 QString pointer(ldomNode *node, int offset) {
     return qstring(ldomXPointer(node, offset).toString());
 }
 }
 
-QString PocketBookPositionCodec::encode(const EngineDocument &model, QString *error) {
+QString PocketBookPositionCodec::encode(const Engine &engine, QString *error) {
     auto fail = [error](const QString &message) {
         if (error)
             *error = message;
@@ -157,6 +162,9 @@ QString PocketBookPositionCodec::encode(const EngineDocument &model, QString *er
     };
     if (error)
         error->clear();
+    if (!crengine(engine))
+        return fail(strings::get("error.no_supported_native_reading_position"));
+    const auto &model = *crengine(engine);
     if (!model.engine_)
         return fail(strings::get("error.no_reading_position"));
     auto *doc = model.engine_->getDocument();
@@ -207,7 +215,7 @@ QString PocketBookPositionCodec::encode(const EngineDocument &model, QString *er
     return locationPrefix + cfi + ')';
 }
 
-QString PocketBookPositionCodec::decode(const EngineDocument &model, const QString &location, QString *error) {
+QString PocketBookPositionCodec::decode(const Engine &engine, const QString &location, QString *error) {
     auto fail = [error](const QString &message) {
         if (error)
             *error = message;
@@ -215,6 +223,9 @@ QString PocketBookPositionCodec::decode(const EngineDocument &model, const QStri
     };
     if (error)
         error->clear();
+    if (!crengine(engine))
+        return fail(strings::get("error.no_supported_native_reading_position"));
+    const auto &model = *crengine(engine);
     if (!model.engine_ || location.isEmpty() || location.size() > 4096)
         return fail(strings::get("error.no_supported_native_reading_position"));
     const int start = location.indexOf(QLatin1String("epubcfi("));

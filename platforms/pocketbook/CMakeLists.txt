@@ -2,7 +2,8 @@
 # ReaderController from the standalone (desktop and Android) host, with its KOBALT_POCKETBOOK hooks, the pbink inkview
 # platform plugin (pbink/) and a small host (host/), linked into one static-Qt executable.
 # Third-party libraries come prebuilt from KOBALT_DEPS (Kobalt's own dependencies/ recipes, built
-# once by tools/kobalt-check with the same toolchain; tools/rebuild-deps.sh). See doc/building.md.
+# once by tools/kobalt-check with the same toolchain; tools/rebuild-deps.sh). The reader engine
+# (koblaze, src/engine/blaze/) is built here from this repository, as on Kobo. See doc/building.md.
 cmake_minimum_required(VERSION 3.22)
 project(KobaltPocketBook LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
@@ -13,13 +14,14 @@ set(CMAKE_AUTORCC ON)
 set(KOBALT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." CACHE PATH "Kobalt source tree (this repository)")
 # Normalised: the same file under two spellings is "multiple rules" to ninja.
 get_filename_component(KOBALT_ROOT "${KOBALT_ROOT}" ABSOLUTE)
-set(KOBALT_DEPS "/work/kobalt-deps" CACHE PATH "Prebuilt Kobalt dependencies: install/, crengine-src/, crengine-build/")
+set(KOBALT_DEPS "/work/kobalt-deps" CACHE PATH "Prebuilt Kobalt dependencies: install/")
 set(PB_SYSROOT "/work/sdk/SDK-B288/usr/arm-obreey-linux-gnueabi/sysroot" CACHE PATH "PocketBook SDK sysroot (inkview)")
 set(PB_CACERT "/work/cacert.pem" CACHE FILEPATH "Mozilla CA bundle packaged for TLS (the firmware has no root store Qt finds)")
 set(prefix "${KOBALT_DEPS}/install")
-set(CRENGINE_SOURCE "${KOBALT_DEPS}/crengine-src")
-set(CRENGINE_BUILD "${KOBALT_DEPS}/crengine-build")
 set(KOBALT_QT_MAJOR 5)
+# CRENGINE_SOURCE and CRENGINE_BUILD: the repository's engine, built against the prefix above.
+include("${KOBALT_ROOT}/dependencies/local-engine.cmake")
+kobalt_local_engine()
 
 find_package(Qt5 REQUIRED COMPONENTS Core Gui Widgets Network Sql Sensors
     FbSupport EventDispatcherSupport ServiceSupport FontDatabaseSupport)
@@ -41,6 +43,11 @@ file(GLOB_RECURSE shared CONFIGURE_DEPENDS "${source}/*.cpp" "${source}/*.h")
 list(FILTER shared EXCLUDE REGEX "/(library|app/library)/")
 # The scenario player belongs to Kobo's evaluation packages only.
 list(FILTER shared EXCLUDE REGEX "/src/scenario/")
+# The engine library has its own build (kobalt_local_engine); only its adapter is Kobalt code.
+list(FILTER shared EXCLUDE REGEX "/src/engine/blaze/")
+file(GLOB_RECURSE engine_adapter CONFIGURE_DEPENDS "${source}/engine/blaze/adapter/*.cpp"
+    "${source}/engine/blaze/adapter/*.h")
+list(APPEND shared ${engine_adapter})
 set(plugin "${CMAKE_CURRENT_SOURCE_DIR}/pbink")
 set(host "${CMAKE_CURRENT_SOURCE_DIR}/host")
 add_executable(kobalt-pb ${shared}
@@ -85,7 +92,7 @@ qt5_add_resources(compiled_resources "${CMAKE_CURRENT_BINARY_DIR}/notices.qrc")
 target_sources(kobalt-pb PRIVATE ${compiled_resources})
 
 # As on Kobo and Android: route CREngine's glyph loading through Kobalt's wrappers
-# (src/engine/crengine/font_weight.cpp) by renaming the FreeType calls inside libcrengine.a.
+# (src/engine/blaze/adapter/font_weight.cpp) by renaming the FreeType calls inside libcrengine.a.
 set(engine "${CMAKE_CURRENT_BINARY_DIR}/libcrengine-reader.a")
 add_custom_command(OUTPUT "${engine}"
     COMMAND "${CMAKE_OBJCOPY}" --redefine-sym FT_Load_Glyph=kobalt_font_load_glyph
@@ -93,6 +100,8 @@ add_custom_command(OUTPUT "${engine}"
     DEPENDS "${CRENGINE_BUILD}/libcrengine.a" VERBATIM)
 add_custom_target(reader-engine DEPENDS "${engine}")
 add_dependencies(kobalt-pb reader-engine)
+add_dependencies(reader-engine kobalt-local-engine)
+add_dependencies(kobalt-pb kobalt-local-engine)
 
 target_link_directories(kobalt-pb PRIVATE "${prefix}/lib" "${PB_SYSROOT}/usr/local/lib")
 target_link_libraries(kobalt-pb PRIVATE

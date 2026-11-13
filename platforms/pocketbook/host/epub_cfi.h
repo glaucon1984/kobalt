@@ -3,7 +3,7 @@
 #include <QString>
 
 namespace kobalt {
-class EngineDocument;
+class Engine;
 }
 
 namespace kobalt::pocketbook {
@@ -20,8 +20,8 @@ namespace kobalt::pocketbook {
 // The codec runs on the engine worker, like Kobo's.
 class PocketBookPositionCodec {
 public:
-    static QString decode(const EngineDocument &model, const QString &location, QString *error);
-    static QString encode(const EngineDocument &model, QString *error);
+    static QString decode(const Engine &engine, const QString &location, QString *error);
+    static QString encode(const Engine &engine, QString *error);
     // The chapter part of a location: "pbr:/webkit?##epubcfi(/6/22!)", decoded as its body start.
     static QString chapterStart(const QString &location);
 };

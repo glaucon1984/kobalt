@@ -1161,3 +1161,43 @@ a full flash (`flashAfterTurn`, as for the closing KOSync dialogs), logged as "f
 page under the closed Settings". Settings left for Light or Stats (bars still up) drops the clock,
 since closing the menu flashes anyway, and so does a flash Kobalt asks for itself (a tap on the
 page closes Settings with `reader_full_flash`), so that path still flashes once.
+
+## Upstream feature/blaze-engine a4bb4d1 merged for testing (2026-11-13, not released)
+
+Nico's engine branch (`feature/blaze-engine` at `a4bb4d1`), on upstream develop `f0befca`, which
+is 17 commits past v1.0-beta.8; the branch adds 71 commits. Merged on `feature/pocketbook-blaze`
+only, to try it on the Era Lite; not merged into `pocketbook` and not released, since upstream has
+not released it either.
+
+What it brings: an engine interface (`src/engine/engine.h`) with CREngine kept in the repository
+as koblaze (`src/engine/blaze/`, the adapter in `src/engine/blaze/adapter/`), a chapter mode that
+lays out only the chapter on screen, and the Rendering setting (System → Engine): Hybrid, the new
+default, opens in chapter mode and builds the whole book in idle time, then switches to it; More
+accurate lays out the whole book as before. Page numbers show Calculating or an estimate until
+the whole book is counted. Header and footer Custom slots gain page-turn and chapter-load times.
+
+Eight conflicts, mostly the plugins (not upstream) against upstream's changes. Both kept: the
+plugin strings beside the Engine section, the plugin chooser marker beside the save button's new
+type, the Plugins section after the Engine section at the end of System, the plugin tests in the
+desktop lists, and Lua in `dependencies/CMakeLists.txt` with CREngine gone from it.
+`engine_document.h` moved to the adapter; the port's friend declaration for its position codec
+moved with it. The port's cover and author fixes in `engine_document.cpp` followed the rename.
+
+What the port needed:
+
+- `CMakeLists.txt` builds the engine from the repository (`kobalt_local_engine()`, as on Kobo)
+  against the prebuilt prefix, keeps the vendored sources out of the glob (only the adapter is
+  Kobalt code) and waits for `kobalt-local-engine` before the symbol rename and the link.
+- `epub_cfi`: the codec takes `const Engine &` and works only on CREngine documents
+  (`name() == "crengine"`), as Kobo's Nickel codec now does. Fragment ids keep the real spine
+  index in chapter mode, so a location in a loaded chapter maps as before; one in a chapter that
+  is not loaded fails and is logged.
+- Dependencies: the third-party libraries are unchanged, so the prebuilt prefix was reused and
+  `remote-rebuild-deps.sh` was not run. `tools/rebuild-deps.sh` still copies CREngine out of the
+  dependency set, which no longer has it; it needs changing before this reaches a release.
+- Built in its own source copy and build directory on the build host (`kobalt-blaze`,
+  `kobalt-pb-blaze`), leaving the release build's alone.
+
+Saved data: upstream adds only optional fields (`rendering_mode`, `page_estimate` and others) and
+keeps every format version, so 0.11.1 reads a profile this build wrote. The device's install and
+profile before the test: `backups/era-lite-before-blaze-20261113` in the parent folder.
