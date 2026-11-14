@@ -102,8 +102,11 @@ public:
                                                QString *error) = 0;
     // Negative is before the current source anchor; positive is beyond it.
     virtual int comparePosition(const QString &position, QString *error) const = 0;
+    // Describes a remote passage in whole-book coordinates without moving the reader.
+    virtual int describePosition(const QString &position, QString *chapter, int *page,
+                                 QString *error, const std::function<bool()> &current) = 0;
     virtual int comparePlatformPosition(const PositionCodec &codec, const QString &location,
-                                        QString *error) const = 0;
+                                        QString *error) = 0;
     // The shared location of an engine position. False when the position is
     // not in a spine item or is in generated content. *exact is false when
     // the location is the nearest one that the source has, for example for
@@ -187,7 +190,8 @@ public:
     virtual PagePreview previewTurn(int direction,
                                     const QVector<QPair<QString, QString>> &ranges = {},
                                     const std::function<bool()> &current = {},
-                                    const QStringList &bookmarkPositions = {}) = 0;
+                                    const QStringList &bookmarkPositions = {},
+                                    bool adoptingFullDocument = false) = 0;
     // One screen that starts at the reading position instead of a page break. With
     // stayInChapter, it starts earlier near a chapter's end, so that a full screen stays in
     // the chapter. Without it, the text continues past the chapter to fill the screen.
@@ -276,6 +280,10 @@ public:
 
     // True while a document from prepareFullDocument() waits to be shown.
     virtual bool fullDocumentReady() const { return false; }
+
+    // Resolve an adopting turn from the edge column of the screen being left.
+    // A negative result uses the usual turn from the adopted reading position.
+    virtual int preparedSpreadTurn(int) const { return -1; }
 
     // True once the build of that document has started.
     virtual bool fullDocumentStarted() const { return false; }

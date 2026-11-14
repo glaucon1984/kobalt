@@ -1221,3 +1221,23 @@ Nothing in `platforms/pocketbook/` changed; dependencies were not rebuilt.
 Saved data: SQLite schema 4, settings schema 1 and book-record format 1 are unchanged. The
 profile can hold both engines' caches (128 MiB budget each). Device backup before the update:
 `backups/era-lite-before-blaze-update-20261114` in the parent folder.
+
+### Upstream feature/blaze-engine 52c522a merged (2026-11-14, not released)
+
+46 fixes past `89f861d`, mostly for chapter mode: highlights, links, page notes and borders across
+chapter slices, search in chapters not yet opened, exact native positions in unloaded chapters
+(the PBReader codec case), the reading page kept when Hybrid adopts the whole book, text presets
+that stick, conditional fast shaping and percent-encoded EPUB links. `rendering_version` 7: books
+repaginate once; the parser format and saved data are unchanged.
+
+One conflict, the desktop test lists: the plugin tests and upstream's new ones, both kept. Nothing
+in `platforms/pocketbook/` changed; dependencies were not rebuilt.
+
+Upstream `develop` (`5da4c6a`) has six fixes the engine branch doesn't have yet. A test merge
+(`git merge-tree`) conflicts with the engine branch: the paragraph float fix is a new CREngine
+patch, while the engine branch has folded the patch series into `src/engine/blaze/`, plus
+`src/reading/opening_job.h`, the cache policy and documentation. Left for upstream's own merge
+of develop into the engine branch.
+
+Device backup before the update: `backups/era-lite-before-blaze-52c522a-20261114` in the parent
+folder.

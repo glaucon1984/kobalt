@@ -116,7 +116,10 @@ QImage presetPreviewImage(const StyleSample &sample, QSize size, bool dark)
 
 ReaderSession *Reader::textPresetSettings()
 {
-    return appearanceEdit.edited() && appearanceEdit.ready() ? appearanceEdit.preview() : session;
+    return appearanceEdit.edited() && appearanceEdit.preview()
+                    && appearanceEdit.previewState() != AppearanceEditSession::PreviewState::Failed
+            ? appearanceEdit.preview()
+            : session;
 }
 
 TextPresetView Reader::textPresetView(const Preset &preset)
@@ -166,7 +169,7 @@ void Reader::buildTextPresets()
 void Reader::textPresetChoice(QVector<Preset> *presets, QString *selected, bool *modified)
 {
     *presets = textpresets::load(preferences);
-    const auto state = textPresetSettings()->state();
+    const auto state = textPresetSettings()->requestedAppearance().fields();
     const QString applied = book ? book->textPreset() : QString();
     selected->clear();
     for (const auto &preset : *presets)
@@ -187,7 +190,9 @@ void Reader::setTextPresetGalleryPresets(TextPresetGallery *gallery, const QVect
         all.append(textPresetView(preset));
     gallery->setPresets(all, selected,
                         // The first cell always offers Save current text.
-                        true, presetSummary(textpresets::capture(textPresetSettings()->state())));
+                        true,
+                        presetSummary(textpresets::capture(
+                                textPresetSettings()->requestedAppearance().fields())));
 }
 
 void Reader::syncTextPresets()
@@ -229,7 +234,9 @@ void Reader::applyTextPreset(const QString &id)
     if (!preset || session->temporaryTypography())
         return;
     book->setTextPreset(id);
-    if (textpresets::matches(*preset, textPresetSettings()->state())) {
+    // A pending preview can still show the preset we are switching back to.
+    if (!appearanceEdit.edited()
+        && textpresets::matches(*preset, textPresetSettings()->requestedAppearance().fields())) {
         syncTextPresets();
         refresh();
         return;
@@ -264,7 +271,7 @@ void Reader::updateTextPreset(const QString &id)
     for (auto &preset : presets) {
         if (preset.id != id)
             continue;
-        auto captured = textpresets::capture(textPresetSettings()->state());
+        auto captured = textpresets::capture(textPresetSettings()->requestedAppearance().fields());
         captured.id = preset.id;
         captured.name = preset.name;
         preset = captured;
@@ -313,7 +320,9 @@ void Reader::editTextPresetName(const QString &id)
     const auto *existing = textpresets::find(presets, id);
     if (!id.isEmpty() && !existing)
         return;
-    auto preset = existing ? *existing : textpresets::capture(textPresetSettings()->state());
+    auto preset = existing
+            ? *existing
+            : textpresets::capture(textPresetSettings()->requestedAppearance().fields());
     auto *dialog = new ui::ChoiceModal(
             this,
             { QString(),
@@ -604,6 +613,7 @@ QVector<Reader::TextPresetPreview> Reader::textPresetPreviews(const QVector<Pres
                                                               const QStringList &ids, QSize size)
 {
     const auto fonts = session->fontInputs();
+    const auto catalog = session->fontCatalog();
     // The tile's size and the paper colour also decide its pixels.
     const QByteArray tile = QByteArray::number(size.width()) + 'x'
             + QByteArray::number(size.height()) + (darkTheme ? 'd' : 'l');
@@ -613,7 +623,7 @@ QVector<Reader::TextPresetPreview> Reader::textPresetPreviews(const QVector<Pres
             TextPresetPreview preview{
                 preset->id, preset->fontFace, textPresetPreviewRequest(*preset, size), {}
             };
-            preview.tile = styleSampleKey(fonts, preview.request) + tile;
+            preview.tile = styleSampleKey(fonts, preview.request, catalog) + tile;
             previews.append(preview);
         }
     return previews;

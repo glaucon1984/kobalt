@@ -5828,6 +5828,38 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
         QCOMPARE(restarted.value("page").toInt(), 0);
         for (const auto *key : { "font_face", "font_pixels", "line_spacing", "text_alignment" })
             QCOMPARE(restarted.value(key), first.value(key));
+        // A second preset can have the same typography. Keep the name chosen
+        // for new books when the first book is opened again.
+        fixture.window.readerWindow()->close();
+        QTRY_VERIFY(fixture.window.idle());
+        auto prefs = storage::readJson(fixture.paths.preferences());
+        auto presets = textpresets::examples();
+        auto duplicate = presets.first();
+        duplicate.id = "preset-duplicate";
+        duplicate.name = "Same text";
+        duplicate.example = false;
+        presets.prepend(duplicate);
+        textpresets::store(prefs, presets);
+        prefs[textpresets::newBookKey] = "kobalt";
+        QVERIFY(storage::writeJson(fixture.paths.preferences(), prefs));
+        const auto fresh = fixture.directory.path() + "/preset-book.epub";
+        QVERIFY(QFile::copy(book, fresh));
+        for (const int opening : { 4, 5 }) {
+            fixture.window.openBook(fresh);
+            QTRY_COMPARE(opened.count(), opening);
+            QTRY_VERIFY(!fixture.state().value("busy").toBool());
+            QVERIFY(fixture.press("rrPage"));
+            QVERIFY(fixture.press("rrNavText"));
+            QTRY_VERIFY(fixture.visible("rrTextPresetToggle"));
+            QCOMPARE(fixture.widget("rrTextPresetToggle")->accessibleDescription(),
+                     QString("Kobalt"));
+            fixture.window.readerWindow()->close();
+            QTRY_VERIFY(fixture.window.idle());
+            // Once saved, the book keeps its own preset if the default changes.
+            prefs = storage::readJson(fixture.paths.preferences());
+            prefs[textpresets::newBookKey] = duplicate.id;
+            QVERIFY(storage::writeJson(fixture.paths.preferences(), prefs));
+        }
     }
 
     void libraryGridRows()
@@ -6718,6 +6750,102 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
             QVERIFY(!watch.movedWhileLoading);
             QVERIFY(fixture.visible("rrScrubberReturn"));
         }
+    }
+
+    void fastLocateText()
+    {
+        renderingMode::setOverride(1);
+        const auto previous = qgetenv("KOBALT_CHAPTER_PAGES");
+        const auto restore = qScopeGuard([previous] {
+            renderingMode::setOverride(-1);
+            if (previous.isNull())
+                qunsetenv("KOBALT_CHAPTER_PAGES");
+            else
+                qputenv("KOBALT_CHAPTER_PAGES", previous);
+        });
+        qputenv("KOBALT_CHAPTER_PAGES", "2");
+        Fixture fixture;
+        QVERIFY(fixture.prepared);
+        auto files = test::engineBook(false, 4, 35);
+        files["OEBPS/c4.xhtml"].replace("</body>", "<p>Cartographer mapped it.</p></body>");
+        QVERIFY(writeBook(fixture.directory.path(), "mapped.epub", files));
+        selectPreview(fixture, 1);
+        QSignalSpy opened(&fixture.window, &desktop::Window::bookOpened);
+        fixture.window.openBook(fixture.directory.path() + "/mapped.epub");
+        QTRY_COMPARE(opened.count(), 1);
+        auto result = std::make_shared<QPoint>(-2, -2);
+        fixture.window.readerWindow()->locateText("Cartographer",
+                                                  [result](QPoint pos) { *result = pos; });
+        QTRY_VERIFY_WITH_TIMEOUT(result->x() != -2, 15000);
+        QVERIFY2(result->x() >= 0,
+                 "The scenario player could not locate a word in a later chapter");
+    }
+
+    void fastKosyncChoice()
+    {
+        renderingMode::setOverride(1);
+        const auto previous = qgetenv("KOBALT_CHAPTER_PAGES");
+        qputenv("KOBALT_CHAPTER_PAGES", "2");
+        const auto restore = qScopeGuard([previous] {
+            renderingMode::setOverride(-1);
+            if (previous.isNull())
+                qunsetenv("KOBALT_CHAPTER_PAGES");
+            else
+                qputenv("KOBALT_CHAPTER_PAGES", previous);
+        });
+        auto body = std::make_shared<QByteArray>("{}");
+        Fixture fixture(false, false, false, true, false, false,
+                        [body](ReaderHostServices &services) {
+                            services.kosyncHttp = [body] {
+                                return std::make_unique<ChoiceProgressHttp>(body);
+                            };
+                        });
+        QVERIFY(fixture.prepared);
+        QVERIFY(storage::writeJson(fixture.paths.syncAccount(),
+                                   { { "schema", 1 },
+                                     { "server", "https://fixture.invalid" },
+                                     { "username", "reader" },
+                                     { "key", QString(32, 'a') },
+                                     { "device_id", "local" },
+                                     { "automatic", false } }));
+        selectPreview(fixture, 1);
+        QSignalSpy opened(&fixture.window, &desktop::Window::bookOpened);
+        fixture.window.openBook(book);
+        QTRY_COMPARE(opened.count(), 1);
+        QTRY_VERIFY(fixture.state().value("rough_pages").toInt() > 0);
+        QVERIFY(fixture.press("rrPage"));
+        QVERIFY(fixture.press("rrNavChapters"));
+        QTRY_VERIFY(fixture.visible("rrChapter4"));
+        QVERIFY(fixture.press("rrChapter4"));
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        QVERIFY(fixture.turnPage(1));
+        const auto remote = fixture.state().value("position").toString();
+        const auto title = fixture.state().value("chapter_title").toString();
+        QVERIFY(fixture.press("rrPage"));
+        QVERIFY(fixture.press("rrNavChapters"));
+        QTRY_VERIFY(fixture.visible("rrChapter1"));
+        QVERIFY(fixture.press("rrChapter1"));
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        const auto local = fixture.state();
+        QVERIFY(local.value("position").toString() != remote);
+        *body = QJsonDocument(QJsonObject{ { "progress", remote },
+                                           { "percentage", 0.7 },
+                                           { "device", "Other reader" },
+                                           { "device_id", "remote" },
+                                           { "timestamp", 1794124800 } })
+                        .toJson();
+        fixture.window.readerWindow()->findChild<QPushButton *>("rrKosyncNow")->click();
+        QPointer<ui::ChoiceModal> dialog;
+        QTRY_VERIFY((dialog = dynamic_cast<ui::ChoiceModal *>(fixture.widget("rrKosyncChoice")))
+                    && dialog->primaryButton()->isEnabled());
+        auto *view = dynamic_cast<reader::SyncChoiceView *>(fixture.widget("rrKosyncChoiceView"));
+        QVERIFY(view);
+        QCOMPARE(dialog->titleLabel()->text(), strings::get("kosync.ahead_title"));
+        QCOMPARE(view->jump().toChapter, title);
+        QCOMPARE(view->jump().pages, local.value("rough_pages").toInt());
+        QCOMPARE(view->jump().here, local.value("rough_page").toInt() - 1);
+        QVERIFY(view->jump().drawable() && view->jump().synced > view->jump().here);
+        QCOMPARE(fixture.state().value("position"), local.value("position"));
     }
 
     void fastProgressSurfaces()
@@ -7623,8 +7751,12 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
         QVERIFY(context && context->isVisible() && context->text().contains("<u>"));
         auto *passage = qobject_cast<QPushButton *>(fixture.widget("rrWordPagePassage"));
         QVERIFY(passage && passage->isVisible());
-        QVERIFY(passage->text().startsWith(
-                strings::get("words.go_to_page").arg(QString()).trimmed()));
+        const auto shown = fixture.state();
+        const int savedWordPage = shown.contains("book_fraction")
+                ? shown.value("rough_page").toInt()
+                : shown.value("page").toInt() + 1;
+        QVERIFY(savedWordPage > 0);
+        QCOMPARE(passage->text(), strings::get("words.go_to_page").arg(savedWordPage));
         QVERIFY(fixture.press("rrWordPageBack"));
         QTRY_VERIFY(!fixture.visible("rrWordPage"));
         // Every book's words open over the list and return to it.
@@ -13012,6 +13144,53 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
             QVERIFY(ready());
             QCOMPARE(fixture.widget("rrStylingPreview")->grab().toImage(), portrait);
         }
+    }
+
+    void settingsTextPresetLatestChoice()
+    {
+        Fixture fixture;
+        QVERIFY(fixture.prepared);
+        selectPreview(fixture, 1);
+        QSignalSpy opened(&fixture.window, &desktop::Window::bookOpened);
+        fixture.window.openBook(book);
+        QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 30000);
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        QVERIFY(fixture.press("rrPage"));
+        QTRY_VERIFY(fixture.visible("rrNavText"));
+        QVERIFY(fixture.press("rrNavText"));
+        QTRY_VERIFY(fixture.visible("rrTextPresetToggle"));
+        QVERIFY(fixture.press("rrTextPresetToggle"));
+        QTRY_VERIFY(fixture.visible("rrTextPreset_modern"));
+        {
+            // The reader still shows Kobalt while the Modern preview is queued.
+            const auto gate = holdEngine();
+            const auto unblock = qScopeGuard([gate] { gate->release.release(); });
+            QTRY_VERIFY(gate->entered.load());
+            QVERIFY(fixture.press("rrTextPreset_modern"));
+            QVERIFY(fixture.press("rrTextPresetAll"));
+            QTRY_VERIFY(fixture.visible("rrTextPresetGallery"));
+            auto *grid = fixture.widget("rrTextPresetGrid");
+            QVERIFY(grid && fixture.click(grid, QPoint(grid->width() / 4, grid->height() / 6)));
+            QTRY_VERIFY(fixture.visible("rrTextPresetNameInput"));
+            auto *input =
+                    fixture.window.readerWindow()->findChild<QLineEdit *>("rrTextPresetNameInput");
+            QVERIFY(input);
+            const auto name = input->text();
+            input->setText("Evening reading");
+            QVERIFY(fixture.press("rrTextPresetNameSave"));
+            const auto saved =
+                    textpresets::load(storage::readJson(fixture.paths.preferences())).first();
+            QCOMPARE(saved.name, QString("Evening reading"));
+            QCOMPARE(saved.fontFace, QString("NV Jost"));
+            QVERIFY(name.contains("Jost"));
+            QTRY_VERIFY(!fixture.widget("rrTextPresetName"));
+            QVERIFY(fixture.press("rrTextPresetGalleryClose"));
+            QVERIFY(fixture.press("rrTextPreset_kobalt"));
+            QVERIFY(fixture.press("rrPage"));
+        }
+        QTRY_VERIFY_WITH_TIMEOUT(
+                !fixture.visible("rrFont") && !fixture.state().value("busy").toBool(), 30000);
+        QCOMPARE(fixture.state().value("font_face").toString(), QString("Libron"));
     }
 
     void settingsTextPresetName()

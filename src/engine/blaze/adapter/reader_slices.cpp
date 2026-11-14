@@ -621,6 +621,7 @@ void EngineDocument::applySlice()
     if (!engine_)
         return;
     visiblePages_ = 0;
+    sliceLookAheadHidden_ = false;
     if (!slices()) {
         engine_->getDocument()->setKoblazeLayoutSlice(0, 0);
         return;
@@ -655,6 +656,10 @@ bool EngineDocument::pageStartsBlock(int page, int *before) const
     const auto position = pageStart(page);
     const auto pointer =
             engine_->getDocument()->createXPointer(Utf8ToUnicode(position.toUtf8().constData()));
+    // A column with only decoration can borrow a bookmark from another
+    // column. Cutting at that bookmark would repeat or omit the decoration.
+    if (pointer.isNull() || engine_->getBookmarkPage(pointer, true) != engine_->firstColumn(page))
+        return false;
     auto *block = pointer.getNode();
     while (block && (block->isText() || block->getRendMethod() != erm_final))
         block = block->getParentNode();
@@ -685,14 +690,24 @@ bool EngineDocument::pageStartsBlock(int page, int *before) const
 
 bool EngineDocument::earlierContentOnPage(ldomNode *block, int page) const
 {
-    // Pages of vertical text advance along x.
-    if (engine_->isVerticalText())
-        return false;
+    // Page starts and block rectangles use document y in both writing modes.
+    // Drawing a vertical page maps that coordinate to screen x.
     const auto *list = engine_->getPageList();
-    const int index = page * qMax(1, columns_);
+    const int index = engine_->firstColumn(page);
     if (!list || index < 0 || index >= list->length())
         return false;
     const int top = list->get(index)->start;
+    // A container can start this page with a border or padding before its
+    // first text block. Starting the slice at that text would omit the space.
+    lvRect first;
+    block->getAbsRect(first);
+    for (auto *parent = block->getParentNode(); parent && !parent->isNodeName("DocFragment");
+         parent = parent->getParentNode()) {
+        lvRect box;
+        parent->getAbsRect(box);
+        if (box.top >= top && box.top < first.top)
+            return true;
+    }
     // The page can start a little below the top of the last line before the
     // block. That line is then on the page, and the page start names the
     // block.
@@ -836,6 +851,7 @@ bool EngineDocument::enterNextSlice(const std::function<bool()> &current)
         sliceHistory_ = history;
         windowLoadMs_ = loadMs;
         if (engine_->koblazeRestoreLayout()) {
+            engine_->groupColumns(hideNonlinearFragments_);
             visiblePages_ = visible;
             layoutInterrupted_ = false;
             return go(shown) && false;
@@ -1055,11 +1071,10 @@ QVector<int> EngineDocument::bookPages(const QStringList &positions,
             if (exclusive && fraction == 0 && item > 0) {
                 // The first character of a chapter excludes that whole chapter.
                 pages = qRound(map.pagesBefore(item)) - 1;
-                exclusive = true;
             } else {
-                exclusive = false;
                 if (exclusive)
                     fraction = qMax(0.0, textFraction(item, position, true, current));
+                exclusive = false;
                 pages = std::floor(map.pagesBefore(item)
                                    + map.pagesBefore(item, qRound(fraction * 1000000), 1000000));
             }

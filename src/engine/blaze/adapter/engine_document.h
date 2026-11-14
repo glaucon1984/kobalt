@@ -120,8 +120,10 @@ public:
                                        QString *error) override;
     // Negative is before the current source anchor; positive is beyond it.
     int comparePosition(const QString &position, QString *error) const override;
+    int describePosition(const QString &position, QString *chapter, int *page, QString *error,
+                         const std::function<bool()> &current) override;
     int comparePlatformPosition(const PositionCodec &codec, const QString &location,
-                                QString *error) const override;
+                                QString *error) override;
     // The shared location of an engine position. False when the position is
     // not in a spine item or is in generated content. *exact is false when
     // the location is the nearest one that the source has, for example for
@@ -203,7 +205,10 @@ public:
     bool turnInWindow(int delta) override;
     void prepareAhead(const std::function<bool()> &current = {}) override;
 
-    bool continuesBefore() const override { return windowFirst_ > 0 || sliceFirst_ > 0; }
+    bool continuesBefore() const override
+    {
+        return windowFirst_ >= 0 && (sliceFirst_ > 0 || adjacentSpineItem(-1) >= 0);
+    }
 
     double bookFraction() const override;
     RoughPages roughPages() const override;
@@ -218,6 +223,7 @@ public:
     // a build for other settings is dropped by the next prepareFullDocument()
     // and counts as nothing here.
     bool fullDocumentReady() const override;
+    int preparedSpreadTurn(int direction) const override;
     bool fullDocumentStarted() const override;
     void setBackgroundCount(bool enabled) override;
     bool backgroundCount() const override;
@@ -225,7 +231,7 @@ public:
     bool continuesAfter() const override
     {
         return windowFirst_ >= 0
-                && (windowLast_ + 1 < spineItemCount_ || (slices() && sliceEnd_ < spineItemText()));
+                && ((slices() && sliceEnd_ < spineItemText()) || adjacentSpineItem(1) >= 0);
     }
 
     // With the koblaze fork only, experimental. A spine item that is shown
@@ -259,7 +265,8 @@ public:
     QImage image(int page) override;
     PagePreview previewTurn(int direction, const QVector<QPair<QString, QString>> &ranges = {},
                             const std::function<bool()> &current = {},
-                            const QStringList &bookmarkPositions = {}) override;
+                            const QStringList &bookmarkPositions = {},
+                            bool adoptingFullDocument = false) override;
     // One screen that starts at the reading position instead of a page break. With
     // stayInChapter, it starts earlier near a chapter's end, so that a full screen stays in
     // the chapter. Without it, the text continues past the chapter to fill the screen.
@@ -337,6 +344,8 @@ private:
                                    const QString &position) const;
     int chapterEndPage(const ChapterLink &next) const;
     void markKoboLinkDecorations();
+    enum class PageNoteLayout { Chapters, WholeBook, Interrupted };
+    PageNoteLayout pageNoteLayout();
     void markPageNotes();
     EngineFontInputs fonts_;
     friend class nickel::NickelPositionCodec;
@@ -349,12 +358,12 @@ private:
     std::unique_ptr<ColumnView> engine_;
     struct SearchText;
     std::shared_ptr<SearchText> searchText_;
+    QString decodePosition(const PositionCodec &codec, const QString &location, QString *error);
     // The search in the text that this document has.
     SearchBatch searchLoaded(const QString &query, SearchCursor cursor, int maximum,
-                             SearchScope scope, const QString &origin, bool details,
+                             SearchScope scope, bool details,
                              const std::function<bool()> &current = {});
-    QVector<SearchHit> searchDetailsLoaded(QVector<SearchHit> hits, SearchScope scope,
-                                           const QString &origin);
+    QVector<SearchHit> searchDetailsLoaded(QVector<SearchHit> hits, SearchScope scope);
     // In chapter mode: the document that has the text of spine item `item`,
     // this one, the one opened ahead, or a new one opened ahead. Null when
     // it cannot open.
@@ -368,7 +377,16 @@ private:
     // when this document does not have the text of `position`.
     int estimatedBookPage(const QString &position) const;
     void ensureSearchText();
-    bool ensureSearchScope(SearchScope scope, const QString &origin);
+
+    struct SearchBounds
+    {
+        QString lower, upper;
+        bool valid = false;
+    };
+
+    SearchBounds searchBounds(SearchScope scope, const QString &origin,
+                              const std::function<bool()> &current = {});
+    bool setSearchBounds(const SearchBounds &bounds);
     struct SourceIndex;
     friend struct ReaderSourceIndexProbe;
     friend struct ReaderFootnoteProbe;
@@ -402,6 +420,7 @@ private:
     // found no clean end, and whether the last search found one.
     int sliceExtra_ = 0;
     bool sliceCut_ = true;
+    bool sliceLookAheadHidden_ = false;
     // The characters that are laid out from the start of the slice.
     int sliceReach() const;
     // The starts of the slices that the reader passed going forward, so
@@ -493,7 +512,8 @@ private:
     // slice.
     void prepareNextItem(const std::function<bool()> &current);
     void preparePreviousItem(const std::function<bool()> &current);
-    QPair<int, int> neighbouringUnit(int direction) const;
+    int adjacentSpineItem(int direction) const;
+    QPair<int, int> neighbouringUnit(int item, int direction) const;
     // Opens the unit that starts at spine item `item` in `ahead_`, or keeps
     // it when it is open there. The reader can then show it without a new
     // load. Also used to read a spine item that is not shown, such as the
@@ -598,6 +618,7 @@ private:
     // How long the last window took to load and lay out.
     qint64 windowLoadMs_ = -1;
     // Loads the window that holds `position` when it is outside the window.
+    bool hasPageAt(const QString &position) const;
     bool showSpineItemOf(const QString &position);
     // Lays out the book. False when the layout was interrupted.
     bool renderLayout();
@@ -652,6 +673,12 @@ private:
     int margin_ = defaultMarginPixels(), topMargin_ = defaultVerticalMarginPixels(margin_),
         bottomMargin_ = defaultVerticalMarginPixels(margin_);
     void activateFontParameters() const;
+    // Capped at the measured crossover; no full-book text allocation is needed.
+    static constexpr int fastShapingMinimum = 250000;
+    int shapingText_ = 0;
+    int shapingOverride_ = -1;
+    bool fastShaping() const;
+    void activateFastShaping() const;
     int axisWeight_ = defaultVariableFontWeight;
     double opticalSize_ = 0;
     int weight_ = 0;

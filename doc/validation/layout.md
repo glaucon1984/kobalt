@@ -6,9 +6,11 @@ These checks cover the CREngine layout groups, publisher markup, the document ca
 
 ## Engine checks
 
-Hybrid regressions keep the chapter usable when a prepared document cannot resolve its reading position. Such a document is dropped and not built again for the same appearance. The session regression deliberately damages the prepared document and checks that the requested turn and later turns succeed in chapter mode without an error. In a long chapter, the text around a search hit must match the whole book, including when the part containing the hit has no layout.
+Hybrid regressions keep the chapter usable when a prepared document cannot resolve its reading position. Such a document is dropped and not built again for the same appearance. The page estimate regression opens a chapter whose heading is visible by itself and hidden by a publisher CSS rule in the whole book. Both a prepared layout and a fresh layout must leave the chapter in place and preserve the next turn. The session regression deliberately damages the prepared document and checks that the requested turn and later turns succeed in chapter mode without an error. In a long chapter, the text around a search hit must match the whole book, including when the part containing the hit has no layout.
 
 `KOBALT_HANDOFF_BOOK=<epub>` makes `kobalt-page-estimate-tests` walk that book in chapter mode and resolve every page anchor in the whole book. It compares pages by sequential index because a blank page can share its anchor with the following page. It fails on unresolved positions, different page totals, different page starts or different sampled pixels. Pixel comparisons sample every fifth page. Set `KOBALT_HANDOFF_ALL_PAGES=1` to compare every page. Optional `KOBALT_HANDOFF_CAPTURE_DIR` saves the first differing page pairs for inspection. Keep captures under the worktree’s `build/` directory.
+
+The Hybrid font-size check uses a percentage column gap. It verifies that the reader adopts the whole book with the new pixel gap after changing text size.
 
 The session checks also request an appearance edit while the worker has adopted the whole book but has not published its frame. The edit must return to chapter rendering before reflow.
 
@@ -18,7 +20,15 @@ The restored `reader`, `publisher-markup`, `local-reader` and `document-word-cou
 
 `engine.engine-contract` checks that callbacks stay with their view through chapter changes and detach when the view is destroyed. Nested layouts preserve their caller's cancellation and progress. A foreground layout with nested flows polls its own callback while a whole-book layout is parked.
 
-`engine.page-estimate` checks the reading position after chapter eviction, repeated font changes and whole-book handoff. An interrupted layout must resume with the same page count and slice boundary in a long paragraph. Opening another book on the same engine must discard the previous book's prepared pages. These changes keep the existing cache formats.
+`engine.page-estimate` restores a bookmark outside the initial chapter window, parks whole-book pagination, jumps until the bookmarked chapter is evicted, then returns. The bookmark, adjacent pages and final handoff must match an independent whole-book rendering. Opening a second book on the same engine must use the new book's pages and count whether the first book's pagination was parked or complete.
+
+The slice checks compare interrupted and uninterrupted readers at the start of layout, during extension of a long paragraph and at a slice boundary. Cancelling preparation of the next slice must preserve the visible page and allow both a reverse turn and a retry. `engine.layout-interrupt` also interrupts a viewport change in a later slice, returns to the original viewport and checks the page starts and pixels in both directions.
+
+`engine.page-estimate` checks the position and word count of a passage with supplementary Unicode characters before the anchor.
+
+`engine.page-estimate` compares saved highlight end pages with whole-book pagination after the chapter leaves the window. A selection ending at the start of the next page belongs to the preceding page.
+
+`engine.chapter-parity` compares chapter and whole-book navigation across hidden non-linear chapters. It checks covers, explicit entry into a hidden chapter, forward and reverse turns, adjacent preview pixels and the last readable page before a hidden appendix. It also crosses between a long chapter and a group of short chapters with hidden footnotes at both ends. After a font or line-spacing change, it compares the reading position and page pixels at slice boundaries where a container has a top border and padding. In vertical Japanese text it also checks the next passage after crossing that boundary in both directions. After reflow, forward and reverse turns across a padded container also check its bottom edge against whole-book rendering. A shaded-group fixture checks that blocks from a previous slice leave no background on the current page.
 
 ## Shared locations and the engine interface
 
@@ -86,3 +96,9 @@ The vertical-writing buffer regression covers a run measured at 57 pixels that d
 The horizontal-rule check in `engine.beautifier` renders the reported top-border CSS at several reading densities. It checks both border heights and the gray colors.
 
 Current-page formatting warnings use parsed-book format 12 for the added style diagnostic field. `engine.page-estimate` checks that unsupported CSS does not change fallback pixels and that cached styles retain the warning. The previous whole-book inspector remains covered as a standalone utility; it no longer determines reader warnings.
+
+The session check turns forward from Trevelyan’s cover and backward from its title while adopting full pagination. Both turns must show the mixed cover and title screen before proceeding. It compares the adjacent Navigate thumbnail with that screen, then checks a subsequent turn and return to portrait. The chapter-parity check reads a vertical Japanese chapter with ornamental columns in both directions. It compares the slice pixels and the screen selected for handoff with Accurate pagination.
+
+The columns check reads a non-linear section in both page directions. It checks that hiding it clears the trailing column, explicit jumps still reach it and showing it restores the shared screen.
+
+`engine.fast-shaping` checks automatic selection around the text threshold, explicit overrides, font-size changes, interleaved documents and small slices of a large chapter. It compares page counts, boundaries and pixels with the selected forced path across bundled serif and sans-serif fonts. The optional parsed-cache property `kobalt.shaping.text.250000` retains the bounded count for the same rendering policy. Older caches compute it once without reparsing. Rendering policy 7 repaginates existing layouts while retaining parsed books and reading data.

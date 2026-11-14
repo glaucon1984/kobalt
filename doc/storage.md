@@ -190,6 +190,8 @@ Annotation exports are compressed ZIP snapshots for reading outside Kobalt. Each
 
 ## Disposable caches
 
+Rendering version 7 repaginates compatible parsed books for conditional fast shaping. The optional `kobalt.shaping.text.250000` property retains the bounded text count under the same rendering policy. A cache without it computes the count once. The parser format and saved reading data do not change.
+
 The 10,000-entry chapter limit changes no saved-data, parsed-book or rendering format. Chapter indices rebuild from the parsed TOC for each layout. Stored word counts with a different number or order of chapter positions are rejected and recounted. Word-count JSON uses its actual encoded size within the existing 512 KiB limit; oversized counts remain usable in memory but are not cached.
 
 Parsed-book cache format 10 rebuilds paragraph markers for publisher containers with zero-width borders. These containers now allow ordinary paragraph adjustments. Visible borders keep their protection. Older rendering caches rebuild without changing settings, reading positions or annotations.
@@ -200,7 +202,7 @@ Parsed-book cache format 11 rebuilds books under the embedded font size limit. O
 
 The parsed-book checksum retains the beta 7 compatibility token, the explicit Kobalt parser format and the requested DOM version. Dependency revisions, build recipes and patch checksums do not change it. Review upstream and local patches before declaring an update compatible. Bump the format in `documentCacheChecksum` when parser or preprocessing changes make the cached DOM unsafe to reuse. CREngine also rejects incompatible engine cache formats. Density, user CSS and bold-reading variants keep their existing checks.
 
-Rendering compatibility is separate. Increment `rendering_version` in `platforms/cache-policy.cmake` for shaping or layout changes not covered by CREngine's formatting version. The rendering policy also includes bundled hyphenation pattern names and contents. A cache with an older or missing rendering policy keeps its parsed DOM and Kobalt markers, then rebuilds styles and pagination once. Saving records the current policy in that cache; the next unchanged opening reuses its layout. The engine dependency update after beta 7 uses this path. Settings, reading positions, bookmarks and annotations are not cache data and do not change.
+Rendering compatibility is separate. Increment `rendering_version` in `platforms/cache-policy.cmake` for shaping or layout changes not covered by CREngine's formatting version. The rendering policy also includes bundled hyphenation pattern names and contents. A cache with an older or missing rendering policy keeps its parsed DOM and Kobalt markers, then rebuilds styles and pagination once. Rendering policy 6 repaginates page notes with percent-encoded fragment links. Saving records the current policy in that cache; the next unchanged opening reuses its layout. The engine dependency update after beta 7 uses this path. Settings, reading positions, bookmarks and annotations are not cache data and do not change.
 
 Decorative page-spacing records retain prose-gap boundaries and the fixed opening prefix for disk-cache reopening and alternate viewport snapshots. Eligibility is computed during layout without adding DOM markers. Changes to these records require review of both engine-format and rendering compatibility.
 

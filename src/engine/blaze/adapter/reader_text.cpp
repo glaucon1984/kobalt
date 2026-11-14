@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <QElapsedTimer>
 #include <QRegularExpression>
+#include <QXmlStreamReader>
 
 namespace kobalt {
 namespace {
@@ -30,7 +31,7 @@ struct PageTextRange
     ldomXPointerEx start, end;
 };
 
-QVector<PageTextRange> pageTextRanges(ColumnView &view, int columns)
+QVector<PageTextRange> pageTextRanges(ColumnView &view)
 {
     auto *doc = view.getDocument();
     const int current = view.getCurPage();
@@ -44,9 +45,8 @@ QVector<PageTextRange> pageTextRanges(ColumnView &view, int columns)
                                              : ldomXRange(doc->getRootNode(), true).getEnd());
     // Notes can come from another source section. Resolve only the fragments
     // drawn on this screen, so a long note does not format remote text.
-    for (int column = 0;
-         column < columns && current * columns + column < view.getPageList()->length(); ++column) {
-        const auto &page = *view.getPageList()->operator[](current * columns + column);
+    for (int column = 0; column < view.columnCount(current); ++column) {
+        const auto &page = *view.getPageList()->operator[](view.firstColumn(current) + column);
         for (int i = 0; i < page.footnotes.length(); ++i) {
             const auto &note = page.footnotes[i];
             ldomXPointerEx start(
@@ -338,7 +338,7 @@ QString EngineDocument::pageExcerpt(int page) const
 
 namespace {
 AnnotationToken sourceWord(ColumnView *engine, QSize size, ldomXPointerEx hit,
-                           bool annotation = false)
+                           bool annotation = false, bool geometry = true)
 {
     AnnotationToken result;
     if (hit.isNull() || !hit.isText() || !hit.isVisible()) {
@@ -447,20 +447,22 @@ AnnotationToken sourceWord(ColumnView *engine, QSize size, ldomXPointerEx hit,
         return result;
     auto startPointer = positions[begin], endPointer = positions[end - 1];
     endPointer.setOffset(endPointer.getOffset() + 1);
-    ldomXRange range(startPointer, endPointer);
-    LVArray<lvRect> rectangles;
-    range.getSegmentRects(rectangles);
-    for (int i = 0; i < rectangles.length(); ++i) {
-        const auto &r = rectangles[i];
-        lvPoint top(r.left, r.top), bottom(r.right, r.bottom);
-        if (!engine->docToWindowPoint(top) || !engine->docToWindowPoint(bottom, true))
-            continue;
-        const QRect rect(qMin(top.x, bottom.x), qMin(top.y, bottom.y), qAbs(bottom.x - top.x),
-                         qAbs(bottom.y - top.y));
-        const auto clipped = rect.intersected(QRect(QPoint(), size));
-        if (clipped.isEmpty())
-            continue;
-        result.rectangles.append(clipped);
+    if (geometry) {
+        ldomXRange range(startPointer, endPointer);
+        LVArray<lvRect> rectangles;
+        range.getSegmentRects(rectangles);
+        for (int i = 0; i < rectangles.length(); ++i) {
+            const auto &r = rectangles[i];
+            lvPoint top(r.left, r.top), bottom(r.right, r.bottom);
+            if (!engine->docToWindowPoint(top) || !engine->docToWindowPoint(bottom, true))
+                continue;
+            const QRect rect(qMin(top.x, bottom.x), qMin(top.y, bottom.y), qAbs(bottom.x - top.x),
+                             qAbs(bottom.y - top.y));
+            const auto clipped = rect.intersected(QRect(QPoint(), size));
+            if (clipped.isEmpty())
+                continue;
+            result.rectangles.append(clipped);
+        }
     }
     result.punctuation = punctuation;
     result.text = text.mid(begin, end - begin);
@@ -651,7 +653,7 @@ QString sentenceEnding(ColumnView *engine, QSize size, const TextRange &range,
     if (!hit.prevVisibleChar(true)) {
         return {};
     }
-    const auto word = sourceWord(engine, size, hit, true);
+    const auto word = sourceWord(engine, size, hit, true, false);
     if (word.punctuation || word.end != range.end || word.endAfterPunctuation.isEmpty()) {
         return {};
     }
@@ -758,7 +760,7 @@ SentenceOpening sentenceOpening(ColumnView *engine, QSize size, const TextRange 
 {
     auto *doc = engine->getDocument();
     const ldomXPointerEx start(doc->createXPointer(cre(range.start)));
-    const auto word = sourceWord(engine, size, start, true);
+    const auto word = sourceWord(engine, size, start, true, false);
     if (word.punctuation || word.start != range.start || word.startBeforePunctuation.isEmpty()) {
         return {};
     }
@@ -803,7 +805,7 @@ SentenceOpening sentenceOpening(ColumnView *engine, QSize size, const TextRange 
     if (!lastHit.prevVisibleChar(true)) {
         return {};
     }
-    const auto lastWord = sourceWord(engine, size, lastHit, true);
+    const auto lastWord = sourceWord(engine, size, lastHit, true, false);
     if (lastWord.punctuation || lastWord.text.isEmpty()) {
         return {};
     }
@@ -958,8 +960,13 @@ AnnotationPageEdges EngineDocument::annotationPageEdges()
             return true;
         };
         const auto continuation = [&](bool forward) {
-            if (forward ? page() + 1 >= pages() : page() == 0)
+            // A prior slice has source text even though its pages are absent.
+            const bool beforeSlice = !forward && page() == 0 && slices() && sliceFirst_ > 0;
+            if (forward ? page() + 1 >= pages() : page() == 0 && !beforeSlice)
                 return false;
+#ifdef KOBLAZE_SOURCE_TEXT
+            const KoblazeSourceText sourceText(beforeSlice ? doc : nullptr);
+#endif
             ldomXPointerEx edge(doc->createXPointer(cre(forward ? lastPosition : firstPosition)));
             auto adjacent = forward ? last : edge;
             if (!forward && !adjacent.prevVisibleChar(false))
@@ -971,7 +978,8 @@ AnnotationPageEdges EngineDocument::annotationPageEdges()
                     const auto text = adjacent.getNode()->getText();
                     const int offset = adjacent.getOffset();
                     if (offset >= 0 && offset < text.length() && !QChar::isSpace(text[offset])) {
-                        if (engine_->getBookmarkPage(adjacent) != page() + (forward ? 1 : -1))
+                        if (!beforeSlice
+                            && engine_->getBookmarkPage(adjacent) != page() + (forward ? 1 : -1))
                             return false;
                         return forward ? sameSection(edge, adjacent) : sameSection(adjacent, edge);
                     }
@@ -1120,6 +1128,9 @@ TextRange EngineDocument::annotationRange(const QString &startTokenStart,
         return {};
     }
     auto *doc = engine_->getDocument();
+#ifdef KOBLAZE_SOURCE_TEXT
+    const KoblazeSourceText sourceText(slices() ? doc : nullptr);
+#endif
     auto token = [&](const QString &start, const QString &end, bool exclusiveEnd) {
         if (start != end) {
             return textRange(start, end);
@@ -1135,7 +1146,7 @@ TextRange EngineDocument::annotationRange(const QString &startTokenStart,
         if (exclusiveEnd && !pointer.prevVisibleChar(true)) {
             return TextRange();
         }
-        const auto word = sourceWord(engine_.get(), size_, pointer, true);
+        const auto word = sourceWord(engine_.get(), size_, pointer, true, false);
         return TextRange{ word.start, word.end, word.text };
     };
     const auto first = token(startTokenStart, startTokenEnd, false);
@@ -1192,6 +1203,9 @@ TextRange EngineDocument::annotationRange(const QString &start, const QString &e
         return {};
     }
     auto *doc = engine_->getDocument();
+#ifdef KOBLAZE_SOURCE_TEXT
+    const KoblazeSourceText sourceText(slices() ? doc : nullptr);
+#endif
     ldomXPointerEx a(doc->createXPointer(cre(start))), b(doc->createXPointer(cre(end)));
     if (a.isNull() || b.isNull() || !a.isText() || !b.isText()) {
         return {};
@@ -1208,8 +1222,8 @@ TextRange EngineDocument::annotationRange(const QString &start, const QString &e
     if (!b.prevVisibleChar(true)) {
         return {};
     }
-    const auto first = sourceWord(engine_.get(), size_, b, true);
-    const auto last = sourceWord(engine_.get(), size_, a, true);
+    const auto first = sourceWord(engine_.get(), size_, b, true, false);
+    const auto last = sourceWord(engine_.get(), size_, a, true, false);
     if (first.text.isEmpty() || last.text.isEmpty()) {
         return {};
     }
@@ -1222,6 +1236,9 @@ TextRange EngineDocument::textRange(const QString &start, const QString &end, bo
         return {};
     }
     auto *doc = engine_->getDocument();
+#ifdef KOBLAZE_SOURCE_TEXT
+    const KoblazeSourceText sourceText(slices() ? doc : nullptr);
+#endif
     ldomXPointerEx a(doc->createXPointer(cre(start))), b(doc->createXPointer(cre(end)));
     if (a.isNull() || b.isNull() || !a.isText() || !b.isText() || a == b) {
         return {};
@@ -1270,6 +1287,9 @@ EngineDocument::intersectingRanges(const QString &start, const QString &end,
         return result;
     }
     auto *doc = engine_->getDocument();
+#ifdef KOBLAZE_SOURCE_TEXT
+    const KoblazeSourceText sourceText(slices() ? doc : nullptr);
+#endif
     auto resolve = [doc](const QString &anchor) {
         ldomXPointerEx pointer;
         if (anchor.isEmpty() || anchor.size() > 4096) {
@@ -1376,7 +1396,7 @@ QVector<int> EngineDocument::visibleRanges(const QVector<QPair<QString, QString>
         return {};
     const auto index = sourceRanges(ranges);
     QVector<int> result;
-    for (const auto &span : pageTextRanges(*engine_, columns_))
+    for (const auto &span : pageTextRanges(*engine_))
         result += index->intersections(span.start, span.end);
     std::sort(result.begin(), result.end());
     result.erase(std::unique(result.begin(), result.end()), result.end());
@@ -1396,7 +1416,7 @@ bool EngineDocument::rangeVisible(const QString &start, const QString &end) cons
         std::swap(a, b);
     if (a.compare(b) >= 0)
         return false;
-    for (const auto &span : pageTextRanges(*engine_, columns_))
+    for (const auto &span : pageTextRanges(*engine_))
         if (a.compare(span.end) < 0 && span.start.compare(b) < 0)
             return true;
     return false;
@@ -1424,9 +1444,9 @@ AnnotationGeometry EngineDocument::annotationGeometry(const QString &start, cons
     const int current = page();
     auto *pageList = engine_->getPageList();
     result.vertical = pageList->hasMixedWritingModes()
-            ? css_wm_is_vertical((*pageList)[current * columns_]->writing_mode)
+            ? css_wm_is_vertical((*pageList)[engine_->firstColumn(current)]->writing_mode)
             : engine_->isVerticalText();
-    const auto spans = pageTextRanges(*engine_, columns_);
+    const auto spans = pageTextRanges(*engine_);
     const auto endpoint = [&](ldomXPointerEx pointer, bool ending) {
         SelectionEndpoint edge;
         if (!pointer.isText() || pointer.getOffset() < 0
@@ -1537,7 +1557,7 @@ QVector<QRect> EngineDocument::rangeRects(const QString &start, const QString &e
     // Resolve geometry only for visible main text and note fragments. Image
     // link ranges keep their existing engine behavior.
     const auto spans =
-            includeImages ? QVector<PageTextRange>{ { a, b } } : pageTextRanges(*engine_, columns_);
+            includeImages ? QVector<PageTextRange>{ { a, b } } : pageTextRanges(*engine_);
     if (!includeImages && a.compare(b) > 0)
         std::swap(a, b);
     for (const auto &span : spans) {
@@ -1605,6 +1625,8 @@ struct EngineDocument::SearchText
     bool done = false;
     QString query, pattern, origin;
     SearchScope scope = SearchScope::Book;
+    SearchBounds bounds;
+    QVector<ChapterLink> scopeChapters;
     ldomXPointerEx lower, upper;
 };
 
@@ -1665,51 +1687,94 @@ bool EngineDocument::prepareSearch()
     return cache.done;
 }
 
-bool EngineDocument::ensureSearchScope(SearchScope scope, const QString &origin)
+EngineDocument::SearchBounds EngineDocument::searchBounds(SearchScope scope, const QString &origin,
+                                                          const std::function<bool()> &current)
 {
+    if (scope == SearchScope::Book)
+        return { {}, {}, true };
     ensureSearchText();
     auto &cache = *searchText_;
-    if (cache.scope == scope && cache.origin == origin && !cache.lower.isNull())
-        return true;
-    cache.scope = scope;
-    cache.origin = origin;
-    ldomXRange document(engine_->getDocument()->getRootNode(), true);
-    cache.lower = document.getStart();
-    cache.upper = document.getEnd();
-    if (scope != SearchScope::Book) {
-        ldomXPointerEx position(engine_->getDocument()->createXPointer(cre(origin)));
-        if (position.isNull()) {
-            cache.lower = ldomXPointerEx();
-            return false;
-        }
-        if (scope == SearchScope::Chapter) {
-            const auto links = chapters();
-            const auto selected = chapterAround(links, origin);
-            if (selected.current >= 0)
-                cache.lower = ldomXPointerEx(engine_->getDocument()->createXPointer(
-                        cre(links[selected.current].position)));
-            if (selected.next >= 0)
-                cache.upper = ldomXPointerEx(
-                        engine_->getDocument()->createXPointer(cre(links[selected.next].position)));
-        } else {
-            const int page = engine_->getBookmarkPage(position);
-            const auto boundary = page + 1 < pages()
-                    ? ldomXPointerEx(engine_->getPageBookmark(page + 1))
-                    : cache.upper;
-            if (scope == SearchScope::Before)
-                cache.upper = boundary;
-            else
-                cache.lower = boundary;
+    if (cache.scope == scope && cache.origin == origin && cache.bounds.valid
+        && (scope != SearchScope::Chapter
+            || cache.scopeChapters.constData() == contents_.constData()))
+        return cache.bounds;
+    // Search keeps its original page when the reader follows a result.
+    // Resolve the bounds in the layout that contains that page.
+    const int item = spineItemIndex(origin);
+    auto *document = this;
+    if (windowFirst_ >= 0 && slicePages_ > 0 && item >= 0) {
+        document = documentFor(item, current);
+        if (document && document->slices()) {
+            const int before = document->textBefore(origin);
+            if (before < document->sliceFirst_ || before >= document->sliceEnd_) {
+                if (document == this)
+                    document = openAhead(item, current);
+                if (document && !document->showSliceOf(origin))
+                    document = nullptr;
+            }
         }
     }
-    return true;
+    if (!document)
+        return {};
+    auto *view = document->engine_.get();
+    ldomXPointerEx position(view->getDocument()->createXPointer(cre(origin)));
+    if (position.isNull())
+        return {};
+    SearchBounds bounds{ {}, {}, true };
+    if (scope == SearchScope::Chapter) {
+        cache.scopeChapters = contents_;
+        if (document != this)
+            document->setChapters(contents_, graph_);
+        const auto links = document->chapters();
+        const auto selected = document->chapterAround(links, origin);
+        if (selected.current >= 0)
+            bounds.lower = links[selected.current].position;
+        if (selected.next >= 0)
+            bounds.upper = links[selected.next].position;
+    } else {
+        const int page = view->getBookmarkPage(position);
+        QString boundary;
+        if (page + 1 < document->pages())
+            boundary = document->pageStart(page + 1);
+        else if (document->windowLast_ >= 0 && document->windowLast_ + 1 < spineItemCount_)
+            boundary = QString("/body[1]/DocFragment[%1].0").arg(document->windowLast_ + 2);
+        else if (scope == SearchScope::After)
+            return {};
+        if (scope == SearchScope::Before)
+            bounds.upper = boundary;
+        else
+            bounds.lower = boundary;
+    }
+    cache.scope = scope;
+    cache.origin = origin;
+    cache.bounds = bounds;
+    return bounds;
 }
 
-QVector<SearchHit> EngineDocument::searchDetailsLoaded(QVector<SearchHit> hits, SearchScope scope,
-                                                       const QString &origin)
+bool EngineDocument::setSearchBounds(const SearchBounds &bounds)
 {
-    if (!engine_ || !ensureSearchScope(scope, origin))
-        return {};
+    if (!bounds.valid)
+        return false;
+    ensureSearchText();
+    auto *doc = engine_->getDocument();
+    ldomXRange all(doc->getRootNode(), true);
+    auto &cache = *searchText_;
+    const auto resolve = [&](const QString &anchor, bool lower) -> ldomXPointerEx {
+        if (!anchor.isEmpty()) {
+            const int item = spineItemIndex(anchor);
+            if (windowFirst_ < 0 || item < 0 || (item >= windowFirst_ && item <= windowLast_))
+                return ldomXPointerEx(doc->createXPointer(cre(anchor)));
+            lower = item < windowFirst_;
+        }
+        return lower ? all.getStart() : all.getEnd();
+    };
+    cache.lower = resolve(bounds.lower, true);
+    cache.upper = resolve(bounds.upper, false);
+    return !cache.lower.isNull() && !cache.upper.isNull() && cache.lower.compare(cache.upper) < 0;
+}
+
+QVector<SearchHit> EngineDocument::searchDetailsLoaded(QVector<SearchHit> hits, SearchScope scope)
+{
     const auto &cache = *searchText_;
     auto *doc = engine_->getDocument();
     for (auto &hit : hits) {
@@ -1745,7 +1810,7 @@ QVector<SearchHit> EngineDocument::searchDetailsLoaded(QVector<SearchHit> hits, 
 }
 
 SearchBatch EngineDocument::searchLoaded(const QString &query, SearchCursor cursor, int maximum,
-                                         SearchScope scope, const QString &origin, bool details,
+                                         SearchScope scope, bool details,
                                          const std::function<bool()> &current)
 {
     SearchBatch result;
@@ -1761,10 +1826,6 @@ SearchBatch EngineDocument::searchLoaded(const QString &query, SearchCursor curs
     if (cache.query != query) {
         cache.query = query;
         cache.pattern = qstring(ldomFoldSearchPattern(cre(query), searchFlags));
-    }
-    if (!ensureSearchScope(scope, origin)) {
-        result.done = true;
-        return result;
     }
 
     if (cache.pattern.isEmpty()) {
@@ -1814,7 +1875,7 @@ SearchBatch EngineDocument::searchLoaded(const QString &query, SearchCursor curs
             continue;
         SearchHit hit{ qstring(start.toString()), qstring(end.toString()), {}, {}, {}, -1 };
         if (details)
-            hit = searchDetailsLoaded({ hit }, scope, origin).first();
+            hit = searchDetailsLoaded({ hit }, scope).first();
         result.hits.append(std::move(hit));
     }
     result.cursor = cursor;
@@ -1824,82 +1885,24 @@ SearchBatch EngineDocument::searchLoaded(const QString &query, SearchCursor curs
 }
 
 namespace {
-// Text for the check whether a query can match: case folded, without
-// white space, soft hyphens and format characters, with one kind of
-// apostrophe and hyphen. The engine folds the same way or less.
+// Ignore spaces for this preliminary check: adjacent text nodes can acquire
+// or lose a space when the engine lays them out.
 QString searchKey(const QString &text)
 {
-    const auto normalized = text.normalized(QString::NormalizationForm_KC).toCaseFolded();
-    QString key;
-    key.reserve(normalized.size());
-    for (const auto ch : normalized) {
-        if (ch.isSpace() || ch.category() == QChar::Other_Format || ch == QChar(0xad))
-            continue;
-        if (ch == QChar(0x2019) || ch == QChar(0x2018) || ch == QChar(0x2bc))
-            key.append(QLatin1Char('\''));
-        else if (ch.category() == QChar::Punctuation_Dash)
-            key.append(QLatin1Char('-'));
-        else
-            key.append(ch);
-    }
-    return key;
+    return qstring(ldomFoldSearchPattern(cre(text), searchFlags)).remove(QLatin1Char(' '));
 }
 
-// The text of XHTML without its tags, with the common entities decoded.
-QString plainText(const QByteArray &xhtml)
+QString chapterSearchKey(const QByteArray &xhtml)
 {
-    const auto source = QString::fromUtf8(xhtml);
+    QXmlStreamReader xml(xhtml);
     QString text;
-    text.reserve(source.size());
-    bool tag = false;
-    for (int i = 0; i < source.size(); ++i) {
-        const auto ch = source.at(i);
-        if (tag) {
-            tag = ch != QLatin1Char('>');
-            continue;
-        }
-        if (ch == QLatin1Char('<')) {
-            tag = true;
-            continue;
-        }
-        if (ch == QLatin1Char('&')) {
-            const int end = source.indexOf(QLatin1Char(';'), i);
-            if (end > i && end - i < 12) {
-                const auto name = source.mid(i + 1, end - i - 1);
-                static const QHash<QString, QChar> named{
-                    { QStringLiteral("amp"), QLatin1Char('&') },
-                    { QStringLiteral("lt"), QLatin1Char('<') },
-                    { QStringLiteral("gt"), QLatin1Char('>') },
-                    { QStringLiteral("quot"), QLatin1Char('"') },
-                    { QStringLiteral("apos"), QLatin1Char('\'') },
-                    { QStringLiteral("nbsp"), QChar(0xa0) },
-                    { QStringLiteral("shy"), QChar(0xad) }
-                };
-                bool numeric = false;
-                const uint code = name.startsWith(QLatin1String("#x"))
-                        ? name.mid(2).toUInt(&numeric, 16)
-                        : name.startsWith(QLatin1Char('#')) ? name.mid(1).toUInt(&numeric)
-                                                            : 0;
-                if (numeric && code > 0 && code <= 0x10ffff) {
-                    if (QChar::requiresSurrogates(code)) {
-                        text.append(QChar(QChar::highSurrogate(code)));
-                        text.append(QChar(QChar::lowSurrogate(code)));
-                    } else {
-                        text.append(QChar(ushort(code)));
-                    }
-                    i = end;
-                    continue;
-                }
-                if (named.contains(name)) {
-                    text.append(named.value(name));
-                    i = end;
-                    continue;
-                }
-            }
-        }
-        text.append(ch);
+    while (!xml.atEnd()) {
+        if (xml.readNext() == QXmlStreamReader::Characters)
+            text += xml.text().toString();
     }
-    return text;
+    // The renderer accepts some markup and named entities beyond strict XML.
+    // Only a complete parse can rule out a match in this chapter.
+    return xml.hasError() ? QStringLiteral("") : searchKey(text);
 }
 
 // The spine item of an engine position, counted from zero, or -1.
@@ -1926,16 +1929,26 @@ bool EngineDocument::mayContain(int item, const QString &query) const
         if (!stream.isNull() && stream->GetSize() < 64 * 1024 * 1024) {
             bytes.resize(int(stream->GetSize()));
             lvsize_t read = 0;
-            if (stream->Read(bytes.data(), bytes.size(), &read) != LVERR_OK)
+            if (stream->Read(bytes.data(), bytes.size(), &read) != LVERR_OK
+                || read != stream->GetSize())
                 bytes.clear();
-            bytes.resize(int(read));
         }
-        // An item that cannot be read is searched by the engine.
-        texts[item] = bytes.isEmpty() ? QStringLiteral("") : searchKey(plainText(bytes));
-        if (bytes.isEmpty())
-            return true;
+        texts[item] = bytes.isEmpty() ? QStringLiteral("") : chapterSearchKey(bytes);
     }
-    return texts[item].contains(searchKey(query));
+    const auto &text = texts[item];
+    const auto pattern = searchKey(query);
+    if (text.isEmpty() || text.contains(pattern))
+        return true;
+    // CSS can hide intervening text nodes, joining visible parts of a word.
+    // Rule out a chapter only when the letters cannot occur in order.
+    int after = 0;
+    for (const auto letter : pattern) {
+        const int at = text.indexOf(letter, after);
+        if (at < 0)
+            return false;
+        after = at + 1;
+    }
+    return true;
 }
 
 EngineDocument *EngineDocument::documentFor(int item, const std::function<bool()> &current)
@@ -1970,16 +1983,32 @@ SearchBatch EngineDocument::searchText(const QString &query, SearchCursor cursor
                                        SearchScope scope, const QString &origin, bool details,
                                        std::function<bool()> current)
 {
-    if (windowFirst_ < 0 || slicePages_ <= 0 || scope != SearchScope::Book || !engine_)
-        return searchLoaded(query, cursor, maximum, scope, origin, details, current);
     SearchBatch result;
     result.cursor = cursor;
+    if (!engine_ || query.isEmpty() || query.size() > 256 || maximum <= 0) {
+        result.done = true;
+        return result;
+    }
     if (current && !current())
         return result;
+    const auto bounds = searchBounds(scope, origin, current);
+    if (!bounds.valid) {
+        result.done = !current || current();
+        return result;
+    }
+    if (windowFirst_ < 0 || slicePages_ <= 0) {
+        if (setSearchBounds(bounds))
+            return searchLoaded(query, cursor, maximum, scope, details, current);
+        result.done = true;
+        return result;
+    }
+    const int firstItem = spineItemIndex(bounds.lower);
+    const int lastItem = spineItemIndex(bounds.upper);
+    cursor.item = qMax(cursor.item, firstItem);
     QElapsedTimer budget;
     budget.start();
-    while (cursor.item < spineItemCount_ && result.hits.size() < maximum
-           && (result.hits.isEmpty() || budget.elapsed() < 8)) {
+    while (cursor.item < spineItemCount_ && (lastItem < 0 || cursor.item <= lastItem)
+           && result.hits.size() < maximum && (result.hits.isEmpty() || budget.elapsed() < 8)) {
         if (current && !current())
             break;
         const bool loaded = cursor.item >= windowFirst_ && cursor.item <= windowLast_;
@@ -2033,8 +2062,12 @@ SearchBatch EngineDocument::searchText(const QString &query, SearchCursor cursor
         if (document != this && cursor.item < windowFirst_)
             last = qMin(last, windowFirst_ - 1);
         SearchCursor local{ cursor.block, cursor.offset, 0 };
-        auto batch = document->searchLoaded(query, local, maximum - result.hits.size(), scope,
-                                            origin, details, current);
+        SearchBatch batch;
+        if (document->setSearchBounds(bounds))
+            batch = document->searchLoaded(query, local, maximum - result.hits.size(), scope,
+                                           details, current);
+        else
+            batch.done = true;
         for (auto &hit : batch.hits) {
             const int item = positionItem(hit.start);
             if (item < cursor.item || item > last)
@@ -2070,7 +2103,7 @@ SearchBatch EngineDocument::searchText(const QString &query, SearchCursor cursor
         }
     }
     result.cursor = cursor;
-    result.done = cursor.item >= spineItemCount_;
+    result.done = cursor.item >= spineItemCount_ || (lastItem >= 0 && cursor.item > lastItem);
     result.nextPage = result.done ? pages() : 0;
     return result;
 }
@@ -2078,8 +2111,14 @@ SearchBatch EngineDocument::searchText(const QString &query, SearchCursor cursor
 QVector<SearchHit> EngineDocument::searchDetails(QVector<SearchHit> hits, SearchScope scope,
                                                  const QString &origin)
 {
-    if (windowFirst_ < 0 || slicePages_ <= 0 || scope != SearchScope::Book || !engine_)
-        return searchDetailsLoaded(std::move(hits), scope, origin);
+    if (!engine_ || hits.isEmpty())
+        return {};
+    const auto bounds = searchBounds(scope, origin);
+    if (!bounds.valid)
+        return {};
+    if (windowFirst_ < 0 || slicePages_ <= 0)
+        return setSearchBounds(bounds) ? searchDetailsLoaded(std::move(hits), scope)
+                                       : QVector<SearchHit>();
     QVector<SearchHit> result;
     for (const auto &hit : hits) {
         const int item = positionItem(hit.start);
@@ -2096,8 +2135,9 @@ QVector<SearchHit> EngineDocument::searchDetails(QVector<SearchHit> hits, Search
                     document = nullptr;
             }
         }
-        auto found = document ? document->searchDetailsLoaded({ hit }, scope, origin)
-                              : QVector<SearchHit>();
+        auto found = document && document->setSearchBounds(bounds)
+                ? document->searchDetailsLoaded({ hit }, scope)
+                : QVector<SearchHit>();
         for (auto &one : found)
             document->labelChapterHit(one);
         result += found;
