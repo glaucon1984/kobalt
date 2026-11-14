@@ -1,5 +1,5 @@
 #include "platforms/kobo/common/native_lifecycle.h"
-#include "engine/crengine/engine_activity.h"
+#include "engine/engine_activity.h"
 #include "storage/profile_database.h"
 #include "storage/reader_storage.h"
 #include "storage/record_writer.h"

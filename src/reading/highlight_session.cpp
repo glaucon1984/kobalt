@@ -1,5 +1,5 @@
 #include "highlight_session.h"
-#include "engine/crengine/engine_activity.h"
+#include "engine/engine_activity.h"
 #include "support/save_wait.h"
 #include "reader_session.h"
 #include "support/diagnostics.h"
