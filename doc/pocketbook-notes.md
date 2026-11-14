@@ -1241,3 +1241,39 @@ of develop into the engine branch.
 
 Device backup before the update: `backups/era-lite-before-blaze-52c522a-20261114` in the parent
 folder.
+
+### Upstream develop 71fc998 merged, and dictionaries of my own beside the catalogue's (2026-11-14)
+
+Upstream develop at `71fc998`, eight commits that the engine branch does not have yet: highlight
+saves finished before sleep, KOSync resumed after native dialogs close, float footprints kept when
+paragraphs are painted (a CREngine patch), the sleep widget's reading time at local midnight, user
+StarDict dictionaries on Kobo, a BOOX refresh fix and two test fixes. Five conflicts, the same as
+the Kobo branch's merge of develop into the engine (`kobo-blaze`, `f887114`): the float patch is
+applied to `src/engine/blaze/crengine/src/lvrend.cpp` instead of the retired patch list
+(`rendering_version` 8), `opening_job.h` keeps both the engine branch's fields and
+`dictionariesPath`, the storage notes and the desktop lists keep both sides, and develop's
+highlight-save code includes `engine/engine_activity.h`, where the engine branch moved it.
+
+User StarDict dictionaries: upstream's `FolderDictionaries` lists the dictionaries unpacked under a
+folder beside the host's own dictionary service and writes their indexes (`.idx.kobalt`,
+`.syn.kobalt`, `.ifo.kobalt-ready` with a size and time fingerprint) beside their files on the
+opening worker. Kobo scans `.adds/kobalt/dictionaries`. Here:
+
+- `userDictionaryDirectory` (`host/services.h`) is `applications/kobalt/dictionaries`, the folder
+  that already took catalogue zips for the offline install; zips are not read as dictionaries.
+- `readerServices().dictionary` returns `FolderDictionaries` over that folder. The reader puts
+  the downloaded dictionaries in front of it (`downloadableDictionaries`), so the chooser lists
+  the catalogue's and the folder's together, and the Dictionaries page is unchanged.
+- The standalone controller passes the folder as `OpenRequest::dictionariesPath` behind
+  `KOBALT_POCKETBOOK`, so the indexes are prepared while a book opens, as on Kobo.
+- A folder dictionary is named by its `.ifo`'s `bookname` and grouped by `lang`; the reader shows
+  folder dictionaries under the book's language whatever their `lang`. An unsupported one is
+  rejected from its `.ifo` alone, so source copies in other formats can stay in the folder.
+
+`tools/convert-dictionary.py --folder` converts into that form and installs under the
+dictionary's own name, with `lang` from the slot's first language; the slot only lends its
+inflected forms. On my Era Lite: Cambridge and RAE converted into the folder, the catalogue's
+`en-en` restored from `backups/dictionaries-catalogue-20261111` (that backup has no `es-es`
+files, so the catalogue's Spanish dictionary has to be downloaded again in Kobalt), and the
+Shorter Oxford, already in Kobalt's form, picked up as it is. Device backup before:
+`backups/era-lite-before-folder-dictionaries-20261114` in the parent folder.

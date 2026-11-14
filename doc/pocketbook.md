@@ -251,6 +251,23 @@ What to expect:
 - `--output <folder>` writes the converted dictionary there and leaves the device alone;
   `--check <folder> <pair> [word…]` reads such a folder back by the rules of Kobalt's reader.
 
+**Beside the catalogue's instead of in its place** (builds with the blaze engine): Kobalt also
+reads StarDict dictionaries unpacked in folders under `applications/kobalt/dictionaries/` and
+lists them in the lookup chooser next to the downloaded ones, so a dictionary of yours and the
+catalogue's can both be used. Kobalt takes them as they are only in its own form (StarDict 2.4.2,
+HTML definitions, a `.dict.dz` body, an optional `.syn`); it writes its indexes beside their
+files when a book opens, so close and reopen the book after adding, replacing or removing one.
+Other dictionaries are skipped. `--folder` converts into that form and installs there, under the
+dictionary's own name, leaving the language pair's slot as it is; the pair only says which
+language the dictionary is for and lends its inflected forms:
+
+```sh
+python platforms/pocketbook/tools/convert-dictionary.py L: en-en path/to/my-dictionary --folder --name "My dictionary"
+```
+
+Running it again with the same name replaces that folder. The catalogue zips that the offline
+install takes (`<id>.zip`) go in the same folder; they are not read as dictionaries.
+
 The tool was written against Kobalt v1.0-beta.7 and depends on how that version stores an
 installed dictionary; it checks its own output by the reader's rules before it installs.
 Use it with dictionaries you have the right to use.

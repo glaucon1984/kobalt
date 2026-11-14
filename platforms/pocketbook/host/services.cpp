@@ -2,6 +2,7 @@
 #include "host.h"
 #include "sleep_screen_files.h"
 #include "app/reader/views/annotation_exporter.h"
+#include "dictionaries/stardict.h"
 #include "ui/controls/keyboard.h"
 #include "ui/style/fonts.h"
 #include <QGuiApplication>
@@ -466,8 +467,10 @@ ReaderHostServices readerServices() {
     result.light = [](QWidget *) {
         return std::make_unique<Light>();
     };
+    // The reader puts the downloaded dictionaries in front of this (downloadableDictionaries).
     result.dictionary = [] {
-        return std::make_unique<Dictionary>();
+        return std::make_unique<FolderDictionaries>(QString::fromLatin1(userDictionaryDirectory),
+                                                    std::make_unique<Dictionary>());
     };
     // Kobalt's own widget keyboard (the firmware's keyboard belongs to inkview tasks, not to Qt).
     result.keyboard = ui::makeWidgetKeyboard;

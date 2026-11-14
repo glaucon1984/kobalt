@@ -10,6 +10,7 @@
 #include "orientation_sensor.h"
 #include "explorer_progress.h"
 #include "epub_cfi.h"
+#include "services.h"
 #include "reading/reading_progress.h"
 #include "platform/posix/diagnostics.h"
 #endif
@@ -310,6 +311,9 @@ void ReaderController::begin(const QString &path, QSize pixels)
             + "/user-folders/custom-pins";
 #else
     request.customPinsPath = paths.customPins();
+#endif
+#ifdef KOBALT_POCKETBOOK
+    request.dictionariesPath = QString::fromLatin1(pocketbook::userDictionaryDirectory);
 #endif
     request.appearanceDefaults = appearance::bookDefaults(settings);
     opening->open(

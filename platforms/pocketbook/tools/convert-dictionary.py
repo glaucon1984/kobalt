@@ -2,6 +2,8 @@
 
   python convert-dictionary.py <mount> <slot> <dictionary>     convert, back up the slot, install
   python convert-dictionary.py <mount> <slot> --restore        put the backed-up dictionary back
+  python convert-dictionary.py <mount> <slot> <dictionary> --folder
+                                                 convert into Kobalt's dictionaries folder instead
   python convert-dictionary.py --check <folder> <slot> [word]  read a converted folder back
 
   <mount>       the device over USB, e.g. L: or /media/you/PB710
@@ -26,6 +28,10 @@ in exactly that form from a StarDict dictionary whose definitions are HTML, XDXF
   Kobalt also brings the catalogue's back.
 - Kobalt keeps showing the catalogue's name for the slot; the source line under a definition
   names your dictionary.
+- --folder leaves the slot alone and writes the dictionary to applications/kobalt/dictionaries/
+  <name>/ under its own name, with the slot's first language: Kobalt (from the blaze engine
+  builds on) lists such dictionaries beside the catalogue's, so both can be used. The slot still
+  lends its inflected forms. The same command again replaces that folder.
 
 Written against the reader of Kobalt v1.0-beta.7. Python 3.8 or later, no packages. Use it with
 dictionaries you have the right to use; it contains none.
@@ -49,6 +55,7 @@ LABEL = "#555555"  # coloured labels of an XDXF dictionary, on a greyscale scree
 MARK = "convert-dictionary.py"
 ENTRY_LIMIT = 4 * 1024 * 1024  # the reader refuses a longer definition
 SLOTS = os.path.join("applications", "kobalt", "profile", "config", "dictionaries")
+FOLDER = os.path.join("applications", "kobalt", "dictionaries")
 
 
 class Problem(Exception):
@@ -478,6 +485,35 @@ def replace_files(source, target, keep=()):
             raise Problem("%s did not arrive intact on the device" % name)
 
 
+def install_in_folder(converted, mount, slot, name):
+    """Moves the converted slot files in `converted` to FOLDER/<name>/ as a dictionary of its own."""
+    if mount.endswith(":"):
+        mount += os.sep  # "L:" alone would be drive-relative on Windows
+    # Letters and digits of any script stay (the device's storage takes them); the rest become "-".
+    base = re.sub(r"[^\w.-]+", "-", name).strip("-.") or "dictionary"
+    target = os.path.join(mount, FOLDER, base)
+    if os.path.isdir(target):
+        previous = [entry[:-4] for entry in os.listdir(target) if entry.endswith(".ifo")]
+        if any(not is_converted(target, entry) for entry in previous):
+            raise Problem("%s holds a dictionary this tool did not write; choose another --name" % target)
+        shutil.rmtree(target)
+    with open(os.path.join(converted, slot + ".ifo"), "rb") as file:
+        lines = file.read().decode("utf-8").splitlines()
+    lines = [("bookname=" + name.replace("\n", " ")) if line.startswith("bookname=") else line
+             for line in lines if not line.startswith("lang=")]
+    lines.append("lang=" + slot.split("-")[0])
+    os.makedirs(target)
+    with open(os.path.join(target, base + ".ifo"), "wb") as file:
+        file.write(("\n".join(lines) + "\n").encode("utf-8"))
+    # Kobalt writes its own .idx.kobalt and .syn.kobalt beside a folder dictionary when a book opens.
+    for suffix in (".idx", ".dict.dz", ".syn"):
+        if os.path.exists(os.path.join(converted, slot + suffix)):
+            shutil.copyfile(os.path.join(converted, slot + suffix), os.path.join(target, base + suffix))
+    if os.path.exists(os.path.join(converted, "ATTRIBUTION")):
+        shutil.copyfile(os.path.join(converted, "ATTRIBUTION"), os.path.join(target, "ATTRIBUTION"))
+    return target
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], epilog="Run with --explain for the full description.")
     parser.add_argument("mount", nargs="?")
@@ -490,6 +526,8 @@ def main():
     parser.add_argument("--no-forms", action="store_true", help="do not add the catalogue dictionary's inflected forms")
     parser.add_argument("--backup", default="kobalt-dictionary-backup", help="where the slot's own dictionary is kept")
     parser.add_argument("--output", help="write the converted folder here and leave the device alone")
+    parser.add_argument("--folder", action="store_true",
+                        help="install into applications/kobalt/dictionaries/<name>/ beside the catalogue's, not in the slot")
     parser.add_argument("--restore", action="store_true", help="put the backed-up dictionary back in the slot")
     parser.add_argument("--check", action="store_true", help="read a converted folder back: --check <folder> <slot> [word...]")
     parser.add_argument("--explain", action="store_true", help=argparse.SUPPRESS)
@@ -540,6 +578,11 @@ def main():
         check(folder, args.slot, args.words)
         if args.output:
             print("written to %s; the device is as it was" % folder)
+            return
+        if args.folder:
+            name = args.name or read_ifo(source).get("bookname") or os.path.basename(source)
+            target = install_in_folder(folder, args.mount, args.slot, name)
+            print("%s: installed as its own dictionary; Kobalt lists it when the next book opens" % target)
             return
         if not converted and not have_backup:
             os.makedirs(kept, exist_ok=True)
