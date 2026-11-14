@@ -6,7 +6,19 @@ These checks cover the CREngine layout groups, publisher markup, the document ca
 
 ## Engine checks
 
+Hybrid regressions keep the chapter usable when a prepared document cannot resolve its reading position. Such a document is dropped and not built again for the same appearance. The session regression deliberately damages the prepared document and checks that the requested turn and later turns succeed in chapter mode without an error. In a long chapter, the text around a search hit must match the whole book, including when the part containing the hit has no layout.
+
+`KOBALT_HANDOFF_BOOK=<epub>` makes `kobalt-page-estimate-tests` walk that book in chapter mode and resolve every page anchor in the whole book. It compares pages by sequential index because a blank page can share its anchor with the following page. It fails on unresolved positions, different page totals, different page starts or different sampled pixels. Pixel comparisons sample every fifth page. Set `KOBALT_HANDOFF_ALL_PAGES=1` to compare every page. Optional `KOBALT_HANDOFF_CAPTURE_DIR` saves the first differing page pairs for inspection. Keep captures under the worktree’s `build/` directory.
+
+The session checks also request an appearance edit while the worker has adopted the whole book but has not published its frame. The edit must return to chapter rendering before reflow.
+
+The Hybrid checks also cover interrupted chapter-place reads, publisher-font reuse across the whole-book build, parked-cache ownership and abandonment after a cached document opens. Rendering policy 5 rebuilds pagination that may contain another book's publisher-font metrics. Parsed-book data remains compatible and is retained. Search-context resolution and refusal handling do not change either cache format.
+
 The restored `reader`, `publisher-markup`, `local-reader` and `document-word-count` checks keep the original assertions. Their focused EPUBs are generated offline in C++ with the original text, span IDs, markup and resource paths. `engine.document-cache` is a separate check, so `engine.reader` stays within the child deadline under parallel execution. `engine.reader` also links the portable Kobo position codec, but it does not load Nickel or inspect firmware symbols. Its variable-font cases need the pinned Amstelvar fixture and fail rather than skip without it.
+
+`engine.engine-contract` checks that callbacks stay with their view through chapter changes and detach when the view is destroyed. Nested layouts preserve their caller's cancellation and progress. A foreground layout with nested flows polls its own callback while a whole-book layout is parked.
+
+`engine.page-estimate` checks the reading position after chapter eviction, repeated font changes and whole-book handoff. An interrupted layout must resume with the same page count and slice boundary in a long paragraph. Opening another book on the same engine must discard the previous book's prepared pages. These changes keep the existing cache formats.
 
 ## Shared locations and the engine interface
 
@@ -72,3 +84,5 @@ Build `kobalt-document-cache-tests` against the previous and candidate sources w
 The vertical-writing buffer regression covers a run measured at 57 pixels that draws 58 pixels. Rotating the old allocation read beyond its last row and could paint unrelated glyph fragments, making cached and fresh pages differ. The local buffer patch grows and zero-fills the allocation before compositing and rotation. It adapts the buffer-safety part of the upstream vertical fork's fix without its experimental glyph-origin changes.
 
 The horizontal-rule check in `engine.beautifier` renders the reported top-border CSS at several reading densities. It checks both border heights and the gray colors.
+
+Current-page formatting warnings use parsed-book format 12 for the added style diagnostic field. `engine.page-estimate` checks that unsupported CSS does not change fallback pixels and that cached styles retain the warning. The previous whole-book inspector remains covered as a standalone utility; it no longer determines reader warnings.

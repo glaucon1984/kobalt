@@ -222,7 +222,7 @@ The measuring runs on the engine worker after the pages beside the current page,
 
 #### Fast interactions
 
-Fast keeps one spare unit beside the current document. At the first page of a unit, cancellable background work prepares the previous unit through its last page. At the end of a unit it prepares the next one. Crossing a unit boundary retains the departed document in the spare slot, so immediate reverse turns can reuse it. The cache checks layout settings, viewport, stylesheet and slice size before reuse. A tap that arrives before preparation finishes can still pay the cold load cost.
+Chapter mode keeps one immediate spare unit beside the current document and a bounded cache of previously visited units. At the first page of a unit, cancellable background work prepares the previous unit through its last page. At the end of a unit it prepares the next one. Crossing a unit boundary retains the departed document in the spare slot, so immediate reverse turns can reuse it. The cache checks layout settings, viewport, stylesheet and slice size before reuse. A tap that arrives before preparation finishes can still pay the cold load cost.
 
 Fast keeps slice-local page indices for painting, selection and bookmark marks. `pagesOf()` returns -1 for a position outside the loaded slice. Display labels use `bookPages()` instead, with an estimated whole-book page or a pending value. Highlight end labels use the preceding visible character because the saved end is exclusive. Saved lists retain their anchors and remain navigable while page labels are pending.
 
@@ -290,7 +290,7 @@ A small record, the book-state field `page_estimate` ([Storage compatibility](..
 
 ### Stages
 
-The fork exists: the branch `kobalt` in the koblaze checkout is upstream CREngine at the pinned revision with each Kobalt patch as one commit. Its tree is the same as the patched tree that Kobalt builds. On the Mac, Kobalt adds one line to CREngine's `CMakeLists.txt` after the patches (a rename of two FreeType functions); that step is not in the fork yet.
+These stages record the original migration plan. Kobalt now builds the imported fork directly from `src/engine/blaze` on every platform. The FreeType symbol rename is an engine CMake option. The external checkout, post-patch edit and temporary symlink are retired. See [source provenance](koblaze.md) and [current status](../engines.md#status).
 
 1. Build Kobalt from the fork in place of the pin and the patches, with the same output. Move the FreeType rename into a CMake option of the fork.
 2. Measure on a Kobo: the split of a cold open and of a font size change into parse, style, layout and page split, and the time between two progress points.
