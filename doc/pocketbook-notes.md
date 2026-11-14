@@ -1201,3 +1201,23 @@ What the port needed:
 Saved data: upstream adds only optional fields (`rendering_mode`, `page_estimate` and others) and
 keeps every format version, so 0.11.1 reads a profile this build wrote. The device's install and
 profile before the test: `backups/era-lite-before-blaze-20261113` in the parent folder.
+
+### Upstream feature/blaze-engine 89f861d merged (2026-11-14, not released)
+
+23 commits past `a4bb4d1`: Hybrid's handoff from the chapter view to the whole book made
+reliable, idle rendering that yields to foreground requests, less loading and pagination work,
+cancellation and progress kept in nested layouts, Fast-mode page number fixes, publisher fonts
+kept apart between books, and Blaze's parsed books moved to their own `.cache-blaze/` (parser
+cache format 12; beta 8 keeps `.cache/`, so returning to 0.11.1 does not reparse). The CREngine
+patch series is retired: its changes live in `src/engine/blaze/`.
+
+Three conflicts, additions on both sides, all kept: upstream's opening-progress steps beside the
+PocketBook hooks in `platforms/standalone/reader.cpp`, upstream's `AssetBundle::verify()` beside
+the port's `setVerificationRecord()` (the record logic now sits in `verifyFiles()`, so it runs on
+both paths; the PocketBook bundle keeps the default on-demand verification), and upstream's
+`openingProgressStages` and `formattingWarning` beside the plugin tests in the desktop lists.
+Nothing in `platforms/pocketbook/` changed; dependencies were not rebuilt.
+
+Saved data: SQLite schema 4, settings schema 1 and book-record format 1 are unchanged. The
+profile can hold both engines' caches (128 MiB budget each). Device backup before the update:
+`backups/era-lite-before-blaze-update-20261114` in the parent folder.

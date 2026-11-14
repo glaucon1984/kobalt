@@ -71,6 +71,8 @@ std::unique_ptr<ReadingBridge> platformLibraryBridge(const QString &, const QStr
     return nullptr;
 }
 #endif
+// Match the native host: engine, window, then presentation.
+constexpr int openingBarEngine = 60, openingBarWindow = 80;
 
 QString recentText(QString text)
 {
@@ -322,6 +324,9 @@ void ReaderController::begin(const QString &path, QSize pixels)
                     guard->retire();
                     return;
                 }
+                emit guard->openingProgress(openingBarEngine);
+                if (!guard || guard->phase != Phase::Opening)
+                    return;
                 QJsonObject last{ { "path", guard->current },
                                   { "title", recentText(guard->opening->title()) },
                                   { "author", recentText(guard->opening->author()) } };
@@ -356,6 +361,9 @@ void ReaderController::begin(const QString &path, QSize pixels)
                 window->setWindowModality(Qt::NonModal);
                 window->resize(pixels);
                 guard->window_ = window;
+                emit guard->openingProgress(openingBarWindow);
+                if (!guard || guard->phase != Phase::Opening || guard->window_ != window)
+                    return;
                 window->finished = [guard](std::unique_ptr<ReaderSession> retained) {
                     if (guard && guard->window_)
                         guard->closing = guard->window_->closingTiming();
@@ -395,7 +403,9 @@ void ReaderController::begin(const QString &path, QSize pixels)
                             QJsonObject{ { "engine_ms", engine },
                                          { "window_ms", created },
                                          { "wait_ms", waiting.nsecsElapsed() / 1e6 } });
-                    emit guard->opened();
+                    emit guard->openingProgress(100);
+                    if (guard && guard->phase == Phase::Reading && pendingWindow)
+                        emit guard->opened();
                 });
             },
             [guard, lastStage = OpeningStage::Content,
@@ -409,8 +419,8 @@ void ReaderController::begin(const QString &path, QSize pixels)
                     return;
                 lastStage = stage;
                 painted.start();
-                emit guard->openingProgress((int(stage) * 100 + percent)
-                                            / (int(OpeningStage::Ready) + 1));
+                emit guard->openingProgress((int(stage) * 100 + percent) * openingBarEngine
+                                            / ((int(OpeningStage::Ready) + 1) * 100));
             },
             [guard](QImage cover) {
                 if (guard && guard->phase == Phase::Opening)

@@ -1,5 +1,6 @@
 #include "reader_inputs.h"
 #include "reading/reader_session.h"
+#include "reading/rendering_mode.h"
 #include "sync/kosync.h"
 #include "app/messages/opening_message.h"
 #include "publication/native_resources.h"
@@ -9,6 +10,10 @@
 #include "support/qt_compat.h"
 #include "publication/zip_resource.h"
 #include "support/strings.h"
+#include "engine/engine_worker.h"
+#include "engine/blaze/adapter/engine_document.h"
+#include "engine/blaze/adapter/column_view.h"
+#include <lvdocview.h>
 #include "check.h"
 #include <QGuiApplication>
 #include <QJsonDocument>
@@ -24,6 +29,25 @@
 #include <functional>
 
 using namespace kobalt;
+
+// Access the engine only on its worker during the adoption checks.
+static Engine *openedEngine = nullptr;
+static std::function<void()> adoptingDocument;
+
+namespace kobalt {
+struct ReaderLocationProbe
+{
+    static void refusePreparedDocument(Engine &engine)
+    {
+        auto &model = dynamic_cast<EngineDocument &>(engine);
+        require(model.fullDocumentReady(), "The session must have a prepared document");
+        auto *body = model.full_->engine_->getDocument()->nodeFromXPath(U"/body");
+        require(body, "The prepared document must have a body");
+        while (body->getChildCount())
+            body->removeLastChild();
+    }
+};
+} // namespace kobalt
 
 int run(int argc, char **argv)
 {
@@ -190,7 +214,7 @@ int run(int argc, char **argv)
             // validation flag distinguishes a content rejection from failed I/O.
             reject(request(path, access, broken),
                    rejected ? OpeningFailureKind::InvalidContent : OpeningFailureKind::Io,
-                   "error.publication_layout_inspection_is_incomplete", rejected);
+                   "opening.resource-read", rejected);
         }
         OpeningResult ready;
         ready.rememberContentRejection();
@@ -272,23 +296,166 @@ int run(int argc, char **argv)
             int warnings = 0;
             for (const auto &line : log.readAll().split('\n')) {
                 const auto entry = QJsonDocument::fromJson(line).object();
-                if (entry.value("event").toString()
-                    != QStringLiteral("opening-formatting-warning")) {
+                if (entry.value("event").toString() != QStringLiteral("page-formatting-warning")) {
                     continue;
                 }
-                require(entry.value("resource").toString().endsWith(".xhtml")
-                                && entry.value("issue").toString().contains("writing")
-                                && entry.value("excerpt").toString().contains("vertical-lr"),
-                        "Formatting warning log lost its cause, resource or excerpt");
-                require(entry.value("retained_book_hit").toBool() == (warnings == 1),
-                        "Retained warning log lost its origin");
+                require(entry.value("page").toInt(-1) >= 0
+                                && !entry.value("position").toString().isEmpty(),
+                        "Page warning log lost its displayed position");
                 ++warnings;
             }
-            require(warnings == 2, "Expected initial and retained formatting warning diagnostics");
+            require(warnings >= 2,
+                    "Expected current-page diagnostics on initial and retained opening");
             retainedWarning->cancelSource();
             ReaderSession::drain([&] { opened.quit(); });
             opened.exec();
             servedPath = path;
+        }
+        // A stale ready notification must not turn into a synchronous whole
+        // book load when its first frame is superseded by another request.
+        for (const int scenario : { 0, 1, 2, 3 }) {
+            const bool prepared = scenario != 0;
+            const bool refuse = scenario == 2;
+            auto fast =
+                    std::make_unique<ReaderSession>(test::readerFonts(), test::readerPlaceholder());
+            auto probePositions = firstPositions;
+            probePositions.encode = [](const Engine &engine, QString *) {
+                openedEngine = const_cast<Engine *>(&engine);
+                if (engine.bookFraction() < 0 && adoptingDocument) {
+                    const auto notify = std::exchange(adoptingDocument, {});
+                    notify();
+                }
+                return "first:" + engine.position();
+            };
+            auto access = std::make_shared<SourceLease>();
+            const int quiet = renderingMode::buildQuietMilliseconds();
+            renderingMode::setBuildQuietMilliseconds(0);
+            renderingMode::setOverride(prepared ? 2 : 1);
+            fast->open({ path,
+                         path,
+                         QSize(758, 900),
+                         {},
+                         {},
+                         {},
+                         access,
+                         nativeResourceFactory(path, server.serverPort(), access),
+                         probePositions },
+                       [&](OpeningResult result) {
+                           require(result.ready(), qPrintable(openingMessage(result)));
+                           opened.quit();
+                       });
+            opened.exec();
+            require(fast->state().contains("book_fraction"),
+                    "The stale-ready fixture must open as a chapter");
+            QEventLoop rendered;
+            fast->updated = [&] {
+                if (!fast->busy())
+                    rendered.quit();
+            };
+            if (prepared) {
+                // A completed appearance edit must not leave chapter mode as
+                // pending intent when a later full-document frame is superseded.
+                fast->requestAppearance(
+                        fast->requestedAppearance().edited(appearance::Patch(
+                                QJsonObject{ { "font_pixels",
+                                               fast->state().value("font_pixels").toInt() + 2 } })),
+                        {}, ReaderSession::hybridChapterMode);
+                rendered.exec();
+                for (int turn = 0; turn < 4; ++turn) {
+                    require(fast->turn(1), "Cannot read on before the full build");
+                    rendered.exec();
+                }
+                QEventLoop ready;
+                QTimer poll;
+                QObject::connect(&poll, &QTimer::timeout, &ready, [&] {
+                    if (fast->fullDocumentPending_)
+                        ready.quit();
+                });
+                poll.start(10);
+                if (!fast->fullDocumentPending_)
+                    ready.exec();
+                poll.stop();
+                if (refuse) {
+                    QEventLoop damaged;
+                    kobalt::qt::invoke(
+                            engineWorker(),
+                            [&] {
+                                require(openedEngine, "The session must expose its position codec");
+                                ReaderLocationProbe::refusePreparedDocument(*openedEngine);
+                                kobalt::qt::invoke(
+                                        qApp, [&] { damaged.quit(); }, Qt::QueuedConnection);
+                            },
+                            Qt::QueuedConnection);
+                    damaged.exec();
+                    for (int turn = 0; turn < 3; ++turn) {
+                        const auto before = fast->state().value("position");
+                        require(fast->turn(1), "Cannot turn after refusing the prepared document");
+                        rendered.exec();
+                        require(fast->error().isEmpty() && fast->state().contains("book_fraction")
+                                        && fast->state().value("position") != before
+                                        && fast->turnDirection() == 1,
+                                "Refusing the whole book must preserve the requested page turn");
+                    }
+                } else if (scenario == 3) {
+                    const int pixels = fast->state().value("font_pixels").toInt() + 2;
+                    adoptingDocument = [&] {
+                        kobalt::qt::invoke(
+                                qApp,
+                                [&] {
+                                    require(fast->busy() && fast->state().contains("book_fraction"),
+                                            "The appearance edit must race the unpublished whole-book frame");
+                                    fast->editAppearance(appearance::Patch(
+                                            QJsonObject{ { "font_pixels", pixels } }));
+                                },
+                                Qt::BlockingQueuedConnection);
+                    };
+                    require(fast->go(0), "Cannot start adoption before the appearance edit");
+                    rendered.exec();
+                    require(!adoptingDocument && fast->error().isEmpty()
+                                    && fast->state().value("font_pixels").toInt() == pixels
+                                    && fast->state().contains("book_fraction"),
+                            "An appearance edit during adoption must reflow a chapter, not the whole book");
+                } else {
+                    QTemporaryDir logs;
+                    initializeDiagnostics(logs.path());
+                    pauseDiagnostics(false);
+                    auto armed = std::make_shared<std::atomic_bool>(true);
+                    auto opens = std::make_shared<std::atomic_int>(0);
+                    setDiagnosticObserver([&, armed, opens](const QJsonObject &event) {
+                        if (event.value("event") == "operation-start"
+                            && event.value("operation") == "engine-open")
+                            ++*opens;
+                        if (event.value("event") == "render-end"
+                            && event.value("book_fraction").toDouble() < 0
+                            && armed->exchange(false))
+                            kobalt::qt::invoke(
+                                    qApp,
+                                    [&] {
+                                        require(fast->go(0),
+                                                "Cannot supersede the adopted full frame");
+                                    },
+                                    Qt::QueuedConnection);
+                    });
+                    require(fast->go(0), "Cannot adopt the prepared full document");
+                    rendered.exec();
+                    setDiagnosticObserver({});
+                    require(!armed->load() && !fast->state().contains("book_fraction")
+                                    && opens->load() == 0,
+                            "A superseded full frame reopened a chapter after an appearance edit");
+                }
+            } else {
+                fast->showFullDocument();
+                require(fast->go(0) && fast->go(0), "Cannot supersede the stale-ready frame");
+                rendered.exec();
+                require(fast->state().contains("book_fraction"),
+                        "A superseded stale-ready frame loaded the whole book");
+            }
+            fast.reset();
+            renderingMode::setOverride(-1);
+            renderingMode::setBuildQuietMilliseconds(quiet);
+            QEventLoop drained;
+            ReaderSession::drain([&] { drained.quit(); });
+            drained.exec();
         }
         lease = std::make_shared<SourceLease>();
         session->open({ path,

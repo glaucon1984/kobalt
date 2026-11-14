@@ -48,6 +48,18 @@ lString32 cre(const QString &s)
 
 constexpr int maxBook = 64 * 1024 * 1024;
 
+#ifdef KOBLAZE_DOCUMENT_FONT_DATA
+quint64 documentFontSource = 0;
+
+void useDocumentFontSource(quint64 source)
+{
+    if (source != documentFontSource) {
+        koblazeForgetDocumentFontData();
+        documentFontSource = source;
+    }
+}
+#endif
+
 class ResourceStream : public LVNamedStream
 {
 public:
@@ -202,7 +214,7 @@ class ResourceContainer : public LVNamedContainer
 {
 public:
     ResourceContainer(std::shared_ptr<ResourceCache> resources, const QMap<QString, qint64> &sizes)
-        : resources(std::move(resources))
+        : resources(std::move(resources)), sizes(sizes)
     {
         SetName(U"publication.epub");
         for (const auto &name : this->resources->names()) {
@@ -233,12 +245,20 @@ public:
         const auto dimensions = resources->deferredImageSize(key);
         if (dimensions.isValid())
             return LVStreamRef(new ResourceStream(resources, key, -1, dimensions));
-        const auto length = resources->size(key);
+        // Raw font sizes come from the publication. Asking the resource
+        // cache loads the bytes even when the font manager can reuse them.
+        // Other resources can be transformed by their provider, so their
+        // stream size must still come from the returned bytes.
+        const auto suffix = QFileInfo(key).suffix().toLower();
+        const bool rawFont = suffix == "ttf" || suffix == "otf";
+        const auto length =
+                rawFont && sizes.contains(key) ? sizes.value(key) : resources->size(key);
         return length < 0 ? LVStreamRef() : LVStreamRef(new ResourceStream(resources, key, length));
     }
 
 private:
     std::shared_ptr<ResourceCache> resources;
+    QMap<QString, qint64> sizes;
 };
 
 class ContentContainer : public LVContainer
@@ -573,7 +593,13 @@ bool EngineDocument::openSource(std::shared_ptr<ReaderSource> source, QSize size
     if (!initializeFonts())
         return fail(OpeningFailureKind::HostUnavailable,
                     strings::key("error.the_reading_font_is_unavailable"));
+    if (source_ && source_ != source) {
+        dropSideDocuments();
+        fullFailed_.clear();
+        fullUncached_.clear();
+    }
     configure(size, saved);
+    layoutInterrupted_ = false;
     openedFromCache_ = false;
     // Stream loading does not set a filename. CREngine uses its presence to
     // distinguish a loaded document from its internal blank/error document,
@@ -631,6 +657,8 @@ bool EngineDocument::openSource(std::shared_ptr<ReaderSource> source, QSize size
         source->contentContainer = true;
     }
     OpeningCallback callback(engine_, std::move(progress), openInterrupt_);
+    if (openingFontSource_)
+        source->fontIdentity = std::exchange(openingFontSource_, 0);
     source_ = std::move(source);
     openingTimes_["model_prepare_ms"] = double(phase.restart());
     bool loaded;
@@ -650,12 +678,9 @@ bool EngineDocument::openSource(std::shared_ptr<ReaderSource> source, QSize size
 #  ifdef KOBLAZE_DOCUMENT_FONT_DATA
         // The fork keeps the data of embedded fonts for the next part of
         // the same book. Another book has other fonts under the same names.
-        static quint64 fontSource = 0;
-        const quint64 book = source_->parent ? source_->parent->identity : source_->identity;
-        if (book != fontSource) {
-            koblazeForgetDocumentFontData();
-            fontSource = book;
-        }
+        const quint64 book =
+                source_->parent ? source_->parent->fontIdentity : source_->fontIdentity;
+        useDocumentFontSource(book);
 #  endif
         // Experimental, with the koblaze fork only: load the text of a
         // window of spine items. The others stay empty.
@@ -679,20 +704,6 @@ bool EngineDocument::openSource(std::shared_ptr<ReaderSource> source, QSize size
             koblazeSetPlainJoiner(fast);
 #  endif
         }
-#endif
-#if __has_include(<koblaze.h>)
-        // The loads of the other units of this book read the same package
-        // and contents files.
-        struct EpubCacheScope
-        {
-            explicit EpubCacheScope(KoblazeEpubCache *cache) { koblazeSetEpubCache(cache); }
-            ~EpubCacheScope() { koblazeSetEpubCache(nullptr); }
-        };
-        const bool cached = packageCache_ && firstSpineItem >= 0 && !source_->parent;
-        if (cached && !source_->epubCache)
-            source_->epubCache = std::shared_ptr<KoblazeEpubCache>(koblazeCreateEpubCache(),
-                                                                   koblazeDeleteEpubCache);
-        const EpubCacheScope epubCache(cached ? source_->epubCache.get() : nullptr);
 #endif
         loaded = engine_->LoadDocument(LVCreateMemoryStream(), false, source_->container);
 #if __has_include(<koblaze.h>)
@@ -901,10 +912,17 @@ bool EngineDocument::setChapterMode(bool fast, const appearance::Patch &patch, Q
             prepared = !before.contains(it.key()) || before.value(it.key()) == it.value();
     }
     if (prepared) {
-        auto full = std::move(full_);
         const auto place = position();
-        if (!place.isEmpty())
-            full->goTo(place);
+        // Keep the chapter on screen if the prepared document cannot resolve
+        // its place. A failed switch must never send the reader to page one.
+        if (!place.isEmpty() && !full_->goTo(place)) {
+            // The same build would refuse the same place again. Drop it and
+            // do not build it again for this appearance.
+            fullFailed_ = fullKey_;
+            full_.reset();
+            return false;
+        }
+        auto full = std::move(full_);
         if (externalChapters_) {
             full->setChapters(contents_, graph_);
             full->externalChapters_ = true;
@@ -917,6 +935,8 @@ bool EngineDocument::setChapterMode(bool fast, const appearance::Patch &patch, Q
         return true;
     }
     EngineDocument next(fonts_);
+    next.openingFontSource_ =
+            source_->parent ? source_->parent->fontIdentity : source_->fontIdentity;
     next.slicePages_ = fast ? qMax(1,
                                    qgetenv("KOBALT_CHAPTER_PAGES").isEmpty()
                                            ? 25
@@ -1157,11 +1177,10 @@ EngineDocument *EngineDocument::openAhead(int item, const std::function<bool()> 
 
 std::unique_ptr<EngineDocument> EngineDocument::openSide(const QJsonObject &settings,
                                                          const std::function<bool()> &current,
-                                                         QString *error, bool packageCache)
+                                                         QString *error)
 {
 #if __has_include(<koblaze.h>)
     auto side = std::make_unique<EngineDocument>(fonts_);
-    side->packageCache_ = packageCache;
     // What the host gave this document and a saved state does not hold.
     side->slicePages_ = slicePages_;
     side->userStyleSheet_ = userStyleSheet_;
@@ -1191,7 +1210,6 @@ std::unique_ptr<EngineDocument> EngineDocument::openSide(const QJsonObject &sett
 #  endif
     return side;
 #else
-    Q_UNUSED(packageCache);
     Q_UNUSED(settings);
     Q_UNUSED(current);
     Q_UNUSED(error);
@@ -1224,7 +1242,7 @@ struct EngineDocument::FullBuild
     QMutex mutex;
     QWaitCondition changed;
     State state = State::Parked;
-    bool abandoned = false;
+    std::atomic_bool abandoned{ false };
     // "Still current" of the job that lets the build run. False parks it.
     std::function<bool()> current;
     std::unique_ptr<EngineDocument> document;
@@ -1289,6 +1307,9 @@ struct EngineDocument::FullBuild
         // must not write to that cache.
         int levels[64];
         const int count = qMin(64, TextLangMan::koblazeQuoteLevels(levels, 64));
+#  ifdef KOBLAZE_DOCUMENT_FONT_DATA
+        const auto fontSource = documentFontSource;
+#  endif
         StopCheck::suspend();
         // The scopes that this build has open say nothing about the work
         // that has the engine meanwhile.
@@ -1301,6 +1322,11 @@ struct EngineDocument::FullBuild
         changed.wakeAll();
         while (state != State::Running)
             changed.wait(&mutex);
+#  ifdef KOBLAZE_DOCUMENT_FONT_DATA
+        // A different book can use the engine while this one is parked.
+        // Its font files can have the same names and sizes as this book's.
+        useDocumentFontSource(fontSource);
+#  endif
         ldomDocCache::koblazeSuspend(false);
         koblazeSwapCancelScopes(&noCancel, &parserCanStop);
         TextLangMan::koblazeSetQuoteLevels(levels, count);
@@ -1372,10 +1398,7 @@ Engine::FullDocument EngineDocument::prepareFullDocument(const std::function<boo
     if (!building_) {
         // The whole book needs the room of the documents that only chapter
         // mode uses.
-        counting_.reset();
-        countingNext_ = -1;
         kept_.clear();
-        source_->epubCache.reset();
         auto saved = state();
         saved.remove("page_estimate");
         saved["koblaze_first_spine_item"] = -1;
@@ -1409,6 +1432,7 @@ Engine::FullDocument EngineDocument::prepareFullDocument(const std::function<boo
                 const std::function<bool()> wanted = [state] { return state->wanted(); };
                 document->openInterrupt_ = [state] { return !state->wanted(); };
                 QString error;
+                document->openingFontSource_ = source->fontIdentity;
                 koblazeSetPausePoint(&FullBuild::pausePoint, state);
                 try {
                     const StopCheck check(wanted);
@@ -1432,7 +1456,7 @@ Engine::FullDocument EngineDocument::prepareFullDocument(const std::function<boo
                 // A build that stopped half-way leaves no half book in the
                 // cache file: writing it would hold up the work that gave
                 // the build up, and nothing could use it.
-                if (!opened && document->engine_ && document->engine_->getDocument())
+                if (document->engine_ && document->engine_->getDocument())
                     document->engine_->getDocument()->invalidateCacheFile();
                 document.reset();
             }
@@ -1484,8 +1508,8 @@ void EngineDocument::keepUnit(std::unique_ptr<EngineDocument> document, const QJ
     static constexpr qint64 keptUnitBytes = 6 * 1024 * 1024;
     // The engine has room for 16 documents at a time
     // (MAX_DOCUMENT_INSTANCE_COUNT). The document on screen, the one
-    // opened ahead, the one of the count, a preview, the three of the
-    // package cache and the short-lived documents of a load need theirs.
+    // opened ahead, a preview and the short-lived documents of a load
+    // need theirs.
     static constexpr int keptUnitCount = 4;
     if (!document || !source_ || document->windowFirst_ < 0)
         return;
@@ -1544,158 +1568,8 @@ void EngineDocument::dropSideDocuments()
 {
     building_.reset();
     full_.reset();
-    if (source_ && !source_->parent)
-        source_->epubCache.reset();
     ahead_.reset();
-    counting_.reset();
-    countingNext_ = -1;
     kept_.clear();
-}
-
-void EngineDocument::reportCountEnd()
-{
-    if (countReported_ || !diagnosticsActive())
-        return;
-    countReported_ = true;
-    const auto &map = pageMap();
-    diagnostic("page-count-end",
-               { { "spine_items", map.items() },
-                 { "counted", int(map.completeItems().size()) },
-                 { "not_counted", int(uncounted_.size()) },
-                 { "exact", map.counted() },
-                 { "pages", qRound(map.total()) } },
-               false);
-}
-
-void EngineDocument::adoptCounted()
-{
-    if (windowFirst_ < 0 || !source_ || !engine_)
-        return;
-    // Once the spine items up to the page are counted, the page number is
-    // the real one. The total stays an estimate until the count ends.
-    const auto place = roughPlace();
-    if (pageMap().adoptCounted(place.item))
-        source_->pageEstimate.lastItem = -1;
-}
-
-bool EngineDocument::countPages(const std::function<bool()> &current)
-{
-#if __has_include(<koblaze.h>) && defined(KOBLAZE_CANCEL_CHECK)
-    if (slicePages_ <= 0 || windowFirst_ < 0 || !source_ || source_->parent || !engine_)
-        return false;
-    auto &map = pageMap();
-    // The estimate comes first: it gives the numbers that are shown until
-    // the count ends.
-    if (!map.complete())
-        return false;
-    if (map.counted()) {
-        // The last spine item can get its pages from the step that opens
-        // it, or from the page on screen. The count ends here then.
-        keepUnit(std::move(counting_), countingSettings_, countingSize_);
-        countingNext_ = -1;
-        source_->epubCache.reset();
-        reportCountEnd();
-        return false;
-    }
-    const auto key = estimateKey(settingsState());
-    if (key != countingKey_ || size_ != countingSize_) {
-        // Another page: the counts so far were for the old one.
-        countReported_ = false;
-        source_->epubCache.reset();
-        counting_.reset();
-        countingNext_ = -1;
-        kept_.clear();
-        uncounted_.clear();
-        countingKey_ = key;
-        countingSize_ = size_;
-    }
-    if (!counting_) {
-        // The spine items before the page come first, the nearest first:
-        // with them the page number is the real one. Then the spine item of
-        // the page, then the rest of the book.
-        const auto counted = map.completeItems();
-        const auto open = [&](int item) {
-            return !counted.contains(item) && !uncounted_.contains(item);
-        };
-        int item = windowFirst_ - 1;
-        while (item >= 0 && !open(item))
-            --item;
-        if (item < 0) {
-            item = windowFirst_;
-            while (item < spineItemCount_ && !open(item))
-                ++item;
-        }
-        if (item >= spineItemCount_) {
-            // Nothing left to try. Spine items that gave no count stay
-            // estimates.
-            source_->epubCache.reset();
-            adoptCounted();
-            reportCountEnd();
-            return false;
-        }
-        // A unit can start before the item: count from its start.
-        auto unit = unitFrom(item);
-        for (int start = item - 1; start >= 0 && unitFrom(start).second >= item; --start)
-            unit = unitFrom(start);
-        auto settings = windowSettings(unit.first, unit.second);
-        settings.remove("position");
-        // The layout at the open observes the first slice, or each spine
-        // item of a unit as a whole.
-        counting_ = openSide(settings, current, nullptr, true);
-        countingItem_ = item;
-        countingNext_ = -1;
-        countingSettings_ = settings;
-        if (!counting_ && (!current || current())) {
-            // Without the kept documents the engine has room for this one.
-            if (!kept_.empty())
-                kept_.clear();
-            else
-                uncounted_.insert(item);
-        }
-        return true;
-    }
-    auto *side = counting_.get();
-    if (countingNext_ >= 0 || (side->slices() && side->sliceEnd_ < side->spineItemText())) {
-        const int next = countingNext_ >= 0 ? countingNext_ : side->sliceEnd_;
-        side->sliceInterrupt_ = [&current] { return current && !current(); };
-        bool laidOut = false;
-        try {
-            laidOut = side->layoutSlice(next);
-        } catch (const KoblazeRenderCancelled &) {
-            koblazeSetSpineWindow(-1, -1);
-            laidOut = false;
-        }
-        side->sliceInterrupt_ = nullptr;
-        if (laidOut) {
-            countingNext_ = -1;
-            return true;
-        }
-        if (side->layoutInterrupted() || (current && !current())) {
-            // A stopped layout is not a count. Only this slice is laid out
-            // again: the slices before it keep theirs.
-            countingNext_ = next;
-            return true;
-        }
-        uncounted_.insert(countingItem_);
-        counting_.reset();
-        countingNext_ = -1;
-        return true;
-    }
-    // The counted document stays in memory while there is room.
-    keepUnit(std::move(counting_), countingSettings_, countingSize_);
-    // A spine item that did not get its pages is not tried again.
-    if (!map.completeItems().contains(countingItem_))
-        uncounted_.insert(countingItem_);
-    adoptCounted();
-    if (map.counted()) {
-        source_->epubCache.reset();
-        reportCountEnd();
-    }
-    return !map.counted();
-#else
-    Q_UNUSED(current);
-    return false;
-#endif
 }
 
 bool EngineDocument::adoptAhead(int first, int last)
@@ -1726,21 +1600,13 @@ bool EngineDocument::adoptAhead(int first, int last)
     auto old = std::make_unique<EngineDocument>(fonts_);
     *old = std::move(*this);
     *this = std::move(*next);
-    // The count goes on in the document that is shown.
-    counting_ = std::move(old->counting_);
-    countingKey_ = std::move(old->countingKey_);
-    countingSize_ = old->countingSize_;
-    countingItem_ = old->countingItem_;
-    countingNext_ = old->countingNext_;
-    countReported_ = old->countReported_;
+    // The whole-book build follows the document that is shown.
     building_ = std::move(old->building_);
     full_ = std::move(old->full_);
     fullKey_ = std::move(old->fullKey_);
     fullFailed_ = std::move(old->fullFailed_);
     fullUncached_ = std::move(old->fullUncached_);
     fullSize_ = old->fullSize_;
-    countingSettings_ = std::move(old->countingSettings_);
-    uncounted_ = std::move(old->uncounted_);
     kept_ = std::move(old->kept_);
     ahead_ = std::move(old);
     aheadItem_ = oldItem;

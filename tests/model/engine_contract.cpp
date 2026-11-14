@@ -2,8 +2,10 @@
 #include "engine_fixtures.h"
 #include "reader_inputs.h"
 #include "engine/engine.h"
+#include "engine/blaze/adapter/reader_render_callback.h"
 #include <QGuiApplication>
 #include <cstdio>
+#include <thread>
 
 using namespace kobalt;
 
@@ -53,6 +55,98 @@ void open(Engine &engine, const test::BookFiles &files)
             qPrintable(error));
 }
 
+// Chapter changes can retain a view after its opening callback leaves scope.
+// The callback belongs to that view, even after its unique owner moves.
+void callbacksFollowViews()
+{
+    const auto book = createEngine(test::readerFonts());
+    open(*book, test::engineBook());
+    auto view = std::make_unique<ColumnView>();
+    {
+        QList<int> progress;
+        OpeningCallback outer(
+                view, [&](OpeningStage, int percent) { progress.append(percent); },
+                [] { return true; });
+        outer.OnFormatProgress(40);
+        {
+            OpeningCallback inner(view, {}, [] { return false; });
+            require(view->getCallback() == &inner, "The inner callback must receive rendering");
+            inner.OnFormatProgress(10);
+            inner.OnFormatProgress(70);
+            require(progress == QList<int>({ 40, 70 }),
+                    "Nested pagination must advance the caller's progress");
+            require(view->getCallback()->OnRenderCancelRequested(),
+                    "A nested layout ignored the outer cancellation request");
+        }
+        require(view->getCallback() == &outer,
+                "A nested layout discarded the outer opening callback");
+        require(view->getCallback()->OnRenderCancelRequested(),
+                "A nested layout lost the outer cancellation request");
+    }
+    require(!view->getCallback(), "The last callback must detach from the view");
+
+    std::unique_ptr<ColumnView> retained;
+    {
+        OpeningCallback callback(view, {});
+        retained = std::move(view);
+    }
+    require(!retained->getCallback(), "A retained view kept a dead opening callback");
+
+    view = std::make_unique<ColumnView>();
+    // Reusing the old owner must not let the first guard clear a callback
+    // installed on a different view.
+    std::unique_ptr<OpeningCallback> replacement;
+    {
+        OpeningCallback callback(view, {});
+        retained = std::move(view);
+        view = std::make_unique<ColumnView>();
+        replacement = std::make_unique<OpeningCallback>(view, OpeningProgress{});
+    }
+    require(!retained->getCallback() && view->getCallback() == replacement.get(),
+            "A moved callback guard detached from the wrong view");
+    replacement.reset();
+
+    // A failed opening can destroy the view before its callback guard exits.
+    {
+        OpeningCallback callback(view, {});
+        view.reset();
+    }
+}
+
+// A whole-book layout can park while the reader lays out a chapter on
+// another thread. Nested flows must poll the chapter's callback.
+void parkedLayoutCallbacks()
+{
+    struct Polls : LVDocViewCallback
+    {
+        int count = 0;
+
+        bool OnRenderCancelRequested() override
+        {
+            ++count;
+            return false;
+        }
+    };
+
+    Polls background;
+    LVRendPageContext parked(nullptr, 800);
+    parked.setCallback(&background, 10);
+    parked.updateRenderProgress(1);
+    Polls foreground;
+    std::thread chapter([&] {
+        LVRendPageContext current(nullptr, 800);
+        current.setCallback(&foreground, 10);
+        current.updateRenderProgress(1);
+        LVRendPageContext nested(nullptr, 800);
+        nested.updateRenderProgress(1);
+        current.Abandon();
+    });
+    chapter.join();
+    parked.Abandon();
+    require(background.count == 1 && foreground.count == 2,
+            "A nested chapter flow polled the parked whole-book callback");
+}
+
 // The engine that reads books today lays out the whole book, so it must
 // report every page value as exact and equal to its page numbers.
 void wholeBookPages()
@@ -90,6 +184,8 @@ int main(int argc, char **argv)
     QGuiApplication app(argc, argv);
     queryStates();
     wholeBookPages();
+    callbacksFollowViews();
+    parkedLayoutCallbacks();
     std::printf("PASS: query states and exact page values of the whole-book engine\n");
     return 0;
 }

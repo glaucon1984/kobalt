@@ -122,6 +122,8 @@ Linux provides the same light, fast, integration and full test lanes, performanc
 
 ## Assets
 
+Kobo verifies the complete runtime asset bundle on the engine worker from the first queued startup callback. It retains that result for book openings. Pending or failed verification keeps the native reader available and disables Kobalt reading and private sleep screens. USB release invalidates the result only after the current storage handoff succeeds. Nickel's completed remount and library processing trigger a fresh verification. Ordinary library scans, cancellations before storage release and book openings do not repeat it. A cancellation after storage release rechecks when the profile becomes available again. Individual font reads retain their checksum checks. Desktop and Android keep their existing on-demand bundle verification.
+
 `assets/manifest.json` records the runtime file selection, version, sizes and SHA-256 checksums. Font metadata records upstream sources and revisions. The selected eBook font collection is checked in under `assets/fonts/ebook-core/`; builds do not fetch fonts. Keep the manifest consistent when changing runtime assets. All platforms include bundled hyphenation pattern names and contents in the cache policy. Pattern changes rebuild disposable book caches without changing saved reading data.
 
 The desktop, Kobo and Android projects include `platforms/shared-inputs.cmake` for the inputs they share: the generated `reader_styles.h` and `reader_hyphenation.h`, the cache policy, the default of the annotation store, the list of notice resources and the definitions of every target that compiles shared sources (`kobalt_shared_definitions`). The file sets variables and runs steps. Each project keeps its own targets, resource code and source lists. Change a shared input there, not in one project.
@@ -215,13 +217,15 @@ Kobalt builds its koblaze engine from the source in this repository. Its text/im
 
 Desktop, Kobo and Android builds compile the repository-owned koblaze source at `src/engine/blaze`. No separate checkout, symlink or source override is needed. Configuration prints `CREngine: repository source` and the path. This is also the source used by release evaluation and source archives.
 
-`dependencies/local-engine.cmake` builds the engine under each platform's output directory in `blaze/`. Engine edits rebuild only the affected engine objects. Its libraries still come from the shared dependency cache. The old pinned CREngine download and build are no longer part of that cache, and archived CREngine patches are not applied to the repository source.
+`dependencies/local-engine.cmake` builds the engine under each platform's output directory in `blaze/`. Engine edits rebuild only the affected engine objects. Its libraries still come from the shared dependency cache. The old pinned CREngine download and build are no longer part of that cache, and the former CREngine patch series is retained in Git history. Its changes are integrated into the repository source.
 
 The first configure after this separation creates a new dependency set for each SDK because the recipes changed. Later engine edits do not change the dependency key. The import itself does not invalidate parsed-book caches; parser or layout changes still follow [Storage compatibility](storage.md).
 
 ## Dependency cache
 
 All worktrees of a repository share compiled dependencies. The cache is `build/dependency-cache/` in the main checkout. Configuration finds it through Git's common directory, so every linked worktree uses the same folder. A tree without Git, such as an extracted source bundle, uses its own `build/dependency-cache/`. To use another folder, set `KOBALT_DEPENDENCY_CACHE` to an absolute path, as a CMake variable or in the environment. The environment value applies when a build directory is first configured.
+
+CMake dependencies use Release builds. Autotools dependencies use `-O2`, followed by the caller's C flags so explicit overrides take precedence. Setting `CFLAGS` for position-independent code must not disable Autoconf's default optimization. Autotools builds keep their assertions enabled unless the caller disables them.
 
 | Path | Contents |
 | --- | --- |
