@@ -4533,6 +4533,113 @@ private slots:
                  "Today dropped the completed session after the sleep timeout");
     }
 
+    void sleepWidgetsUseSavedDay()
+    {
+        const auto paths = testPaths();
+        QVERIFY(storage::writePreferences(paths.preferences(),
+                                          { { sleep::designKey, "widgets" } }));
+        qint64 utc = QDateTime(QDate(2026, 11, 10), QTime(9, 0)).toMSecsSinceEpoch();
+        {
+            ReadingHistory previous(paths.directory, "other-book", {}, {}, "Other", "Author",
+                                    [&] { return utc; });
+            previous.start(0, "start");
+            utc += 8 * 60000;
+            previous.stop(8 * 60000, "end");
+            QVERIFY(previous.save());
+        }
+        qint64 active = 0;
+        ReaderFixture host(paths, testFonts, testPlaceholder);
+        CloseHost cleanup{ host };
+        host.utc = [&] { return utc; };
+        host.readingClock = [&] { return active; };
+        auto state = std::make_shared<test::SleepPresentationState>();
+        host.configureServices = [state](ReaderHostServices &services) {
+            services.presentation = [state](QWidget *) {
+                return std::make_unique<test::HostPresentation>(state);
+            };
+        };
+        QSignalSpy opened(&host, &ReaderFixture::opened);
+        host.open(textBook);
+        QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 30000);
+        host.window()->show();
+        QTRY_VERIFY(host.book()->readingActive());
+        QTRY_COMPARE(host.window()->powerScreenSnapshot().details.todayMilliseconds,
+                     qint64(8 * 60000));
+        utc += 2 * 60000;
+        active += 2 * 60000;
+        host.window()->checkpoint();
+        QCOMPARE(host.window()->powerScreenSnapshot().details.todayMilliseconds,
+                 qint64(10 * 60000));
+        host.shutdown();
+        QTRY_VERIFY(host.idle());
+        host.open(textBook);
+        QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 2, 30000);
+        host.window()->show();
+        QTRY_VERIFY(host.book()->readingActive());
+        QTRY_COMPARE(host.window()->powerScreenSnapshot().details.todayMilliseconds,
+                     qint64(10 * 60000));
+    }
+
+    void sleepWidgetsUseLocalDay_data()
+    {
+        QTest::addColumn<int>("timeout");
+        QTest::newRow("short-sleep") << 15;
+        QTest::newRow("expired-session") << 15;
+        QTest::newRow("never-reset-session") << 0;
+    }
+
+    void sleepWidgetsUseLocalDay()
+    {
+        QFETCH(int, timeout);
+        const auto paths = testPaths();
+        const QJsonObject preferences{ { sleep::designKey, "widgets" },
+                                       { sessionTimeout::preferenceKey, timeout } };
+        QVERIFY(storage::writePreferences(paths.preferences(), preferences));
+        const QDate date(2026, 11, 10);
+        qint64 utc = QDateTime(date, QTime(23, 50)).toMSecsSinceEpoch();
+        qint64 active = 0;
+        ReaderFixture host(paths, testFonts, testPlaceholder);
+        CloseHost cleanup{ host };
+        host.utc = [&] { return utc; };
+        host.readingClock = [&] { return active; };
+        auto state = std::make_shared<test::SleepPresentationState>();
+        host.configureServices = [state](ReaderHostServices &services) {
+            services.presentation = [state](QWidget *) {
+                return std::make_unique<test::HostPresentation>(state);
+            };
+        };
+        QSignalSpy opened(&host, &ReaderFixture::opened);
+        host.open(textBook);
+        QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 30000);
+        host.window()->show();
+        QTRY_VERIFY(host.window()->readyForPresentation());
+        QTRY_VERIFY(host.book()->readingActive());
+        utc += 15 * 60000;
+        active += 15 * 60000;
+        auto shot = host.window()->powerScreenSnapshot();
+        QCOMPARE(shot.details.todayMilliseconds, qint64(5 * 60000));
+        // A completed checkpoint must not be added to this opening twice.
+        host.book()->checkpointReadingHistory();
+        shot = host.window()->powerScreenSnapshot();
+        QCOMPARE(shot.details.todayMilliseconds, qint64(5 * 60000));
+        host.window()->sleepReader();
+        const int days = QByteArray(QTest::currentDataTag()) == "short-sleep" ? 0 : 3;
+        utc = QDateTime(date.addDays(1 + days), QTime(0, 10)).toMSecsSinceEpoch();
+        host.window()->wakeReader();
+        QTRY_VERIFY(host.book()->readingActive());
+        utc += 2 * 60000;
+        active += 2 * 60000;
+        shot = host.window()->powerScreenSnapshot();
+        QCOMPARE(shot.details.todayMilliseconds, qint64((days ? 2 : 7) * 60000));
+        host.window()->sleepReader();
+        // A sleep spanning midnight contributes zero until reading resumes.
+        utc = QDateTime(date.addDays(2 + days), QTime(0, 1)).toMSecsSinceEpoch();
+        host.window()->wakeReader();
+        QTRY_VERIFY(host.book()->readingActive());
+        shot = host.window()->powerScreenSnapshot();
+        QCOMPARE(shot.details.todayMilliseconds, qint64(0));
+    }
+
     void sleepPrivatePreviewsHideBookPixels()
     {
         const QSize size(300, 400);
@@ -7103,6 +7210,63 @@ private slots:
         QVERIFY(status->height() >= status->heightForWidth(status->width()));
     }
 
+    // A response received under a native dialog resumes when the host releases input.
+    void kosyncDialogResume()
+    {
+        auto paths = testPaths();
+        QVERIFY(storage::writeJson(paths.syncAccount(),
+                                   { { "schema", 1 },
+                                     { "server", "https://fixture.invalid" },
+                                     { "username", "reader" },
+                                     { "key", QString(32, 'a') },
+                                     { "device_id", "fixture" },
+                                     { "automatic", false } }));
+        auto http = std::make_shared<KosyncHttpState>();
+        http->hold = true;
+        bool suspended = false;
+        WindowPresentation *presentation = nullptr;
+        ReaderFixture host(paths, testFonts, testPlaceholder);
+        host.configureServices = [&](ReaderHostServices &services) {
+            services.kosyncHttp = [http] { return std::make_unique<KosyncHttp>(http); };
+            services.suspended = [&] { return suspended; };
+            services.presentation = [&](QWidget *) {
+                auto result = std::make_unique<test::HostPresentation>();
+                presentation = result.get();
+                return result;
+            };
+        };
+        CloseHost cleanup{ host };
+        QSignalSpy opened(&host, &ReaderFixture::opened);
+        host.open(fixture(), nativeSize);
+        QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 30000);
+        Canvas canvas(host.window(), nativeSize);
+        canvas.resize(900, 900);
+        canvas.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&canvas));
+        QTRY_VERIFY(!host.session()->busy());
+        QVERIFY(presentation && presentation->inputResumed);
+        const auto position = host.session()->state().value("position");
+        host.window()->findChild<QPushButton *>("rrSettings")->click();
+        host.window()->findChild<QPushButton *>("rrSettingsKosync")->click();
+        host.window()->findChild<QPushButton *>("rrKosyncNow")->click();
+        QTRY_COMPARE(http->held.size(), 1);
+        suspended = true;
+        http->held.takeFirst()->finish();
+        QCOMPARE(http->uploads, 0);
+        auto *deadline = host.window()->findChild<QTimer *>("rrKosyncDeadline");
+        QVERIFY(deadline && deadline->isActive());
+        suspended = false;
+        http->hold = false;
+        presentation->inputResumed();
+        QTRY_COMPARE(http->uploads, 1);
+        auto *status = host.window()->findChild<QLabel *>("rrKosyncStatus");
+        QVERIFY(status);
+        QTRY_COMPARE(status->text(), strings::get("kosync.up_to_date"));
+        QCOMPARE(http->requests, 2);
+        QVERIFY(!deadline->isActive());
+        QCOMPARE(host.session()->state().value("position"), position);
+    }
+
     // Checks Sync now in Settings: no deadline while a connection waits for permission, then the Syncing notice and its Cancel.
     void kosyncManualConnection_data()
     {
@@ -7680,6 +7844,120 @@ private slots:
         events.seen.removeDuplicates();
         QVERIFY2(events.seen.isEmpty(),
                  qPrintable("Timer events while idle: " + events.seen.join(", ")));
+    }
+
+    // An accepted highlight must finish saving with the sleep pause still requested.
+    void sleepFinishesHighlightSave_data()
+    {
+        QTest::addColumn<int>("stage");
+        QTest::newRow("selection-only") << 0;
+        QTest::newRow("prepare-range") << 1;
+        QTest::newRow("save-text") << 2;
+    }
+
+    void sleepFinishesHighlightSave()
+    {
+        QFETCH(int, stage);
+        const auto paths = testPaths();
+        bool suspended = false;
+        ReaderFixture host(paths, testFonts, testPlaceholder);
+        host.configureServices = [&](ReaderHostServices &services) {
+            services.suspended = [&] { return suspended; };
+        };
+        CloseHost cleanup{ host };
+        const auto release = std::make_shared<QSemaphore>();
+        const auto entered = std::make_shared<QSemaphore>();
+        const auto resume = qScopeGuard([&] {
+            release->release(2);
+            engineActivity().pause(false);
+        });
+        QSignalSpy opened(&host, &ReaderFixture::opened);
+        host.open(textBook, nativeSize);
+        QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 30000);
+        Canvas canvas(host.window(), nativeSize);
+        canvas.resize(900, 900);
+        canvas.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&canvas));
+        QTRY_VERIFY(!host.session()->busy());
+        QVector<SearchHit> hits;
+        bool done = false;
+        host.session()->search("reader", [&](SearchBatch batch) {
+            hits += batch.hits;
+            done = batch.done;
+        });
+        QTRY_VERIFY(done && !hits.isEmpty());
+        QVector<QRect> rects;
+        done = false;
+        host.session()->rangeRects(hits.first().start, hits.first().end, [&](QVector<QRect> value) {
+            rects = value;
+            done = true;
+        });
+        QTRY_VERIFY(done && !rects.isEmpty());
+        auto *page = static_cast<ReadingPage *>(host.window()->findChild<QWidget *>("rrPage"));
+        QVERIFY(page);
+        page->annotationRequested();
+        page->held(rects.first().center());
+        QTRY_VERIFY(!page->annotationHandleRect(true).isEmpty());
+        page->tapped(rects.first().center() + QPoint(0, page->topHeight()));
+        QPushButton *save = nullptr;
+        QTRY_VERIFY((save = host.window()->findChild<QPushButton *>("rrAnnotationSave"))
+                    && save->isVisible());
+        QTRY_VERIFY(!host.window()->pendingStorageSave());
+        auto barrier = [=] {
+            qt::invoke(
+                    engineWorker(),
+                    [=] {
+                        entered->release();
+                        release->acquire();
+                    },
+                    Qt::QueuedConnection);
+        };
+        barrier();
+        QTRY_VERIFY(entered->available() == 1);
+        if (stage) {
+            save->click();
+            QVERIFY(host.window()->pendingStorageSave());
+        }
+        if (stage == 2) {
+            // The range reply queues the text query behind this second barrier.
+            barrier();
+            release->release();
+            QTRY_VERIFY(entered->available() == 2);
+        }
+        engineActivity().pause(true);
+        suspended = true;
+        host.window()->sleepReader();
+        host.window()->sleepViewReady();
+        release->release();
+        QTRY_VERIFY(!host.window()->pendingStorageSave());
+        QTRY_VERIFY(engineActivity().quiescent());
+        QVERIFY(!host.window()->pendingNetworkSync());
+        if (stage)
+            QVERIFY(storage::profileHasUnsyncedWrites());
+        QTRY_VERIFY(host.window()->flushBeforeStandby());
+        QVERIFY(!storage::profileHasUnsyncedWrites());
+        const auto identity =
+                QUrl::fromLocalFile(QFileInfo(textBook).absoluteFilePath()).toString();
+        HighlightStore store(paths.annotations(), identity, host.session()->sourceHash(), "test",
+                             paths.database());
+        QVERIFY(store.load());
+        QCOMPARE(store.highlights().size(), stage ? 1 : 0);
+        if (stage)
+            QVERIFY(store.highlights().first().text.contains("reader"));
+        // With the save finished, subsequent engine work must remain parked.
+        const auto replied = std::make_shared<bool>(false);
+        host.session()->rangeRects(hits.first().start, hits.first().end,
+                                   [replied](QVector<QRect>) { *replied = true; });
+        QTest::qWait(50);
+        QVERIFY(!*replied);
+        engineActivity().pause(false);
+        suspended = false;
+        host.window()->wakeReader();
+        QTRY_VERIFY(*replied);
+        host.shutdown();
+        QTRY_VERIFY(host.idle());
+        QVERIFY(store.load());
+        QCOMPARE(store.highlights().size(), stage ? 1 : 0);
     }
 
     void readerStandbySetting_data()

@@ -10249,7 +10249,9 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
                 }
                 else {
                     RENDER_RECT_UNSET_FLAG(fmt, VERTICAL_USED_INLINE_SIZE_SET);
-                    fmt.setVerticalUsedInlineSize( 0 );
+                    // The flag makes the vertical extent inactive. Do not clear
+                    // its shared slot: final blocks store the float-id count there.
+                    // Painting and text geometry must restore those same floats.
                 }
                 fmt.push();
                 // (We set the height now because we know it, but it should be
