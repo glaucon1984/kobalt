@@ -116,7 +116,7 @@ struct SyncedPositionDescription
 {
     PositionComparison comparison;
     QString chapter;
-    // Compared only: the page of the synced position in this layout, or -1.
+    // Compared only: the whole-book page of the synced position, or -1.
     int page = -1;
 };
 
@@ -203,7 +203,7 @@ public:
     bool goToFraction(double fraction);
     bool goToNative(const QString &location, std::function<void(QString)> finished);
     bool goToSyncedPosition(const QString &position, std::function<void(QString)> finished);
-    // Resolves chapter, page and source order without navigating or rendering another page.
+    // Resolves chapter, page and source order without changing the displayed page.
     void describeSyncedPosition(const QString &position,
                                 std::function<void(SyncedPositionDescription)> finished);
     void nativePosition(std::function<void(QString, QString)> finished);
@@ -218,6 +218,8 @@ public:
     void bookmarkLocations(QStringList positions, std::function<void(BookmarkLocations)> finished,
                            bool rangeEndpoints = false, bool sourceOrder = true,
                            std::shared_ptr<std::atomic_bool> cancelled = {});
+    // My Words needs the book page even if Hybrid adopts a prepared layout
+    // during the lookup. Retry on the same open book when its pages are ready.
     void bookmarkPages(QStringList positions, std::function<void(QVector<int>)> finished,
                        bool rangeEndpoints = false);
     void pageSummary(int page, std::function<void(QString position, QString excerpt)> finished);
@@ -481,6 +483,7 @@ public:
     void setChapters(QVector<ChapterTarget> contents, QVector<ChapterTarget> graph);
 
 private:
+    bool currentSourceFrame(quint64 job) const;
     // `requests` is engineWorkRequests() from when this step was queued:
     // work that was announced after that is in the queue behind this step,
     // or will be, and goes first.
@@ -533,6 +536,7 @@ private:
     int pendingTurn = 0;
     bool loadingImage = false;
     bool preview_ = false;
+    bool openingPreview_ = false;
     bool retiring = false;
     bool layoutReady_ = false;
     RenderProgress renderProgress_;
@@ -560,6 +564,6 @@ private:
                     std::shared_ptr<std::atomic_bool> cancelled,
                     std::function<void(SearchBatch)> finished, bool reset);
     void request(bool appearanceChange = false, RenderReason reason = RenderReason::Appearance);
-    void dispatch(bool pageTurn = false);
+    void dispatch(bool pageTurn = false, std::function<void()> afterFrame = {});
 };
 } // namespace kobalt

@@ -1771,7 +1771,7 @@ public:
                                             && !STYLE_HAS_CR_HINT(parent->getStyle(), NOTEREF_IGNORE) ) {
                                     lString32 href = parent->getAttributeValue(LXML_NS_ANY, attr_href);
                                     if ( href.firstChar()=='#' ) {
-                                        href.erase(0,1);
+                                        href = DecodeHTMLUrlString(href.substr(1));
                                         caption_links.add( href );
                                     }
                                 }
@@ -1989,7 +1989,7 @@ public:
                                                         && !STYLE_HAS_CR_HINT(parent->getStyle(), NOTEREF_IGNORE) ) {
                                                 lString32 href = parent->getAttributeValue(LXML_NS_ANY, attr_href);
                                                 if ( href.firstChar()=='#' ) {
-                                                    href.erase(0,1);
+                                                    href = DecodeHTMLUrlString(href.substr(1));
                                                     if ( is_single_column )
                                                         row->single_col_context->addLink( href, link_insert_pos );
                                                     else
@@ -6110,7 +6110,7 @@ int renderBlockElementLegacy( LVRendPageContext & context, ldomNode * enode, int
                                                 && !STYLE_HAS_CR_HINT(parent->getStyle(), NOTEREF_IGNORE) ) {
                                         lString32 href = parent->getAttributeValue(LXML_NS_ANY, attr_href);
                                         if ( href.firstChar()=='#' ) {
-                                            href.erase(0,1);
+                                            href = DecodeHTMLUrlString(href.substr(1));
                                             context.addLink( href, link_insert_pos );
                                         }
                                     }
@@ -6146,7 +6146,7 @@ int renderBlockElementLegacy( LVRendPageContext & context, ldomNode * enode, int
                                                 && !STYLE_HAS_CR_HINT(parent->getStyle(), NOTEREF_IGNORE) ) {
                                         lString32 href = parent->getAttributeValue(LXML_NS_ANY, attr_href);
                                         if ( href.firstChar()=='#' ) {
-                                            href.erase(0,1);
+                                            href = DecodeHTMLUrlString(href.substr(1));
                                             context.addLink( href, link_insert_pos );
                                         }
                                     }
@@ -10489,7 +10489,7 @@ void renderBlockElementEnhanced( FlowState * flow, ldomNode * enode, int x, int 
                                                 && !STYLE_HAS_CR_HINT(parent->getStyle(), NOTEREF_IGNORE) ) {
                                         lString32 href = parent->getAttributeValue(LXML_NS_ANY, attr_href);
                                         if ( href.firstChar()=='#' ) {
-                                            href.erase(0,1);
+                                            href = DecodeHTMLUrlString(href.substr(1));
                                             flow->getPageContext()->addLink( href, link_insert_pos );
                                         }
                                     }
@@ -11137,10 +11137,14 @@ void DrawDocument( LVDrawBuf & drawbuf, ldomNode * enode, int x0, int y0, int dx
     // where we could do a simple tweak to behave as web browsers.
     if ( enode->isElement() )
     {
+        // A block omitted from this slice can still have its previous rectangle.
+        // Leave it out before painting its background.
+        lvdom_element_render_method rm = enode->getRendMethod();
+        if ( rm == erm_invisible )
+            return;
         RenderRectAccessor fmt( enode );
         doc_x += fmt.getX();
         doc_y += fmt.getY();
-        lvdom_element_render_method rm = enode->getRendMethod();
         lUInt32 rend_flags = enode->getDocument()->getRenderBlockRenderingFlags();
         // A few things differ when done for TR, THEAD, TBODY and TFOOT
         // (erm_table_row_group, erm_table_header_group, erm_table_footer_group, erm_table_row)

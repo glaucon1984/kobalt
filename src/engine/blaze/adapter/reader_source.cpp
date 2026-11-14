@@ -48,6 +48,28 @@ lString32 cre(const QString &s)
 
 constexpr int maxBook = 64 * 1024 * 1024;
 
+// Count only until the shaping threshold. Images and ZIP compression say
+// nothing about how much text the formatter will measure.
+int shapingText(ldomNode *root, int limit)
+{
+    QVector<ldomNode *> pending{ root };
+    int count = 0;
+    while (!pending.isEmpty() && count < limit) {
+        stopPoint();
+        auto *node = pending.takeLast();
+        if (node->isText()) {
+            count += qMin(limit - count, node->getText().length());
+        } else {
+            const auto style = node->getStyle();
+            if (!style.isNull() && style->display == css_d_none)
+                continue;
+            for (int i = node->getChildCount() - 1; i >= 0; --i)
+                pending.append(node->getChildNode(i));
+        }
+    }
+    return count;
+}
+
 #ifdef KOBLAZE_DOCUMENT_FONT_DATA
 quint64 documentFontSource = 0;
 
@@ -544,6 +566,8 @@ QJsonObject EngineDocument::resourceStats() const
     auto result = source_ && source_->resources ? source_->resources->statistics() : QJsonObject();
     for (auto at = openingTimes_.begin(); at != openingTimes_.end(); ++at)
         result.insert(at.key(), at.value());
+    result["fast_shaping"] = fastShaping();
+    result["shaping_text_characters"] = shapingText_;
     return result;
 }
 
@@ -573,6 +597,9 @@ bool EngineDocument::openSource(std::shared_ptr<ReaderSource> source, QSize size
                     strings::key("error.the_reading_engine_could_not_open_this_epub"));
 #endif
     openingTimes_ = {};
+    shapingText_ = 0;
+    const auto shaping = qgetenv("KOBALT_FAST_SHAPING");
+    shapingOverride_ = shaping == "0" ? 0 : shaping == "1" ? 1 : -1;
     QElapsedTimer phase;
     phase.start();
     // Supplying a container skips format detection in the engine. Keep the
@@ -627,7 +654,8 @@ bool EngineDocument::openSource(std::shared_ptr<ReaderSource> source, QSize size
 #else
     firstSpineItem = lastSpineItem = -1;
 #endif
-    EngineSlowdownScope slowdown(firstSpineItem >= 0, [this] { return openInterrupt_ && openInterrupt_(); });
+    EngineSlowdownScope slowdown(firstSpineItem >= 0,
+                                 [this] { return openInterrupt_ && openInterrupt_(); });
     QElapsedTimer windowTimer;
     windowTimer.start();
     windowFirst_ = firstSpineItem < 0 ? -1 : firstSpineItem;
@@ -656,7 +684,7 @@ bool EngineDocument::openSource(std::shared_ptr<ReaderSource> source, QSize size
                 LVContainerRef(new ContentContainer(source->container, std::move(skippedFonts)));
         source->contentContainer = true;
     }
-    OpeningCallback callback(engine_, std::move(progress), openInterrupt_);
+    OpeningCallback callback(engine_, progress, openInterrupt_);
     if (openingFontSource_)
         source->fontIdentity = std::exchange(openingFontSource_, 0);
     source_ = std::move(source);
@@ -685,25 +713,6 @@ bool EngineDocument::openSource(std::shared_ptr<ReaderSource> source, QSize size
         // Experimental, with the koblaze fork only: load the text of a
         // window of spine items. The others stay empty.
         koblazeSetSpineWindow(firstSpineItem, lastSpineItem);
-        // The fork measures plain text from memories of glyph pairs and of
-        // words. HarfBuzz fills them, and each face checks a sample of its
-        // results against HarfBuzz and stops when one differs. The pages
-        // are the same. KOBALT_FAST_SHAPING=0 turns this off, to compare.
-        {
-            const bool fast = qgetenv("KOBALT_FAST_SHAPING") != "0";
-#  ifdef KOBLAZE_PAIR_KERNING
-            koblazeSetPairKerning(fast);
-#  endif
-#  ifdef KOBLAZE_WORD_WIDTHS
-            koblazeSetWordWidths(fast);
-#  endif
-#  ifdef KOBLAZE_WORD_PAIRS
-            koblazeSetWordPairs(fast);
-#  endif
-#  ifdef KOBLAZE_PLAIN_JOINER
-            koblazeSetPlainJoiner(fast);
-#  endif
-        }
 #endif
         loaded = engine_->LoadDocument(LVCreateMemoryStream(), false, source_->container);
 #if __has_include(<koblaze.h>)
@@ -712,6 +721,17 @@ bool EngineDocument::openSource(std::shared_ptr<ReaderSource> source, QSize size
         // A parsed document is rendered only after Render(); one restored
         // from the cache arrives rendered.
         openedFromCache_ = loaded && cache.enabled() && engine_->getDocument()->isRendered();
+    }
+    const auto notes = loaded && firstSpineItem >= 0 && inpageFootnotes_ ? pageNoteLayout()
+                                                                         : PageNoteLayout::Chapters;
+    if (notes == PageNoteLayout::Interrupted)
+        return fail(OpeningFailureKind::Cancelled, strings::key("error.opening_interrupted"));
+    if (notes == PageNoteLayout::WholeBook) {
+        auto whole = saved;
+        whole["koblaze_first_spine_item"] = -1;
+        whole["koblaze_last_spine_item"] = -1;
+        return openSource(source_, size, whole, error, std::move(progress), result,
+                          std::move(coverReady), {}, std::move(cacheReady));
     }
     openingTimes_["model_cache_hit"] = openedFromCache_;
     if (openedFromCache_ && cacheReady)
@@ -730,10 +750,11 @@ bool EngineDocument::openSource(std::shared_ptr<ReaderSource> source, QSize size
     applyPublisherFontFallbacks();
     auto *document = engine_->getDocument();
     const auto renderingPolicy = Utf8ToUnicode(lString8(KOBALT_RENDERING_POLICY));
+    const bool sameRenderingPolicy =
+            document->getProps()->getStringDef("kobalt.rendering.policy", "") == renderingPolicy;
     // A compatible engine update keeps the parsed DOM and Kobalt's markers.
     // Rebuild only its layout when shaping or hyphenation rules have changed.
-    if (openedFromCache_
-        && document->getProps()->getStringDef("kobalt.rendering.policy", "") != renderingPolicy) {
+    if (openedFromCache_ && !sameRenderingPolicy) {
         document->forceReinitStyles();
         engine_->requestRender();
         document->setCacheFileStale(true);
@@ -790,8 +811,23 @@ bool EngineDocument::openSource(std::shared_ptr<ReaderSource> source, QSize size
     engine_->getDocument()->setKoblazeDropEmptyPages(true);
 #endif
     applyStyleSheet();
+    if (shapingOverride_ < 0) {
+        // This optional parsed-cache property avoids walking text on a cache hit.
+        // Its key includes the cap; older caches count once and retain their DOM.
+        constexpr auto countProperty = "kobalt.shaping.text.250000";
+        shapingText_ = openedFromCache_ && sameRenderingPolicy
+                ? document->getProps()->getIntDef(countProperty, -1)
+                : -1;
+        if (shapingText_ < 0 || shapingText_ > fastShapingMinimum) {
+            shapingText_ = shapingText(document->getRootNode(), fastShapingMinimum);
+            document->getProps()->setInt(countProperty, shapingText_);
+            document->setCacheFileStale(true);
+        }
+    }
+    activateFastShaping();
     applySlice();
     engine_->Render();
+    engine_->groupColumns(hideNonlinearFragments_);
     openingTimes_["model_paginate_ms"] = double(phase.restart());
     cutSlice();
 #if __has_include(<koblaze.h>)
@@ -888,6 +924,14 @@ QJsonObject EngineDocument::windowSettings(int first, int last) const
     return saved;
 }
 
+bool EngineDocument::hasPageAt(const QString &position) const
+{
+    const auto pointer = engine_->getDocument()->createXPointer(cre(position));
+    // CREngine maps a hidden node to page zero. Only a laid-out position
+    // can carry the reader from a chapter into the whole book.
+    return !pointer.isNull() && pointer.toPoint().y >= 0;
+}
+
 bool EngineDocument::setChapterMode(bool fast, const appearance::Patch &patch, QSize size,
                                     OpeningProgress progress, const std::function<bool()> &current)
 {
@@ -915,7 +959,7 @@ bool EngineDocument::setChapterMode(bool fast, const appearance::Patch &patch, Q
         const auto place = position();
         // Keep the chapter on screen if the prepared document cannot resolve
         // its place. A failed switch must never send the reader to page one.
-        if (!place.isEmpty() && !full_->goTo(place)) {
+        if (!full_->hasPageAt(place) || !full_->goTo(place)) {
             // The same build would refuse the same place again. Drop it and
             // do not build it again for this appearance.
             fullFailed_ = fullKey_;
@@ -964,6 +1008,8 @@ bool EngineDocument::setChapterMode(bool fast, const appearance::Patch &patch, Q
                 : next.open(source_->bytes, viewport, saved, &error, std::move(progress));
         if (!opened || (current && !current()))
             return false;
+        if (!fast && windowFirst_ >= 0 && !next.hasPageAt(position()))
+            return false;
 #  ifdef KOBLAZE_CANCEL_CHECK
     } catch (const KoblazeRenderCancelled &) {
         koblazeSetSpineWindow(-1, -1);
@@ -1004,7 +1050,8 @@ bool EngineDocument::showSpineItems(int first, int last, QString *error)
         return false;
     if (adoptAhead(first, last)) {
         if (diagnosticsActive())
-            diagnostic("engine-cache-reuse", { { "first_item", first }, { "last_item", last } }, false);
+            diagnostic("engine-cache-reuse", { { "first_item", first }, { "last_item", last } },
+                       false);
         // An explicit chapter jump starts at its first slice, even when
         // the retained document was left at the end of the chapter.
         return !slices() || sliceFirst_ == 0 || showSliceAt(0);
@@ -1032,9 +1079,38 @@ bool EngineDocument::showSpineItems(int first, int last, QString *error)
     return opened;
 }
 
-QPair<int, int> EngineDocument::neighbouringUnit(int direction) const
+int EngineDocument::adjacentSpineItem(int direction) const
 {
-    const int item = direction > 0 ? windowLast_ + 1 : windowFirst_ - 1;
+    int item = direction > 0 ? windowLast_ + 1 : windowFirst_ - 1;
+    if (item < 0 || item >= spineItemCount_)
+        return -1;
+    if (!hideNonlinearFragments_)
+        return item;
+    // Even a chapter window has a DocFragment for each omitted spine item.
+    // The manifest flag lets us skip entire hidden chapters without laying them out.
+    auto &hidden = source_->nonLinearItems;
+    if (hidden.isEmpty()) {
+        auto *document = engine_->getDocument();
+        const auto flag = document->getAttrNameIndex("NonLinear");
+        auto *body = document->nodeFromXPath(U"/body");
+        for (int i = 0; body && i < body->getChildCount(); ++i) {
+            auto *fragment = body->getChildNode(i);
+            if (fragment->isElement() && fragment->isNodeName("DocFragment"))
+                hidden.append(fragment->hasAttribute(flag));
+        }
+    }
+    // Blaze lays out adjacent non-linear spine items as one non-linear flow.
+    // A direct jump into that flow keeps its adjacent pages available.
+    const int from = direction > 0 ? windowLast_ : windowFirst_;
+    if (engine_->getPageFlow(page()) > 0 && hidden.value(from) && hidden.value(item))
+        return item;
+    while (item >= 0 && item < spineItemCount_ && hidden.value(item))
+        item += direction;
+    return item >= 0 && item < spineItemCount_ ? item : -1;
+}
+
+QPair<int, int> EngineDocument::neighbouringUnit(int item, int direction) const
+{
     // Forward and backward grouping can choose different ranges of short
     // items. Keep the actual adjacent range when it is already available.
     if (ahead_ && (direction > 0 ? ahead_->windowFirst_ == item : ahead_->windowLast_ == item)) {
@@ -1051,13 +1127,13 @@ void EngineDocument::prepareNextItem(const std::function<bool()> &current)
 {
     if (slicePages_ <= 0 || windowFirst_ < 0)
         return;
-    const int next = windowLast_ + 1;
+    const int next = adjacentSpineItem(1);
     // In a spine item with slices, only in the last slice: a second
     // document takes memory, and the reader is far from the next unit
     // before that.
-    if (next >= spineItemCount_ || (slices() && sliceEnd_ < spineItemText()))
+    if (next < 0 || (slices() && sliceEnd_ < spineItemText()))
         return;
-    const auto unit = neighbouringUnit(1);
+    const auto unit = neighbouringUnit(next, 1);
     auto *prepared = openAhead(unit.first, current, unit.second);
 #if defined(KOBLAZE_CANCEL_CHECK)
     if (!prepared)
@@ -1098,7 +1174,10 @@ void EngineDocument::preparePreviousItem(const std::function<bool()> &current)
     if (slicePages_ <= 0 || windowFirst_ <= 0 || page() != 0 || (slices() && sliceFirst_ > 0)
         || (current && !current()))
         return;
-    const auto unit = neighbouringUnit(-1);
+    const int item = adjacentSpineItem(-1);
+    if (item < 0)
+        return;
+    const auto unit = neighbouringUnit(item, -1);
     const int direction = emptyUnitDirection_;
     emptyUnitDirection_ = -1;
     auto *previous = openAhead(unit.first, current, unit.second);
@@ -1133,8 +1212,7 @@ EngineDocument *EngineDocument::openAhead(int item, const std::function<bool()> 
                                           QString *error)
 {
 #if __has_include(<koblaze.h>)
-    if (slicePages_ <= 0 || windowFirst_ < 0 || !source_ || !engine_ || item < 0
-        || item >= spineItemCount_)
+    if (windowFirst_ < 0 || !source_ || !engine_ || item < 0 || item >= spineItemCount_)
         return nullptr;
     const auto unit = last >= item ? qMakePair(item, last) : unitFrom(item);
     auto settings = windowSettings(unit.first, unit.second);
@@ -1307,6 +1385,10 @@ struct EngineDocument::FullBuild
         // must not write to that cache.
         int levels[64];
         const int count = qMin(64, TextLangMan::koblazeQuoteLevels(levels, 64));
+        const bool pairKerning = koblazePairKerning();
+        const bool wordWidths = koblazeWordWidths();
+        const bool wordPairs = koblazeWordPairs();
+        const bool plainJoiner = koblazePlainJoiner();
 #  ifdef KOBLAZE_DOCUMENT_FONT_DATA
         const auto fontSource = documentFontSource;
 #  endif
@@ -1330,6 +1412,10 @@ struct EngineDocument::FullBuild
         ldomDocCache::koblazeSuspend(false);
         koblazeSwapCancelScopes(&noCancel, &parserCanStop);
         TextLangMan::koblazeSetQuoteLevels(levels, count);
+        koblazeSetPairKerning(pairKerning);
+        koblazeSetWordWidths(wordWidths);
+        koblazeSetWordPairs(wordPairs);
+        koblazeSetPlainJoiner(plainJoiner);
         koblazeSetSpineWindow(-1, -1);
         koblazeSetPausePoint(&FullBuild::pausePoint, this);
         StopCheck::resume();
@@ -1349,6 +1435,36 @@ struct EngineDocument::FullBuild
 bool EngineDocument::fullDocumentReady() const
 {
     return full_ && fullSize_ == size_ && fullKey_ == fullDocumentKey(settingsState());
+}
+
+int EngineDocument::preparedSpreadTurn(int direction) const
+{
+    if ((direction != 1 && direction != -1) || columns_ != 2 || !fullDocumentReady())
+        return -1;
+    const int screen = page();
+    const int first = engine_->firstColumn(screen);
+    const int edge = direction < 0 ? first : first + engine_->columnCount(screen) - 1;
+    auto anchor = engine_->getPageBookmark(edge, true, true);
+    if (anchor.isNull())
+        return -1;
+    auto &whole = *full_->engine_;
+    const auto pointer = whole.getDocument()->createXPointer(anchor.toString());
+    if (pointer.isNull() || pointer.toPoint().y < 0 || !full_->hasPageAt(position()))
+        return -1;
+    // On a column containing only decoration, the bookmark can point to
+    // nearby text. Keep the distance from that text to the displayed column.
+    const int offset = edge - engine_->getBookmarkPage(anchor, true);
+    const int physical = whole.getBookmarkPage(pointer, true) + offset;
+    if (physical < 0 || physical >= whole.getPageList()->length())
+        return -1;
+    const int spread = whole.screenOfColumn(physical);
+    const int firstInSpread = whole.firstColumn(spread);
+    // The adjoining column may already be on this whole-book screen.
+    // Showing that screen repeats one column instead of skipping the other.
+    const bool sameSpread = direction < 0
+            ? physical > firstInSpread
+            : physical + 1 < firstInSpread + whole.columnCount(spread);
+    return sameSpread ? spread : full_->turnTarget(spread, direction);
 }
 
 bool EngineDocument::fullDocumentStarted() const
@@ -1620,9 +1736,10 @@ bool EngineDocument::showNextUnit()
     DiagnosticOperation turning("chapter-turn", engineCancellationRequested);
     EngineSlowdownScope slowdown;
     const int last = windowLast_;
-    if (last + 1 >= spineItemCount_)
+    const int item = adjacentSpineItem(1);
+    if (item < 0)
         return false;
-    const auto unit = neighbouringUnit(1);
+    const auto unit = neighbouringUnit(item, 1);
     if (!showSpineItems(unit.first, unit.second))
         return false;
     // The rest of the book has no pages. The window then holds the spine
@@ -1639,13 +1756,14 @@ bool EngineDocument::showPreviousUnit()
 {
     DiagnosticOperation turning("chapter-turn", engineCancellationRequested);
     EngineSlowdownScope slowdown;
-    if (windowFirst_ <= 0)
+    const int item = adjacentSpineItem(-1);
+    if (item < 0)
         return false;
-    const auto unit = neighbouringUnit(-1);
+    const auto unit = neighbouringUnit(item, -1);
     emptyUnitDirection_ = -1;
     // A backward page turn can use the retained last slice directly.
-    const bool shown = adoptAhead(unit.first, unit.second)
-            || showSpineItems(unit.first, unit.second);
+    const bool shown =
+            adoptAhead(unit.first, unit.second) || showSpineItems(unit.first, unit.second);
     emptyUnitDirection_ = 1;
     if (!shown)
         return false;
@@ -1670,65 +1788,53 @@ bool EngineDocument::turnInWindow(int delta)
     // The last page that has a layout stops where the layout stops, so it
     // is not a whole page while the slice continues. With one extra page
     // only, the next page is that one: lay out the next slice first.
-    if (delta > 0 && slices() && visiblePages_ > 0 && sliceEnd_ < spineItemText()
-        && page() + 1 == visiblePages_ && visiblePages_ + 1 >= pages()) {
-        sliceHistory_.append({ sliceFirst_, sliceForcedEnd_ });
-        return layoutSlice(sliceEnd_) && pages() > 0 && go(0);
-    }
+    const bool nextSlice = delta > 0 && slices() && visiblePages_ > 0 && sliceEnd_ < spineItemText()
+            && page() + 1 == visiblePages_ && visiblePages_ + 1 >= pages();
     const int target = turnTarget(page(), delta);
-    if (target != page())
+    if (!nextSlice && target != page())
         return go(target);
     if (windowFirst_ < 0)
         return false;
-    if (slices()) {
-        // The next or the previous slice of this spine item, then the
-        // spine item beside it.
-        // A slice has no pages when no block starts in it: one block, such
-        // as a table, can be longer than a slice. Pass such slices.
-        if (delta > 0) {
-            for (;;) {
-                if (slices() && sliceEnd_ < spineItemText() && visiblePages_ == 0) {
-                    sliceHistory_.append({ sliceFirst_, sliceForcedEnd_ });
-                    if (!layoutSlice(sliceEnd_))
-                        return false;
-                } else if (!showNextUnit()) {
-                    return false;
-                }
-                if (pages() > 0)
-                    return go(0);
-            }
-        }
+    if (slicePages_ > 0) {
+        const int direction = delta > 0 ? 1 : -1;
+        const bool linear = hideNonlinearFragments_ && engine_->getPageFlow(page()) == 0;
+        const QString original = linear ? position() : QString();
+        bool passedHiddenPages = false;
         for (;;) {
-            if (slices() && sliceFirst_ > 0) {
+            bool moved = false;
+            if (direction > 0) {
+                if (slices() && sliceEnd_ < spineItemText()) {
+                    sliceHistory_.append({ sliceFirst_, sliceForcedEnd_ });
+                    moved = layoutSlice(sliceEnd_);
+                } else
+                    moved = showNextUnit();
+            } else if (slices() && sliceFirst_ > 0) {
                 // A recorded start gives the same pages as before. Without
                 // one, the slice before must stop where this one starts.
                 const auto slice = sliceHistory_.isEmpty()
                         ? qMakePair(qMax(0, sliceFirst_ - sliceSize()), sliceFirst_)
                         : sliceHistory_.takeLast();
-                if (!layoutSlice(slice.first, slice.second))
-                    return false;
-            } else if (!showPreviousUnit()) {
+                moved = layoutSlice(slice.first, slice.second);
+            } else
+                moved = showPreviousUnit();
+            if (!moved) {
+                if (passedHiddenPages)
+                    goTo(original);
                 return false;
             }
-            // The extra pages after the end of the slice repeat the start
-            // of the slice that the reader came from.
-            if (pages() > 0)
-                return go((visiblePages_ > 0 ? visiblePages_ : pages()) - 1);
-        }
-    }
-    if (slicePages_ > 0) {
-        // A unit of several short spine items. Pass a unit without pages.
-        for (;;) {
-            if (!(delta > 0 ? showNextUnit() : showPreviousUnit()))
-                return false;
-            if (pages() > 0)
-                return go(delta > 0 ? 0 : (visiblePages_ > 0 ? visiblePages_ : pages()) - 1);
+            // Look-ahead pages after the cut will occur in the following slice.
+            // The first or last physical page can itself be a footnote.
+            const int end = visiblePages_ > 0 ? visiblePages_ : pages();
+            for (int p = direction > 0 ? 0 : end - 1; p >= 0 && p < end; p += direction)
+                if (!linear || engine_->getPageFlow(p) == 0)
+                    return go(p);
+            passedHiddenPages |= linear;
         }
     }
     const auto items = spineItems();
     const int count = items.size();
-    const int item = delta > 0 ? windowLast_ + 1 : windowFirst_ - 1;
-    if (item < 0 || item >= count)
+    const int item = adjacentSpineItem(delta > 0 ? 1 : -1);
+    if (item < 0)
         return false;
     if (!showSpineItems(qMax(0, item - 1), qMin(count - 1, item + 1)))
         return false;
@@ -1746,19 +1852,22 @@ bool EngineDocument::turnInWindow(int delta)
 PagePreview EngineDocument::previewTurn(int direction,
                                         const QVector<QPair<QString, QString>> &ranges,
                                         const std::function<bool()> &current,
-                                        const QStringList &bookmarkPositions)
+                                        const QStringList &bookmarkPositions,
+                                        bool adoptingFullDocument)
 {
     if (!engine_ || direction < -1 || direction > 1 || (current && !current()))
         return {};
-    const int target = direction ? turnTarget(page(), direction) : page();
+    const int spread = adoptingFullDocument ? preparedSpreadTurn(direction) : -1;
+    const int target = spread >= 0 ? spread : turnTarget(page(), direction);
     const bool tail = direction > 0 && slices() && visiblePages_ > 0 && target >= visiblePages_;
-    if ((!direction || target != page()) && !tail) {
+    if (spread >= 0 || ((!direction || target != page()) && !tail)) {
+        auto &document = spread >= 0 ? *full_ : *this;
         PagePreview result;
-        result.image = image(target);
-        result.position = pageStart(target);
-        result.ranges = pageRangeRects(target, ranges);
-        result.bookmarked =
-                !bookmarkPositions.isEmpty() && pagesOf(bookmarkPositions).contains(target);
+        result.image = document.image(target);
+        result.position = document.pageStart(target);
+        result.ranges = document.pageRangeRects(target, ranges);
+        result.bookmarked = !bookmarkPositions.isEmpty()
+                && document.pagesOf(bookmarkPositions).contains(target);
         return current && !current() ? PagePreview{} : result;
     }
     if (windowFirst_ < 0 || !source_)

@@ -60,6 +60,223 @@ struct Book
     }
 };
 
+// A tall ornament in vertical text can fill a physical column without giving
+// the engine a bookmark on that column. The nearest text is on a neighbor.
+void verticalOrnamentTurns()
+{
+    QByteArray body = "<h1>一</h1>";
+    for (int group = 0; group < 6; ++group) {
+        body += "<div style='page-break-before:always;page-break-after:always'><div style='border:"
+                + QByteArray::number(group + 1) + "px solid #335588;height:"
+                + QByteArray::number(120 + group * 20) + "px'>&#160;</div></div>";
+        for (int p = 0; p < 3; ++p)
+            body += "<p>" + QByteArray::number(group * 3 + p)
+                    + QByteArray("吾輩は猫である。名前はまだ無い。").repeated(8 + (group + p) % 5)
+                    + "</p>";
+    }
+    auto chapter = test::publisherHtml(body);
+    chapter.replace(
+            "</head>",
+            "<style>body{writing-mode:vertical-rl;font-family:Noto Serif CJK JP}</style></head>");
+    Book book;
+    book.files =
+            test::publisherPackage("ja", "Vertical ornaments", { { "chapter.xhtml", chapter } },
+                                   "<itemref idref='chapter.xhtml'/>");
+    book.files["book.opf"].replace("<spine>", "<spine page-progression-direction='rtl'>");
+    auto options = settings;
+    options["two_columns_landscape"] = true;
+    EngineDocument whole(test::readerFonts()), fast(test::readerFonts());
+    QString error;
+    setChapterModeOverride(0);
+    require(book.open(whole, options, &error), qPrintable(error));
+    setChapterModeOverride(1);
+    require(book.open(fast, options, &error), qPrintable(error));
+    setChapterModeOverride(-1);
+    fast.setChapterSlices(2);
+    const QSize landscape(1072, 758);
+    require(fast.applyAppearance({}, landscape) && whole.applyAppearance({}, landscape),
+            "Cannot lay out the vertical spreads");
+    require(fast.prepareFullDocument({}) == Engine::FullDocument::Ready && whole.pages() > 4,
+            "Cannot prepare the vertical book");
+    for (const int direction : { 1, -1 }) {
+        for (;;) {
+            const int page = whole.page(), target = whole.turnTarget(page, direction);
+            require(fast.image(fast.page()) == whole.image(page),
+                    "A vertical slice repeated an ornamental column");
+            require(fast.preparedSpreadTurn(direction) == target,
+                    "The nearest text on another column changed the handoff target");
+            if (target == page)
+                break;
+            require(fast.turnInWindow(direction) && whole.go(target),
+                    "Cannot turn a vertical spread");
+        }
+    }
+}
+
+void nonLinearTurns(bool hide, int slicePages)
+{
+    Book book;
+    book.files["cover.xhtml"] = test::publisherHtml(
+            "<div><svg xmlns='http://www.w3.org/2000/svg'"
+            " width='180' height='240'><rect width='180' height='240' fill='#555'/></svg></div>");
+    QByteArray spine = "<itemref idref='cover.xhtml' linear='no'/>";
+    for (const auto &name : { QByteArray("start"), QByteArray("notes"), QByteArray("other-notes"),
+                              QByteArray("end"), QByteArray("appendix") }) {
+        QByteArray body;
+        for (int p = 0; p < 12; ++p)
+            body += "<p style='page-break-before:always'>" + name + " " + QByteArray::number(p)
+                    + ". " + QByteArray("The text continues. ").repeated(28) + "</p>";
+        book.files[name + ".xhtml"] = test::publisherHtml(body);
+        spine += "<itemref idref='" + name + ".xhtml'"
+                + ((name == "start" || name == "end") ? "" : " linear='no'") + "/>";
+    }
+    book.files = test::publisherPackage("en", "Non-linear turns", book.files, spine);
+    auto appearance = settings;
+    appearance["hide_nonlinear_fragments"] = hide;
+    QString error;
+    EngineDocument whole(test::readerFonts()), chapters(test::readerFonts());
+    require(book.open(whole, appearance, &error) && book.open(chapters, appearance, &error),
+            qPrintable(error));
+    chapters.setChapterSlices(slicePages);
+    require(chapters.showSpineItems(0, 0) && chapters.go(0), "Cannot open the chapter fixture");
+    const auto turn = [&](int direction) {
+        const int from = whole.page(), target = whole.turnTarget(from, direction);
+        const auto expected = whole.pageStart(target);
+        const auto preview = chapters.previewTurn(direction, {});
+        require((target == from) == preview.image.isNull()
+                        && (target == from
+                            || (preview.position == expected
+                                && preview.image == whole.image(target))),
+                qPrintable(QString("Preview from page %1 in direction %2 expected %3, got %4")
+                                   .arg(from)
+                                   .arg(direction)
+                                   .arg(expected, preview.position)));
+        require(chapters.turnInWindow(direction) == (target != from),
+                "A non-linear boundary changed whether the turn succeeded");
+        if (target != from)
+            require(whole.go(target), "Cannot turn the reference reader");
+        require(chapters.pageStart(chapters.page()) == expected
+                        && chapters.image(chapters.page()) == whole.image(target),
+                "A turn across a non-linear boundary differs from the whole book");
+        if (target != from && target % 2 == 0)
+            chapters.prepareAhead();
+        return target != from;
+    };
+    require(whole.spineItemOf(whole.position()) == 0
+                    && chapters.image(chapters.page()) == whole.image(whole.page()),
+            "The non-linear cover must open as the first page");
+    while (turn(1)) { }
+    require(whole.spineItemOf(whole.position()) == (hide ? 4 : 5),
+            "The final readable chapter must be reachable");
+    while (turn(-1)) { }
+    // Opening a hidden chapter explicitly allows reading all of its pages.
+    Location notes;
+    notes.href = "notes.xhtml";
+    const auto firstNote = whole.positionOf(notes);
+    require(whole.goTo(firstNote) && chapters.goTo(firstNote), "Cannot open the hidden chapter");
+    while (whole.spineItemOf(whole.position()) != 4)
+        require(turn(1), "Cannot leave a hidden chapter after reading it");
+}
+
+// A pair of short chapters shares a unit between two long, sliced chapters.
+// Non-linear asides at its edges must be skipped when entering from either side.
+void groupedNonLinearTurns()
+{
+    Book book;
+    QByteArray spine;
+    for (int i = 0; i < 4; ++i) {
+        const auto name = QByteArray::number(i) + ".xhtml";
+        QByteArray body;
+        const auto aside = "<aside epub:type='footnote'><p>Hidden " + name + "</p></aside>";
+        if (i == 1 || i == 3)
+            body += aside;
+        for (int p = 0; p < (i == 0 || i == 3 ? 22 : 2); ++p)
+            body += "<p style='page-break-before:always'>" + name + " " + QByteArray::number(p)
+                    + ". " + QByteArray("The chapter continues. ").repeated(18) + "</p>";
+        if (i == 0 || i == 2)
+            body += aside;
+        book.files[name] = test::publisherHtml(body);
+        spine += "<itemref idref='" + name + "'/>";
+    }
+    book.files = test::publisherPackage("en", "Grouped chapter edges", book.files, spine);
+    auto options = settings;
+    options["hide_nonlinear_fragments"] = true;
+    EngineDocument whole(test::readerFonts()), chapters(test::readerFonts());
+    QString error;
+    require(book.open(whole, options, &error) && book.open(chapters, options, &error),
+            qPrintable(error));
+    chapters.setChapterSlices(2);
+    require(chapters.showSpineItems(0, 0) && chapters.go(0),
+            "Cannot open the sliced first chapter");
+    for (const int direction : { 1, -1 }) {
+        bool sawGroup = false;
+        for (;;) {
+            const int target = whole.turnTarget(whole.page(), direction);
+            if (target == whole.page())
+                break;
+            const auto start = whole.pageStart(target);
+            const auto preview = chapters.previewTurn(direction, {});
+            require(chapters.turnInWindow(direction) && whole.go(target),
+                    "Cannot cross the grouped chapter boundary");
+            const auto actual = chapters.pageStart(chapters.page());
+            require(actual == start && preview.position == start,
+                    qPrintable(QString("Grouped turn %1 must show %2; turn showed %3, preview %4")
+                                       .arg(direction)
+                                       .arg(start, actual, preview.position)));
+            require(chapters.image(chapters.page()) == whole.image(target)
+                            && preview.image == whole.image(target),
+                    "The grouped chapter turn or preview painted a different page");
+            if (chapters.spineItemOf(actual) == 1) {
+                // Out-of-window chapters have no pages. Find the last page
+                // actually laid out in this window to prove the grouping.
+                sawGroup |= chapters.spineItemOf(chapters.pageStart(chapters.pages() - 1)) == 2;
+            }
+        }
+        require(sawGroup, "The two short chapters must share a unit in both directions");
+    }
+    // A long footnote in the middle and another at the end require several
+    // slices. Reaching the end must leave the last linear page on screen.
+    QByteArray middle;
+    for (int p = 0; p < 36; ++p) {
+        if (p == 9 || p == 30)
+            middle += "<aside epub:type='footnote'>";
+        if (p == 27)
+            middle += "</aside>";
+        middle += "<p style='page-break-before:always'>Slice " + QByteArray::number(p) + " "
+                + QByteArray("The text continues. ").repeated(18) + "</p>";
+    }
+    middle += "</aside>";
+    book.files = test::publisherPackage("en", "Sliced note",
+                                        { { "middle.xhtml", test::publisherHtml(middle) } },
+                                        "<itemref idref='middle.xhtml'/>");
+    require(book.open(whole, options, &error) && book.open(chapters, options, &error),
+            qPrintable(error));
+    chapters.setChapterSlices(2);
+    require(chapters.showSpineItems(0, 0) && chapters.go(0),
+            "Cannot open the sliced aside fixture");
+    for (const int step : { 1, -1 }) {
+        for (;;) {
+            const int from = whole.page(), target = whole.turnTarget(from, step);
+            if (from == target) {
+                const auto start = whole.pageStart(from);
+                require(!chapters.turnInWindow(step) && chapters.pageStart(chapters.page()) == start
+                                && chapters.image(chapters.page()) == whole.image(from),
+                        "A failed turn through hidden slices must keep the visible page");
+                break;
+            }
+            const auto start = whole.pageStart(target);
+            const auto preview = chapters.previewTurn(step, {});
+            require(chapters.turnInWindow(step) && whole.go(target)
+                            && chapters.pageStart(chapters.page()) == start
+                            && preview.position == start,
+                    qPrintable(QString("Sliced aside at %1 in direction %2 expected %3, got %4")
+                                       .arg(from)
+                                       .arg(step)
+                                       .arg(start, chapters.pageStart(chapters.page()))));
+        }
+    }
+}
+
 // One reader in one mode, with what the actions remember.
 struct Reader
 {
@@ -259,6 +476,44 @@ Action search(const QString &query, const QString &abandoned = {})
                                                          .toHex()
                                                          .left(8)));
             } };
+}
+
+void searchUnopenedChapter()
+{
+    Book book;
+    book.files = test::engineBook();
+    book.files["OEBPS/c3.xhtml"] = test::publisherHtml(
+            QStringLiteral("<p>Caf&#233;teria a−minus سـلام</p><p>One<!-- note > here -->Two</p>"
+                           "<p>Pub<![CDATA[lication]]>Needle</p>"
+                           "<p>rose<span style='display:none'>omitted</span>bud</p>")
+                    .toUtf8());
+    book.files["OEBPS/c2.xhtml"] =
+            test::publisherHtml("<p>Andr&eacute;nav</p>"
+                                + QByteArray("<p>Intervening chapter text.</p>").repeated(800));
+    QString error;
+    EngineDocument whole(test::readerFonts()), chapters(test::readerFonts());
+    require(book.open(whole, settings, &error) && book.open(chapters, settings, &error),
+            qPrintable(error));
+    chapters.setChapterSlices(2);
+    require(chapters.showSpineItems(0, 0), "Cannot open the first chapter");
+    const auto hits = [](EngineDocument &model, const QString &query) {
+        QStringList positions;
+        SearchBatch batch;
+        do {
+            batch = model.searchText(query, batch.cursor, 16);
+            for (const auto &hit : batch.hits)
+                positions.append(hit.start);
+        } while (!batch.done);
+        return positions;
+    };
+    for (const auto &query :
+         { QStringLiteral("cafe"), QStringLiteral("a-minus"), QStringLiteral("سلام"),
+           QStringLiteral("OneTwo"), QStringLiteral("PublicationNeedle"),
+           QStringLiteral("Andrénav"), QStringLiteral("rosebud") }) {
+        const auto expected = hits(whole, query);
+        require(expected.size() == 1 && hits(chapters, query) == expected,
+                qPrintable("Missing search result in an unopened chapter: " + query));
+    }
 }
 
 // A negative index counts from the end.
@@ -1290,6 +1545,31 @@ Book loadBook(const QString &name)
 {
     if (name == QLatin1String("links"))
         return { name, {}, test::linkBook() };
+    if (name == QLatin1String("bordered vertical text")
+        || name == QLatin1String("shaded paragraphs") || name == QLatin1String("padded paragraphs")) {
+        const bool vertical = name == QLatin1String("bordered vertical text");
+        QByteArray body;
+        for (int group = 0; group < 8; ++group) {
+            body += vertical ? "<div style='border:1px solid #333;padding:12px 8px'>"
+                             : name == QLatin1String("padded paragraphs") ? "<div style='padding:12px 8px'>"
+                                                                          : "<div style='background:#eee'>";
+            for (int paragraph = 0; paragraph < 3; ++paragraph)
+                body += "<p>"
+                        + QByteArray("吾輩は猫である。名前はまだ無い。")
+                                  .repeated((vertical ? 18 : 12) + (group + paragraph) % 3)
+                        + "</p>";
+            body += "</div>";
+        }
+        auto chapter = test::publisherHtml(body);
+        chapter.replace("</head>",
+                        QByteArray("<style>body{font-family:Noto Serif CJK JP;writing-mode:")
+                                + (vertical ? "vertical-rl" : "horizontal-tb")
+                                + "}</style></head>");
+        return { name,
+                 {},
+                 test::publisherPackage("ja", name.toUtf8(), { { "chapter.xhtml", chapter } },
+                                        "<itemref idref='chapter.xhtml'/>") };
+    }
     if (name == QLatin1String("trevelyan"))
         return { name,
                  readFile(QStringLiteral(KOBALT_TEST_FIXTURES)
@@ -1306,6 +1586,16 @@ int main(int argc, char **argv)
     QGuiApplication app(argc, argv);
 #if __has_include(<koblaze.h>)
     const QString only = argc > 1 ? QString::fromLocal8Bit(argv[1]) : QString();
+    if (only.isEmpty() || only == QLatin1String("non-linear")) {
+        groupedNonLinearTurns();
+        nonLinearTurns(true, 2);
+        nonLinearTurns(true, 18);
+        nonLinearTurns(false, 2);
+    }
+    if (only.isEmpty() || only == QLatin1String("vertical ornaments"))
+        verticalOrnamentTurns();
+    if (only.isEmpty() || only == QLatin1String("unopened search"))
+        searchUnopenedChapter();
     const auto other = qEnvironmentVariable("KOBALT_PARITY_BOOK");
     int differences = 0;
     for (const auto &scenario : scenarios()) {

@@ -3,6 +3,23 @@
 // each one. Append a scenario here; the actions are in chapter_parity.cpp.
 // Run one scenario: kobalt-chapter-parity-tests <part of its name>.
 namespace {
+Action chapterSlicePages(int pages)
+{
+    return { QString("setChapterSlices(%1)").arg(pages), [pages](Reader &reader) -> QString {
+                if (reader.model->bookFraction() >= 0)
+                    reader.model->setChapterSlices(pages);
+                return {};
+            } };
+}
+
+Action rotateToLandscape()
+{
+    return { "rotate to landscape", [](Reader &reader) -> QString {
+                return reader.model->applyAppearance({}, { 1072, 758 }) ? QString()
+                                                                       : "error: rotation failed";
+            } };
+}
+
 QVector<Scenario> scenarios()
 {
     return {
@@ -14,6 +31,22 @@ QVector<Scenario> scenarios()
             followLink("legacy note"), followLink("oversized note"), followLink("hidden note"),
             followLink("missing passage", true), followLink("nearby passage"), back(),
             followLink("later passage"), followLink("Return through a link"), back(), back() } },
+        { "border above a chapter slice",
+          "trevelyan",
+          { chapterSlicePages(2), gotoChapter(3), setFontSize(2), turn(-2), turn(-2) } },
+        { "border before a vertical chapter slice",
+          "bordered vertical text",
+          { chapterSlicePages(2), rotateToLandscape(), turn(4), turn(1), turn(-1) } },
+        { "padding at the end of a reflowed slice",
+          "padded paragraphs",
+          { chapterSlicePages(2), rotateToLandscape(), turn(6), turn(-1), turn(1) } },
+        { "background from an omitted chapter block",
+          "shaded paragraphs",
+          { chapterSlicePages(2), rotateToLandscape(), turn(5), turn(-1), turn(1) } },
+        { "line spacing on the final chapter slice",
+          "trevelyan",
+          { chapterSlicePages(7), setFontSize(8), gotoChapter(3), turn(-1),
+            changeLayout("setLineSpacing(140)", { { "line_spacing", 140 } }) } },
         { "chapters and turns",
           "trevelyan",
           { gotoChapter(9), gotoChapter(1), gotoChapter(2), turn(30), turn(-30) } },

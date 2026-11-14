@@ -14,6 +14,8 @@ struct ReaderSource
     std::shared_ptr<ReaderSource> parent;
     // The full publication count also governs a preview of a font-free chapter.
     int embeddedFonts = -1;
+    // -1 before checking the spine for in-page note bodies.
+    int hasLinkedPageNotes = -1;
     QByteArray bytes;
     std::shared_ptr<ResourceCache> resources;
     QMap<QString, qint64> sizes;
@@ -34,6 +36,8 @@ struct ReaderSource
     // first needed. They decide the spine items of a unit and give the
     // page estimate its sizes.
     QVector<qint64> spineBytes;
+    // EPUB spine flags, including fragments whose text the chapter window omitted.
+    QVector<bool> nonLinearItems;
     // The plain text of each spine item, folded for a quick check whether a
     // search can match there. Filled when first needed.
     QVector<QString> searchTexts;

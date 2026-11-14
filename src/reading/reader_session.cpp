@@ -591,6 +591,7 @@ void ReaderSession::open(OpenRequest request, std::function<void(OpeningResult)>
     retiring = false;
     loadingImage = false;
     preview_ = false;
+    openingPreview_ = false;
     desiredChapterMode = -1;
     desiredSize = size;
     destination.clear();
@@ -755,6 +756,13 @@ void ReaderSession::openPreview(const ReaderSession &source, QSize size,
     turning = false;
     pendingTurn = 0;
     preview_ = true;
+    openingPreview_ = true;
+    // A preview starts with the visible book's settings and font catalog.
+    // Edits can use them while the worker opens the isolated document.
+    frame.state = source.frame.state;
+    frame.fonts = source.frame.fonts;
+    frame.fontCatalog = source.frame.fontCatalog;
+    desired = frame.state;
     desiredChapterMode = -1;
     desiredSize = size;
     QPointer<ReaderSession> guard(this);
@@ -791,13 +799,14 @@ void ReaderSession::openPreview(const ReaderSession &source, QSize size,
                              { "failed", !result.error.isEmpty() } });
                 kobalt::qt::invoke(
                         qApp,
-                        [guard, result = std::move(result), finished, lease, job]() mutable {
+                        [guard, result = std::move(result), finished, lease, job, size]() mutable {
                             if (!guard) {
                                 return;
                             }
                             guard->completeFrameMarkup(
                                     std::move(result), job, lease,
-                                    [guard, finished, lease, job](ReaderFrame result) mutable {
+                                    [guard, finished, lease, job,
+                                     size](ReaderFrame result) mutable {
                                         if (!guard || guard->revision != job
                                             || guard->lease_ != lease)
                                             return;
@@ -806,11 +815,20 @@ void ReaderSession::openPreview(const ReaderSession &source, QSize size,
                                             result.error =
                                                     strings::get("error.opening_interrupted");
                                         }
+                                        const auto requested = guard->requestedAppearance();
+                                        const bool edited =
+                                                requested != guard->displayedAppearance().settings
+                                                || guard->desiredSize != size;
+                                        guard->openingPreview_ = false;
                                         guard->running = false;
                                         guard->frame = result;
                                         guard->layoutReady_ = !result.image.isNull()
                                                 && result.state.value("pages").toInt() > 0;
                                         guard->desired = result.state;
+                                        if (edited && guard->layoutReady_) {
+                                            requested.replaceIn(guard->desired);
+                                            guard->request(true);
+                                        }
                                         finished(result.error);
                                         if (guard) {
                                             guard->startPendingSearch();
@@ -1051,6 +1069,9 @@ bool ReaderSession::turn(int direction)
 
 bool ReaderSession::go(int target)
 {
+    // The worker may already have left the slice whose numbers are on screen.
+    if (running && frame.state.contains("book_fraction"))
+        return false;
     if (target < 0 || target >= pages())
         return false;
     pageTarget = target;
@@ -1114,11 +1135,13 @@ bool ReaderSession::goToSyncedPosition(const QString &position,
 bool ReaderSession::importPosition(const QString &location, bool native,
                                    std::function<void(QString)> finished)
 {
-    if (running)
+    if (running || retiring || !lease_ || lease_->revoked() || !layoutReady_)
         return false;
+    cancelPendingTurn();
     cancelSearch();
     running = true;
-    const auto job = revision;
+    const auto job = ++revision;
+    newest->store(job);
     auto engine = engine_;
     const auto positions = positions_;
     const auto markup = markupRequest_;
@@ -1150,14 +1173,28 @@ bool ReaderSession::importPosition(const QString &location, bool native,
                                         if (!guard || guard->lease_ != lease)
                                             return;
                                         guard->running = false;
-                                        guard->frame = result;
-                                        // The owner records the accepted native baseline before saving the
-                                        // newly imported frame. A failed import leaves the anchor unchanged.
-                                        finished(error);
-                                        if (!guard || guard->lease_ != lease)
+                                        if (lease->revoked())
                                             return;
-                                        if (!guard->running && job != guard->revision)
-                                            guard->dispatch();
+                                        if (job != guard->revision) {
+                                            // The owner saves the displayed position in finished().
+                                            // Wait for the requested layout before acknowledging it.
+                                            const auto position = result.state.value("position");
+                                            guard->dispatch(false, [guard, position, error, finished] {
+                                                if (error.isEmpty()
+                                                    && guard->frame.state.value("position")
+                                                            != position)
+                                                    finished(strings::get(
+                                                            "error.could_not_find_that_passage"));
+                                                else
+                                                    finished(error);
+                                            });
+                                            return;
+                                        }
+                                        guard->frame = result;
+                                        finished(error);
+                                        if (!guard || guard->lease_ != lease || lease->revoked()
+                                            || guard->running || guard->revision != job)
+                                            return;
                                         if (guard->updated)
                                             guard->updated();
                                         if (guard) {
@@ -1186,13 +1223,11 @@ void ReaderSession::describeSyncedPosition(const QString &position,
                 EngineJob activity;
                 SyncedPositionDescription result;
                 if (ready && lease && !lease->revoked()) {
-                    result.comparison.direction =
-                            engine->comparePosition(position, &result.comparison.error);
-                    if (result.comparison.error.isEmpty()) {
+                    result.comparison.direction = engine->describePosition(
+                            position, &result.chapter, &result.page, &result.comparison.error,
+                            [lease] { return !lease->revoked(); });
+                    if (result.comparison.error.isEmpty())
                         result.comparison.status = PositionComparison::Status::Compared;
-                        result.chapter = engine->chapterTitle(position);
-                        result.page = engine->pagesOf({ position }).value(0, -1);
-                    }
                 }
                 kobalt::qt::invoke(
                         qApp,
@@ -1230,7 +1265,7 @@ void ReaderSession::compareNativePosition(const QString &location,
                             if (!guard)
                                 return;
                             PositionComparison result;
-                            if (guard->revision != job || guard->running)
+                            if (!guard->currentSourceFrame(job) || guard->running)
                                 result.status = PositionComparison::Status::Stale;
                             else if (!error.isEmpty())
                                 result.error = error;
@@ -1334,9 +1369,20 @@ BookmarkLocations captureBookmarkLocations(Engine &engine, const QStringList &po
 void ReaderSession::bookmarkPages(QStringList positions, std::function<void(QVector<int>)> finished,
                                   bool rangeEndpoints)
 {
+    const auto layout = layoutRevision();
+    const auto lease = lease_;
     bookmarkLocations(
-            std::move(positions),
-            [finished](BookmarkLocations result) { finished(std::move(result.bookPages)); },
+            positions,
+            [this, positions, layout, lease, rangeEndpoints, finished](BookmarkLocations result) {
+                // My Words needs a label for this position even when the chapter gives
+                // way to the whole book while its first lookup is queued.
+                if (layout != layoutRevision() && layoutReady_ && lease_ == lease && lease
+                    && !lease->revoked()) {
+                    bookmarkPages(positions, finished, rangeEndpoints);
+                    return;
+                }
+                finished(std::move(result.bookPages));
+            },
             rangeEndpoints, false);
 }
 
@@ -1525,7 +1571,8 @@ void ReaderSession::previewAdjacentPage(int direction, QSize bounds, QStringList
     kobalt::qt::invoke(
             engineWorker(),
             [engine, guard, direction, bounds, finished, request, token, latest, job, lease, markup,
-             markupGeneration, dark, bookmarkPositions] {
+             markupGeneration, dark, bookmarkPositions,
+             adoptingFullDocument = fullDocumentPending_] {
                 const auto current = [token, request, latest, job, lease] {
                     return token->load() == request && latest->load() == job && !lease->revoked();
                 };
@@ -1537,7 +1584,8 @@ void ReaderSession::previewAdjacentPage(int direction, QSize bounds, QStringList
                 QVector<QPair<QString, QString>> ranges;
                 for (const auto &range : markup.saved)
                     ranges.append(qMakePair(range.start, range.end));
-                auto preview = engine->previewTurn(direction, ranges, current, bookmarkPositions);
+                auto preview = engine->previewTurn(direction, ranges, current, bookmarkPositions,
+                                                   adoptingFullDocument);
                 if (!current() || preview.image.isNull())
                     return;
                 if (!preview.image.isNull() && !markup.saved.isEmpty()) {
@@ -1664,6 +1712,11 @@ void ReaderSession::intersectingRanges(const QString &start, const QString &end,
             Qt::QueuedConnection);
 }
 
+bool ReaderSession::currentSourceFrame(quint64 job) const
+{
+    return revision == job && lease_ && !lease_->revoked();
+}
+
 void ReaderSession::annotationPageEdges(std::function<void(AnnotationPageEdges)> finished)
 {
     auto engine = engine_;
@@ -1678,7 +1731,7 @@ void ReaderSession::annotationPageEdges(std::function<void(AnnotationPageEdges)>
                         qApp,
                         [guard, job, result, finished] {
                             if (guard)
-                                finished(guard->revision == job && !guard->running
+                                finished(guard->currentSourceFrame(job) && !guard->running
                                                  ? result
                                                  : AnnotationPageEdges{});
                         },
@@ -1704,7 +1757,7 @@ void ReaderSession::annotationTokenAt(QPoint point, std::function<void(Annotatio
                         qApp,
                         [guard, job, result, finished] {
                             if (guard) {
-                                finished(guard->revision == job && !guard->running
+                                finished(guard->currentSourceFrame(job) && !guard->running
                                                  ? result
                                                  : AnnotationToken());
                             }
@@ -1735,7 +1788,7 @@ void ReaderSession::annotationRange(const QString &startTokenStart, const QStrin
                         qApp,
                         [guard, job, result, finished] {
                             if (guard) {
-                                finished(guard->revision == job ? result : TextRange());
+                                finished(guard->currentSourceFrame(job) ? result : TextRange());
                             }
                         },
                         Qt::QueuedConnection);
@@ -1758,7 +1811,7 @@ void ReaderSession::annotationRange(const QString &start, const QString &end,
                         qApp,
                         [guard, job, result, finished] {
                             if (guard) {
-                                finished(guard->revision == job ? result : TextRange());
+                                finished(guard->currentSourceFrame(job) ? result : TextRange());
                             }
                         },
                         Qt::QueuedConnection);
@@ -1812,7 +1865,7 @@ void ReaderSession::wordAt(QPoint point, std::function<void(WordSelection)> fini
                 kobalt::qt::invoke(
                         qApp,
                         [guard, job, result, finished] {
-                            if (guard && guard->revision == job && !guard->running)
+                            if (guard && guard->currentSourceFrame(job) && !guard->running)
                                 finished(result);
                         },
                         Qt::QueuedConnection);
@@ -1836,8 +1889,9 @@ void ReaderSession::imageAt(QPoint point, std::function<void(QImage)> finished)
                         qApp,
                         [guard, job, image, finished] {
                             if (guard)
-                                finished(guard->revision == job && !guard->running ? image
-                                                                                   : QImage());
+                                finished(guard->currentSourceFrame(job) && !guard->running
+                                                 ? image
+                                                 : QImage());
                         },
                         Qt::QueuedConnection);
             },
@@ -1859,7 +1913,7 @@ void ReaderSession::linkDetails(const QString &source, std::function<void(LinkDe
                 kobalt::qt::invoke(
                         qApp,
                         [guard, job, result, finished] {
-                            if (guard && guard->revision == job && !guard->running)
+                            if (guard && guard->currentSourceFrame(job) && !guard->running)
                                 finished(result);
                         },
                         Qt::QueuedConnection);
@@ -2184,7 +2238,7 @@ void ReaderSession::annotationGeometry(const QString &start, const QString &end,
                 kobalt::qt::invoke(
                         qApp,
                         [guard, job, geometry, finished] {
-                            if (guard && guard->revision == job && !guard->running) {
+                            if (guard && guard->currentSourceFrame(job) && !guard->running) {
                                 finished(geometry);
                             }
                         },
@@ -2209,7 +2263,7 @@ void ReaderSession::rangeRects(const QString &start, const QString &end,
                 kobalt::qt::invoke(
                         qApp,
                         [guard, job, result, finished] {
-                            if (guard && guard->revision == job && !guard->running)
+                            if (guard && guard->currentSourceFrame(job) && !guard->running)
                                 finished(result);
                         },
                         Qt::QueuedConnection);
@@ -2237,7 +2291,7 @@ void ReaderSession::rangeRects(QVector<QPair<QString, QString>> ranges,
                 kobalt::qt::invoke(
                         qApp,
                         [guard, job, rectangles, finished] {
-                            if (guard && guard->revision == job && !guard->running) {
+                            if (guard && guard->currentSourceFrame(job) && !guard->running) {
                                 finished(rectangles);
                             }
                         },
@@ -2278,7 +2332,7 @@ void ReaderSession::rangeRectGroups(QVector<QPair<QString, QString>> ranges,
                 kobalt::qt::invoke(
                         qApp,
                         [guard, job, groups, finished] {
-                            if (guard && guard->revision == job && !guard->running) {
+                            if (guard && guard->currentSourceFrame(job) && !guard->running) {
                                 finished(groups);
                             }
                         },
@@ -2298,12 +2352,15 @@ void ReaderSession::resize(QSize size)
 void ReaderSession::setChapters(QVector<ChapterTarget> contents, QVector<ChapterTarget> graph)
 {
     const auto positions = positions_;
+    const auto lease = lease_;
     auto engine = engine_;
     QPointer<ReaderSession> guard(this);
     const auto job = revision;
     kobalt::qt::invoke(
             engineWorker(),
-            [engine, guard, job, contents, graph, positions] {
+            [engine, guard, job, contents, graph, positions, lease] {
+                if (!lease || lease->revoked())
+                    return;
                 EngineJob activity;
                 auto resolved = resolveChapterTargets(*engine, positions, contents, graph);
                 engine->setChapters(std::move(resolved.contents), std::move(resolved.graph));
@@ -2311,10 +2368,11 @@ void ReaderSession::setChapters(QVector<ChapterTarget> contents, QVector<Chapter
                 captureChapters(result, *engine);
                 kobalt::qt::invoke(
                         qApp,
-                        [guard, job, result] {
+                        [guard, job, result, lease] {
                             // A later page or layout job captures these chapters itself. This
                             // metadata update must not cancel a search or replace a newer frame.
-                            if (!guard || guard->revision != job || guard->running)
+                            if (!guard || guard->lease_ != lease || lease->revoked()
+                                || guard->revision != job || guard->running)
                                 return;
                             guard->frame.chapters = result.chapters;
                             guard->frame.chapterGraph = result.chapterGraph;
@@ -2335,8 +2393,9 @@ void ReaderSession::setChapters(QVector<ChapterTarget> contents, QVector<Chapter
 
 void ReaderSession::loadImages()
 {
-    if (retiring || running || pendingTurn || loadingImage || !openingResult_.ready()
-        || frame.resources.value("pending_images").toInt() == 0 || !frame.error.isEmpty())
+    if (retiring || running || pendingTurn || loadingImage || !lease_ || lease_->revoked()
+        || !openingResult_.ready() || frame.resources.value("pending_images").toInt() == 0
+        || !frame.error.isEmpty())
         return;
     loadingImage = true;
     const auto engine = engine_;
@@ -2354,18 +2413,21 @@ void ReaderSession::loadImages()
                 EngineJob activity;
                 ReaderFrame result;
                 bool loaded = false;
-                if (latest->load() == job) {
+                const auto current = [latest, job, lease] {
+                    return latest->load() == job && !lease->revoked();
+                };
+                if (current()) {
                     const bool timing = diagnosticsActive();
                     QElapsedTimer timer;
                     if (timing)
                         timer.start();
                     loaded = engine->loadNextImage();
-                    if (loaded && latest->load() == job)
+                    if (loaded && current())
                         result = capture(*engine, positions, false, markup, markupGeneration);
                     if (loaded && timing)
                         diagnostic("image-load-end",
                                    { { "elapsed_ms", double(timer.elapsed()) },
-                                     { "current", latest->load() == job },
+                                     { "current", current() },
                                      { "failed", !engine->resourceError().isEmpty() } },
                                    false);
                 }
@@ -2373,8 +2435,7 @@ void ReaderSession::loadImages()
                 // complete, after handing over the current frame, rather than redrawing
                 // neighbours that the next image will immediately invalidate.
                 const bool refill = loaded && !preview && result.error.isEmpty()
-                        && result.resources.value("pending_images").toInt() == 0
-                        && latest->load() == job;
+                        && result.resources.value("pending_images").toInt() == 0 && current();
                 kobalt::qt::invoke(
                         qApp,
                         [guard, loaded, refill, result = std::move(result), job, lease] {
@@ -2387,6 +2448,8 @@ void ReaderSession::loadImages()
                                         if (!guard || guard->lease_ != lease)
                                             return;
                                         guard->loadingImage = false;
+                                        if (lease->revoked())
+                                            return;
                                         if (loaded && !guard->running && job == guard->revision) {
                                             guard->frame = result;
                                             if (guard->updated)
@@ -2407,10 +2470,10 @@ void ReaderSession::loadImages()
 
 void ReaderSession::resumeIdleWork(int direction, quint64 job)
 {
-    if (running || pendingTurn || retiring || revision != job || !frame.error.isEmpty())
+    if (running || pendingTurn || retiring || !currentSourceFrame(job) || !frame.error.isEmpty())
         return;
     loadImages();
-    if (loadingImage || preview_ || !openingResult_.ready() || !lease_ || lease_->revoked())
+    if (loadingImage || preview_ || !openingResult_.ready())
         return;
     const auto engine = engine_;
     const auto latest = newest;
@@ -2425,14 +2488,14 @@ void ReaderSession::resumeIdleWork(int direction, quint64 job)
                 QElapsedTimer timer;
                 if (timing)
                     timer.start();
-                const std::function<bool()> current = [latest, job] {
-                    return latest->load() == job;
+                const std::function<bool()> current = [latest, job, lease] {
+                    return latest->load() == job && !lease->revoked();
                 };
                 prepareNeighbours(*engine, direction, current);
                 if (timing)
                     diagnostic("neighbours-end",
                                { { "elapsed_ms", double(timer.elapsed()) },
-                                 { "completed", latest->load() == job } },
+                                 { "completed", current() } },
                                false);
                 // Drawing a neighbour can discover deferred images. Publish them now
                 // so they load before that page is requested.
@@ -2442,7 +2505,7 @@ void ReaderSession::resumeIdleWork(int direction, quint64 job)
                         qApp,
                         [guard, resources, cachedPages, job, lease] {
                             if (!guard || guard->lease_ != lease || guard->running
-                                || guard->revision != job)
+                                || !guard->currentSourceFrame(job))
                                 return;
                             guard->frame.resources = resources;
                             guard->frame.state["cached_pages"] = cachedPages;
@@ -2455,17 +2518,14 @@ void ReaderSession::resumeIdleWork(int direction, quint64 job)
                 // neighbour work: they run after this job has ended, so
                 // that the reader does not count as preparing pages for as
                 // long as they take.
-                const std::function<bool()> idle = [current, lease] {
-                    return current() && lease && !lease->revoked();
-                };
                 const quint64 queued = engineWorkRequests();
                 kobalt::qt::invoke(
                         engineWorker(),
-                        [engine, idle, guard, job, lease, queued] {
-                            if (!idle())
+                        [engine, current, guard, job, lease, queued] {
+                            if (!current())
                                 return;
                             EngineJob activity;
-                            refinePageEstimate(engine, idle, guard, job, lease, queued);
+                            refinePageEstimate(engine, current, guard, job, lease, queued);
                         },
                         Qt::QueuedConnection);
             },
@@ -2503,6 +2563,10 @@ void ReaderSession::clearRenderProgress()
 
 void ReaderSession::request(bool appearanceChange, RenderReason reason)
 {
+    // Keep the opening job current. It renders the latest draft after the
+    // preview document is ready.
+    if (openingPreview_ && appearanceChange)
+        return;
     cancelPendingTurn();
     turning = false;
     if (appearanceChange) {
@@ -2523,7 +2587,7 @@ void ReaderSession::request(bool appearanceChange, RenderReason reason)
         dispatch();
 }
 
-void ReaderSession::dispatch(bool pageTurn)
+void ReaderSession::dispatch(bool pageTurn, std::function<void()> afterFrame)
 {
     running = true;
     turning = pageTurn;
@@ -2533,6 +2597,10 @@ void ReaderSession::dispatch(bool pageTurn)
     const auto requested = desired;
     // The prepared document of the whole book is shown with this render.
     const bool swapToFull = std::exchange(fullDocumentPending_, false);
+    // Queries queued before this turn used chapter pagination. Later queries
+    // run behind the swap and see the whole book, or the chapter if it refused.
+    if (swapToFull)
+        newestLayout->fetch_add(1);
     // A ready notification is only a try. Keep it local to this job until
     // adoption succeeds, so a superseded try cannot request a full load.
     const auto chapterMode = swapToFull ? 0 : desiredChapterMode;
@@ -2586,8 +2654,9 @@ void ReaderSession::dispatch(bool pageTurn)
         diagnostic("render-queued", { { "render_id", double(job) }, { "delta", delta } }, false);
     kobalt::qt::invoke(
             engineWorker(),
-            [guard, engine, requested, chapterMode, swapToFull, size, anchor, chapter, delta, target,
-             fraction, job, lease, latest, progress, positions, markup, markupGeneration] {
+            [guard, engine, requested, chapterMode, swapToFull, size, anchor, chapter, delta,
+             target, fraction, job, lease, latest, progress, positions, markup, markupGeneration,
+             afterFrame] {
                 EngineJob activity;
                 const bool timing = diagnosticsActive();
                 QElapsedTimer timer;
@@ -2616,7 +2685,13 @@ void ReaderSession::dispatch(bool pageTurn)
                 // The prepared document can be gone, after a change that
                 // this render does not know. Loading the whole book here
                 // would make the page turn wait: keep the chapter then.
-                const bool swap = swapToFull && engine->fullDocumentReady();
+                const bool swap = swapToFull && oldSize == size
+                        && appearance::same(before, requested) && engine->fullDocumentReady();
+                // A numbered jump addresses the displayed chapter. Move there
+                // before adoption so the whole book restores that passage.
+                if (swap && target >= 0)
+                    engine->go(target);
+                const int spreadTurn = swap && delta ? engine->preparedSpreadTurn(delta) : -1;
                 const int mode = swapToFull && !swap ? -1 : chapterMode;
                 const bool modeChanged = mode >= 0 && (engine->bookFraction() >= 0) != (mode > 0);
                 const bool unchanged =
@@ -2658,10 +2733,12 @@ void ReaderSession::dispatch(bool pageTurn)
                         && !(chapter >= 0 ? engine->goToChapter(chapter, anchor)
                                           : engine->goTo(anchor)))
                         result.error = strings::get("error.could_not_find_that_passage");
-                    else if (target >= 0)
+                    else if (target >= 0 && !swap)
                         engine->go(target);
                     else if (fraction >= 0)
                         engine->goToFraction(fraction);
+                    else if (swap && !refused && spreadTurn >= 0)
+                        windowTurned = engine->go(spreadTurn);
                     else if (delta) {
                         const int to = appearanceChanged ? engine->turnTarget(engine->page(), delta)
                                                          : turned;
@@ -2719,20 +2796,25 @@ void ReaderSession::dispatch(bool pageTurn)
                 const bool failed = !result.error.isEmpty();
                 kobalt::qt::invoke(
                         qApp,
-                        [guard, result = std::move(result), job, lease, delta, failed] {
+                        [guard, result = std::move(result), job, lease, delta, failed, afterFrame] {
                             if (!guard) {
                                 return;
                             }
                             guard->completeFrameMarkup(
                                     std::move(result), job, lease,
-                                    [guard, job, lease, delta, failed](ReaderFrame result) {
+                                    [guard, job, lease, delta, failed,
+                                     afterFrame](ReaderFrame result) {
                                         if (!guard || guard->lease_ != lease)
                                             return;
                                         guard->running = false;
                                         guard->turning = false;
+                                        if (!lease || lease->revoked()) {
+                                            guard->clearRenderProgress();
+                                            return;
+                                        }
                                         // Do not flash intermediate layouts while newer settings wait.
                                         if (job != guard->revision) {
-                                            guard->dispatch();
+                                            guard->dispatch(false, afterFrame);
                                             return;
                                         }
                                         guard->frame = result;
@@ -2748,14 +2830,20 @@ void ReaderSession::dispatch(bool pageTurn)
                                         // usable layout while reporting the command error.
                                         guard->layoutReady_ = !result.image.isNull()
                                                 && result.state.value("pages").toInt() > 0;
-                                        if (!result.error.isEmpty()) {
-                                            guard->desired = result.state;
-                                        }
+                                        // This is the latest request. Keep the values the engine
+                                        // resolved, including the pixel gap for the new font size.
+                                        guard->desired = result.state;
                                         if (failed)
                                             guard->cancelPendingTurn();
                                         guard->clearRenderProgress();
-                                        if (!guard)
+                                        if (!guard || guard->lease_ != lease)
                                             return;
+                                        if (afterFrame && !lease->revoked()) {
+                                            afterFrame();
+                                            if (!guard || guard->lease_ != lease || guard->running
+                                                || guard->revision != job)
+                                                return;
+                                        }
                                         if (guard->updated)
                                             guard->updated();
                                         if (guard) {

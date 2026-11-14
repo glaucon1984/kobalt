@@ -103,8 +103,13 @@ ReadingBook::ReadingBook(std::unique_ptr<ReaderSession> session, QString statePa
             layoutPreferences_[key] = preferences.value(key);
     if (saved.value("book").toString() == identity_)
         dictionaryChoice_ = saved.value("dictionary_id").toString();
-    if (saved.value("book").toString() == identity_)
+    if (session_->savedStateMatched() && saved.value("book").toString() == identity_) {
         textPreset_ = saved.value(textpresets::bookKey).toString().left(64);
+    } else {
+        const auto choice = textpresets::newBookChoice(preferences);
+        if (choice != "last" && choice != "book")
+            textPreset_ = choice;
+    }
     // Qt 5.2 leaves a default-constructed QElapsedTimer uninitialized, so
     // isValid() is not reliable until the timer is invalidated or started.
     progressPoll.invalidate();
@@ -644,15 +649,13 @@ bool ReadingBook::canFinish() const
     const auto anchor = session_->state().value("position").toString();
     if (anchor.isEmpty() || anchor == acceptedFinishedAnchor)
         return false;
-    // The last page that the engine has is not the last page of the book.
-    if (session_->continuesAfter())
-        return false;
     // Nickel asks on exit at 90%. Include the final page of very short books,
     // and the last page of the text before trailing non-linear sections.
     // With only a part of the book laid out, its pages are not those of the
     // book: the percent of the whole book decides.
     if (session_->state().contains("book_fraction"))
-        return session_->progressFraction() >= 0.9 || session_->nextPage() == session_->page();
+        return session_->progressFraction() >= 0.9
+                || (!session_->continuesAfter() && session_->nextPage() == session_->page());
     return session_->page() * 10 >= session_->pages() * 9
             || session_->nextPage() == session_->page();
 }

@@ -540,8 +540,25 @@ FontOpticalSizeAxis EngineDocument::opticalSizeAxis() const
     return fontOpticalSizeAxis(readingFonts, face_);
 }
 
+bool EngineDocument::fastShaping() const
+{
+    if (shapingOverride_ >= 0)
+        return shapingOverride_ != 0;
+    return shapingText_ >= fastShapingMinimum && (!slices() || sliceSize() >= fastShapingMinimum);
+}
+
+void EngineDocument::activateFastShaping() const
+{
+    const bool fast = fastShaping();
+    koblazeSetPairKerning(fast);
+    koblazeSetWordWidths(fast);
+    koblazeSetWordPairs(fast);
+    koblazeSetPlainJoiner(fast);
+}
+
 void EngineDocument::activateFontParameters() const
 {
+    activateFastShaping();
     const auto axis = weightAxis();
     // CREngine shares font parameters across documents. Restore this document's
     // values before layout or drawing so previews cannot change another book.
@@ -741,6 +758,8 @@ int EngineDocument::page() const
 
 int EngineDocument::pages() const
 {
+    if (sliceLookAheadHidden_ && visiblePages_ > 0)
+        return visiblePages_;
     return engine_ ? engine_->getPageCount() : 0;
 }
 
@@ -862,6 +881,21 @@ int EngineDocument::turnTarget(int from, int delta) const
 
 bool EngineDocument::goTo(const QString &position)
 {
+    const int item = spineItemIndex(position);
+    if (engine_ && windowFirst_ >= 0 && slicePages_ > 0 && item >= 0
+        && (item < windowFirst_ || item > windowLast_)) {
+        // A saved position may refer to text that has changed. Resolve it in
+        // the spare chapter before replacing the page on screen.
+        const auto unit = unitFrom(item);
+        auto *next = openAhead(unit.first, {}, unit.second);
+        if (!next || item < next->windowFirst_ || item > next->windowLast_ || !next->goTo(position))
+            return false;
+        const qint64 loadMs = next->windowLoadMs_;
+        if (!adoptAhead(unit.first, unit.second))
+            return false;
+        windowLoadMs_ = loadMs;
+        return true;
+    }
     if (!engine_ || !showSpineItemOf(position) || !showSliceOf(position))
         return false;
     auto pointer = engine_->getDocument()->createXPointer(cre(position));
@@ -898,6 +932,14 @@ bool EngineDocument::applyAppearance(const appearance::Patch &patch, QSize size,
                                      OpeningProgress progress)
 {
     const auto &settings = patch.fields();
+    if (windowFirst_ >= 0 && !inpageFootnotes_ && settings.value("inpage_footnotes").toBool()) {
+        const auto layout = pageNoteLayout();
+        if (layout == PageNoteLayout::Interrupted)
+            return false;
+        if (layout == PageNoteLayout::WholeBook)
+            return setChapterMode(false, patch, size, std::move(progress),
+                                  [this] { return !interrupt_ || !interrupt_(); });
+    }
     const int pixels = settings.value("font_pixels").toInt(pixels_);
     const int spacing = settings.value("line_spacing").toInt(spacing_);
     const int paragraphSpacing = settings.contains("paragraph_spacing")
@@ -1024,6 +1066,7 @@ bool EngineDocument::applyAppearance(const appearance::Patch &patch, QSize size,
             || paragraphIndent != paragraphIndent_ || face != face_ || defaultFace != defaultFace_
             || margin != margin_ || topMargin != topMargin_ || bottomMargin != bottomMargin_
             || alignment != alignment_ || hyphenation != hyphenation_;
+    const bool regroup = columns > 1 && hideNonlinear != hideNonlinearFragments_;
     const bool resized = size != size_ || columns != columns_ || columnSpacing != columnSpacing_;
     twoColumnsLandscape_ = landscapeColumns;
     columnSpacingPercent_ = gapPercent;
@@ -1141,8 +1184,15 @@ bool EngineDocument::applyAppearance(const appearance::Patch &patch, QSize size,
         // Rebuild drawn paragraphs without repaginating or changing anchors.
         engine_->getDocument()->clearRendBlockCache();
     }
-    if (!styled && !resized)
+    if (!styled && !resized && !(regroup && slices())) {
+        if (regroup) {
+            engine_->groupColumns(hideNonlinearFragments_);
+            forgetObservedPages();
+            observeLayout();
+            return goTo(anchor);
+        }
         return true;
+    }
     // The pages that the old settings gave are not the pages of the new ones.
     forgetObservedPages();
     // Applying a panel can change typography, hyphenation and the viewport together.
@@ -1168,14 +1218,15 @@ bool EngineDocument::applyAppearance(const appearance::Patch &patch, QSize size,
     observeLayout();
     if (!goTo(anchor))
         return false;
-    // Reflow can extend a slice to find a safe page boundary. Once the
-    // reading slice is known, discard the look-ahead pages beyond its end.
-    return !slices() || visiblePages_ <= 0
-            || (layoutSlice(sliceFirst_, sliceEnd_) && goTo(anchor));
+    // Keep the layout beyond the cut so the last visible page paints a
+    // partial publisher box with its actual border and padding.
+    sliceLookAheadHidden_ = slices() && visiblePages_ > 0;
+    return true;
 }
 
 bool EngineDocument::renderLayout()
 {
+    activateFastShaping();
     applySlice();
 #if __has_include(<koblaze.h>)
     try {
@@ -1191,6 +1242,7 @@ bool EngineDocument::renderLayout()
 #else
     engine_->Render();
 #endif
+    engine_->groupColumns(hideNonlinearFragments_);
     cutSlice();
     return true;
 }
@@ -1703,6 +1755,7 @@ quint64 EngineDocument::layoutSignature() const
     mix(quint64(quintptr(engine_->getDocument())));
     mix(engine_->getDocumentRenderingHash(true));
     mix(columns_);
+    mix(columns_ > 1 && hideNonlinearFragments_);
     mix(verticalSpacing_ == "center" ? 2 : verticalSpacing_ == "expand" ? 1 : 0);
     mix(verticalSpacingScope_ == "protection");
     return hash ? hash : 1;
@@ -1834,7 +1887,10 @@ int EngineDocument::chapterEndPage(const ChapterLink &next) const
     const int column = pointer.isNull() ? -1 : engine_->getBookmarkPage(pointer, true);
     // A chapter starting in the second column shares this screen with the
     // preceding chapter. Round its exclusive end up before counting screens.
-    return column < 0 ? next.page : (column + columns_ - 1) / columns_;
+    if (column < 0)
+        return next.page;
+    const int screen = engine_->screenOfColumn(column);
+    return screen + (engine_->firstColumn(screen) != column);
 }
 
 ChapterSelection EngineDocument::chapterSelection(const QVector<ChapterLink> &links) const
