@@ -136,6 +136,10 @@ endforeach()
 set(svg_patches "${koreader-base_source}/thirdparty/lunasvg")
 kobalt_source(lunasvg PATCHES "${svg_patches}/cmake_tweaks.patch" "${svg_patches}/extended.patch"
     "${svg_patches}/pkgconfig.patch" "${CMAKE_CURRENT_SOURCE_DIR}/patches/lunasvg-resource-limits.patch")
+kobalt_source(lua PATCHES "${CMAKE_CURRENT_SOURCE_DIR}/patches/lua-cmake.patch"
+    "${CMAKE_CURRENT_SOURCE_DIR}/patches/lua-match-steps.patch"
+    "${CMAKE_CURRENT_SOURCE_DIR}/patches/lua-c-budget.patch")
+
 # Android builds pinned libpng. The Mac reuses libpng from its Qt SDK and Kobo
 # from its prepared SDK, so Kobo keeps the same libpng ABI as Qt; cache.cmake
 # finds those. Qt itself is never configured here.
@@ -165,6 +169,7 @@ kobalt_library(libjpeg-turbo ARCHIVE libjpeg.a OPTIONS -DENABLE_SHARED=OFF -DENA
 kobalt_library(xxhash ARCHIVE libxxhash.a SUFFIX /cmake_unofficial OPTIONS -DXXHASH_BUILD_XXHSUM=OFF)
 kobalt_library(libunibreak AUTOTOOLS ARCHIVE libunibreak.a)
 kobalt_library(lunasvg ARCHIVE liblunasvg.a OPTIONS "-DXTENDED_DIR=${svg_patches}/xtended" -DLUNASVG_BUILD_EXAMPLES=OFF)
+kobalt_library(lua ARCHIVE liblua.a)
 if(ANDROID)
     kobalt_source(openssl PATCHES "${CMAKE_CURRENT_SOURCE_DIR}/patches/openssl-android-libraries.patch")
     find_program(PERL_EXECUTABLE perl REQUIRED)

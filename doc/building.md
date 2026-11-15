@@ -182,7 +182,7 @@ First-party C and C++ code uses the Qt project style in `.clang-format`. Format 
 
 ## Dependencies and validation
 
-Kobalt builds Blaze, its hard fork of CREngine, from the source in this repository. Its text/image libraries use the versions and patches recorded in `dependencies/`. Android also builds OpenSSL and downloads the pinned BOOX compatibility JAR. These application dependencies are separate from Qt SDK production. A change to a third-party recipe, patch or source pin selects a new dependency set; application and engine source changes reuse that set.
+Kobalt builds Blaze, its hard fork of CREngine, from the source in this repository. Its text/image libraries use the versions and patches recorded in `dependencies/`. Android also builds OpenSSL and downloads the pinned BOOX compatibility JAR. Lua 5.4 for [plugins](plugins.md) is another application dependency, built from a pinned source archive and a patch that limits pattern matching steps. These application dependencies are separate from Qt SDK production. A change to a third-party recipe, patch or source pin selects a new dependency set; application and engine source changes reuse that set.
 
 ### Local engine source
 
