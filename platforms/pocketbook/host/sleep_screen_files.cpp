@@ -396,6 +396,9 @@ bool takeLockReloadPending() {
     pendingReload = false;
     return pending;
 }
+bool lockReloadPending() {
+    return pendingReload;
+}
 
 bool lockImageReloadInFlight() {
     return reloadsInFlight > 0;

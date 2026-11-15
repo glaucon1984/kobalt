@@ -1277,3 +1277,46 @@ inflected forms. On my Era Lite: Cambridge and RAE converted into the folder, th
 files, so the catalogue's Spanish dictionary has to be downloaded again in Kobalt), and the
 Shorter Oxford, already in Kobalt's form, picked up as it is. Device backup before:
 `backups/era-lite-before-folder-dictionaries-20261114` in the parent folder.
+
+### Upstream feature/blaze-engine 55870b0 merged, and two lock-image reloads that met the firmware (2026-11-15)
+
+Nico rewrote `feature/blaze-engine` on 2026-11-15: the 140 commits merged so far (up to `52c522a`)
+are now 5 (*Import the Blaze rendering library*, *Render books by chapter and adopt the completed
+layout*, the engine monitor, the Kobo benchmark, preset thumbnails), on top of develop `b7e64c4`
+(*Enable fast shaping for large books*, blaze's fast shaping ported to the pinned CREngine). The
+fetch refspec takes only `main` and `develop`; the branch has to be fetched by name, with a `+`.
+Their merge base with this branch is two days old, so a plain merge conflicts in 28 files. Merged
+against `52c522a` as the base (`git merge-tree --merge-base`, the tree applied with
+`git read-tree -m -u`, the commit given both parents), five conflicts remain, all Nico rewording or
+extending his own change: the storage and layout notes, the `rendering_version` 8 comment and a
+float test take his side; the desktop check list takes his side plus the 19 plugin checks. Outside
+`platforms/pocketbook` the tree now differs from his only where it did before (plugins, the
+PocketBook hooks); the develop files that differed before match. What it brings beyond the earlier
+merges, 13 files and about 190 lines: chapter slices keep a float and the paragraph beside it in
+one layout (and a floating first letter's bookmark), the line scan finds floats beside a row, the
+slice's text count uses the saved passages' offsets, a Text preview reflows in place, and the style
+sample thumbnails follow changes in system font files. `rendering_version` stays 8 and nothing in
+`platforms/pocketbook` changed.
+
+From the device log of the same day, two hangs with one cause: taskmgr reloading Kobalt's lock
+image when the firmware changed screens.
+
+- **Standby, then no wake (22:52).** A page turn at 22:52:04, its lock-image reload requested at
+  :07.6, the lock at :07.9 (the warning *standby while a lock image reload is in flight*). The
+  device never suspended: the heartbeat went on every 30 s for 44 minutes. The power button
+  then woke and slept it twice within three seconds, and it had to be powered off.
+  The refresh was meant to come 0.3 s after the turn. It came 3.3 s after: the page's paint
+  event and its `reader_page_turn` property arrive a few ms apart, and the second counted as a
+  turn within a second of the first, a "burst" with its 3 s wait. That was every turn since the
+  start (614 of 660 refreshes in the log, beta 5 to beta 9, came 2.5 s or more after the key).
+  The host now takes only the property, when true, as a turn (and resets it, as the Kobo
+  refresh hook does); other paints restart the countdown they find.
+- **USB plugged after a wake (17:48).** Wake at 17:48:27.4, the wake's reload of the image
+  written at the standby requested at :29.3 (meant 300 ms after the unlock, stretched by the
+  wake's 1.2 s reflow), the cable at :29.8. The firmware's PC Link prompt ignored taps until
+  17:49:11, when it closed and woke Kobalt; a second plug, with nothing in flight, worked. That
+  reload now waits for the first page turn after the wake (0.3 s after it, the hand on the page
+  button). The wake's own repaints do not count. Until then a lock shows the image of the last
+  refresh before the standby, the same page.
+
+Residual: a lock or a plug within about 1.5 s of a page turn can still meet the reload.

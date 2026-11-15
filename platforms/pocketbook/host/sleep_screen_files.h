@@ -84,7 +84,9 @@ bool writeCoverAsPowerOffImage(const QImage &cover);
 // button worked). taskmgr reloads its lock image at the next app launch anyway, and the boot
 // logo keeps the last page capture.
 void leaveFirmwareScreens(const QImage &cover, const char *when, bool filesOnly = false);
-// A write made while the device goes to sleep defers its reload request to the next wake.
+// A write made while the device goes to sleep defers its reload request to the first page turn
+// after the wake (Host::refreshSleepScreen); lockReloadPending() only asks.
 void markLockReloadPending();
 bool takeLockReloadPending();
+bool lockReloadPending();
 }

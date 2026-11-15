@@ -152,11 +152,13 @@ private:
     // Lock image rewritten a moment after the last page turn (the firmware draws the lock
     // screen from its cached copy the instant the button is pressed).
     QTimer sleepRefreshTimer, sleepRefreshBusyTimeout;
-    QElapsedTimer lastPagePaint;
+    QElapsedTimer lastPageTurn;
     void refreshSleepScreen(const char *reason);
     int sleepRefreshRetries = 0;
+    bool sleepRefreshTurn = false; // the pending refresh follows a page turn
     bool composingSleepImage = false;
-    void scheduleSleepRefresh();
+    // turn: Kobalt painted a new page (reader_page_turn); otherwise any other page paint.
+    void scheduleSleepRefresh(bool turn = false);
     QTimer heartbeat;
     // KOsync's final upload at standby (bounded by the reader, 2 s): awake until it is done.
     QTimer syncPoll;

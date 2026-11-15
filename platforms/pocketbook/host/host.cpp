@@ -28,6 +28,7 @@
 #include <QPixmap>
 #include <QLineEdit>
 #include <QTimer>
+#include <utility>
 #include <QVBoxLayout>
 #include <utility>
 
@@ -521,17 +522,14 @@ void Host::finishWake(const char *how) {
             scheduleSleepRefresh();
         }
     }
-    if (takeLockReloadPending()) {
-        // Right after the unlock press, when another lock is least likely.
-        holdAwakeForRefresh();
-        QPointer<Host> self(this);
-        QTimer::singleShot(300, this, [self] {
-            requestLockImageReload("wake", [self] {
-                if (self)
-                    self->releaseAwakeForRefresh();
-            });
-        });
-    }
+    // The image written at the standby is not reloaded here but at the refresh after the first
+    // page turn (refreshSleepScreen), 0.3 s after it. Up to 0.11.1 it was reloaded "300 ms" after the
+    // unlock, which the wake's reflow (about 1.2 s with the orientation restored) stretched to
+    // 1.8 s: a cable plugged then (2026-11-14, 17:48) met the reload, and the firmware's PC Link
+    // prompt ignored taps for 40 s. Until that turn, a lock shows the image of the last refresh
+    // before the standby, the same page.
+    if (lockReloadPending())
+        qInfo("kobalt-pb: lock image reload left for the first page turn after the wake");
 }
 
 // The first lock image of the book, through the same burst-aware scheduler as a page turn: the
@@ -552,16 +550,28 @@ void Host::primeSleepScreen() {
 // reload (together well under a second) are over while the hand is still on the page button:
 // a lock that lands while taskmgr reloads leaves the device half asleep, and nothing the app can
 // do refuses a lock (iv_sleepmode(0) does not). Quick successive turns coalesce into one refresh.
-void Host::scheduleSleepRefresh() {
+// Every page frame arrives here twice, a few ms apart: as the page's paint event (this host's
+// filter sees it before the page paints) and as the reader_page_turn property the page sets
+// while it paints. Up to 0.11.1 both counted as turns, so every turn looked like the second of a
+// burst and the refresh ran 3 s after it, not 0.3 s (the log, beta.5 to beta.9: 614 of 660
+// refreshes 2.5 s or more after the key). Only the property, when true, is a turn now; any
+// other paint just restarts the countdown it finds.
+void Host::scheduleSleepRefresh(bool turn) {
     if (asleep || quitting || composingSleepImage || currentWidget() != controller.window())
         return;
     sleepRefreshRetries = 0;
-    if (!sleepRefreshTimer.isActive())
+    const bool active = sleepRefreshTimer.isActive();
+    if (!active)
         holdAwakeForRefresh();
+    if (!turn) {
+        sleepRefreshTimer.start(active ? sleepRefreshTimer.interval() : 300);
+        return;
+    }
     // A turn within a second of the previous one is browsing: composing (tens of ms even with
     // the cached cover) would slow the next turn, so the refresh waits for the burst to end.
-    const bool burst = lastPagePaint.isValid() && lastPagePaint.elapsed() < 1000;
-    lastPagePaint.start();
+    const bool burst = lastPageTurn.isValid() && lastPageTurn.elapsed() < 1000;
+    lastPageTurn.start();
+    sleepRefreshTurn = true;
     sleepRefreshTimer.start(burst ? 3000 : 300);
 }
 
@@ -630,13 +640,25 @@ void Host::refreshSleepScreen(const char *reason) {
             self->releaseAwakeForRefresh();
             return;
         }
+        takeLockReloadPending(); // this reload covers the standby's write too
         requestLockImageReload(why.toLatin1().constData(), [self] {
             if (self)
                 self->releaseAwakeForRefresh();
         });
     });
-    if (!queued) // same image as the one already on disk
-        releaseAwakeForRefresh();
+    const bool afterTurn = std::exchange(sleepRefreshTurn, false);
+    if (queued)
+        return;
+    // Same image as the one already on disk: still to be reloaded if the standby wrote it, but
+    // only after a turn (the hand on the page button), not for the wake's own repaints.
+    if (afterTurn && takeLockReloadPending()) {
+        requestLockImageReload("after the wake", [self] {
+            if (self)
+                self->releaseAwakeForRefresh();
+        });
+        return;
+    }
+    releaseAwakeForRefresh();
 }
 
 sleep::Mode Host::sleepMode() const {
@@ -943,7 +965,11 @@ bool Host::eventFilter(QObject *object, QEvent *event) {
                 platform::animateNextFrame(direction);
             }
         } else if (change->propertyName() == "reader_page_turn") {
-            scheduleSleepRefresh();
+            // Consumed, as the Kobo refresh hook does, so that the next turn changes it again.
+            const bool turn = object->property("reader_page_turn").toBool();
+            if (turn)
+                object->setProperty("reader_page_turn", false);
+            scheduleSleepRefresh(turn);
         } else if (change->propertyName() == "reader_exit_clean_pending" &&
                    object->property("reader_exit_clean_pending").toBool()) {
             // Kobalt is closing the book on its own: the restore of the start orientation follows,

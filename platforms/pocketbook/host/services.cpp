@@ -225,7 +225,8 @@ public:
 };
 // Sleep screen: the firmware draws the lock screen from a cached bitmap, so Kobalt's sleep
 // image is written to that file for the *next* standby (the host runs Kobalt's sleep sequence
-// at book open and at every EVT_BACKGROUND) and the task manager reloads it at wake.
+// at book open and at every EVT_BACKGROUND) and the task manager reloads it at the first page
+// turn after the wake (Host::refreshSleepScreen).
 class Presentation final : public WindowPresentation {
 public:
     void pauseBackground(bool) override {}
