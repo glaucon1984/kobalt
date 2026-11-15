@@ -950,10 +950,17 @@ void offscreenRangeEnd()
         chapters.roughPages();
     while (chapters.turnInWindow(-1)) { }
     require(Probe::windowLast(chapters) == 0, "The saved chapter must be off screen");
+    require(whole.pages() > 2, "The saved chapter must span multiple pages");
     for (int p = 2; p < whole.pages(); ++p) {
         const QStringList range{ whole.pageStart(p - 1), whole.pageStart(p) };
+        require(!range.first().isEmpty() && !range.last().isEmpty()
+                        && range.first() != range.last(),
+                "Adjacent pages must have distinct anchors");
         const auto expected = whole.bookPages(range, {}, true);
-        require(chapters.bookPages(range, {}, true).value(1) == expected.value(1),
+        require(expected == QVector<int>({ p, p }),
+                "Whole-book range must end on the preceding page");
+        const auto actual = chapters.bookPages(range, {}, true);
+        require(actual.size() == 2 && actual.at(1) == p,
                 "An offscreen highlight end included the next page");
     }
 }
@@ -1874,6 +1881,20 @@ void hiddenHeadingAtHandoff()
         const auto next = model.position();
         require(model.turnInWindow(-1), "Cannot return to the chapter heading");
         const auto heading = model.position();
+        if (prepared) {
+            EngineDocument whole(test::readerFonts());
+            openResources(whole, files, { { "font_pixels", 28 } });
+            require(whole.goTo(next) && whole.page() > 0,
+                    "Cannot reach the passage after the hidden heading");
+            const int page = whole.page();
+            const auto cover = whole.pageStart(0);
+            require(whole.pagesOf({ heading, cover, next }) == QVector<int>({ -1, 0, page })
+                            && whole.bookPages({ heading, cover, next })
+                                    == QVector<int>({ -1, 1, page + 1 }),
+                    "A hidden heading must not be assigned the cover page");
+            require(!whole.goTo(heading) && whole.page() == page && whole.position() == next,
+                    "A jump to a hidden heading must keep the displayed passage");
+        }
         if (prepared)
             require(model.prepareFullDocument({}) == Engine::FullDocument::Ready,
                     "Cannot prepare the whole book");
@@ -1883,6 +1904,35 @@ void hiddenHeadingAtHandoff()
                         && model.position() == next,
                 "The next turn must reach the same passage in the chapter");
     }
+}
+
+// The heading is visible in the whole book only because its preceding
+// chapter participates in the selector. A font edit opens the chapter alone.
+void hiddenHeadingOnChapterReflow()
+{
+    auto files = test::engineBook(false, 2, 12);
+    for (const auto &name : { "OEBPS/c1.xhtml", "OEBPS/c2.xhtml" })
+        files[name].replace("<html ", "<html class='chapter' ");
+    files["OEBPS/c2.xhtml"].replace("</head>",
+                                    "<style>h1 {display:none} .chapter + .chapter h1 "
+                                    "{display:block}</style></head>");
+    EngineDocument model(test::readerFonts());
+    openResources(model, files, { { "font_pixels", 28 } });
+    int headingPage = -1;
+    for (int page = 1; page < model.pages(); ++page)
+        if (model.pageExcerpt(page).startsWith("Chapter 2")) {
+            headingPage = page;
+            break;
+        }
+    require(headingPage > 0 && model.go(headingPage), "Cannot reach the visible second heading");
+    const auto position = model.position();
+    const auto image = model.image(model.page());
+    require(!model.setChapterMode(true, appearance::Patch(QJsonObject{ { "font_pixels", 32 } }),
+                                  {}),
+            "A chapter without the displayed passage must refuse the font-change handoff");
+    require(model.bookFraction() < 0 && model.page() == headingPage && model.position() == position
+                    && model.image(model.page()) == image,
+            "A refused font-change handoff must leave the original document usable");
 }
 
 // Hybrid rendering builds the document of the whole book beside the chapter
@@ -2055,7 +2105,7 @@ void parkedFullDocument(const std::function<void(EngineDocument &)> &openWhole, 
 // The switch to the whole book resolves the place of the page on screen in
 // the whole-book document. Walks a book in chapter mode and asks the whole
 // book for the place of every page.
-void handoffWalk(const QByteArray &text)
+void handoffWalk(const QByteArray &text, int slicePages = 0)
 {
     const QJsonObject settings{ { "font_pixels", 28 }, { "line_spacing_version", 1 } };
     const auto pixels = [](const QImage &image) {
@@ -2068,18 +2118,33 @@ void handoffWalk(const QByteArray &text)
     EngineDocument whole(test::readerFonts());
     require(whole.open(text, QSize(600, 800), settings, &error), qPrintable(error));
     EngineDocument model(test::readerFonts());
+    const auto previousPages = qgetenv("KOBALT_CHAPTER_PAGES");
+    if (slicePages > 0)
+        qputenv("KOBALT_CHAPTER_PAGES", QByteArray::number(slicePages));
     setChapterModeOverride(1);
     const bool opened = model.open(text, QSize(600, 800), settings, &error);
+    if (slicePages > 0) {
+        if (previousPages.isNull())
+            qunsetenv("KOBALT_CHAPTER_PAGES");
+        else
+            qputenv("KOBALT_CHAPTER_PAGES", previousPages);
+    }
     setChapterModeOverride(-1);
     require(opened && model.bookFraction() >= 0, qPrintable(error));
     int pages = 0, unresolved = 0, otherStart = 0, otherPixels = 0, compared = 0;
     for (;;) {
         const auto place = model.position();
         ++pages;
+        if (slicePages > 0)
+            require(whole.go(pages == 1 ? whole.pages() - 1 : 0) && whole.page() != pages - 1,
+                    "Start the anchor lookup on a different page");
         if (place.isEmpty() || !whole.goTo(place)) {
             if (++unresolved <= 5)
                 std::printf("unresolved place on chapter page %d: %s\n", pages, qPrintable(place));
         }
+        if (slicePages > 0)
+            require(!place.isEmpty() && whole.page() == pages - 1,
+                    "A mixed-layout reading position must resolve to its displayed page");
         // A blank page can share its source anchor with the following page.
         // Resolve the anchor above to test adoption, but compare pixels at
         // the same sequential page index so that such pages are not skipped.
@@ -2088,7 +2153,8 @@ void handoffWalk(const QByteArray &text)
                 std::printf("other page start at chapter page %d: %s / %s\n", pages,
                             qPrintable(model.pageStart(model.page())),
                             qPrintable(whole.pageStart(whole.page())));
-            if (qEnvironmentVariableIsSet("KOBALT_HANDOFF_ALL_PAGES") || pages % 5 == 0) {
+            if (slicePages > 0 || qEnvironmentVariableIsSet("KOBALT_HANDOFF_ALL_PAGES")
+                || pages % 5 == 0) {
                 ++compared;
                 if (pixels(whole.image(whole.page())) != pixels(model.image(model.page()))
                     && ++otherPixels <= 5) {
@@ -2753,6 +2819,14 @@ int main(int argc, char **argv)
         return 0;
     }
 #if __has_include(<koblaze.h>)
+    const auto walkFixture = [](const char *name, int slicePages) {
+        QFile file(QStringLiteral(KOBALT_TEST_FIXTURES) + '/' + QLatin1String(name));
+        require(file.open(QIODevice::ReadOnly), "Cannot open mixed-layout regression book");
+        handoffWalk(file.readAll(), slicePages);
+    };
+    walkFixture("overflowing-float-bookmarks.epub", 3);
+    walkFixture("heading-after-floats.epub", 1);
+    hiddenHeadingOnChapterReflow();
     hiddenHeadingAtHandoff();
 #endif
     offscreenRangeEnd();

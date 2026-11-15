@@ -2379,12 +2379,14 @@ void RenderRectAccessor::getInvolvedFloatIds( int & float_count, lUInt32 * float
         rr_lock( _node );
 #endif
     }
-    float_count = _extra0;
-    if (float_count > 0) float_ids[0] = _extra1;
-    if (float_count > 1) float_ids[1] = _extra2;
-    if (float_count > 2) float_ids[2] = _extra3;
-    if (float_count > 3) float_ids[3] = _extra4;
-    if (float_count > 4) float_ids[4] = _extra5;
+    // A zero data index ends the list. The vertical inline extent can use
+    // _extra0 on the same final block.
+    const int ids[] = { _extra1, _extra2, _extra3, _extra4, _extra5 };
+    float_count = 0;
+    while ( float_count < 5 && ids[float_count] ) {
+        float_ids[float_count] = ids[float_count];
+        ++float_count;
+    }
 }
 void RenderRectAccessor::setInvolvedFloatIds( int float_count, const lUInt32 * float_ids )
 {
@@ -2395,12 +2397,11 @@ void RenderRectAccessor::setInvolvedFloatIds( int float_count, const lUInt32 * f
         rr_lock( _node );
 #endif
     }
-    _extra0 = float_count;
-    if (float_count > 0) _extra1 = float_ids[0];
-    if (float_count > 1) _extra2 = float_ids[1];
-    if (float_count > 2) _extra3 = float_ids[2];
-    if (float_count > 3) _extra4 = float_ids[3];
-    if (float_count > 4) _extra5 = float_ids[4];
+    _extra1 = float_count > 0 ? float_ids[0] : 0;
+    _extra2 = float_count > 1 ? float_ids[1] : 0;
+    _extra3 = float_count > 2 ? float_ids[2] : 0;
+    _extra4 = float_count > 3 ? float_ids[3] : 0;
+    _extra5 = float_count > 4 ? float_ids[4] : 0;
     _modified = true;
 }
 
@@ -5926,25 +5927,30 @@ bool ldomDocument::koblazeTableEndsSliceAfter( ldomNode * node, int end )
 
 bool ldomDocument::koblazeEnterBlock( ldomNode * node, bool spineItem, bool container )
 {
-    if ( spineItem ) {
-        _koblazeChars = 0;
+    if ( _koblazeSliceLast <= 0 || spineItem )
         return true;
-    }
-    if ( _koblazeSliceLast <= 0 )
-        return true;
-    // The text of a table or another block that is not a plain container is
-    // counted once, at that block. Its inner blocks follow it: they are not
-    // counted again, so that the count does not depend on what is shown.
-    for ( ldomNode * parent = node->getParentNode(); parent && parent->getNodeId() != el_DocFragment;
-            parent = parent->getParentNode() ) {
+    // Use the same offsets as saved passages. Hidden blocks and floats
+    // are not always visited by the main flow.
+    ldomNode * body = node;
+    for ( ldomNode * parent = node->getParentNode(); parent; parent = parent->getParentNode() ) {
+        if ( parent->getNodeId() == el_DocFragment )
+            break;
         if ( parent->getRendMethod() != erm_block )
             return true;
+        body = parent;
     }
-    int start = _koblazeChars;
-    int length = koblazeTextLength(node);
+    if ( body->getNodeId() != el_body || !body->getParentNode() ||
+            body->getParentNode()->getNodeId() != el_DocFragment )
+        return true;
+    const int length = koblazeTextLength(node);
+    if ( node == body && length > _koblazeSpineItemChars )
+        _koblazeSpineItemChars = length;
+    const int start = koblazeTextBefore(body, node);
+    if ( node->getNodeId() == el_floatBox && node->isFloatingBox() )
+        _koblazeSliceHasFloats = true;
     if ( container ) {
         // A container with text in the slice is entered, and its blocks are
-        // counted one by one. A container outside the slice is left out as
+        // placed by their source offsets. Containers outside the slice are left out as
         // a whole, with its margins and page breaks.
         if ( length > 0 && start + length > _koblazeSliceFirst && start < _koblazeSliceLast )
             return true;
@@ -5958,9 +5964,6 @@ bool ldomDocument::koblazeEnterBlock( ldomNode * node, bool spineItem, bool cont
                 && koblazeTableEndsSliceAfter(node, start + length) )
             return true;
     }
-    _koblazeChars += length;
-    if ( _koblazeChars > _koblazeSpineItemChars )
-        _koblazeSpineItemChars = _koblazeChars;
     if ( container )
         return false;
     const bool inside = length > 0 ? start >= _koblazeSliceFirst && start < _koblazeSliceLast
@@ -6149,8 +6152,8 @@ bool ldomDocument::render( LVRendPageList * pages, LVDocViewCallback * callback,
         context.setCallback(callback, numFinalBlocks);
         //updateStyles();
         CRLog::trace("rendering...");
-        _koblazeChars = 0;
         _koblazeSpineItemChars = 0;
+        _koblazeSliceHasFloats = false;
         _koblazeFirstBlock = NULL;
         if ( _koblazeSliceFirst > 0 && _koblazeSliceLast > 0 )
             context.koblazeSkipLinesUntil( &_koblazeFirstBlock );
@@ -21847,18 +21850,20 @@ ldomNode * ldomNode::elementFromPoint( lvPoint pt, int direction, bool strict_bo
                 // looking at inlines' children. We handle this case above (at the
                 // start of this function) by looking at erm_inline's children for
                 // non-erm_inline nodes before checking any x/y or bottom overflow.
+                // A logical line scan has no screen x. Include a float on
+                // either side if its final block covers this row. A point
+                // lookup still needs to be inside the float horizontally.
+                const bool logical = direction >= PT_DIR_SCAN_FORWARD_LOGICAL_FIRST;
                 int count = getChildCount();
                 for ( int i=0; i<count; i++ ) {
                     ldomNode * p = getChildNode( i );
-                    // Find an inner erm_final element that has pt in it: for now, it can
-                    // only be a float. Use PT_DIR_EXACT to really check for x boundaries.
-                    ldomNode * e = p->elementFromPoint( lvPoint(pt.x-fmt.getX(), pt.y-fmt.getY()), PT_DIR_EXACT );
+                    ldomNode * e = p->elementFromPoint( lvPoint(pt.x-fmt.getX(), pt.y-fmt.getY()),
+                                                        logical ? direction : PT_DIR_EXACT );
                     if ( e ) {
-                        // Just to be sure, as elementFromPoint() may be a bit fuzzy in its
-                        // checks, double check that pt is really inside that e rect.
                         lvRect erc;
                         e->getAbsRect( erc );
-                        if ( erc.isPointInside(pt0) ) {
+                        if ( logical ? (e->getRendMethod() == erm_final && pt0.y >= erc.top && pt0.y < erc.bottom)
+                                     : erc.isPointInside(pt0) ) {
                             return e; // return this inner erm_final
                         }
                     }

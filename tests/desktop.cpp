@@ -13146,8 +13146,129 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
         }
     }
 
+    void settingsQuickTextPreset_data()
+    {
+        QTest::addColumn<int>("mode");
+        QTest::addColumn<QString>("id");
+        QTest::addColumn<QString>("face");
+        QTest::addColumn<bool>("duringCount");
+        for (int mode : { 0, 1, 2 })
+            for (const auto &preset : textpresets::examples())
+                if (preset.id != "kobalt")
+                    QTest::newRow(qPrintable(QString::number(mode) + "-" + preset.id))
+                            << mode << preset.id << preset.fontFace << false;
+        QTest::newRow("hybrid-counting-modern")
+                << 2 << QString("modern") << QString("NV Jost") << true;
+    }
+
+    // A quick-access tap changes the preview and the reading page in each rendering mode.
+    void settingsQuickTextPreset()
+    {
+        QFETCH(int, mode);
+        QFETCH(QString, id);
+        QFETCH(QString, face);
+        QFETCH(bool, duringCount);
+        renderingMode::setOverride(mode);
+        const auto restore = qScopeGuard([] { renderingMode::setOverride(-1); });
+        Fixture fixture;
+        QVERIFY(fixture.prepared);
+        selectPreview(fixture, 1);
+        QSignalSpy opened(&fixture.window, &desktop::Window::bookOpened);
+        fixture.window.openBook(book);
+        QTRY_COMPARE_WITH_TIMEOUT(opened.count(), 1, 30000);
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        openPrologueBody(fixture);
+        QVERIFY(!QTest::currentTestFailed());
+        QCOMPARE(fixture.state().contains("book_fraction"), mode != 0);
+        QTemporaryDir logs;
+        const auto gate = std::make_shared<EngineGate>();
+        auto ready = std::make_shared<std::atomic_bool>(false);
+        const auto quiet = renderingMode::buildQuietMilliseconds();
+        const auto cleanup = qScopeGuard([&] {
+            gate->release.release();
+            if (duringCount) {
+                setDiagnosticObserver({});
+                pauseDiagnostics(true);
+                renderingMode::setBuildQuietMilliseconds(quiet);
+            }
+        });
+        if (duringCount) {
+            QVERIFY(logs.isValid());
+            initializeDiagnostics(logs.path());
+            pauseDiagnostics(false);
+            auto *worker = engineWorkerForIdle()->thread();
+            auto *gui = QThread::currentThread();
+            setDiagnosticObserver([gate, ready, worker, gui](const QJsonObject &event) {
+                if (event.value("event") == "full-document-ready")
+                    ready->store(true);
+                if (event.value("event") == "operation-start"
+                    && event.value("operation") == "engine-open"
+                    && QThread::currentThread() != worker && QThread::currentThread() != gui
+                    && !gate->entered.exchange(true))
+                    gate->release.acquire();
+            });
+            renderingMode::setBuildQuietMilliseconds(500);
+            for (int i = 0; i < 3; ++i)
+                QVERIFY(fixture.turnPage(1));
+            QTRY_VERIFY_WITH_TIMEOUT(gate->entered.load(), 10000);
+        }
+        QCOMPARE(fixture.state().value("font_face").toString(), QString("Libron"));
+        QVERIFY(fixture.press("rrPage"));
+        QTRY_VERIFY(fixture.visible("rrNavText"));
+        QVERIFY(fixture.press("rrNavText"));
+        QTRY_VERIFY(fixture.visible("rrTextPresetToggle"));
+        QVERIFY(fixture.press("rrTextPresetToggle"));
+        if (!duringCount)
+            QTRY_VERIFY(fixture.state().value("preview_ready").toBool());
+        const auto card = "rrTextPreset_" + id.toLatin1();
+        QVERIFY(fixture.press(card.constData()));
+        if (duringCount)
+            gate->release.release();
+        QTRY_VERIFY(fixture.state().value("preview_ready").toBool()
+                    && !fixture.state().value("preview_busy").toBool());
+        QCOMPARE(fixture.state().value("preview_settings").toObject().value("font_face").toString(),
+                 face);
+        QCOMPARE(fixture.state().value("text_preset").toString(), id);
+        QVERIFY(fixture.press("rrPage"));
+        QTRY_VERIFY(!fixture.visible("rrFont") && !fixture.state().value("busy").toBool());
+        QCOMPARE(fixture.state().value("font_face").toString(), face);
+        QCOMPARE(fixture.state().value("text_preset").toString(), id);
+        QVERIFY(fixture.turnPage(1));
+        QCOMPARE(fixture.state().value("font_face").toString(), face);
+        if (duringCount) {
+            // The old layout cannot be adopted over the chosen font. Wait for
+            // the new count and turn onto the completed whole-book layout.
+            ready->store(false);
+            renderingMode::setBuildQuietMilliseconds(0);
+            for (int i = 0; i < 2; ++i)
+                QVERIFY(fixture.turnPage(1));
+            QTRY_VERIFY_WITH_TIMEOUT(ready->load(), 15000);
+            for (int i = 0; i < 3 && fixture.state().contains("book_fraction"); ++i)
+                QVERIFY(fixture.turnPage(1));
+            QVERIFY(!fixture.state().contains("book_fraction"));
+            QCOMPARE(fixture.state().value("font_face").toString(), face);
+        }
+        fixture.window.readerWindow()->close();
+        QTRY_VERIFY(fixture.window.idle());
+        fixture.window.openBook(book);
+        QTRY_COMPARE(opened.count(), 2);
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        QCOMPARE(fixture.state().value("font_face").toString(), face);
+        QCOMPARE(fixture.state().value("text_preset").toString(), id);
+    }
+
+    void settingsTextPresetLatestChoice_data()
+    {
+        QTest::addColumn<QString>("last");
+        QTest::addColumn<QString>("face");
+        QTest::newRow("return-to-start") << QString("kobalt") << QString("Libron");
+        QTest::newRow("switch-to-bookish") << QString("bookish") << QString("NV Ancizar Serif");
+    }
+
     void settingsTextPresetLatestChoice()
     {
+        QFETCH(QString, last);
+        QFETCH(QString, face);
         Fixture fixture;
         QVERIFY(fixture.prepared);
         selectPreview(fixture, 1);
@@ -13185,12 +13306,13 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
             QVERIFY(name.contains("Jost"));
             QTRY_VERIFY(!fixture.widget("rrTextPresetName"));
             QVERIFY(fixture.press("rrTextPresetGalleryClose"));
-            QVERIFY(fixture.press("rrTextPreset_kobalt"));
+            QVERIFY(fixture.press(("rrTextPreset_" + last.toLatin1()).constData()));
             QVERIFY(fixture.press("rrPage"));
         }
         QTRY_VERIFY_WITH_TIMEOUT(
                 !fixture.visible("rrFont") && !fixture.state().value("busy").toBool(), 30000);
-        QCOMPARE(fixture.state().value("font_face").toString(), QString("Libron"));
+        QCOMPARE(fixture.state().value("font_face").toString(), face);
+        QCOMPARE(fixture.state().value("text_preset").toString(), last);
     }
 
     void settingsTextPresetName()

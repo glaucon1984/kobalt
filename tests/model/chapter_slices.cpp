@@ -102,6 +102,24 @@ int main(int argc, char **argv)
 {
     QGuiApplication app(argc, argv);
 #if __has_include(<koblaze.h>)
+    {
+        const auto files = styledBook(
+                "p { margin:0; text-indent:0 } .float { float:left; width:6em; height:5em }",
+                "<p class='float'>Sidebar</p><p>Passage beside the note.</p>");
+        EngineDocument book(test::readerFonts());
+        open(book, files);
+        book.image(0);
+        const auto side = book.searchPage("Sidebar", 0).hits;
+        const auto passage = book.searchPage("Passage", 0).hits;
+        require(side.size() == 1 && passage.size() == 1, "Both words must be on the first page");
+        const auto left = book.rangeRects(side.first().start, side.first().end);
+        const auto right = book.rangeRects(passage.first().start, passage.first().end);
+        require(!left.isEmpty() && !right.isEmpty(), "Both words must have text rectangles");
+        require(left.first().top() < right.first().bottom()
+                        && right.first().top() < left.first().bottom()
+                        && left.first().right() < right.first().left(),
+                "Reformatting the paragraph for display must keep its text beside the float");
+    }
     const int slicePages = 6;
     EngineDocument model(test::readerFonts());
     open(model, test::engineBook(false, 3, 500));
@@ -384,6 +402,36 @@ int main(int argc, char **argv)
         requireWholeBookPages(
                 styledBook("p{display:block;text-indent:0.2em;padding:0.1em;margin:0}", body), 2,
                 "A line above the page start changed the pages of chapter mode");
+    }
+    // The DOM position counts every character in the body, including text
+    // rendered in a separate float flow and text hidden by publisher CSS.
+    for (const auto &style : { QByteArray(".aside{float:left;width:5em;border:1px solid}"),
+                               QByteArray(".aside{display:none}") }) {
+        QByteArray body;
+        for (int group = 0; group < 8; ++group) {
+            body += "<div><h2>Group " + QByteArray::number(group) + "</h2><p class='aside'>"
+                    + prose(group, 4) + "</p>";
+            for (int i = 0; i < 6; ++i)
+                body += "<p>" + prose(group + i, 5) + "</p>";
+            body += "</div>";
+        }
+        requireWholeBookPages(styledBook(style, body), 2,
+                              "Float and hidden text must preserve chapter slice offsets");
+    }
+    // A floating drop cap can start above the first regular line of text.
+    {
+        QByteArray body;
+        const QByteArray sentence =
+                "The reader returns to the same passage after a change of type and page width. ";
+        for (int group = 0; group < 10; ++group) {
+            body += "<section><h2>Entry " + QByteArray::number(group) + "</h2>";
+            for (int i = 0; i < 6; ++i)
+                body += "<p>Section " + QByteArray::number(i) + ". " + sentence.repeated(2 + i % 5)
+                        + "</p>";
+            body += "</section>";
+        }
+        requireWholeBookPages(styledBook("p:first-letter{float:left;font-size:2em}", body), 4,
+                              "A floating drop cap at the page start changed the next slice");
     }
     // A last spine item without content adds no page to the whole book. As
     // the last unit of chapter mode it must not add one, nor show the pages
