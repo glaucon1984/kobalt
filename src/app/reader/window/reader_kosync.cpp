@@ -244,7 +244,8 @@ void Reader::updateKosyncFeatures()
     const bool ereaderPreview =
             services.devicePreview && services.devicePreview() && !services.phoneLayout;
     kosyncPage->setScheduleFeatures(services.kosyncSleepWake || ereaderPreview,
-                                    services.kosyncWifiControl || ereaderPreview);
+                                    services.kosyncWifiControl || ereaderPreview,
+                                    services.kosyncFinalUploadConnects);
 }
 
 void Reader::updateKosyncToolbar()
@@ -442,7 +443,7 @@ void Reader::synchronizeKosync(bool interactive)
     const auto connection = interactive    ? Connection::Interactive
             : opening                      ? Connection::Background
             : syncCoordinator->connected() ? Connection::Existing
-            : (kosyncClient->schedule().wakeWifi || services.kosyncConnectsForEverySync)
+            : kosyncClient->schedule().wakeWifi
                     && syncCoordinator->backgroundFailures() < kosync::backgroundConnectionLimit
             ? Connection::Background
             : Connection::Unavailable;
@@ -544,7 +545,7 @@ void Reader::flushKosync(std::function<void()> finished, bool enabled)
             && session->pages() > 0 && !kosyncDocument().isEmpty()
             && !session->state().value("position").toString().isEmpty();
     // Wi-Fi is brought up for the upload only when there is something new to upload.
-    const bool connect = eligible && services.kosyncConnectsForEverySync
+    const bool connect = eligible && services.kosyncFinalUploadConnects
             && syncCoordinator->needsSync(session->state().value("position").toString())
             && syncCoordinator->backgroundFailures() < kosync::backgroundConnectionLimit;
     syncCoordinator->flush(eligible, std::move(finished), connect);

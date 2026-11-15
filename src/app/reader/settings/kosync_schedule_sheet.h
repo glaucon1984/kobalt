@@ -29,6 +29,8 @@ public:
     {
         bool sleepWake = false;
         bool wifi = false;
+        // The sleep and close uploads turn on Wi-Fi when it is off.
+        bool finalConnects = false;
     };
 
     KosyncScheduleSheet(QWidget *parent, bool automatic, const kosync::Schedule &schedule,

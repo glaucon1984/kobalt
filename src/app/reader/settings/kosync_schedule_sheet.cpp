@@ -465,9 +465,13 @@ KosyncScheduleSheet::KosyncScheduleSheet(QWidget *parent, bool automatic,
     // Only a device with a sleep and wake lifecycle offers this moment.
     if (features.sleepWake)
         switchable(ui::ControlIcon::Moon, "rrKosyncOnSleepWake", "kosync.when_sleep_wake",
-                   "kosync.when_sleep_wake_description", &kosync::Schedule::onSleepWake);
+                   features.finalConnects ? "kosync.when_sleep_wake_description_connects"
+                                          : "kosync.when_sleep_wake_description",
+                   &kosync::Schedule::onSleepWake);
     switchable(ui::ControlIcon::Door, "rrKosyncOnClose", "kosync.when_close",
-               "kosync.when_close_description", &kosync::Schedule::onClose);
+               features.finalConnects ? "kosync.when_close_description_connects"
+                                      : "kosync.when_close_description",
+               &kosync::Schedule::onClose);
     // The gap before the Wi-Fi divider belongs to the list, so a page that
     // starts with the Wi-Fi section has its divider right under the header.
     details_.last()->layout()->setContentsMargins(chrome::inset, px(16), chrome::inset,

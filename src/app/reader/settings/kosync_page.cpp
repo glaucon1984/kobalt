@@ -198,12 +198,13 @@ void KosyncPage::setSchedule(const kosync::Schedule &schedule)
     updateAutomaticCaption();
 }
 
-void KosyncPage::setScheduleFeatures(bool sleepWake, bool wifi)
+void KosyncPage::setScheduleFeatures(bool sleepWake, bool wifi, bool finalConnects)
 {
-    if (sleepWake_ == sleepWake && wifi_ == wifi)
+    if (sleepWake_ == sleepWake && wifi_ == wifi && finalConnects_ == finalConnects)
         return;
     sleepWake_ = sleepWake;
     wifi_ = wifi;
+    finalConnects_ = finalConnects;
     dismissSchedule();
     updateAutomaticCaption();
 }
@@ -231,7 +232,8 @@ void KosyncPage::showSchedule()
     if (scheduleSheet_ || !signedIn_)
         return;
     auto *sheet =
-            new KosyncScheduleSheet(overlayParent_, automatic_, schedule_, { sleepWake_, wifi_ });
+            new KosyncScheduleSheet(overlayParent_, automatic_, schedule_,
+                                   { sleepWake_, wifi_, finalConnects_ });
     scheduleSheet_ = sheet;
     sheet->closed = [this] { dismissSchedule(); };
     sheet->automaticChanged = [this](bool enabled) {

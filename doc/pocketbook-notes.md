@@ -1333,10 +1333,9 @@ and the periodic syncs connect only with the Wi-Fi choice "turn Wi-Fi on", a row
 not show (`kosyncWifiControl` is off), so on the PocketBook the position reached the server only
 at an opening or a wake.
 
-The host now sets `kosyncConnectsForEverySync`:
+The host now sets `kosyncFinalUploadConnects` (first named `kosyncConnectsForEverySync`, when it
+also made the periodic syncs connect; see the next entry):
 
-- Periodic syncs connect in the background whatever the Wi-Fi choice, still stopped after
-  `backgroundConnectionLimit` failures until the next wake or Sync now.
 - The standby and close uploads, when the position changed since the last upload, prepare the
   connection first (`SyncCoordinator::flush(..., connect)`), silently, as the opening sync does.
   The budget is 12 s instead of 2 s: 2-4 s for the connection with a known network in range, and
@@ -1349,3 +1348,28 @@ Test: `tests/model/sync_coordinator.cpp` (`connectingFinalUpload`: an offline fl
 connect ends at once; with it, the connection comes first under the 12 s deadline, and a failed
 one ends the flush and counts as a background failure). It ran against Qt 6.4 in a Debian
 container, with the `src/` files that compile on their own and no desktop build.
+
+### The Automatic sync sheet as on Kobo (2026-11-15)
+
+Nico's Automatic sync sheet (Settings > KOSync > Automatic sync, upstream `2595351`, 2026-11-04)
+came into the port with develop `898f831` (merge `18d56178`, 2026-11-05) and compiled without a
+conflict. Its sleep and wake moment and its Wi-Fi choice (*While you read and Wi-Fi is off*: Wait
+or Turn on Wi-Fi) depend on two host fields, `kosyncSleepWake` and `kosyncWifiControl`, false
+unless the host sets them, and only the Kobo host did. So the PocketBook sheet showed only opening,
+reading and closing, and the periodic syncs never turned Wi-Fi on. When merging, look for new
+optional `ReaderHostServices` fields, not just conflicts.
+
+The host now sets both. The periodic syncs follow the Wi-Fi choice again, as on Kobo (inkview
+brings Wi-Fi up silently for them, as for the opening sync); the earlier entry had made them
+connect whatever the choice. The standby and close uploads keep connecting (`kosyncFinalUploadConnects`),
+and the sheet says so: with that field its sleep and close rows use their own descriptions
+(`kosync.when_sleep_wake_description_connects`, `kosync.when_close_description_connects`).
+Kobo turns Wi-Fi off again after a silent connection (`SyncNetwork::release`); the PocketBook's
+`Network` does not, and the firmware drops it about two minutes later.
+
+The device log of the previous build shows a standby upload that connected first: silent
+connection at 19:57:59, standby sync done after 2891 ms.
+
+Test: `tests/model/kosync_ui.cpp` checks the two descriptions in the sheet with the field set.
+It compiled in the Qt 6.4 container but could not link there: the interface text needs the
+engine, which the container does not build. Not run.

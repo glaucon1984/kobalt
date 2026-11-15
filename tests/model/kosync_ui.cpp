@@ -972,6 +972,29 @@ int main(int argc, char **argv)
             "a host without sleep or Wi-Fi control leaves those choices out");
     plain->findChild<QPushButton *>("rrKosyncAutomaticClose")->click();
     QApplication::processEvents();
+    // PocketBook: its sleep and close uploads turn on Wi-Fi, and their rows say so.
+    page->setScheduleFeatures(true, true, true);
+    automatic->click();
+    QApplication::processEvents();
+    QWidget *connecting = nullptr;
+    for (auto *candidate : window.findChildren<QWidget *>("rrKosyncAutomaticPopup"))
+        if (candidate->isVisible())
+            connecting = candidate;
+    const auto says = [](QWidget *root, const char *key) {
+        for (auto *label : root->findChildren<QLabel *>())
+            if (label->text() == strings::get(key))
+                return true;
+        return false;
+    };
+    require(connecting && connecting->findChild<QWidget *>("rrKosyncOnSleepWakeRow")
+                    && connecting->findChild<QWidget *>("rrKosyncWifiRow")
+                    && says(connecting, "kosync.when_sleep_wake_description_connects")
+                    && says(connecting, "kosync.when_close_description_connects")
+                    && !says(connecting, "kosync.when_sleep_wake_description")
+                    && !says(connecting, "kosync.when_close_description"),
+            "a host whose final uploads connect describes them so");
+    connecting->findChild<QPushButton *>("rrKosyncAutomaticClose")->click();
+    QApplication::processEvents();
     page->setAccount("https://sync.example/prefix", "reader", true, false);
     page->setStatus({}, true);
     require(!automatic->isEnabled() && !sync->isEnabled(), "busy sync blocks manual controls");

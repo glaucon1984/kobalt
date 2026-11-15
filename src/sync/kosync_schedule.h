@@ -5,8 +5,7 @@ namespace kobalt::kosync {
 // When automatic sync runs. While reading, an open book uploads a changed
 // position every `minutes`: 0 follows page turns with the 30-second check and
 // `neverWhileReading` turns periodic syncs off. The default is 15 minutes.
-// Periodic syncs turn on Wi-Fi only with wakeWifi, or on a host that sets
-// kosyncConnectsForEverySync. Opening, sleep and wake,
+// Periodic syncs turn on Wi-Fi only with wakeWifi. Opening, sleep and wake,
 // and closing each have their own switch.
 inline constexpr int neverWhileReading = -1;
 

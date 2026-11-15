@@ -19,7 +19,7 @@ public:
     void setAccount(const QString &server, const QString &username, bool signedIn, bool automatic);
     void setSchedule(const kosync::Schedule &schedule);
     // Which platform moments the Automatic sync sheet offers.
-    void setScheduleFeatures(bool sleepWake, bool wifi);
+    void setScheduleFeatures(bool sleepWake, bool wifi, bool finalConnects = false);
     void setNativeCloudSync(const NativeSyncPolicy &policy);
     void setLastSync(const QDateTime &time);
     void setDeviceName(const QString &name, const QString &defaultName);
@@ -86,7 +86,7 @@ private:
     bool filenameMatching_ = false;
     bool automatic_ = true;
     kosync::Schedule schedule_;
-    bool sleepWake_ = false, wifi_ = false;
+    bool sleepWake_ = false, wifi_ = false, finalConnects_ = false;
     ui::CaptionButton *serverButton_, *usernameButton_, *passwordButton_, *deviceNameButton_,
             *matchingButton_;
     ui::DescribedOption *metadataOption_;

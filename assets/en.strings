@@ -103,8 +103,10 @@
 "kosync.when_reading_description" = "Syncs your progress periodically.";
 "kosync.when_sleep_wake" = "When your device sleeps or wakes";
 "kosync.when_sleep_wake_description" = "Syncs your progress before sleep if you're online, and gets your latest progress on wake.";
+"kosync.when_sleep_wake_description_connects" = "Syncs your progress before sleep, turning on Wi-Fi if it's off, and gets your latest progress on wake.";
 "kosync.when_close" = "When you close the book";
 "kosync.when_close_description" = "Syncs your progress if you're online.";
+"kosync.when_close_description_connects" = "Syncs your progress, turning on Wi-Fi if it's off.";
 "kosync.interval_description" = "Choose how often Kobalt syncs your progress while a book is open. Syncing more often uses more battery.";
 "kosync.interval_0" = "Every page";
 "kosync.interval_1" = "Every minute";
