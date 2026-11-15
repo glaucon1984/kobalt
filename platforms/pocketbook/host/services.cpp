@@ -478,6 +478,10 @@ ReaderHostServices readerServices() {
     result.syncNetwork = [] {
         return std::make_unique<Network>();
     };
+    // The firmware turns Wi-Fi off about two minutes after a connection, so a sync that only
+    // used an existing connection (the periodic ones, the standby and close uploads) found none
+    // and the server kept the position of the book's opening or wake.
+    result.kosyncConnectsForEverySync = true;
     result.presentation = [](QWidget *) {
         return std::make_unique<Presentation>();
     };

@@ -208,9 +208,10 @@ Host::Host(storage::Paths paths, EngineFontInputs fonts, QString placeholder)
     connect(&syncPoll, &QTimer::timeout, this, [this] {
         auto *reader = controller.window();
         const bool pending = reader && !quitting && reader->pendingNetworkSync();
-        // Up to 6 s: the connection itself now runs in the background and takes 2-3 s when the
-        // network is there, before the upload's own 2 s.
-        if (pending && syncClock.elapsed() < 6000)
+        // The reader bounds the upload: 2 s over a connection that is up, 12 s when it has to turn
+        // Wi-Fi on first (2-4 s with a known network in range, a scan giving up within ~10 s).
+        // pendingNetworkSync() ends with that budget; this is only the backstop.
+        if (pending && syncClock.elapsed() < 13000)
             return;
         syncPoll.stop();
         qInfo("kobalt-pb: standby sync %s after %lld ms", pending ? "still pending, releasing" : "done",
@@ -372,7 +373,7 @@ void Host::taskBackground() {
     reader->sleepReader();
     setUpdatesEnabled(false);
     reader->sleepViewReady();
-    // KOsync's final upload runs after the sleep view (the reader bounds it to 2 s); a suspended
+    // KOsync's final upload runs after the sleep view (the reader bounds it, see syncPoll); a suspended
     // CPU would lose it, so stay awake until the reader reports it done.
     if (reader->pendingNetworkSync()) {
         syncBusy = true;

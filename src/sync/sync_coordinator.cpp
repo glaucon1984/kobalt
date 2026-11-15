@@ -99,7 +99,7 @@ bool SyncCoordinator::connected() const
 
 bool SyncCoordinator::finalPending() const
 {
-    return finishing_ && finishingElapsed_.elapsed() < finishBudget;
+    return finishing_ && finishingElapsed_.elapsed() < finishLimit_;
 }
 
 bool SyncCoordinator::start(Connection connection, bool retryRead)
@@ -258,7 +258,7 @@ void SyncCoordinator::complete(const QString &message, bool interactiveConnectio
         finished();
 }
 
-void SyncCoordinator::flush(bool enabled, Done done)
+void SyncCoordinator::flush(bool enabled, Done done, bool connect)
 {
     QPointer<SyncCoordinator> guard(this);
     if (connecting_ || authenticating_ || readerReady_) {
@@ -272,7 +272,8 @@ void SyncCoordinator::flush(bool enabled, Done done)
             done();
         return;
     }
-    if (!connected()) {
+    const bool offline = !connected();
+    if (offline && !connect) {
         cancel();
         if (!guard)
             return;
@@ -281,6 +282,13 @@ void SyncCoordinator::flush(bool enabled, Done done)
             done();
         return;
     }
+    if (offline) {
+        // A request left from before the connection dropped cannot be
+        // waited for: its answer would end this flush before the upload.
+        cancel(true);
+        if (!guard)
+            return;
+    }
     const auto epoch = epoch_;
     notify(EventKind::FinalStarted);
     if (!guard || epoch != epoch_)
@@ -288,7 +296,12 @@ void SyncCoordinator::flush(bool enabled, Done done)
     finishingElapsed_.start();
     finishing_ = true;
     finished_ = std::move(done);
-    deadline_.start(finishBudget);
+    finishLimit_ = offline ? connectingFinishBudget : finishBudget;
+    deadline_.start(finishLimit_);
+    if (offline) {
+        prepareNetwork(false, [this] { exchange(true); });
+        return;
+    }
     // Aborting an older PUT cannot prove that the server stopped its write.
     // Let it finish before the final read/write exchange, under one budget.
     flushWaiting_ = client_.busy();

@@ -307,6 +307,54 @@ void finalUpload(const QString &path, bool timeout)
                     && !owner.needsSync("last-position"),
             "Final handoff did not complete exactly once");
 }
+// A host whose Wi-Fi goes off between syncs asks the final upload to connect.
+// Without that, an offline flush ends at once; with it, the connection is
+// prepared first under the longer budget, and a failed one ends the flush.
+void connectingFinalUpload(const QString &path, bool connects)
+{
+    Http http;
+    kosync::Client client(path, nullptr, &http);
+    const auto radio = std::make_shared<RadioState>();
+    auto current = context();
+    current.readiness = Coordinator::Readiness::Hidden;
+    QVector<Coordinator::Event> completions;
+    Coordinator owner(
+            client, [radio] { return std::make_unique<Radio>(radio); }, [&] { return current; },
+            [&](const Coordinator::Event &event) {
+                if (event.kind == Coordinator::EventKind::Completed)
+                    completions.append(event);
+            },
+            true);
+    int done = 0;
+    owner.flush(true, [&] { ++done; });
+    require(done == 1 && radio->prepared == 0 && http.replies.isEmpty() && !owner.finalPending(),
+            "An offline final upload without connect tried to connect");
+    owner.flush(true, [&] { ++done; }, true);
+    auto *deadline = owner.findChild<QTimer *>("rrKosyncDeadline");
+    require(done == 1 && radio->prepared == 1 && http.replies.isEmpty() && owner.finalPending()
+                    && deadline && deadline->isActive() && deadline->interval() == 12000,
+            "An offline final upload with connect did not prepare the connection first");
+    if (!connects) {
+        radio->answer(false);
+        require(done == 2 && !owner.finalPending() && !owner.busy() && http.replies.isEmpty()
+                        && owner.backgroundFailures() == 1 && radio->released == 1
+                        && completions.size() == 1 && completions[0].finalUpload
+                        && completions[0].message == strings::get("kosync.no_connection"),
+                "A failed connection did not end the final upload");
+        return;
+    }
+    radio->connected = true;
+    radio->answer(true);
+    http.finish(0);
+    await([&] { return http.uploads.size() == 1; });
+    require(done == 1 && owner.finalPending(), "The final upload ended before its write");
+    http.finish(1);
+    require(done == 2 && !owner.finalPending() && !owner.busy() && radio->released == 1
+                    && http.uploads[0].value("progress") == "chapter-one"
+                    && completions.size() == 1 && completions[0].finalUpload
+                    && !owner.needsSync("chapter-one"),
+            "The connected final upload did not write the position exactly once");
+}
 } // namespace
 
 int main(int argc, char **argv)
@@ -328,6 +376,8 @@ int main(int argc, char **argv)
     observerLifetime(path);
     finalUpload(path, false);
     finalUpload(path, true);
+    connectingFinalUpload(path, true);
+    connectingFinalUpload(path, false);
     kosync::overrideAccount({});
     std::puts(
             "PASS: book-scoped sync attempts own late replies, readiness and final upload handoffs");

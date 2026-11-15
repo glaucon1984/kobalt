@@ -1320,3 +1320,32 @@ image when the firmware changed screens.
   refresh before the standby, the same page.
 
 Residual: a lock or a plug within about 1.5 s of a page turn can still meet the reload.
+
+### Every automatic KOSync sync turns Wi-Fi on (2026-11-15)
+
+A chapter read from 13:51 to 13:59, then a standby, and the server still held the position of the
+book's opening: another reader found nothing new until the PocketBook woke at 14:02 and its wake
+sync uploaded. The opening sync had brought Wi-Fi up; the firmware turned it off by itself at
+13:53, about two minutes after the connection (Qt reported the network gone; nothing in Kobalt
+asked). The standby upload then used only a connection that was already up, found none
+(`kosync-network-unavailable`, stage `final`) and skipped. The close upload works the same way,
+and the periodic syncs connect only with the Wi-Fi choice "turn Wi-Fi on", a row this host does
+not show (`kosyncWifiControl` is off), so on the PocketBook the position reached the server only
+at an opening or a wake.
+
+The host now sets `kosyncConnectsForEverySync`:
+
+- Periodic syncs connect in the background whatever the Wi-Fi choice, still stopped after
+  `backgroundConnectionLimit` failures until the next wake or Sync now.
+- The standby and close uploads, when the position changed since the last upload, prepare the
+  connection first (`SyncCoordinator::flush(..., connect)`), silently, as the opening sync does.
+  The budget is 12 s instead of 2 s: 2-4 s for the connection with a known network in range, and
+  the scan gives up within about 10 s when there is none. The standby keeps the device awake while
+  `pendingNetworkSync()` holds (the host's backstop is now 13 s instead of 6 s); a close waits for
+  the upload as it already did.
+- Kobo is unchanged: Nickel keeps Wi-Fi up while reading.
+
+Test: `tests/model/sync_coordinator.cpp` (`connectingFinalUpload`: an offline flush without
+connect ends at once; with it, the connection comes first under the 12 s deadline, and a failed
+one ends the flush and counts as a background failure). It ran against Qt 6.4 in a Debian
+container, with the `src/` files that compile on their own and no desktop build.

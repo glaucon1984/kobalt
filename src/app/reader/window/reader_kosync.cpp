@@ -442,7 +442,7 @@ void Reader::synchronizeKosync(bool interactive)
     const auto connection = interactive    ? Connection::Interactive
             : opening                      ? Connection::Background
             : syncCoordinator->connected() ? Connection::Existing
-            : kosyncClient->schedule().wakeWifi
+            : (kosyncClient->schedule().wakeWifi || services.kosyncConnectsForEverySync)
                     && syncCoordinator->backgroundFailures() < kosync::backgroundConnectionLimit
             ? Connection::Background
             : Connection::Unavailable;
@@ -543,7 +543,11 @@ void Reader::flushKosync(std::function<void()> finished, bool enabled)
             && kosyncAutomatic() && !book->pendingProgress() && !session->temporaryTypography()
             && session->pages() > 0 && !kosyncDocument().isEmpty()
             && !session->state().value("position").toString().isEmpty();
-    syncCoordinator->flush(eligible, std::move(finished));
+    // Wi-Fi is brought up for the upload only when there is something new to upload.
+    const bool connect = eligible && services.kosyncConnectsForEverySync
+            && syncCoordinator->needsSync(session->state().value("position").toString())
+            && syncCoordinator->backgroundFailures() < kosync::backgroundConnectionLimit;
+    syncCoordinator->flush(eligible, std::move(finished), connect);
 }
 
 void Reader::showKosyncChoice()

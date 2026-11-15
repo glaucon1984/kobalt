@@ -57,10 +57,12 @@ public:
     bool start(Connection connection, bool retryRead);
     bool login(const QString &server, const QString &username, const QString &password,
                Client::Done done);
-    // The owner decides eligibility. Only an existing connection may be used.
+    // The owner decides eligibility. Without `connect`, only an existing
+    // connection may be used. With it, a missing connection is prepared in the
+    // background first, under connectingFinishBudget instead of finishBudget.
     // An older HTTP request finishes before the final read/write exchange starts.
     // The same deadline covers that wait and the exchange. Cancel drops done.
-    void flush(bool enabled, Done done);
+    void flush(bool enabled, Done done, bool connect = false);
     void cancel();
     // Resume a response waiting for visible, settled reading state. Hidden
     // owners call this on return; there is no readiness polling while hidden.
@@ -80,6 +82,10 @@ public:
 
 private:
     static constexpr int finishBudget = 2000;
+    // A silent connection takes 2-4 s when a known network is in range, and a
+    // scan that finds none gives up within about 10 s.
+    static constexpr int connectingFinishBudget = 12000;
+    int finishLimit_ = finishBudget;
     Client &client_;
     SyncNetworkFactory networkFactory_;
     std::unique_ptr<SyncNetwork> network_;

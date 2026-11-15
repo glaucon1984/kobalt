@@ -171,6 +171,12 @@ struct ReaderHostServices
     // Automatic KOsync moments the host supports: a device sleep and wake
     // lifecycle, and a sync while reading that may turn on Wi-Fi.
     bool kosyncSleepWake = false, kosyncWifiControl = false;
+    // A host whose Wi-Fi goes off on its own soon after each connection: every
+    // automatic sync turns Wi-Fi on when it is off, the periodic ones whatever
+    // the Wi-Fi choice, and the sleep and close uploads too when the position
+    // changed since the last upload. Background failures still stop them at
+    // backgroundConnectionLimit until the next wake or Sync now.
+    bool kosyncConnectsForEverySync = false;
     // Optional: turns Wi-Fi off for the Wi-Fi power saver, while an opened
     // book waits to be presented or while the device goes to sleep. Both come
     // before the reader takes input. The host leaves Wi-Fi alone unless it is
