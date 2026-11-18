@@ -478,6 +478,12 @@ void Reader::buildReadingPage()
         if (lifecycleHidden || services.suspended() || closing)
             return;
         lookupText = query;
+        // With plugin answers first, the sheet keeps its content until the new word's card
+        // or definition is ready.
+        if (pluginAnswersFirst()) {
+            lookupWord(query, kobalt::ui::PanelTiming("dictionary"));
+            return;
+        }
         const auto result = dictionary->lookup(book->identity(), lookupText);
         dictionaryPanel->setChoices(dictionary->choices());
         dictionaryPanel->setBookFont(bookFace());

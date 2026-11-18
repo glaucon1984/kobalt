@@ -1931,6 +1931,7 @@ void Reader::dismissLookup(bool keepGesture)
     dismissLinks();
     ++lookupEpoch;
     lookupPending = false;
+    pluginWait = 0;
     if (keepGesture)
         page->invalidateHoldTarget();
     else
@@ -1991,21 +1992,69 @@ void Reader::lookupSelection()
                         guard->page->mapTo(guard, QPoint(0, guard->page->topHeight())));
                 guard->lookupContext = range.context;
                 guard->lookupPosition = range.start;
-                guard->openDictionary(query, timing);
-                if (guard && guard->dictionaryPanel->isVisible())
-                    guard->askPlugins(query);
+                guard->lookupWord(query, timing);
             },
             true);
 }
 
-// Plugin answers join the open sheet as choices; the definition never waits for them.
-void Reader::askPlugins(const QString &query)
+// Opens the sheet for a word. The definition opens at once and plugin answers join it as
+// choices. When the user chose plugin answers first, the sheet instead waits a moment for a
+// card and opens on it, and opens on the definition when no plugin answers in time.
+void Reader::lookupWord(const QString &query, kobalt::ui::PanelTiming timing)
 {
+    lookupText = query;
+    if (pluginAnswersFirst()) {
+        // The lookup stays pending until a card, no card or the time limit arrives.
+        lookupPending = true;
+        updateOrientationBlock();
+        updateLinkReturn();
+        askPlugins(query, std::make_shared<kobalt::ui::PanelTiming>(timing));
+        return;
+    }
+    QPointer<Reader> guard(this);
+    openDictionary(query, timing);
+    if (guard && dictionaryPanel->isVisible())
+        askPlugins(query);
+}
+
+// True when a lookup should wait for a plugin's card: the user chose plugin answers first
+// and a plugin of this book can answer.
+bool Reader::pluginAnswersFirst() const
+{
+    return plugins && !plugins->skipsLookups()
+            && kobalt::plugins::switchesFrom(preferences).answerFirst;
+}
+
+// Ends the wait of a lookup that opens on a plugin's answer: with the first card, or with
+// an empty one when no plugin answered or the time ran out.
+void Reader::endPluginWait(const kobalt::plugins::Card &card, kobalt::ui::PanelTiming timing)
+{
+    pluginWait = 0;
+    lookupPending = false;
+    if (closing)
+        return;
+    // Suspension alone dismisses nothing; end the lookup as closing the sheet does.
+    if (lifecycleHidden || services.suspended()) {
+        dismissDictionary();
+        return;
+    }
+    timing.stage("plugins");
+    openDictionary(lookupText, timing, card);
+}
+
+// Plugin answers join the open sheet as choices; the definition never waits for them.
+// With `opening`, the sheet has not opened for this word yet: the first answer, the end of
+// the plugins or the time limit opens it, and later answers join it as choices.
+void Reader::askPlugins(const QString &query, std::shared_ptr<kobalt::ui::PanelTiming> opening)
+{
+    pluginWait = 0;
     dictionaryPanel->clearPluginCards();
     if (!plugins || plugins->skipsLookups())
         return;
     const quint64 request = ++pluginRequest;
     const auto epoch = lookupEpoch;
+    if (opening)
+        pluginWait = request;
     kobalt::plugins::Lookup lookup;
     lookup.epoch = request;
     lookup.word = query;
@@ -2014,24 +2063,41 @@ void Reader::askPlugins(const QString &query)
     if (!linkHistory.isEmpty())
         lookup.position = kobalt::plugins::capAtPage(lookup.position, linkHistory.first().page + 1);
     QPointer<Reader> guard(this);
+    // True while the sheet still waits for this request to open it.
+    const auto waiting = [guard, request, epoch] {
+        return guard && guard->pluginWait == request && guard->lookupEpoch == epoch;
+    };
     plugins->lookup(
             lookup,
-            [guard, request, epoch](quint64, kobalt::plugins::Card card) {
+            [guard, request, epoch, waiting, opening](quint64, kobalt::plugins::Card card) {
+                if (waiting()) {
+                    guard->endPluginWait(card, *opening);
+                    return;
+                }
                 if (!guard || guard->pluginRequest != request || guard->lookupEpoch != epoch
                     || guard->closing || guard->lifecycleHidden || guard->services.suspended()
                     || !guard->dictionaryPanel->isVisible())
                     return;
                 guard->dictionaryPanel->addPluginCard(card);
             },
-            [guard](quint64) {
-                if (guard)
-                    guard->setProperty("reader_plugin_replies",
-                                       guard->property("reader_plugin_replies").toInt() + 1);
+            [guard, waiting, opening](quint64) {
+                if (!guard)
+                    return;
+                guard->setProperty("reader_plugin_replies",
+                                   guard->property("reader_plugin_replies").toInt() + 1);
+                if (waiting())
+                    guard->endPluginWait({}, *opening);
             });
     setProperty("reader_plugin_requests", property("reader_plugin_requests").toInt() + 1);
+    if (opening)
+        kobalt::qt::later(services.pluginAnswerWaitMs, this, [waiting, guard, opening] {
+            if (waiting())
+                guard->endPluginWait({}, *opening);
+        });
 }
 
-void Reader::openDictionary(const QString &query, kobalt::ui::PanelTiming timing)
+void Reader::openDictionary(const QString &query, kobalt::ui::PanelTiming timing,
+                            const kobalt::plugins::Card &first)
 {
     const auto epoch = lookupEpoch;
     lookupText = query;
@@ -2043,7 +2109,7 @@ void Reader::openDictionary(const QString &query, kobalt::ui::PanelTiming timing
     timing.field("chars", result.html.size());
     dictionaryPanel->setChoices(dictionary->choices());
     dictionaryPanel->setBookFont(bookFace());
-    dictionaryPanel->open(query, result, lookupBounds);
+    dictionaryPanel->open(query, result, lookupBounds, first.isEmpty() ? nullptr : &first);
     recordLookup(query, result);
     timing.finish(dictionaryPanel);
     syncAnnotationControls();

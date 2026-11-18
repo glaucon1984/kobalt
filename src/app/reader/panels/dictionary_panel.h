@@ -34,7 +34,10 @@ public:
     static QFont definitionFont(const QString &family, int percent);
     static int definitionLineHeight(int percent, bool customFont = false);
     void setDefinitionFont(const QString &family, int percent);
-    void open(const QString &word, const DictionaryResult &result, const QRect &selection);
+    // With `first`, the sheet opens on that plugin's card, and the chooser leads to the
+    // definition as it does after a card was chosen.
+    void open(const QString &word, const DictionaryResult &result, const QRect &selection,
+              const plugins::Card *first = nullptr);
     // Adds a plugin's answer to the chooser and marks the chooser button; a card from the
     // same plugin replaces its earlier one.
     void addPluginCard(const plugins::Card &card);

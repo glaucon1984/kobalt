@@ -770,6 +770,8 @@
 "settings.section_plugins" = "Plugins";
 "settings.use_plugins" = "Use plugins";
 "settings.use_plugins_description" = "Turn off to open books without loading any plugin.";
+"settings.plugin_answers_first" = "Plugin answers first";
+"settings.plugin_answers_first_description" = "A word that a plugin answers opens on the plugin's card. Other words open on the definition.";
 "settings.plugins_install" = "No plugins are installed. Copy a plugin's folder into %1, then open a book.";
 "settings.plugins_blocked" = "Plugins are off until the plugin from the previous book finishes or Kobalt restarts.";
 "settings.plugin_status_running" = "Running";

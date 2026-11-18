@@ -301,7 +301,7 @@ void DictionaryPanel::setHeadword(const QString &text)
 }
 
 void DictionaryPanel::open(const QString &word, const DictionaryResult &result,
-                           const QRect &selection)
+                           const QRect &selection, const plugins::Card *first)
 {
     finishEditing(false);
     showingCard = false;
@@ -347,6 +347,12 @@ void DictionaryPanel::open(const QString &word, const DictionaryResult &result,
     definitionHtml = html;
     renderedHtml.clear();
     text->setPage(0);
+    // The card takes the definition's place before the sheet is laid out, so the
+    // definition is neither laid out nor painted.
+    if (first) {
+        addPluginCard(*first);
+        showCard(*first);
+    }
     place(selection);
     show();
     raise();
@@ -387,7 +393,8 @@ void DictionaryPanel::clearPluginCards()
     cards.clear();
     pluginMarker->hide();
     dictionary->setEnabled(!editing && options.size() > 1);
-    if (showingCard)
+    // A closed sheet has nothing to restore: opening it replaces its content.
+    if (showingCard && isVisible())
         restoreDefinition();
 }
 

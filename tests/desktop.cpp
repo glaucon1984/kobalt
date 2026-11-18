@@ -1582,13 +1582,16 @@ void swipeChoices(Fixture &fixture, const QString &name = {})
 }
 
 // Points the reader at one fixture plugin folder under tests/fixtures/plugins/reader.
-std::function<void(ReaderHostServices &)> pluginServices(const QString &folder)
+// `answerWait` is the time a lookup waits for a card when plugin answers open first.
+std::function<void(ReaderHostServices &)> pluginServices(const QString &folder, int answerWait = -1)
 {
-    return [folder](ReaderHostServices &services) {
+    return [folder, answerWait](ReaderHostServices &services) {
         services.pluginDirectory = nullptr;
         if (!folder.isEmpty())
             services.pluginDirectory = [path = QStringLiteral(KOBALT_TEST_PLUGIN_FIXTURES) + '/'
                                                 + folder] { return path; };
+        if (answerWait >= 0)
+            services.pluginAnswerWaitMs = answerWait;
     };
 }
 
@@ -1958,6 +1961,19 @@ QString pluginRowStatus(Fixture &fixture, const char *row)
 {
     auto *button = fixture.widget(row);
     return button ? button->accessibleDescription() : QString();
+}
+
+// Turns on Settings > System > Plugins > Plugin answers first and returns to the page.
+void choosePluginAnswersFirst(Fixture &fixture)
+{
+    QVERIFY(openPluginSettings(fixture, "rrPluginAnswersFirst"));
+    auto *first = qobject_cast<QCheckBox *>(fixture.widget("rrPluginAnswersFirst"));
+    QVERIFY(first && !first->isChecked());
+    QVERIFY(fixture.press("rrPluginAnswersFirst"));
+    QVERIFY(first->isChecked());
+    QVERIFY(fixture.press("rrSettingsClose"));
+    QTRY_COMPARE(storage::readJson(fixture.paths.preferences()).value("plugins_answer_first"),
+                 QJsonValue(true));
 }
 
 void reopenPluginBook(Fixture &fixture)
@@ -8377,6 +8393,208 @@ printf '[{"file":"%s.png","scene":"%s"}]' "$3" "$KOBALT_GALLERY_CAPTURE" > "$2/p
         QCOMPARE(fixture.state().value("position"), position);
         QVERIFY(!fixture.visible("rrControlsTop"));
         QTRY_VERIFY(!page->annotationContains(word - QPoint(0, page->topHeight())));
+    }
+
+    // Checks that with plugin answers first the sheet opens on the card, the chooser leads
+    // to the definition of the selected word, and the choice applies without reopening the book.
+    void pluginAnswerOpensFirst()
+    {
+        Fixture fixture(false, false, false, true, false, false, pluginServices("card", 10000));
+        openPluginBook(fixture);
+        auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+        auto *reader = fixture.window.readerWindow();
+        const auto point = fixture.wordPoint();
+        const auto word = wordText(fixture, point);
+        // Without the choice, the sheet opens on the definition.
+        QVERIFY(fixture.selectWord(page, point));
+        QTRY_VERIFY(pluginMarkerShown(fixture));
+        QVERIFY(dictionaryShown(fixture));
+        auto *headword = qobject_cast<QLabel *>(fixture.widget("rrDictionaryWord"));
+        auto *definition = dynamic_cast<ui::PagedText *>(fixture.widget("rrDefinition"));
+        QVERIFY(headword && definition);
+        const auto definitionHtml = definition->html();
+        QVERIFY(fixture.press("rrDictionarySelect"));
+        QTRY_VERIFY(!pluginChoice(fixture, pluginCardName).isEmpty());
+        const auto dictionaryRow = checkedChoice(fixture);
+        QVERIFY(!dictionaryRow.isEmpty());
+        QVERIFY(fixture.press("rrDictionarySelect"));
+        QVERIFY(fixture.press("rrDictionaryClose"));
+        QTRY_VERIFY(!fixture.visible("rrDictionary"));
+        choosePluginAnswersFirst(fixture);
+        // The sheet stays closed while the plugins are asked, then opens on the card.
+        bool closedWhileAsked = false;
+        PluginRequestWatch watch(reader,
+                                 [&] { closedWhileAsked = !fixture.visible("rrDictionary"); });
+        QVERIFY(fixture.selectWord(page, point));
+        QTRY_VERIFY(watch.fired);
+        QVERIFY(closedWhileAsked);
+        QTRY_VERIFY(pluginCardShown(fixture));
+        QVERIFY(definition->html().contains("Harbourmaster of Saltmarsh."));
+        QVERIFY(definition->html().contains(pluginCardFooter.toHtmlEscaped()));
+        QVERIFY(pluginMarkerShown(fixture));
+        QVERIFY(!fixture.visible("rrDictionaryEdit"));
+        QVERIFY(!fixture.visible("rrDictionarySearch"));
+        QVERIFY(fixture.press("rrDictionarySelect"));
+        QTRY_VERIFY(!pluginChoice(fixture, pluginCardName).isEmpty());
+        QCOMPARE(checkedChoice(fixture), pluginChoice(fixture, pluginCardName));
+        QVERIFY(fixture.press(qPrintable(dictionaryRow)));
+        QTRY_VERIFY(dictionaryShown(fixture));
+        QCOMPARE(headword->text(), word);
+        QCOMPARE(definition->html(), definitionHtml);
+        QVERIFY(pluginMarkerShown(fixture));
+        QVERIFY(fixture.press("rrDictionaryClose"));
+        QTRY_VERIFY(!fixture.visible("rrDictionary"));
+        QVERIFY(fixture.turnPage(1));
+    }
+
+    void pluginAnswerFirstFallsBack_data()
+    {
+        QTest::addColumn<QString>("folder");
+        QTest::newRow("silent") << QStringLiteral("silent");
+        QTest::newRow("broken") << QStringLiteral("broken");
+    }
+
+    // Checks that with plugin answers first a word no plugin answers opens on its definition.
+    void pluginAnswerFirstFallsBack()
+    {
+        QFETCH(QString, folder);
+        Fixture fixture(false, false, false, true, false, false, pluginServices(folder, 10000));
+        openPluginBook(fixture);
+        choosePluginAnswersFirst(fixture);
+        auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+        const auto point = fixture.wordPoint();
+        QVERIFY(fixture.selectWord(page, point));
+        QTRY_VERIFY(dictionaryShown(fixture));
+        auto *headword = qobject_cast<QLabel *>(fixture.widget("rrDictionaryWord"));
+        QVERIFY(headword);
+        QCOMPARE(headword->text(), wordText(fixture, point));
+        QCoreApplication::processEvents();
+        QVERIFY(!pluginMarkerShown(fixture));
+        QVERIFY(fixture.press("rrDictionaryClose"));
+        QTRY_VERIFY(!fixture.visible("rrDictionary"));
+        QVERIFY(fixture.turnPage(1));
+    }
+
+    // Checks that with plugin answers first the definition opens when the plugin misses its
+    // time, and its late card joins the sheet as a choice.
+    void pluginAnswerFirstTimeLimit()
+    {
+        Fixture fixture(false, false, false, true, false, false, pluginServices("slow", 1));
+        openPluginBook(fixture);
+        choosePluginAnswersFirst(fixture);
+        auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+        const auto point = fixture.wordPoint();
+        const auto word = wordText(fixture, point);
+        QVERIFY(fixture.selectWord(page, point));
+        QTRY_VERIFY(dictionaryShown(fixture));
+        auto *headword = qobject_cast<QLabel *>(fixture.widget("rrDictionaryWord"));
+        QVERIFY(headword);
+        QCOMPARE(headword->text(), word);
+        QTRY_VERIFY_WITH_TIMEOUT(pluginMarkerShown(fixture), 10000);
+        QVERIFY(dictionaryShown(fixture));
+        QCOMPARE(headword->text(), word);
+        QVERIFY(fixture.press("rrDictionarySelect"));
+        QTRY_VERIFY(!pluginChoice(fixture, QStringLiteral("slow")).isEmpty());
+    }
+
+    // Checks that a page tap while the sheet waits for a card ends the lookup, and the card
+    // that arrives afterwards shows nothing.
+    void pluginAnswerFirstTapWhileWaiting()
+    {
+        Fixture fixture(false, false, false, true, false, false, pluginServices("slow", 10000));
+        openPluginBook(fixture);
+        choosePluginAnswersFirst(fixture);
+        auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+        auto *reader = fixture.window.readerWindow();
+        const auto word = fixture.wordPoint();
+        const QPoint tap(9 * page->width() / 10, page->height() / 2);
+        QVERIFY(!page->annotationContains(tap - QPoint(0, page->topHeight())));
+        const int replies = pluginReplies(fixture);
+        bool tapped = false, closed = false;
+        PluginRequestWatch watch(reader, [&] {
+            closed = pluginReplies(fixture) == replies && !fixture.visible("rrDictionary");
+            tapped = fixture.click(page, tap);
+        });
+        QVERIFY(fixture.selectWord(page, word));
+        QTRY_VERIFY(watch.fired);
+        QVERIFY(closed);
+        QVERIFY(tapped);
+        QTRY_VERIFY_WITH_TIMEOUT(pluginReplies(fixture) == replies + 1, 10000);
+        QCoreApplication::processEvents();
+        QVERIFY(!fixture.visible("rrDictionary"));
+        // The lookup no longer holds page turns back.
+        QTRY_VERIFY(!fixture.state().value("busy").toBool());
+        QVERIFY(fixture.turnPage(1));
+        QVERIFY(!fixture.visible("rrDictionary"));
+    }
+
+    // Checks that suspending the app while the sheet waits for a card ends the lookup
+    // instead of stranding it.
+    void pluginAnswerFirstSuspended()
+    {
+        auto suspended = std::make_shared<bool>(false);
+        Fixture fixture(false, false, false, true, false, false,
+                        [suspended](ReaderHostServices &services) {
+                            pluginServices("card", 10000)(services);
+                            services.suspended = [suspended, host = services.suspended] {
+                                return *suspended || (host && host());
+                            };
+                        });
+        openPluginBook(fixture);
+        choosePluginAnswersFirst(fixture);
+        auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+        auto *reader = fixture.window.readerWindow();
+        const auto word = fixture.wordPoint();
+        const int replies = pluginReplies(fixture);
+        PluginRequestWatch watch(reader, [suspended] { *suspended = true; });
+        QVERIFY(fixture.selectWord(page, word));
+        QTRY_VERIFY(watch.fired);
+        QTRY_COMPARE(pluginReplies(fixture), replies + 1);
+        *suspended = false;
+        QCoreApplication::processEvents();
+        QVERIFY(!fixture.visible("rrDictionary"));
+        QVERIFY(!page->annotationContains(word - QPoint(0, page->topHeight())));
+        QVERIFY(fixture.turnPage(1));
+        QVERIFY(!fixture.visible("rrDictionary"));
+    }
+
+    // Checks that with plugin answers first a submitted edit opens on the new word's card,
+    // and its definition is for the new word.
+    void pluginAnswerFirstEdit()
+    {
+        Fixture fixture(false, false, false, true, false, false, pluginServices("card", 10000));
+        openPluginBook(fixture);
+        choosePluginAnswersFirst(fixture);
+        auto *page = static_cast<ReadingPage *>(fixture.widget("rrPage"));
+        auto *reader = fixture.window.readerWindow();
+        QVERIFY(fixture.selectWord(page, fixture.wordPoint()));
+        QTRY_VERIFY(pluginCardShown(fixture));
+        // The card has no edit cell; the definition behind the chooser has.
+        QVERIFY(fixture.press("rrDictionarySelect"));
+        QTRY_VERIFY(!pluginChoice(fixture, pluginCardName).isEmpty());
+        const auto cardRow = pluginChoice(fixture, pluginCardName);
+        QString dictionaryRow;
+        for (auto *row : fixture.widget("rrDictionaryChoices")->findChildren<QPushButton *>())
+            if (row->isVisible() && !row->objectName().isEmpty() && row->objectName() != cardRow
+                && (dictionaryRow.isEmpty() || row->objectName() < dictionaryRow))
+                dictionaryRow = row->objectName();
+        QVERIFY(!dictionaryRow.isEmpty());
+        QVERIFY(fixture.press(qPrintable(dictionaryRow)));
+        QTRY_VERIFY(dictionaryShown(fixture));
+        const int requests = reader->property("reader_plugin_requests").toInt();
+        QVERIFY(fixture.press("rrDictionaryEdit"));
+        auto *query = qobject_cast<QLineEdit *>(fixture.widget("rrDictionaryQuery"));
+        QVERIFY(query);
+        query->setText(QStringLiteral("harbour"));
+        QTest::keyClick(query, Qt::Key_Return);
+        QTRY_VERIFY(pluginCardShown(fixture));
+        QCOMPARE(reader->property("reader_plugin_requests").toInt(), requests + 1);
+        QVERIFY(fixture.press("rrDictionarySelect"));
+        QTRY_VERIFY(!pluginChoice(fixture, pluginCardName).isEmpty());
+        QVERIFY(fixture.press(qPrintable(dictionaryRow)));
+        QTRY_VERIFY(dictionaryShown(fixture));
+        auto *headword = qobject_cast<QLabel *>(fixture.widget("rrDictionaryWord"));
+        QCOMPARE(headword->text(), QStringLiteral("harbour"));
     }
 
     // Checks that without a plugin folder the dictionary opens without asking any plugin.

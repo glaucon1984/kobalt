@@ -695,10 +695,19 @@ private:
     void showAllWords();
     void reloadWords();
     void openWord(const kobalt::SavedWord &word);
-    void openDictionary(const QString &query, kobalt::ui::PanelTiming timing);
+    // Looks `query` up and opens the sheet on its definition, or on `first` when it has one.
+    void openDictionary(const QString &query, kobalt::ui::PanelTiming timing,
+                        const kobalt::plugins::Card &first = {});
     // Destroyed in ~Reader, where joining its thread may block.
     std::unique_ptr<kobalt::plugins::PluginHost> plugins;
-    void askPlugins(const QString &query);
+    void askPlugins(const QString &query,
+                    std::shared_ptr<kobalt::ui::PanelTiming> opening = nullptr);
+    // Opens the sheet for `query` on the definition, or first on a plugin's card.
+    void lookupWord(const QString &query, kobalt::ui::PanelTiming timing);
+    bool pluginAnswersFirst() const;
+    void endPluginWait(const kobalt::plugins::Card &card, kobalt::ui::PanelTiming timing);
+    // The plugin request that the sheet waits for before it opens; 0 when it waits for none.
+    quint64 pluginWait = 0;
     // Numbers plugin lookups, so that a card for an earlier one is dropped.
     quint64 pluginRequest = 0;
     // The switches this book's plugins loaded with.
