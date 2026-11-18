@@ -20,9 +20,10 @@ class ModalOverlay;
 } // namespace kobalt::ui
 
 namespace kobalt::reader {
-// Settings > System > Plugins: the plugins switch, one row per plugin folder or
-// saved data, and a details dialog. Choices are a draft that applies when
-// Settings closes and takes effect when the next book opens.
+// Settings > System > Plugins: the plugins switch, the choice to open lookups on
+// plugin answers, one row per plugin folder or saved data, and a details dialog.
+// Choices are a draft that applies when Settings closes. Which plugins load takes
+// effect when the next book opens; plugin answers first takes effect at once.
 class PluginsSection final : public QObject
 {
 public:
@@ -47,6 +48,8 @@ public:
 
     ui::DescribedOption *usePluginsOption() const { return useOption; }
 
+    ui::DescribedOption *answersFirstOption() const { return firstOption; }
+
 private:
     void rebuild();
     void refreshStatuses();
@@ -59,7 +62,7 @@ private:
     QString folderLabel;
     std::function<void(ui::CaptionButton *)> styleRow;
     QVBoxLayout *rows;
-    ui::DescribedOption *useOption;
+    ui::DescribedOption *useOption, *firstOption;
     QLabel *hint, *blockedLabel;
     QVector<ui::CaptionButton *> pluginRows;
     QVector<plugins::PluginStatus> statuses;

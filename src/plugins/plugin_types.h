@@ -39,10 +39,13 @@ struct PluginStatus
 };
 
 // The user's choices: `enabled` false loads no plugin, and `disabled` names plugins to skip.
+// With `answerFirst`, a lookup that a plugin answers opens on its card instead of the
+// definition.
 struct Switches
 {
     bool enabled = true;
     QSet<QString> disabled;
+    bool answerFirst = false;
 };
 
 struct Lookup

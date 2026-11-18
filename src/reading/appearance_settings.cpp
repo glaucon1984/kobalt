@@ -168,7 +168,8 @@ QJsonObject cleanPreferences(QJsonObject preferences)
                              "auto_rotate",
                              "turn_off_wifi_on_open",
                              "reverse_page_swipes",
-                             "plugins_enabled" })
+                             "plugins_enabled",
+                             "plugins_answer_first" })
         if (preferences.contains(key) && !preferences.value(key).isBool())
             preferences.remove(key);
     for (const auto *key : beautifierKeys)

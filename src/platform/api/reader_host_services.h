@@ -108,6 +108,8 @@ struct ReaderHostServices
     std::function<QString()> pluginDataDirectory;
     // Where the user copies plugins, as Settings names it.
     QString pluginFolderLabel;
+    // How long a lookup waits for a plugin's card when plugin answers open first.
+    int pluginAnswerWaitMs = 300;
     // False where books have no files beside them, so plugins cannot read sidecars.
     bool bookSidecars = true;
     // Optional host reader-selection preference. Both callbacks are supplied

@@ -1184,8 +1184,10 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
         saveWordsOption
     };
     options.append(openingCoverOption);
-    if (pluginsSection)
+    if (pluginsSection) {
         options.append(pluginsSection->usePluginsOption());
+        options.append(pluginsSection->answersFirstOption());
+    }
     options.prepend(zenModeOption);
     options.append(zenDarkOption);
     for (auto *option : options) {

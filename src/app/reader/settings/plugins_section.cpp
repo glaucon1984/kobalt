@@ -51,6 +51,13 @@ PluginsSection::PluginsSection(QWidget *page, QVBoxLayout *rows, QWidget *overla
         pending.enabled = checked;
         refreshStatuses();
     });
+    firstOption = new ui::DescribedOption(strings::get("settings.plugin_answers_first"),
+                                          strings::get("settings.plugin_answers_first_description"),
+                                          page);
+    firstOption->setObjectName("rrPluginAnswersFirst");
+    rows->addWidget(firstOption);
+    connect(firstOption, &QCheckBox::toggled, this,
+            [this](bool checked) { pending.answerFirst = checked; });
     blockedLabel = note(page, "rrPluginsBlocked");
     blockedLabel->setText(strings::get("settings.plugins_blocked"));
     blockedLabel->hide();
@@ -76,6 +83,7 @@ void PluginsSection::setDraft(const plugins::Switches &switches)
 {
     pending = switches;
     useOption->setChecked(switches.enabled);
+    firstOption->setChecked(switches.answerFirst);
     refreshStatuses();
 }
 
