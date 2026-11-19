@@ -334,8 +334,8 @@ void ReadingBook::stopReading(bool background, bool nativeAllowed)
         else
             history->stop(completedReadingMilliseconds, position);
     }
-    // End Nickel's interval before local storage work, so its clock does not
-    // include that I/O and its asynchronous flush can run alongside our save.
+    // Pause the host's interval. Kobo ends it at the boundary, inside the
+    // transaction that saves the host's progress, as Nickel's reader does.
     if (bridge && nativeAllowed)
         bridge->stopReading(readingActivity());
     if (!background)

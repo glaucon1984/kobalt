@@ -145,6 +145,7 @@ QJsonObject cleanPreferences(QJsonObject preferences)
                              "header_text_size", "footer_text_size" })
         preferences.remove(key);
     for (const auto *key : { "dark_mode",
+                             features::debugModeKey,
                              "hide_tab_labels",
                              "save_looked_up_words",
                              "disable_reader_standby",
@@ -180,6 +181,7 @@ QJsonObject cleanPreferences(QJsonObject preferences)
             preferences.remove(key);
     };
     choice("tappable_links", { "off", "footnotes", "all" });
+    choice("annotation_interaction", { "toggle", "quick" });
     choice("bold_reading", { "off", "bold" });
     choice("widows_orphans", { "publisher", "avoid", "allow" });
     if (preferences.contains("vertical_justification"))
@@ -226,6 +228,11 @@ QJsonObject cleanPreferences(QJsonObject preferences)
         const auto value = preferences.value("orientation");
         if (!value.isDouble() || (value != 1 && value != 2 && value != 4 && value != 8))
             preferences.remove("orientation");
+    }
+    if (preferences.contains("locked_orientation")) {
+        const auto value = preferences.value("locked_orientation");
+        if (!value.isDouble() || (value != 0 && value != 1 && value != 2 && value != 4 && value != 8))
+            preferences.remove("locked_orientation");
     }
     const auto number = [&](const char *key, int minimum, int maximum) {
         const auto value = preferences.value(key);

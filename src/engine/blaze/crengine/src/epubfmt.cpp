@@ -1,5 +1,4 @@
 #include "../include/koblaze.h"
-#include <exception>
 #include "crsetup.h"
 
 #include "../include/epubfmt.h"
@@ -254,7 +253,7 @@ void ReadEpubNavToc( ldomDocument * doc, ldomNode * mapRoot, LVTocItem * baseToc
                     ldomNode * target = doc->getNodeById(doc->getAttrValueIndex(href.substr(1).c_str()));
                     int id = file.pos(U'#');
                     if ( !target && koblazeSpineWindowSet() && id > 0 ) {
-                        // koblaze: the id is in a spine item without its text.
+                        // Blaze: the id is in a spine item without its text.
                         // Point to the start of that spine item, as the NCX
                         // reader does for an id that does not exist.
                         file = appender.convertHref(file.substr(0, id));
@@ -912,7 +911,7 @@ public:
 
     void setIdpfManglingKey(lString32 key) {
         _idpfFontManglingKey.clear();
-        // EPUB removes XML whitespace throughout the unique identifier before
+        // Blaze: remove XML whitespace throughout the unique identifier before
         // hashing its UTF-8 bytes, including whitespace inside the identifier.
         for (int i = key.length() - 1; i >= 0; --i) {
             lChar32 c = key[i];
@@ -1058,84 +1057,6 @@ LVStreamRef GetEpubCoverpage(LVContainerRef arc)
     }
 
     return coverPageImageStream;
-}
-
-static KoblazeCancelCheck koblaze_cancel_check = NULL;
-static void * koblaze_cancel_context = NULL;
-static int koblaze_no_cancel = 0;
-static int koblaze_parser_can_stop = 0;
-
-KoblazeParserCanStop::KoblazeParserCanStop() { koblaze_parser_can_stop++; }
-KoblazeParserCanStop::~KoblazeParserCanStop() { koblaze_parser_can_stop--; }
-
-void koblazeCheckCancelInParser()
-{
-    if ( koblaze_parser_can_stop > 0 )
-        koblazeCheckCancel();
-}
-
-KoblazeNoCancel::KoblazeNoCancel() { koblaze_no_cancel++; }
-KoblazeNoCancel::~KoblazeNoCancel() { koblaze_no_cancel--; }
-
-void koblazeSwapCancelScopes(int * noCancel, int * parserCanStop)
-{
-    int value = koblaze_no_cancel;
-    koblaze_no_cancel = *noCancel;
-    *noCancel = value;
-    value = koblaze_parser_can_stop;
-    koblaze_parser_can_stop = *parserCanStop;
-    *parserCanStop = value;
-}
-
-void koblazeSetCancelCheck(KoblazeCancelCheck check, void * context)
-{
-    koblaze_cancel_check = check;
-    koblaze_cancel_context = context;
-}
-
-void koblazeCheckCancel()
-{
-    // A destructor that runs while a stop unwinds the stack can reach a
-    // check again. A second exception there would end the program.
-    if ( !koblaze_cancel_check || koblaze_no_cancel > 0 || std::uncaught_exception() )
-        return;
-    if ( koblaze_cancel_check(koblaze_cancel_context) )
-        throw KoblazeRenderCancelled();
-}
-
-static KoblazePausePoint koblaze_pause_point = NULL;
-static void * koblaze_pause_context = NULL;
-
-void koblazeSetPausePoint(KoblazePausePoint pause, void * context)
-{
-    koblaze_pause_point = pause;
-    koblaze_pause_context = context;
-}
-
-void koblazePausePoint()
-{
-    if ( koblaze_pause_point )
-        koblaze_pause_point(koblaze_pause_context);
-}
-
-static int koblaze_first_spine_item = -1;
-static int koblaze_last_spine_item = -1;
-
-void koblazeSetSpineWindow(int first, int last)
-{
-    koblaze_first_spine_item = first;
-    koblaze_last_spine_item = last;
-}
-
-bool koblazeSpineWindowSet()
-{
-    return koblaze_first_spine_item >= 0;
-}
-
-bool koblazeSpineItemLoaded(int index)
-{
-    return koblaze_first_spine_item < 0
-            || (index >= koblaze_first_spine_item && index <= koblaze_last_spine_item);
 }
 
 bool ImportEpubDocument( LVStreamRef stream, ldomDocument * m_doc, LVDocViewCallback * progressCallback,
@@ -1749,7 +1670,7 @@ bool ImportEpubDocument( LVStreamRef stream, ldomDocument * m_doc, LVDocViewCall
                 appender.setNonLinearFlag(spineItems[i]->nonlinear);
                 appender.setFragmentType(); // unset
                 if ( !koblazeSpineItemLoaded((int)i) ) {
-                    // Keep the DocFragment of this spine item, without its text.
+                    // Blaze: keep an empty DocFragment so saved positions retain their spine indices.
                     LVStreamRef mstream = LVCreateMemoryStream();
                     lString8 s("<html><body></body></html>");
                     mstream->Write(s.c_str(), s.length(), NULL);
@@ -1761,7 +1682,7 @@ bool ImportEpubDocument( LVStreamRef stream, ldomDocument * m_doc, LVDocViewCall
                 CRLog::debug("Checking fragment: %s", LCSTR(name));
                 LVStreamRef stream = m_arc->OpenStream(name.c_str(), LVOM_READ);
                 if ( !stream.isNull() ) {
-                    // koblaze: a host can stop the load of a chapter.
+                    // Blaze: a host can stop the load of a chapter.
                     KoblazeParserCanStop canStop;
                     LVHTMLParser parser(stream, &appender);
                     if ( parser.CheckFormat() && parser.Parse() && appender.hasMetBaseTag() ) {

@@ -19,9 +19,9 @@
 #include "../include/cssdef.h"
 #include "../include/lvfnt.h"
 #include "../include/lvtextfm.h"
-#include "../include/lvlogical.h"
-#include "../include/lvfntman_vert.h"   // fork-only: JFM class + glue/kern helpers
-#include "../include/lvtextfm_vert_diag.h"
+#include "../../extensions/vertical/lvlogical.h"
+#include "../../extensions/vertical/lvfntman_vert.h"   // Blaze: JFM class + glue/kern helpers
+#include "../../extensions/vertical/lvtextfm_vert_diag.h"
 #include "../include/lvdrawbuf.h"
 #include "../include/fb2def.h"
 #include "../include/koblaze.h"
@@ -32,7 +32,7 @@
 #include "../include/lvrend.h"
 #include "../include/textlang.h"
 #include "../include/renderutil.h"
-#include "../include/lvtextfm_fork.h"
+#include "../../extensions/vertical/lvtextfm_fork.h"
 #endif
 
 #if USE_HARFBUZZ==1
@@ -55,69 +55,6 @@ static inline hb_script_t koblazeUnicodeScript( hb_unicode_funcs_t * funcs, lCha
 #define UNUSED_SPACE_THRESHOLD_PERCENT 5
 #define MAX_ADDED_LETTER_SPACING_PERCENT 0
 #define CJK_WIDTH_SCALE_PERCENT 100
-struct VertDecorationTraceEvent {
-    int kind, owner, character, x0, y0, x1, y1;
-};
-static VertDecorationTraceEvent vert_decoration_trace[128];
-static int vert_decoration_trace_count = 0;
-static int vert_decoration_trace_overflow = 0;
-static bool vert_decoration_trace_enabled = false;
-static int vert_decoration_trace_owner = 0;
-static int vert_decoration_trace_character = 0;
-
-void ltext_reset_vert_decoration_trace() {
-    vert_decoration_trace_count = 0;
-    vert_decoration_trace_overflow = 0;
-    vert_decoration_trace_owner = 0;
-    vert_decoration_trace_character = 0;
-    vert_decoration_trace_enabled = true;
-}
-void ltext_stop_vert_decoration_trace() {
-    vert_decoration_trace_enabled = false;
-    vert_decoration_trace_owner = 0;
-    vert_decoration_trace_character = 0;
-}
-void ltext_get_vert_decoration_trace_stats(int *count_out, int *overflow_out) {
-    *count_out = vert_decoration_trace_count;
-    *overflow_out = vert_decoration_trace_overflow;
-}
-bool ltext_get_vert_decoration_trace_event(int index, int *kind_out,
-        int *owner_out, int *char_out, int *x0_out, int *y0_out,
-        int *x1_out, int *y1_out) {
-    if ( index < 0 || index >= vert_decoration_trace_count )
-        return false;
-    const VertDecorationTraceEvent &event = vert_decoration_trace[index];
-    *kind_out = event.kind; *owner_out = event.owner;
-    *char_out = event.character; *x0_out = event.x0; *y0_out = event.y0;
-    *x1_out = event.x1; *y1_out = event.y1;
-    return true;
-}
-void ltext_set_vert_decoration_trace_context(int owner_id, int first_codepoint) {
-    if ( !vert_decoration_trace_enabled )
-        return;
-    vert_decoration_trace_owner = owner_id;
-    vert_decoration_trace_character = first_codepoint;
-}
-static void recordVertDecorationTrace(int kind, int owner, int character,
-        int x0, int y0, int x1, int y1) {
-    if ( !vert_decoration_trace_enabled )
-        return;
-    if ( vert_decoration_trace_count >= 128 ) {
-        vert_decoration_trace_overflow++;
-        return;
-    }
-    VertDecorationTraceEvent &event = vert_decoration_trace[vert_decoration_trace_count++];
-    event.kind = kind; event.owner = owner; event.character = character;
-    event.x0 = x0; event.y0 = y0; event.x1 = x1; event.y1 = y1;
-}
-void ltext_record_vert_decoration_trace(int kind, int x0, int y0, int x1, int y1) {
-    recordVertDecorationTrace(kind, vert_decoration_trace_owner,
-            vert_decoration_trace_character, x0, y0, x1, y1);
-}
-void ltext_record_vert_border_trace(int owner_id, int x0, int y0, int x1, int y1) {
-    recordVertDecorationTrace(3, owner_id, 0, x0, y0, x1, y1);
-}
-
 // to debug formatter
 
 #if defined(_DEBUG) && 0
@@ -374,7 +311,7 @@ void lvtextAddSourceLine( formatted_text_fragment_t * pbuffer,
     pline->color = color;
     pline->bgcolor = bgcolor;
     pline->letter_spacing = letter_spacing;
-    pline->vert_inline_box_depth = 0; // fork: only meaningful for ruby inline-box objects
+    pline->vert_inline_box_depth = 0; // Blaze: only meaningful for ruby inline-box objects
 }
 
 void lvtextAddSourceObject(
@@ -409,7 +346,7 @@ void lvtextAddSourceObject(
     pline->interval = interval;
     pline->valign_dy = valign_dy;
     pline->letter_spacing = letter_spacing;
-    pline->vert_inline_box_depth = 0; // fork: set later by measureText for ruby inline boxes
+    pline->vert_inline_box_depth = 0; // Blaze: set later by measureText for ruby inline boxes
     if ( !lang_cfg )
         lang_cfg = TextLangMan::getTextLangCfg(); // use main_lang
     pline->lang_cfg = lang_cfg;
@@ -490,24 +427,6 @@ void LFormattedText::AddSourceObject(
     //   Handling CSS width and height (and min/max-width/height) will be done
     //   in measureText(), where we know about the buffer width (its container
     //   width) and can better apply values in %
-}
-
-// koblaze: see koblaze.h.
-static int koblaze_plain_joiner = -1;
-
-void koblazeSetPlainJoiner(bool enabled)
-{
-    koblaze_plain_joiner = enabled ? 1 : 0;
-}
-
-bool koblazePlainJoiner()
-{
-    // Until a host chooses, KOBLAZE_PLAIN_JOINER=1 in the environment turns it on.
-    if ( koblaze_plain_joiner < 0 ) {
-        const char * value = getenv("KOBLAZE_PLAIN_JOINER");
-        koblaze_plain_joiner = value && value[0] == '1' ? 1 : 0;
-    }
-    return koblaze_plain_joiner == 1;
 }
 
 class LVFormatter {
@@ -1745,7 +1664,7 @@ public:
                             // a space following a \n be allowed to collapse.
                     }
 
-                    // Fork (vertical-rl): Enclosed Alphanumerics (U+2460-24FF,
+                    // Blaze: Enclosed Alphanumerics (U+2460-24FF,
                     // ①②③ etc.) are treated as CJK only in vertical mode so they
                     // render upright in their em column instead of the render+rotate
                     // Latin path (whose rotated buffer overflows the column edge).
@@ -1872,7 +1791,7 @@ public:
                         // we don't need to invoke expensive fribidi processing below (which
                         // may add a 50% duration increase to the text rendering phase).
                         if ( !has_rtl ) {
-                            // koblaze: U+FEFF has no direction of its own; lStr_isRTL()
+                            // Blaze: U+FEFF has no direction of its own; lStr_isRTL()
                             // counts it with the Arabic forms around it.
                             has_rtl = lStr_isRTL(c) && !( c == 0xFEFF && joiner_is_plain );
                         }
@@ -2316,12 +2235,8 @@ public:
                         // too long line
                         int newlen = chars_measured;
                         if (newlen == 0) {
-                            // measureText returned 0 — advance at least 1 to avoid infinite loop.
-                            // Fork note: this is the one fork edit in this file that is NOT
-                            // vertical-gated.  It is reachable only on a measure result upstream
-                            // would spin on forever (0 chars consumed while chars remain), so it
-                            // is a strict, deliberate bugfix kept active for horizontal mode too
-                            // rather than re-introducing the hang behind a vertical gate.
+                            // Blaze: consume one character when measurement returns zero. Retrying
+                            // the same character here would stall either writing mode.
                             newlen = 1;
                             chars_measured = 1;
                             widths[0] = 0;
@@ -2533,7 +2448,7 @@ public:
                                 already_rendered = true;
                             }
                         }
-                        // Fork: extracted vertical ruby inline-box metrics to lvtextfm_vert.cpp.
+                        // Blaze: extracted vertical ruby inline-box metrics to lvtextfm_vert.cpp.
                         VertRubyInlineBoxMetrics rbm = computeVertRubyInlineBoxMetrics(m_pbuffer, node, lastFont);
                         bool vert_inline_box      = rbm.vert_inline_box;
                         bool is_ruby_inline_pre   = rbm.is_ruby_inline_pre;
@@ -3126,7 +3041,7 @@ bool LVFormatter::m_libunibreak_init_done = false;
 
 // Vertical-mode diagnostic globals were moved to lvtextfm_vert.cpp during
 // Phase C Step 2a; this file's increment sites see them via the extern
-// declarations in include/lvtextfm_fork.h.
+// declarations in lvtextfm_fork.h.
 
 // -----------------------------------------------------------------------------
 // alignLineHorizontal
@@ -3660,7 +3575,7 @@ void alignLineHorizontal( LVFormatter* fmt, formatted_line_t * frmline, int alig
                 }
             }
         }
-        // Fork: extracted IB-positioning + vertical-mode post-pass (Phase 5
+        // Blaze: extracted IB-positioning + vertical-mode post-pass (Phase 5
         // LuaTeX-ja JFM mirror) into lvtextfm_vert.cpp so this function stays
         // close to upstream.  Runs for any line with inline boxes OR any
         // vertical-mode line (the Phase 5 mirror must run on every vertical
@@ -5255,7 +5170,7 @@ void addLineHorizontal( LVFormatter* fmt, int start, int end, int x, src_text_fr
             fmt->activateInitialLetterInlineBoxExclusion(frmline, word);
         }
 
-        // Fork: extracted vertical frmline dimensions fixup to lvtextfm_vert.cpp.
+        // Blaze: extracted vertical frmline dimensions fixup to lvtextfm_vert.cpp.
         applyVerticalFrmlineDimensions(fmt, frmline);
 
         // Get ready for next line
@@ -6549,7 +6464,7 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
     buf->GetClipRect( &clip );
     const lChar32 * str;
     bool is_vertical = (css_wm_is_vertical(m_pbuffer->writing_mode));
-    // Fork: extracted Y=X swap + line_x setup to lvtextfm_vert.cpp.
+    // Blaze: extracted Y=X swap + line_x setup to lvtextfm_vert.cpp.
     int line_x = initVerticalDrawSetup(m_pbuffer, buf, x, y, clip);
     if ( !is_vertical )
         line_x = x;
@@ -6597,7 +6512,7 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
     // Counters accessible via doc._document:resetVertBleedCounters() /
     // getVertBleedStats().
     //
-    // Fork: bundle all per-column vertical state into one struct so we can
+    // Blaze: bundle all per-column vertical state into one struct so we can
     // pass it by reference to applyVerticalWordDraw() / inline-box draw.
     VerticalDrawState vstate;
 
@@ -6679,8 +6594,8 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
             // to appear on both prev and next pages.)
             bool restore_orig_clip = false;
             lvRect origClip;
-            // Fork: reset per-column vertical state.  See VerticalDrawState
-            // in include/lvtextfm_fork.h for member documentation.
+            // Blaze: reset per-column vertical state.  See VerticalDrawState
+            // in lvtextfm_fork.h for member documentation.
             vstate.resetForNewFrmline();
             bool vertical_line_has_image = false;
             if ( is_vertical ) {
@@ -7014,7 +6929,7 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                         bool is_mirrored = word->flags & LTEXT_WORD_DIRECTION_IS_RTL; // will be drawn as if on the other side
                         ldomNode * node = (ldomNode *) srcline->object;
                         if (is_vertical) {
-                            // Fork: extracted to lvtextfm_vert.cpp.
+                            // Blaze: extracted to lvtextfm_vert.cpp.
                             drawVerticalPadBorders(buf, m_pbuffer, frmline, srcline, word, j,
                                 y, line_x, node, is_right_pad, is_mirrored);
                         } else {
@@ -7109,7 +7024,8 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
 #endif
 
             int text_decoration_back_gap;
-            lUInt16 lastWordSrcIndex;
+            // Hidden leading words can skip the first assignment. Source indices are unsigned.
+            int lastWordSrcIndex = -1;
             ldomNode * last_vertical_decoration_owner = NULL;
             int last_vertical_decoration_end = -1;
             ldomNode * last_vertical_overline_owner = NULL;
@@ -7143,7 +7059,7 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                         if ( img.isNull() )
                             img = LVCreateDummyImageSource( node, word->width, word->o.height );
                         if (is_vertical) {
-                            // Fork: extracted to lvtextfm_vert.cpp.
+                            // Blaze: extracted to lvtextfm_vert.cpp.
                             int x0, y0;
                             int column_clip_right = draw_extra_info && draw_extra_info->vert_column_clip_right
                                     ? draw_extra_info->vert_column_clip_right : clip.right;
@@ -7256,7 +7172,7 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                         // x0_inline carries the vertical (Y-screen) position:
                         //   y_child = x0_inline = y + node_x (vertical offset + parent top)
                         //
-                        // Fork: extracted to lvtextfm_vert.cpp.
+                        // Blaze: extracted to lvtextfm_vert.cpp.
                         applyVerticalInlineBoxDraw(frmline, srcline, word, node_x, node_y,
                             x, y, vstate, x0, y0, doc_x_ib, doc_y_ib);
                         if ( verticalTextDebugEnabled() ) {
@@ -7407,7 +7323,7 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                     }
                     else {
                         if ( is_vertical ) {
-                            // Fork: extracted to lvtextfm_vert.cpp.  Sets x0/y0/
+                            // Blaze: extracted to lvtextfm_vert.cpp.  Sets x0/y0/
                             // vert_skip_draw + drawFlags vertical bits + word_is_*
                             // flags, and updates vstate (vert_min_next_x etc.).
                             applyVerticalWordDraw(m_pbuffer, frmline, srcline, word, font,
@@ -7590,12 +7506,12 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                             buf->SetClipRect(&word_orig_clip);
                         if ( word_is_exact_hanging )
                             ltext_vert_exact_hanging_regular_bottom = -1;
-                        // Fork: extracted post-draw state update for Latin-in-vertical.
+                        // Blaze: extracted post-draw state update for Latin-in-vertical.
                         if (word_is_latin_in_vertical) {
                             applyVerticalLatinPostDraw(_adv, (int)word->width, vstate, clip, y);
                         }
                     }
-                    // Fork: extracted vertical-mode emphasis marks (kenten/bouten).
+                    // Blaze: extracted vertical-mode emphasis marks (kenten/bouten).
                     if ( is_vertical && !vert_skip_draw ) {
                         drawVerticalEmphasisMarks(buf, frmline, srcline, word, font,
                             y, line_x, clip, vstate);
@@ -7757,6 +7673,7 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
 
 
 
-#include "lvtextfm_vert.cpp"
+// Blaze: Compile the vertical formatter with the private LVFormatter class defined here.
+#include "../../extensions/vertical/lvtextfm_vert.cpp"
 
 #endif

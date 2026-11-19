@@ -2,6 +2,7 @@
 #include "publication/page_estimate.h"
 #include "publication/resource_cache.h"
 #include <QHash>
+#include <QJsonObject>
 #include <atomic>
 #include <lvstream.h>
 
@@ -47,7 +48,8 @@ struct ReaderSource
     QHash<QString, qint64> textWordPrefixes;
     // Whether a linked target exists, checked on demand without loading its
     // chapter. Unknown or interrupted checks are not retained.
-    QHash<QString, bool> linkTargets;
+    enum class LinkTarget { Unknown, Missing, Passage, Footnote };
+    QHash<QString, LinkTarget> linkTargets;
 
     // The estimated pages of the book, for rough page numbers. They are for
     // the open book only and are not saved. A document prepared ahead
@@ -67,17 +69,37 @@ struct ReaderSource
         // last character of its slice, its page in that part and the pages
         // of the part.
         int lastItem = -1, lastFirst = -1, lastLast = -1, lastPage = -1, lastPages = 0;
+        // True when the last placed page came from a layout of the whole
+        // book. Its page then counts from the start of the spine item.
+        bool lastWhole = false;
         // True when the last placed page came from the kept estimate.
         bool lastKept = false;
-        // Set by the reader, read on the engine worker. See
-        // Engine::setBackgroundCount().
-        std::atomic_bool count{ false };
         // The estimateKey() of the settings that gave the observed pages.
         QString key;
+        // A layout of the whole book: the first page of each spine item,
+        // for the settings with the estimateKey() `wholeKey`, and its
+        // record without the place, which does not change with the page.
+        QString wholeKey;
+        QVector<int> wholeStarts;
+        QJsonObject wholeRecord;
+        // The spine item that `wholeRecord` keeps its nearest spine items
+        // around, in a book with more than the record holds.
+        int wholeRecordItem = -1;
+        // The record of chapter mode without the place, for the map
+        // generation `recordGeneration`, the estimateKey() `recordKey` and
+        // the spine item `recordItem`, which decides what a full record
+        // leaves out.
+        QJsonObject record;
+        quint64 recordGeneration = 0;
+        QString recordKey;
+        int recordItem = -1;
     } pageEstimate;
 };
 
 // The spine item that a position names as DocFragment[n], counted from zero,
 // or -1.
 int spineItemIndex(const QString &position);
+// The pages of one slice in chapter mode. Zero lays out three spine items
+// as a whole.
+int chapterSlicePages();
 } // namespace kobalt

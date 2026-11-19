@@ -20,7 +20,7 @@
 #include <lvimg.h>
 #include <lvdrawbuf.h>
 #include <lvfntman.h>
-#include <lvbionic.h>
+#include "engine/blaze/extensions/lvbionic.h"
 #include <QCryptographicHash>
 #include <QColor>
 #include <QBuffer>
@@ -97,6 +97,42 @@ static QByteArray storedEpub(const QList<QPair<QByteArray, QByteArray>> &members
     u32(bytes, start);
     u16(bytes, 0);
     return bytes;
+}
+
+// The codec keeps the parsed source of the last chapter. Pages read in
+// order and pages read in another order, by another document of the book,
+// give the same Nickel positions.
+static void checkCachedNativeSources()
+{
+    const auto codec = kobalt::nickel::positionCodec();
+    for (const auto *name : { "/cross-reader-progress-test.kepub.epub",
+                              "/trevelyans-type-tester.kepub.epub", "/figure-caption.epub" }) {
+        QFile file(QStringLiteral(KOBALT_TEST_FIXTURES) + name);
+        require(file.open(QIODevice::ReadOnly), "Cannot open a position fixture");
+        const auto bytes = file.readAll();
+        QString error;
+        kobalt::EngineDocument ordered(kobalt::test::readerFonts()),
+                shuffled(kobalt::test::readerFonts());
+        require(ordered.open(bytes, QSize(1072, 1448), {}, &error)
+                        && shuffled.open(bytes, QSize(1072, 1448), {}, &error),
+                qPrintable(error));
+        QStringList inOrder, positions, errors;
+        for (int page = 0; page < ordered.pages(); ++page) {
+            require(ordered.go(page), "Cannot go to a page in order");
+            inOrder.append(ordered.platformPosition(codec, &error) + '|' + error);
+        }
+        // Every other page from both ends: the file changes at almost every
+        // page.
+        for (int page = 0; page < shuffled.pages(); ++page) {
+            const int target = page % 2 ? shuffled.pages() - 1 - page / 2 : page / 2;
+            require(shuffled.go(target), "Cannot go to a page out of order");
+            const auto encoded = shuffled.platformPosition(codec, &error) + '|' + error;
+            require(encoded == inOrder[target],
+                    qPrintable(QString("A kept source changed page %1: %2 against %3")
+                                       .arg(target)
+                                       .arg(encoded, inOrder[target])));
+        }
+    }
 }
 
 static void checkNativeWhitespace()
@@ -251,6 +287,80 @@ static void checkNativeWhitespace()
         require(!model.goToPlatform(codec, location, &error) && !error.isEmpty()
                         && model.position() == before,
                 "Whitespace mapping accepted an ambiguous or different text stream");
+    }
+}
+
+// Nested elements with ids share their text. Each id maps the same text to
+// the same Nickel position at every depth, and deeper nesting does not keep
+// more text.
+static void checkNestedNativeIds()
+{
+    const auto codec = kobalt::nickel::positionCodec();
+    const auto nested = [](int depth) {
+        QByteArray open, close;
+        for (int level = 1; level <= depth; ++level) {
+            open += "<div id='n" + QByteArray::number(level) + "'>";
+            close += "</div>";
+        }
+        return storedEpub(
+                { { "mimetype", "application/epub+zip" },
+                  { "META-INF/container.xml",
+                    "<container xmlns='urn:oasis:names:tc:opendocument:xmlns:container' version='1.0'><rootfiles><rootfile full-path='book.opf' media-type='application/oebps-package+xml'/></rootfiles></container>" },
+                  { "book.opf",
+                    "<package xmlns='http://www.idpf.org/2007/opf' version='2.0'><metadata/><manifest><item id='c' href='c.xhtml' media-type='application/xhtml+xml'/></manifest><spine><itemref idref='c'/></spine></package>" },
+                  { "c.xhtml",
+                    "<html xmlns='http://www.w3.org/1999/xhtml'><body>" + open
+                            + "<p id='p'>Alpha  <em id='e'>beta</em>\n gamma</p>"
+                              "<p id='q'>Delta</p>"
+                            + close
+                            + "<section id='blocks'>\n<p id='r'>One</p>\n</section>"
+                              "</body></html>" } });
+    };
+    QString error;
+    int kept = -1;
+    for (const int depth : { 1, 6 }) {
+        kobalt::EngineDocument model(kobalt::test::readerFonts());
+        require(model.open(nested(depth), QSize(1072, 1328), {}, &error), qPrintable(error));
+        // "Alpha  beta\n gamma" collapses to "Alpha beta gamma" in the engine.
+        // The canonical Nickel position of each source offset, from the
+        // nearest id.
+        const QStringList canonical{ "p:0",  "p:1",  "p:2",  "p:3",  "p:4", "p:5",  "p:7",
+                                     "p:7",  "e:1",  "e:2",  "e:3",  "e:4", "p:13", "p:13",
+                                     "p:14", "p:15", "p:16", "p:17", "p:18" };
+        for (int offset = 0; offset < canonical.size(); ++offset) {
+            const auto inner = "c.xhtml#p:" + QString::number(offset);
+            const auto anchor = codec.decode(model, inner, &error);
+            require(!anchor.isEmpty() && error.isEmpty(), qPrintable(inner + ": " + error));
+            for (int level = 1; level <= depth; ++level) {
+                const auto outer =
+                        "c.xhtml#n" + QString::number(level) + ':' + QString::number(offset);
+                require(codec.decode(model, outer, &error) == anchor && error.isEmpty(),
+                        qPrintable("A nested id moved the position: " + outer + ' ' + error));
+            }
+            require(model.goTo(anchor), "Cannot select the nested position");
+            const auto native = model.platformPosition(codec, &error);
+            require(native == "c.xhtml#" + canonical[offset] && error.isEmpty()
+                            && model.goToPlatform(codec, native, &error)
+                            && model.position() == anchor,
+                    qPrintable("A nested position did not round-trip: " + native));
+        }
+        // The outer ids continue into the next paragraph.
+        for (const auto &pair : { QPair<QString, QString>{ "e:2", "p:9" },
+                                  { "n1:19", "q:1" },
+                                  { "n" + QString::number(depth) + ":23", "q:5" } }) {
+            const auto anchor = codec.decode(model, "c.xhtml#" + pair.first, &error);
+            require(!anchor.isEmpty() && error.isEmpty()
+                            && codec.decode(model, "c.xhtml#" + pair.second, &error) == anchor,
+                    qPrintable("A nested id moved the position: " + pair.first + ' ' + error));
+        }
+        require(!codec.decode(model, "c.xhtml#r:1", &error).isEmpty() && error.isEmpty(),
+                "A paragraph inside a section lost its id");
+        require(codec.decode(model, "c.xhtml#blocks:0", &error).isEmpty() && !error.isEmpty(),
+                "A section without its block whitespace mapped its text");
+        const int text = kobalt::nickel::keptNativeText(model);
+        require(text > 0 && (kept < 0 || text == kept),
+                qPrintable(QString("Nested ids kept %1 text units, not %2").arg(text).arg(kept)));
+        kept = text;
     }
 }
 
@@ -634,6 +744,54 @@ static void checkJpeg(bool progressive)
             "CREngine did not preserve JPEG colors");
 }
 
+static void checkDrawPalette()
+{
+    LVColorDrawBuf color(2, 2, 32);
+    lUInt32 externalPixel = 0;
+    LVColorDrawBuf external(1, 1, reinterpret_cast<lUInt8 *>(&externalPixel), 32);
+    for (const auto *buffer : { &color, &external }) {
+        require(buffer->GetBackgroundColor() == buffer->GetWhiteColor()
+                        && buffer->GetTextColor() == buffer->GetBlackColor(),
+                "Color draw buffer has an incorrect default palette");
+    }
+    for (const int bits : { 2, 8 }) {
+        LVGrayDrawBuf gray(2, 2, bits);
+        require(gray.GetBackgroundColor() == gray.GetWhiteColor()
+                        && gray.GetTextColor() == gray.GetBlackColor(),
+                "Gray draw buffer lost its pixel-format palette");
+    }
+    LVInkMeasurementDrawBuf ink;
+    {
+        const LVDrawStateSaver restore(ink);
+        ink.SetBackgroundColor(0xff0000);
+        ink.SetTextColor(0x0000ff);
+        ink.FillRect(2, 3, 6, 9, ink.GetBackgroundColor());
+    }
+    require(ink.GetBackgroundColor() == 0xffffffU && ink.GetTextColor() == 0,
+            "Ink measurement did not restore the default palette");
+    lvRect bounds;
+    require(ink.getInkArea(bounds) && bounds.left == 2 && bounds.top == 3
+                    && bounds.right == 6 && bounds.bottom == 9,
+            "Palette handling changed the measured ink bounds");
+}
+
+static void checkGif()
+{
+    // A 2x2 GIF with red left pixels and blue right pixels.
+    auto gif = QByteArray::fromHex("47494638396102000200800000ff00000000ff"
+                                   "2c000000000200020000020404433005003b");
+    auto image = LVCreateStreamImageSource(
+            LVCreateMemoryStream(gif.data(), gif.size(), false, LVOM_READ));
+    require(!image.isNull() && image->GetWidth() == 2 && image->GetHeight() == 2,
+            "CREngine rejected GIF dimensions");
+    LVColorDrawBuf pixels(2, 2, 32);
+    pixels.Clear(0xffffff);
+    pixels.Draw(image, 0, 0, 2, 2, false);
+    require((pixels.GetPixel(0, 0) & 0xffffffU) == 0xff0000U
+                    && (pixels.GetPixel(1, 1) & 0xffffffU) == 0x0000ffU,
+            "CREngine did not preserve the first and last GIF pixels");
+}
+
 static void checkSvg()
 {
     QByteArray svg =
@@ -882,6 +1040,27 @@ static void checkObfuscatedFonts()
         kobalt::EngineDocument preview(kobalt::test::readerFonts());
         require(preview.openPreview(plain, QSize(800, 1000), &error), qPrintable(error));
         expectedPreview = hash(preview.image(0));
+    }
+
+    // Two books can store different fonts at the same path with the same size.
+    {
+        QFile otherFont(
+                kobalt::test::readerAssets().file("fonts/ebook-core/NV_Bitter-Regular.ttf"));
+        require(otherFont.open(QIODevice::ReadOnly), "open second publisher font");
+        const auto other = otherFont.readAll();
+        const auto size = qMax(original.size(), other.size());
+        const auto render = [&](const QByteArray &bytes) {
+            kobalt::EngineDocument reader(kobalt::test::readerFonts());
+            require(reader.open(book(bytes.leftJustified(size, '\0'), {}, "test-identifier"),
+                                QSize(800, 1000), {}, &error),
+                    qPrintable(error));
+            require(reader.embeddedFontCount() == 1 && reader.style(32, 120, "", 36),
+                    "register the current book's publisher font");
+            return hash(reader.image(0));
+        };
+        require(render(original) == expected, "padding the font changed the reference page");
+        require(render(other) != expected, "the second book used the first book's font");
+        require(render(original) == expected, "reopening the first book used the second font");
     }
 
     struct FontCase
@@ -1210,10 +1389,75 @@ static void checkChapterArtPositions()
             "Chapter-art fallback did not round trip");
 }
 
+static void checkDeferredCjkFont()
+{
+    auto inputs = kobalt::test::readerFonts();
+    QString collection;
+    for (const auto &file : inputs.fallbackFiles)
+        if (QFileInfo(file).fileName() == "NotoSerifCJK-Regular.ttc")
+            collection = file;
+    require(!collection.isEmpty(), "Missing CJK collection fixture");
+
+    // Keep the declared metadata tied to the pinned collection. A replacement
+    // collection must not silently change face order, weights or cache hashes.
+    require(InitFontManager(lString8()), "Cannot initialize eager font metadata check");
+    require(fontMan->RegisterFont(lString8(collection.toUtf8().constData())),
+            "Cannot inspect the pinned CJK collection");
+    const auto eagerHash = fontMan->GetFontListHash(-1);
+    lString32Collection eagerFaces;
+    fontMan->getFaceList(eagerFaces);
+    ShutdownFontManager();
+    require(InitFontManager(lString8()), "Cannot initialize deferred font metadata check");
+    for (size_t index = 0; index < kobalt::cjkFallbackFontFaces.size(); ++index)
+        require(fontMan->RegisterStaticFontFace(
+                        lString8(collection.toUtf8().constData()), int(index),
+                        lString8(kobalt::cjkFallbackFontFaces[index]), 400, false),
+                "Cannot register deferred CJK metadata");
+    lString32Collection deferredFaces;
+    fontMan->getFaceList(deferredFaces);
+    require(eagerHash == fontMan->GetFontListHash(-1)
+                    && eagerFaces.length() == deferredFaces.length(),
+            "Deferred CJK metadata differs from the pinned collection");
+    for (int index = 0; index < eagerFaces.length(); ++index)
+        require(eagerFaces[index] == deferredFaces[index],
+                "Deferred CJK family names differ from the pinned collection");
+    ShutdownFontManager();
+
+    QTemporaryDir directory;
+    require(directory.isValid(), "Cannot create deferred-font fixture directory");
+    const auto delayed = directory.filePath("NotoSerifCJK-Regular.ttc");
+    inputs.fallbackFiles.replaceInStrings(collection, delayed);
+    {
+        kobalt::EngineDocument reader(inputs);
+        QString error;
+        QList<QPair<QByteArray, QByteArray>> members;
+        const auto book = kobalt::test::engineBook();
+        for (auto at = book.cbegin(); at != book.cend(); ++at)
+            members.append({ at.key().toUtf8(), at.value() });
+        require(reader.open(storedEpub(members), QSize(600, 800), {}, &error), qPrintable(error));
+        require(reader.pages() > 0 && !reader.image(0).isNull(),
+                "Latin text required the unopened CJK collection");
+        const auto before = fontMan->GetFontListHash(-1);
+        require(QFile::copy(collection, delayed), "Cannot supply the deferred CJK file");
+        for (const auto *family : kobalt::cjkFallbackFontFaces) {
+            auto font = fontMan->GetFont(32, 400, false, css_ff_serif, lString8(family), 0, -1);
+            LVFont::glyph_info_t glyph{};
+            require(!font.isNull() && font->getTypeFace() == lString8(family)
+                            && font->getGlyphInfo(0x65e5, &glyph),
+                    "A deferred CJK face did not load when its glyph was requested");
+        }
+        require(before == fontMan->GetFontListHash(-1),
+                "Loading a deferred CJK face changed parsed-book compatibility");
+    }
+}
+
 int main(int argc, char **argv)
 {
     QGuiApplication app(argc, argv);
+    checkDeferredCjkFont();
     checkNativeWhitespace();
+    checkNestedNativeIds();
+    checkCachedNativeSources();
     checkChapterArtPositions();
     checkPageFormat();
     checkDeferredPublisherStyles();
@@ -1374,8 +1618,10 @@ int main(int argc, char **argv)
         require(kobalt::fontFamilyKey("KF Libron") == kobalt::fontFamilyKey("Libron"),
                 "Legacy font alias changed");
     }
+    checkDrawPalette();
     checkJpeg(false);
     checkJpeg(true);
+    checkGif();
     checkSvg();
     checkKoboStyleHacks();
     checkDarkModeTextColors();
@@ -3466,5 +3712,5 @@ int main(int argc, char **argv)
     require(!reopened.open(bytes, QSize(1072, 1328), invalid, &error),
             "Invalid stored position silently accepted");
     std::puts(
-            "PASS: JPEG and SVG decoding, publisher CSS, chapter boundaries, EPUB preflight, page bounds, cache, typography and persisted anchors");
+            "PASS: GIF, JPEG and SVG decoding, publisher CSS, chapter boundaries, EPUB preflight, page bounds, cache, typography and persisted anchors");
 }

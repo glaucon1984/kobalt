@@ -11,6 +11,7 @@
 #include "canvas_refresh.h"
 #include "assets.h"
 #include "library_source.h"
+#include "library_open.h"
 #include "app/library/library_view.h"
 #include "library/library_store.h"
 #include "assets/assets.h"
@@ -90,11 +91,11 @@ public:
         connect(start, &standalone::StartScreen::addFolderRequested, this,
                 [] { android::activity("chooseFolder"); });
         connect(start, &standalone::StartScreen::exitRequested, this, &QWidget::close);
-        connect(start, &standalone::StartScreen::bookRequested, this, &Window::openLibraryBook);
+        connect(start, &standalone::StartScreen::bookRequested, this,
+                [this](const QString &key) { openLibraryBook(key); });
         connect(start, &standalone::StartScreen::passageRequested, this,
                 [this](const QString &key, const QString &position) {
-                    controller.setStartPosition(position);
-                    openLibraryBook(key);
+                    openLibraryBook(key, position);
                 });
         connect(start, &standalone::StartScreen::markUnreadRequested, this,
                 [this](const QString &key) {
@@ -176,6 +177,7 @@ public:
             layout->setCurrentWidget(canvas);
             layout->setStackingMode(QStackedLayout::StackOne);
             canvas->viewport()->repaint();
+            start->releaseOpening();
             openingHandoff.stop();
             syncPageButtons();
             reader->checkpoint();
@@ -183,7 +185,17 @@ public:
         });
         qApp->installEventFilter(this);
         android::setCallbacks(
-                this, [this](const QString &path) { openBook(path); },
+                this,
+                [this](const QString &path, qint64 request) {
+                    if (!request) {
+                        libraryOpen.cancel();
+                        openBook(path);
+                        return;
+                    }
+                    const auto selection = libraryOpen.complete(request);
+                    if (!selection.key.isEmpty())
+                        openBook(path, selection);
+                },
                 [this](int direction, int volumeKey) {
                     if (!pageButtonsReady())
                         return;
@@ -290,7 +302,13 @@ public:
         });
     }
 
-    ~Window() override { android::setCallbacks(nullptr, {}, {}); }
+    ~Window() override
+    {
+        android::setCallbacks(nullptr, {}, {});
+        qApp->removeEventFilter(this);
+        // The Library disconnects its store callback while the store is still alive.
+        delete start;
+    }
 
 private:
     standalone::ReaderController controller;
@@ -390,20 +408,21 @@ private:
                 + ".epub";
     }
 
-    void openLibraryBook(const QString &key)
+    void openLibraryBook(const QString &key, const QString &position = {})
     {
         const auto book = store.index().books.value(key);
         if (book.key.isEmpty() || closing)
             return;
         if (book.folder.isEmpty()) {
-            openBook(key);
+            android::supersedeBookRequest();
+            libraryOpen.cancel();
+            openBook(key, { {}, position });
             return;
         }
         // Library books are read in place; the reader opens a cached copy.
-        pendingKey = key;
-        pendingPath = cachePath(key);
+        const auto request = libraryOpen.begin(key, position);
         showOpening(key);
-        android::openLibraryBook(key, pendingPath, book.size, book.modified);
+        android::openLibraryBook(key, cachePath(key), book.size, book.modified, request);
     }
 
     void recordProgress()
@@ -414,7 +433,7 @@ private:
         store.setProgress(std::exchange(openedKey, {}), progress.percent, progress.finished);
     }
 
-    QString pendingKey, pendingPath;
+    android::LibraryOpen libraryOpen;
 
     void showOpening(const QString &key = {})
     {
@@ -423,21 +442,19 @@ private:
                                    submitRefresh);
     }
 
-    void openBook(const QString &path)
+    void openBook(const QString &path, const android::LibraryOpen::Selection &selection = {})
     {
         if (closing)
             return;
         recordProgress();
         if (path.isEmpty()) {
             // The activity could not copy a library book; it said why.
-            pendingKey.clear();
-            pendingPath.clear();
             start->showLibrary();
             return;
         }
-        const bool openingPrepared = path == pendingPath && !pendingKey.isEmpty();
+        const bool openingPrepared = !selection.key.isEmpty();
         if (openingPrepared) {
-            openedKey = std::exchange(pendingKey, {});
+            openedKey = selection.key;
         } else {
             // Document picking and Android Open With use the same library path.
             const auto key = QFileInfo(path).absoluteFilePath();
@@ -445,7 +462,6 @@ private:
                 store.addBook(path);
             openedKey = store.index().books.contains(key) ? key : QString();
         }
-        pendingPath.clear();
         openedPath = path;
         const bool restart =
                 store.index().books.value(openedKey).status() == library::Status::Finished;
@@ -463,7 +479,7 @@ private:
         android::activity("showReading");
         setReadingInsets(true);
         layout->activate();
-        controller.open(path, pixels(), openedKey, restart);
+        controller.open(path, pixels(), openedKey, restart, selection.position);
     }
 
     bool eventFilter(QObject *object, QEvent *event) override

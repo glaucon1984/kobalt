@@ -36,7 +36,8 @@ class ColumnView;
 
 namespace nickel {
 class NickelPositionCodec;
-}
+struct NativePositionCache;
+} // namespace nickel
 
 struct ReaderSource;
 struct PageEstimateLayout;
@@ -91,6 +92,8 @@ public:
 
     // Writes the parsed book and its pages to the cache, for the next opening.
     bool saveDocumentCache() override;
+    bool saveDocumentCacheStep(int milliseconds) override;
+    bool removeDocumentCache(bool allBooks) override;
     // Shared count, on the owning engine thread. Populates the Stats graph
     // from source anchors. Counts visible source text once, including
     // non-linear spine fragments; excludes SVG and ruby annotation text.
@@ -222,8 +225,8 @@ public:
     bool fullDocumentReady() const override;
     int preparedSpreadTurn(int direction) const override;
     bool fullDocumentStarted() const override;
-    void setBackgroundCount(bool enabled) override;
-    bool backgroundCount() const override;
+
+    bool fullDocumentFailed() const override { return !fullFailed_.isEmpty(); }
 
     bool continuesAfter() const override
     {
@@ -271,6 +274,7 @@ public:
     bool loadNextImage() override;
     // The idle book keeps its active layout, not images or an alternate layout.
     void releaseImages() override;
+    void releaseRetired() override;
 
     // Compares the cached images of two pages ahead of a turn between them.
     // Cache key of a page's cached image, or 0. Never draws.
@@ -333,7 +337,9 @@ public:
     // The title of the chapter that contains `position`, chosen like the
     // header's chapter. Empty when the book has no usable contents.
     QString chapterTitle(const QString &position) const override;
+    QImage drawTextSample(const TextSampleRequest &request) override;
     QJsonObject state() const override;
+    QJsonObject settingsState() const override;
 
 private:
     // Sets the current and next entries of `links` around `position`.
@@ -346,6 +352,9 @@ private:
     void markPageNotes();
     EngineFontInputs fonts_;
     friend class nickel::NickelPositionCodec;
+    // The chapter files that NickelPositionCodec parsed last, released with
+    // this document.
+    mutable std::shared_ptr<nickel::NativePositionCache> nativePositions_;
     std::shared_ptr<ReaderSource> source_;
     // A replacement reads fresh resources but belongs to the same book.
     // Consumed by openSource(), before it touches the embedded font cache.
@@ -366,7 +375,7 @@ private:
     EngineDocument *documentFor(int item, const std::function<bool()> &current = {});
     // False when the plain text of spine item `item` cannot contain `query`.
     // It can say true where the engine finds nothing.
-    bool mayContain(int item, const QString &query) const;
+    bool mayContain(int item, const QString &pattern) const;
     void labelChapterHit(SearchHit &hit) const;
     // The estimated page of the book that shows `position`, counted from
     // zero, from the page map. -1 until the map covers every spine item, or
@@ -400,7 +409,12 @@ private:
     std::function<bool()> interrupt_;
     bool layoutInterrupted_ = false;
     // The spine items that have their text, or -1 for the whole book.
+    mutable QStringList spineNames_;
     int windowFirst_ = -1, windowLast_ = -1, spineItemCount_ = 0;
+    // Keep traversed group boundaries after their rendered documents are evicted.
+    mutable QMap<int, int> visitedUnits_;
+    mutable quint64 visitedSource_ = 0;
+    mutable qint64 visitedBudget_ = -1;
     // The pages of text in one slice, and the characters of the spine item
     // before the slice that has a layout.
     int slicePages_ = 0, sliceFirst_ = 0;
@@ -468,6 +482,14 @@ private:
     // the page it was built for. `fullFailed_` holds the page for which the
     // whole book did not open, so that it is not tried again.
     std::unique_ptr<EngineDocument> full_;
+    // Documents that this one replaced, until releaseRetired().
+    std::vector<std::unique_ptr<EngineDocument>> retired_;
+    // Gives `next`, another document of this book, what the page estimate,
+    // search and links learned about the text. None of it depends on the
+    // layout, so a change of appearance does not measure the book again.
+    void carryTextKnowledge(EngineDocument &next) const;
+    // Keeps `old`, which this document replaced, for releaseRetired().
+    void retire(std::unique_ptr<EngineDocument> old);
     QString fullKey_, fullFailed_;
     // The page for which the parsed-book cache had no usable document.
     QString fullUncached_;
@@ -571,16 +593,28 @@ private:
     RoughPlace roughPlace() const;
     // Forgets the pages that the layout gave before a change of settings.
     void forgetObservedPages();
-    // The values of state() without the page estimate.
-    QJsonObject settingsState() const;
     // A digest of everything that decides the pages, from settingsState().
+    QString layoutFontDigest() const;
     QString estimateKey(const QJsonObject &settings) const;
+    // The same for slices of `slicePages` pages.
+    QString estimateKey(const QJsonObject &settings, int slicePages) const;
     // The key of a prepared document of the whole book. Unlike estimateKey()
     // it also holds the settings that change pixels only: a document made
     // before dark mode changed must not be shown after it.
     QString fullDocumentKey(const QJsonObject &settings) const;
-    // The saved page estimate, or empty outside chapter mode.
+    // The saved page estimate. Outside chapter mode, the pages of a layout
+    // of the whole book, for the next opening in chapter mode.
     QJsonObject pageEstimateRecord(const QJsonObject &settings) const;
+    QJsonObject wholeBookEstimateRecord(const QJsonObject &settings) const;
+    // The first page of each spine item from `first` to `last`. A spine
+    // item without pages starts where the next one starts. Empty when
+    // `current` stops it, which it asks between groups of spine items.
+    QVector<int> spineItemStarts(int first, int last,
+                                 const std::function<bool()> &current = {}) const;
+    // Finds where each spine item starts in this layout of the whole book,
+    // for wholeBookEstimateRecord(), so that a page turn does not wait for
+    // it later.
+    void findWholeBookStarts(const std::function<bool()> &current) const;
     // Continues from a saved page estimate when the book opens.
     void restorePageEstimate(const QJsonValue &saved);
     // Lays out the slice that starts at `first` characters.
@@ -623,6 +657,9 @@ private:
     QString cacheDirectory_;
     QByteArray cacheFingerprint_, cachePolicy_;
     QByteArray userStyleSheet_;
+    // documentCachePolicy() for the user style sheet that shares its bytes
+    // with `policySheet_`: the page estimate asks for it on every turn.
+    mutable QByteArray policySheet_, policyBase_, policy_;
     QByteArray documentCachePolicy() const;
     qint64 cacheBytes_ = 0;
     bool openedFromCache_ = false;

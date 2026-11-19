@@ -16,6 +16,7 @@ struct ActivitySession
     QString book, identity, sourceKey, title, author, startPosition, endPosition;
     // UTC milliseconds; `milliseconds` is active reading time.
     qint64 started = 0, observed = 0, milliseconds = 0;
+    QMap<QDate, QMap<int, qint64>> hours;
 };
 
 // What Activity reads from the profile. Nothing here is written for it: the
@@ -28,6 +29,8 @@ struct ActivityRecords
     // Active milliseconds per local date, summed over every opening except
     // the one the caller excluded.
     QMap<QDate, qint64> days;
+    // Portion of days written by the per-session hour recorder.
+    QMap<QDate, qint64> recordedDays;
     // Saved percent per reading identity, from each book's record.
     QHash<QString, int> percent;
     // Reading identities the reader marked as finished.

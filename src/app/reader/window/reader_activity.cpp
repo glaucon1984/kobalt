@@ -85,9 +85,9 @@ void Reader::hideActivityBook(const QString &key, bool hidden)
     if (!activityRecords || !book)
         return;
     QPointer<Reader> guard(this);
-    activityRecords->hide(key, hidden, [guard](bool) {
+    activityRecords->hide(key, hidden, [guard](bool ok) {
         if (guard)
-            guard->loadActivity();
+            guard->finishActivityEdit(ok);
     });
 }
 
@@ -117,11 +117,12 @@ void Reader::deleteActivityBook(const QString &key, const QString &title)
         modal->deleteLater();
         if (!remove || !guard || !guard->activityRecords || !guard->book)
             return;
-        if (guard->activityView)
-            guard->activityView->closeBook();
-        guard->activityRecords->remove(key, guard->book->readingOpeningId(), [guard](bool) {
-            if (guard)
-                guard->loadActivity();
+        guard->activityRecords->remove(key, guard->book->readingOpeningId(), [guard, key](bool ok) {
+            if (!guard)
+                return;
+            if (ok && guard->activityView)
+                guard->activityView->closeBook(key);
+            guard->finishActivityEdit(ok);
         });
     };
     connect(choice->secondaryButton(), &QPushButton::clicked, choice, [finish] { finish(false); });
@@ -134,6 +135,14 @@ void Reader::deleteActivityBook(const QString &key, const QString &title)
     choice->show();
     choice->raise();
     refresh();
+}
+
+void Reader::finishActivityEdit(bool ok)
+{
+    if (!ok && activityView)
+        showNotice({ strings::get("activity.title"), strings::get("activity.change_not_saved"),
+                     QStringLiteral("rrActivityWriteError") });
+    loadActivity();
 }
 
 void Reader::openActivity()
@@ -262,8 +271,7 @@ void Reader::mapActivityBook(const QString &key)
         positions << item.startPosition << item.endPosition;
     ActivityOpenBook open;
     open.book = key;
-    open.percent =
-            book->finishedHere() ? 100 : pageProgressPercent(session->page(), session->pages());
+    open.percent = book->finishedHere() ? 100 : session->progressPercent();
     open.remainingMilliseconds = book->estimates().bookMilliseconds;
     activityView->setOpenBook(open);
     if (positions.isEmpty())
@@ -272,7 +280,7 @@ void Reader::mapActivityBook(const QString &key)
     session->bookmarkPages(positions, [guard, sessions, open](QVector<int> pages) mutable {
         if (!guard || !guard->activityView || pages.size() != 2 * sessions.size())
             return;
-        const int total = guard->session->pages();
+        const int total = guard->session->bookPages();
         for (int index = 0; index < sessions.size(); ++index) {
             const int start = pages[2 * index], end = pages[2 * index + 1];
             if (start < 0 || end < 0 || total <= 0)

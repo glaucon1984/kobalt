@@ -1,5 +1,6 @@
 #include "reading/reading_activity.h"
 #include "storage/activity_records.h"
+#include "storage/reading_history.h"
 #include "storage/profile_database.h"
 #include <QCoreApplication>
 #include <QDateTime>
@@ -85,7 +86,9 @@ void weekAndMonths()
                          session("a", QDate(2026, 11, 9), 21, 30, "November"),
                          session("b", QDate(2026, 11, 10), 21, 50),
                          session("a", today, 7, 20, "November") };
-    records.percent.insert("file:///books/a.epub", 22);
+    records.sessions.last().identity = "file:///books/a-renamed.epub";
+    records.sessions.last().sourceKey = "/books/a-renamed.epub";
+    records.percent.insert("file:///books/a-renamed.epub", 22);
     records.percent.insert("file:///books/b.epub", 100);
     records.finished.insert("file:///books/b.epub");
     const auto summary = activity::summarize(records, today);
@@ -96,6 +99,12 @@ void weekAndMonths()
     require(summary.weekMilliseconds == 100 * minute, "The week total was wrong");
     require(summary.months.size() == 2 && summary.months[0].month == QDate(2026, 11, 1),
             "Months were not newest first");
+    const auto &october = summary.months[1].books.first();
+    require(october.identity == records.sessions.last().identity
+                    && october.sourceKey == records.sessions.last().sourceKey
+                    && october.percent == 22 && october.milliseconds == 40 * minute
+                    && october.sessions == 1,
+            "October must use the renamed book without including November's reading time");
     const auto &november = summary.months[0];
     require(november.books.size() == 2 && november.books[0].book == "a"
                     && november.books[0].milliseconds == 50 * minute
@@ -394,6 +403,85 @@ void deleteEdgeCases()
                     == 2,
             "The newer hidden list was replaced");
 }
+
+// A beta 8 session and a new opening share the upgrade date. The new
+// session sleeps over midnight, then resumes on the first of the month.
+void upgradeAndSleep()
+{
+    storage::closeProfile();
+    QTemporaryDir root;
+    const QDate first(2026, 10, 31), second = first.addDays(1);
+    const auto directory = root.path();
+    const auto morning = at(first, 10);
+    sql(directory,
+        "INSERT INTO reading_sessions VALUES('old','older','older','','','','',?,?,?,'','','completed')",
+        { morning, morning + 30 * minute, 30 * minute });
+    qint64 now = at(first, 23, 40);
+    ReadingHistory history(directory, "current", {}, {}, "New book", {}, [&] { return now; });
+    history.start(0, "before");
+    now += 10 * minute;
+    history.pause(10 * minute, "middle");
+    require(history.save(), "Could not save reading before midnight");
+    now = at(second, 0, 5);
+    history.start(10 * minute, "middle");
+    now += 5 * minute;
+    history.stop(15 * minute, "after");
+    require(history.save(), "Could not save reading after midnight");
+    ActivityRecords records;
+    require(ActivityRecordStore::read(directory, {}, &records), "Cannot load both openings");
+    const auto summary = activity::summarize(records, second);
+    require(summary.days.value(first) == 40 * minute && summary.days.value(second) == 5 * minute,
+            "Upgrade-day or post-midnight time was lost");
+    require(summary.hours[23] == 10 * minute && summary.hours[0] == 5 * minute,
+            "Sleep moved reading into the wrong hour");
+    const auto book = records.sessions.last().book;
+    const auto days = activity::bookDays(records, book, second);
+    require(days.value(first) == 10 * minute && days.value(second) == 5 * minute
+                    && summary.months.first().milliseconds == 5 * minute,
+            "The book's time went to the wrong date or month");
+    require(ActivityRecordStore::read(directory, history.openingId(), &records),
+            "Could not load the open book's history");
+    require(activity::summarize(records, second, days).days == summary.days,
+            "The open book's time was counted twice");
+    require(ActivityRecordStore::remove(directory, book, QString()),
+            "Could not delete the new book");
+    require(ActivityRecordStore::read(directory, {}, &records) && records.days.isEmpty()
+                    && records.sessions.size() == 1
+                    && activity::summarize(records, second).totalMilliseconds == 30 * minute,
+            "Deletion changed the other book or left part of the deleted book");
+}
+
+void deleteAnonymousOvernight(bool survivorHasHourlyRecords)
+{
+    storage::closeProfile();
+    QTemporaryDir root;
+    const auto day = QDate(2026, 11, 1);
+    sql(root.path(),
+        "INSERT INTO reading_sessions VALUES('one','only','only','','','','',?,?,?,'','','completed')",
+        { at(day, 23, 40), at(day.addDays(1), 0, 10), 15 * minute });
+    for (int i : { 0, 1 })
+        sql(root.path(), "INSERT INTO profile_state VALUES(?,1,0,?)",
+            { "reading-day:" + day.addDays(i).toString(Qt::ISODate) + ":anonymous",
+              QString("{\"milliseconds\":%1}").arg((i ? 5 : 10) * minute) });
+    sql(root.path(),
+        "INSERT INTO reading_sessions VALUES('two','other','other','','','','',?,?,?,'','','completed')",
+        { at(day, 9), at(day, 9, 20), 20 * minute });
+    if (survivorHasHourlyRecords)
+        sql(root.path(), "INSERT INTO profile_state VALUES(?,1,0,?)",
+            { "reading-hours:two:" + day.toString(Qt::ISODate),
+              QStringLiteral("{\"9\":1200000}") });
+    const auto survivor = survivorHasHourlyRecords
+            ? QStringLiteral("{\"milliseconds\":1200000,\"book\":\"other\"}")
+            : QStringLiteral("{\"milliseconds\":1200000}");
+    sql(root.path(), "INSERT INTO profile_state VALUES(?,1,0,?)",
+        { "reading-day:" + day.toString(Qt::ISODate) + ":other", survivor });
+    require(ActivityRecordStore::remove(root.path(), "only", QString()),
+            "Cannot remove overnight history");
+    ActivityRecords records;
+    require(ActivityRecordStore::read(root.path(), {}, &records) && records.days.size() == 1
+                    && records.days.value(day) == 20 * minute,
+            "Deleting the overnight book should keep only the other book's time");
+}
 } // namespace
 
 int main(int argc, char **argv)
@@ -408,6 +496,9 @@ int main(int argc, char **argv)
     storeReadsProfile();
     hideAndRemove();
     deleteEdgeCases();
+    upgradeAndSleep();
+    deleteAnonymousOvernight(true);
+    deleteAnonymousOvernight(false);
     storage::closeProfile();
     return 0;
 }

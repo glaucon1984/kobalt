@@ -163,7 +163,9 @@
 "kosync.reader_timeout" = "Sync could not finish while the reader was busy. Try again after the current operation finishes. Your reading position was kept.";
 "kosync.connecting" = "Connecting to Wi-Fi…";
 "kosync.invalid_response" = "The server response is not compatible with KOSync. Check the server URL and path prefix. Your reading position was kept.";
-"kosync.invalid_account" = "Enter an HTTP or HTTPS server URL, username and password. The URL cannot contain credentials, a query or a fragment.";
+"kosync.invalid_server" = "Enter an HTTP or HTTPS server URL without credentials, a query or a fragment.";
+"kosync.invalid_username" = "Enter a valid KOSync username.";
+"kosync.missing_password" = "Enter your KOSync password.";
 "kosync.native_sync" = "This book uses Kobo’s built-in sync system. KOSync is unavailable for this copy.";
 "kosync.kobo_cloud" = "This book uses Kobo Cloud to sync reading progress. KOSync is unavailable for this copy.";
 "kosync.unavailable" = "Sync is unavailable for this book or account.";
@@ -543,9 +545,24 @@
 "header_footer.field.battery_warning" = "Battery warning";
 "header_footer.field.page_turn_time" = "Page turn time";
 "header_footer.field.chapter_load_time" = "Chapter load time";
+"header_footer.field.book_status" = "Book status";
 /* Arguments: %1 */
 "header_footer.field_description.battery_warning" = "Shows the battery only below %1%.";
 "header_footer.field_description.time_left" = "Estimated from your reading pace.";
+"header_footer.field_description.book_status" = "The last turn time and the layout: fast while one chapter is laid out, full once the whole book is. Updates every 5 seconds.";
+"header_footer.status.fast" = "fast";
+"header_footer.status.full" = "full";
+"header_footer.status.failed" = "failed";
+/* Arguments: %1 */
+"header_footer.status.seconds" = "%1s";
+/* Arguments: %1 the layout mode, %2 its progress, failure or time */
+"header_footer.status.with_detail" = "%1 (%2)";
+/* Arguments: %1 */
+"header_footer.status.layout" = "layout: %1";
+/* Arguments: %1 */
+"header_footer.status.turn" = "turn: %1ms";
+/* Arguments: %1 the turn time, %2 the layout */
+"header_footer.status.parts" = "%1 | %2";
 
 /* image */
 "image.unavailable" = "Image could not be loaded";
@@ -560,6 +577,8 @@
 
 /* light_panel */
 "light_panel.automatic_brightness" = "Automatic brightness";
+"light_panel.system_brightness" = "Follow system brightness";
+"light_panel.system_brightness_description" = "Use Android's brightness setting. Manual adjustments are remembered for reading.";
 "light_panel.automatic_brightness_description" = "Uses the ambient light sensor. Manual adjustments turn this off.";
 "light_panel.automatic_warmth" = "Follow Kobo warmth schedule";
 "light_panel.automatic_warmth_description" = "Uses the bedtime set in Kobo settings. Manual warmth adjustments turn this off.";
@@ -601,6 +620,8 @@
 "closing.retry" = "Retry save and close";
 "closing.quit" = "Quit without saving";
 "closing.quit_warning" = "Quitting now may lose unsaved progress or annotations.";
+"closing.close_now" = "Close without waiting";
+"closing.close_now_detail" = "Your place in this book is saved. If you close now, Kobo’s reading time and progress might not be updated.";
 "closing.return" = "Keep reading";
 
 /* reader */
@@ -648,6 +669,8 @@
 "settings.light_gesture_feedback" = "Show frontlight gesture pop-up";
 "settings.light_gesture_feedback_description" = "Show the level after a pause in swiping. Turn off to adjust the light without a pop-up or its cleanup refresh.";
 "reader.edge_light" = "Swipe along edges to adjust frontlight";
+"reader.edge_brightness" = "Swipe along the left edge to adjust brightness";
+"settings.brightness_gesture_feedback" = "Show brightness gesture pop-up";
 "reader.enable_page_animations" = "Page turn animations";
 "reader.exit" = "Exit Kobalt";
 "reader.fail_next_native_save" = "Fail next native save";
@@ -715,7 +738,6 @@
 "reader.restore_defaults" = "Restore defaults";
 "reader.return_to_passage" = "Return to passage";
 "reader.follow_link" = "Follow link";
-"reader.link_dictionary" = "Dictionary";
 "reader.dismiss_link" = "Dismiss";
 "reader.stay_here" = "Stay here and forget return position";
 /* Arguments: %1 */
@@ -791,6 +813,9 @@
 "settings.plugin_delete" = "Delete";
 "settings.plugin_data_deleted" = "Saved data deleted.";
 "settings.plugin_data_not_deleted" = "Saved data was not deleted: %1";
+"settings.section_developer" = "Developer";
+"settings.debug_mode" = "Debug mode";
+"settings.debug_mode_description" = "Show the Debug tab, the debug fields of the header and footer, and the Faster engine.";
 "settings.opening_cover" = "Do not show book cover while opening";
 "settings.opening_cover_description" = "Always show the Kobalt logo when opening a book.";
 "settings.rendering" = "Rendering engine";
@@ -850,6 +875,7 @@
 "settings.section_screen" = "Screen refresh";
 "settings.section_navigation" = "Navigation";
 "settings.section_links" = "Links";
+"settings.section_annotations" = "Annotations";
 "settings.section_chapter_list" = "Chapter List";
 "settings.chapter_groups" = "Collapsible chapters";
 "settings.chapter_groups_hint" = "Choose whether chapter groups can collapse and how they open.";
@@ -1010,6 +1036,32 @@
 "sleep.place_top" = "Top";
 "sleep.place_bottom" = "Bottom";
 "settings.about" = "About";
+"settings.debug" = "Debug";
+"debug.section_caches" = "Caches";
+"debug.evict_cache" = "Evict book cache";
+"debug.evict_cache_description" = "Remove the parsed copy and the pages of this book, then close it. Your place, bookmarks and annotations stay.";
+"debug.evict_cache_title" = "Evict Book Cache?";
+"debug.evict_cache_confirm_description" = "The book closes. The next opening parses and lays out the book again.";
+"debug.evict" = "Evict";
+"debug.clear_caches" = "Clear all caches";
+"debug.clear_caches_description" = "Remove the parsed copies of all books and the preview tiles, then close the book. Reading data stays.";
+"debug.clear_caches_title" = "Clear All Caches?";
+"debug.clear_caches_confirm_description" = "The book closes. Every book parses and lays out again when it opens.";
+"debug.clear" = "Clear";
+"debug.section_diagnostics" = "Diagnostics";
+"debug.detailed_diagnostics" = "Detailed diagnostics";
+"debug.detailed_diagnostics_description" = "Write timings and background work to the diagnostic log. Applies at once and after a restart.";
+"debug.detailed_diagnostics_fixed" = "This build always writes timings and background work to the diagnostic log.";
+"debug.clear_log" = "Clear diagnostic log";
+"debug.section_device" = "Device";
+"debug.version" = "Version";
+"debug.qt" = "Qt";
+"debug.firmware" = "Firmware";
+"debug.cores" = "Processor cores";
+"debug.cores_value" = "%1 of %2 online";
+"debug.storage" = "Free storage";
+"debug.storage_value" = "%1 free, caches %2";
+"debug.unknown" = "Unknown";
 "settings.edge_light_description" = "Swipe up or down along the left edge for brightness, and along the right edge for warmth.";
 "settings.edge_brightness_description" = "Swipe up or down along the left edge for brightness.";
 
@@ -1166,6 +1218,7 @@
 "activity.welcome_description" = "Activity shows your reading time and reading stats on this device. It doesn't sync, so if you also read on another device, your streaks and totals here won't include that reading.";
 "activity.loading" = "Loading reading history…";
 "activity.unavailable" = "Reading history is unavailable right now.";
+"activity.change_not_saved" = "Could not save the change to your reading history.";
 "activity.empty" = "Your reading time appears here after your first reading session.";
 "activity.no_books" = "Books you read appear here.";
 "activity.tab_overview" = "OVERVIEW";
@@ -1400,6 +1453,7 @@
 "reader.lock_landscape" = "Lock landscape";
 
 "reader.both" = "Both";
+"reader.lock_current_rotation" = "Lock current rotation";
 "reader.formatting_warning" = "Formatting warning";
 "reader.formatting_warning_description" = "This page uses unsupported formatting. You can keep reading, but some text or layout may not appear as intended.";
 
@@ -1415,8 +1469,7 @@
 "settings.minimal_annotation_mode_description" = "Hide the annotation bar. Tap text or blank space, then choose Stop highlighting to exit.";
 
 /* annotations */
-"annotations.style_section" = "Style";
-"annotations.actions_section" = "Actions";
+"annotations.style" = "Style";
 "annotations.title" = "Annotate";
 "annotations.tab" = "Annotations";
 "annotations.close" = "Close annotations";
@@ -1472,13 +1525,21 @@
 "annotations.next_matches" = "Next highlights";
 "annotations.save_then_edit" = "Save selection and edit highlight";
 "annotations.discard_then_edit" = "Discard selection and edit highlight";
+"annotations.add_note" = "Add note";
+"annotations.look_up" = "Look up";
+"annotations.edit_note" = "Edit note";
+"annotations.discard" = "Discard";
+"annotations.note_placeholder" = "Write a note";
+"annotations.note_save_failed" = "Could not save the note. Your text is kept.";
+"annotations.note_too_long" = "This note is too long to save.";
+"annotations.note" = "Note";
 
 "annotations.color_yellow" = "Yellow";
 "annotations.color_green" = "Green";
 "annotations.color_blue" = "Blue";
 "annotations.color_pink" = "Pink";
 "annotations.color_gray" = "Gray";
-"annotations.color_section" = "Color";
+"annotations.color" = "Color";
 
 "annotations.color_failed" = "Could not save color. Try again.";
 
@@ -1604,6 +1665,12 @@
 "settings.tappable_links_off_description" = "Long press and choose Follow link to avoid accidental opening.";
 "settings.tappable_links_footnotes_description" = "Tap footnotes to open them. Long press other links, then choose Follow link.";
 "settings.tappable_links_all_description" = "Tap footnotes and links to open them.";
+"settings.annotation_interaction" = "Highlighting";
+"settings.annotation_interaction_description" = "Choose how to start a highlight.";
+"settings.annotation_interaction_toggle" = "Toggleable annotation mode";
+"settings.annotation_interaction_toggle_description" = "Turn on Annotate in the reading menu, then hold text to highlight it. Outside the mode, holding text looks it up in a dictionary of your choice.";
+"settings.annotation_interaction_quick" = "Quick annotation mode";
+"settings.annotation_interaction_quick_description" = "Hold text to highlight it, add a note or look it up. The Annotate button is hidden.";
 "settings.vertical_spacing" = "Vertical page spacing";
 "settings.vertical_spacing_mode" = "Page spacing";
 "settings.vertical_spacing_description" = "Adjust blank space on nearly full pages.";

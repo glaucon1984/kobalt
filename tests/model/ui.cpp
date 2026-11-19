@@ -23,6 +23,7 @@
 #include "support/strings.h"
 #include "ui/style/fonts.h"
 #include "app/reader/window/font_registration.h"
+#include <QFileInfo>
 #include <QFontInfo>
 #include <QFontDatabase>
 #include <QJsonObject>
@@ -340,6 +341,92 @@ int main(int argc, char **argv)
         kobalt::setDiagnosticObserver({});
     }
     checkPrivateInterfaceText(kobalt::test::readerAssets());
+    {
+        // A line break is not a missing glyph. Labels measure their whole
+        // text, line breaks included, so a notice with a paragraph break
+        // must not open the bundled fallbacks on the GUI thread.
+        using namespace kobalt::ui;
+        const auto &assets = kobalt::test::readerAssets();
+        int loads = 0;
+        kobalt::setDiagnosticObserver([&](const QJsonObject &event) {
+            if (event.value("event").toString() == "font-load-start")
+                ++loads;
+        });
+        require(initializePrivateInterfaceText(assets), "Cannot reset private interface text");
+        measurePrivateText(QStringLiteral("Latin"), interfaceFont(24));
+        loads = 0;
+        measurePrivateText(QStringLiteral("first\nsecond\r\n\nthird\tfourth"), interfaceFont(24));
+        require(loads == 0, "Line breaks loaded fallback fonts");
+        // A fallback loads only when its character map has the character. The
+        // Japanese full stop has the Common script, so no script picks the CJK
+        // collection for it; the search must skip every file without it.
+        QVector<double> sizes;
+        kobalt::setDiagnosticObserver([&](const QJsonObject &event) {
+            if (event.value("event").toString() == "font-load-start") {
+                ++loads;
+                sizes.append(event.value("file_bytes").toDouble());
+            }
+        });
+        const auto loadsFor = [&](const QString &text) {
+            require(initializePrivateInterfaceText(assets), "Cannot reset private interface text");
+            measurePrivateText(QStringLiteral("Latin"), interfaceFont(24));
+            loads = 0;
+            sizes.clear();
+            measurePrivateText(text, interfaceFont(24));
+            return loads;
+        };
+        const double collection = QFileInfo(assets.file("fonts/NotoSerifCJK-Regular.ttc")).size();
+        require(loadsFor(QString(QChar(0x3002))) == 1 && sizes.value(0) == collection,
+                "A Japanese full stop loaded fonts that lack it");
+        require(loadsFor(QString::fromUcs4(U"\U00010400")) == 0,
+                "A character no bundled font maps loaded fallback fonts");
+        // Noto Serif Italic lacks U+20C0, which Noto Serif Regular maps. Italic
+        // text must not load the italic file for it.
+        const auto loadsInFont = [&](const QString &text, const QFont &font) {
+            require(initializePrivateInterfaceText(assets), "Cannot reset private interface text");
+            measurePrivateText(QStringLiteral("Latin"), font);
+            loads = 0;
+            sizes.clear();
+            measurePrivateText(text, font);
+            return loads;
+        };
+        auto italic = interfaceFont(24);
+        italic.setItalic(true);
+        const double regularSerif = QFileInfo(assets.file("fonts/NotoSerif-Regular.ttf")).size();
+        require(loadsInFont(QString(QChar(0x20C0)), italic) == 1 && sizes.value(0) == regularSerif,
+                "Italic text loaded a style file that lacks the character");
+        kobalt::setDiagnosticObserver([&](const QJsonObject &event) {
+            if (event.value("event").toString() == "font-load-start")
+                ++loads;
+        });
+        // A control character takes no space and draws nothing, also in a font
+        // that lacks it: Instrument Serif has no carriage return.
+        {
+            const auto brand = brandFont(32);
+            require(measurePrivateText(QStringLiteral("a\r"), brand)
+                                    == measurePrivateText(QStringLiteral("a"), brand)
+                            && measurePrivateText(QStringLiteral("a\n"), interfaceFont(24))
+                                    == measurePrivateText(QStringLiteral("a"), interfaceFont(24)),
+                    "A control character took space");
+            require(!renderPrivateText(QStringLiteral("a\rb"), brand).missingGlyphs,
+                    "A carriage return drew a missing glyph");
+        }
+        const auto notice = [&](bool savedLocally) {
+            require(initializePrivateInterfaceText(assets), "Cannot reset private interface text");
+            loads = 0;
+            QWidget parent;
+            parent.resize(1072, 1448);
+            kobalt::SaveErrorView view(&parent, {}, false, kobalt::SaveErrorView::Cause::TimedOut,
+                                       savedLocally);
+            view.setGeometry(parent.rect());
+            parent.grab();
+            return loads;
+        };
+        // The close-now text adds a paragraph break to the same notice.
+        require(notice(true) == notice(false),
+                "The save timeout notice with a paragraph break loaded fallback fonts");
+        kobalt::setDiagnosticObserver({});
+    }
     {
         using namespace kobalt::ui;
         const auto &assets = kobalt::test::readerAssets();
@@ -778,7 +865,9 @@ int main(int argc, char **argv)
                 labelInk(row.titleLabel(), QColor("#999999"));
                 row.setEnabled(true);
                 row.setChecked(false);
-                labelInk(row.detailLabel(), noteColor(&row));
+                // In light, secondary lines use plain ink, as the title does.
+                labelInk(row.detailLabel(),
+                         dark ? noteColor(&row) : first.palette().color(QPalette::WindowText));
                 row.setTitlePixels(px(34));
                 require(row.titleLabel()->font().pixelSize() == px(34),
                         "Owned title pixels do not reach the row label");
@@ -824,7 +913,9 @@ int main(int argc, char **argv)
                 labelInk(row.titleLabel(), QColor("#123456"));
                 row.setParent(&second);
                 labelInk(row.titleLabel(), second.palette().color(QPalette::WindowText));
-                labelInk(row.detailLabel(), noteColor(&row));
+                labelInk(row.detailLabel(),
+                         darkTheme(&row) ? noteColor(&row)
+                                         : second.palette().color(QPalette::WindowText));
                 changed.setColor(QPalette::WindowText, QColor("#654321"));
                 first.setPalette(changed);
                 labelInk(row.titleLabel(), second.palette().color(QPalette::WindowText));
@@ -4665,7 +4756,7 @@ int main(int argc, char **argv)
         };
 
         Keyboard *keyboard = nullptr;
-        kobalt::DictionaryPanel panel(&reader, [&](QWidget *host, QLineEdit *) {
+        kobalt::DictionaryPanel panel(&reader, [&](QWidget *host, QWidget *) {
             require(host == &reader,
                     "The keyboard must belong to the reader, separately from the dictionary sheet");
             auto value = std::make_unique<Keyboard>(host);
@@ -5569,6 +5660,22 @@ int main(int argc, char **argv)
             require(row->grab().toImage() == plain,
                     "Clearing a typeface preview left sample pixels behind");
         }
+    }
+    {
+        kobalt::ui::PageScrubber scrubber(nullptr);
+        scrubber.setChapterBar(true);
+        scrubber.setBook(2, 8, {}, {});
+        scrubber.show();
+        scrubber.showCurrentPage();
+        scrubber.beginNavigation();
+        scrubber.setChapterBar(false, true);
+        scrubber.setBook(1100, 2400, {}, {});
+        scrubber.showCurrentPage();
+        const auto *slider = scrubber.slider();
+        require(scrubber.selectedPage() == 1100 && slider->value() == 1100
+                        && slider->minimum() > 0 && slider->maximum() < 2399
+                        && slider->maximum() - slider->minimum() + 1 <= 1000,
+                "Whole-book Navigate handoff lost the initial zoom range");
     }
     {
         using namespace kobalt::ui;

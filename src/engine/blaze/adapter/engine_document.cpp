@@ -1,9 +1,11 @@
 #include "column_view.h"
+#include "assets/bundled_fonts.h"
 #include <cmath>
 #include "render/image_damage.h"
 #include "support/qt_compat.h"
 #include "support/strings.h"
 #include "engine_document.h"
+#include <QDir>
 #include "engine/engine_worker.h"
 #include "reader_source.h"
 #include "publication/image_policy.h"
@@ -19,6 +21,7 @@
 #include "render/page_content.h"
 #include "page_pixels.h"
 #include <QCryptographicHash>
+#include <QFile>
 #include <QFileInfo>
 #include <QElapsedTimer>
 #include <QJsonArray>
@@ -45,6 +48,7 @@ namespace {
 std::atomic<unsigned> liveDocuments{ 0 };
 bool fontsReady = false;
 EngineFontInputs activeFonts;
+QString registeredFontDigest;
 QVector<ReadingFont> readingFonts;
 QStringList readingFontFaces;
 QVector<ReadingFont> readingFontCatalog;
@@ -335,6 +339,32 @@ bool validAlignment(const QString &value)
     return value == "publisher" || value == "left" || value == "justify" || value == "center"
             || value == "right";
 }
+
+// Loads hyphenation patterns as the engine does, except files that failed the
+// asset check. A pattern that does not load leaves its language without
+// hyphenation.
+class CheckedHyphenationLoader final : public HyphDataLoader
+{
+public:
+    explicit CheckedHyphenationLoader(QStringList excluded) : excluded(std::move(excluded)) { }
+
+    LVStreamRef loadData(lString32 id) override
+    {
+        auto *dictionary = HyphMan::getDictList() ? HyphMan::getDictList()->find(id) : nullptr;
+        if (!dictionary
+            || (dictionary->getType() != HDT_DICT_ALAN && dictionary->getType() != HDT_DICT_TEX))
+            return LVStreamRef();
+        const auto filename = dictionary->getFilename();
+        if (excluded.contains(
+                    QFileInfo(QString::fromUtf8(UnicodeToUtf8(filename).c_str())).fileName()))
+            return LVStreamRef();
+        return LVOpenFileStream(filename.c_str(), LVOM_READ);
+    }
+
+private:
+    QStringList excluded;
+};
+
 } // namespace
 
 // The publication checks embedded fonts against the limit that CREngine enforces.
@@ -367,6 +397,7 @@ EngineDocument::~EngineDocument()
         readingFontFaces.clear();
         readingFontCatalog.clear();
         fontFacesReady = fontCatalogReady = false;
+        registeredFontDigest.clear();
         activeFonts = {};
     }
 }
@@ -399,15 +430,29 @@ bool EngineDocument::initializeFonts()
     // The generic monospace family for code, also under a chosen reading font,
     // and fallback faces for characters that a reading font lacks. The picker
     // offers script fallbacks when they match the document language.
-    for (const auto &file : fonts_.fallbackFiles)
-        if (!fontMan->RegisterFont(lString8(file.toUtf8().constData()))) {
+    for (const auto &file : fonts_.fallbackFiles) {
+        bool registered = true;
+        if (QFileInfo(file).fileName() == "NotoSerifCJK-Regular.ttc") {
+            // This pinned collection contains static regular faces. Their
+            // metadata is enough for the catalogue and font selector. Opening
+            // the large collection waits until text actually requests a face.
+            for (size_t index = 0; index < cjkFallbackFontFaces.size(); ++index)
+                registered &= fontMan->RegisterStaticFontFace(
+                        lString8(file.toUtf8().constData()), int(index),
+                        lString8(cjkFallbackFontFaces[index]), 400, false);
+        } else {
+            registered = fontMan->RegisterFont(lString8(file.toUtf8().constData()));
+        }
+        if (!registered) {
             readingFonts.clear();
             ShutdownFontManager();
             return false;
         }
+    }
     // Bundled dictionaries hyphenate by language. A language whose dictionary
     // is not bundled keeps the engine's algorithmic hyphenation.
     HyphMan::initDictionaries(cre(fonts_.hyphenationDirectory + '/'));
+    HyphMan::setDataLoader(new CheckedHyphenationLoader(fonts_.excludedHyphenation));
     for (const auto *name : engineHyphenationPatterns) {
         if (QFileInfo::exists(fonts_.hyphenationDirectory + '/' + name))
             continue;
@@ -420,6 +465,30 @@ bool EngineDocument::initializeFonts()
     fontsReady = true;
     activeFonts = fonts_;
     return true;
+}
+
+// The font manager and its registered files are shared by every live document.
+QString EngineDocument::layoutFontDigest() const
+{
+    if (!fontsReady || !registeredFontDigest.isEmpty())
+        return registeredFontDigest;
+    QCryptographicHash catalog(QCryptographicHash::Sha256);
+    QStringList files;
+    for (const auto &font : readingFonts)
+        files.append(font.files);
+    files.append(activeFonts.fallbackFiles);
+    for (const auto &path : files) {
+        auto digest = activeFonts.verifiedFontDigests.value(path);
+        if (digest.isEmpty()) {
+            QFile file(path);
+            QCryptographicHash hash(QCryptographicHash::Sha256);
+            if (file.open(QIODevice::ReadOnly) && hash.addData(&file))
+                digest = hash.result().toHex();
+        }
+        catalog.addData(digest + '\n');
+    }
+    registeredFontDigest = QString::fromLatin1(catalog.result().toHex());
+    return registeredFontDigest;
 }
 
 QStringList EngineDocument::fontFaces()
@@ -500,8 +569,14 @@ QByteArray EngineDocument::documentCachePolicy() const
     if (userStyleSheet_.isEmpty()) {
         return cachePolicy_;
     }
-    return cachePolicy_ + ":user-css-v1:"
+    if (!policy_.isEmpty() && policySheet_.isSharedWith(userStyleSheet_)
+        && policyBase_ == cachePolicy_)
+        return policy_;
+    policySheet_ = userStyleSheet_;
+    policyBase_ = cachePolicy_;
+    policy_ = cachePolicy_ + ":user-css-v1:"
             + QCryptographicHash::hash(userStyleSheet_, QCryptographicHash::Sha256).toHex();
+    return policy_;
 }
 
 bool EngineDocument::saveDocumentCache()
@@ -528,6 +603,74 @@ bool EngineDocument::saveDocumentCache()
         ldomDocCache::removeObsolete(name, document->getCacheFilePath());
     }
     return true;
+}
+
+bool EngineDocument::saveDocumentCacheStep(int milliseconds)
+{
+    // The same book and key as saveDocumentCache(); a step that cannot write
+    // leaves the rest to it.
+    if (!engine_ || cacheDirectory_.isEmpty() || cacheFingerprint_.isEmpty()
+        || !resourceError().isEmpty() || !pages())
+        return true;
+    const auto name = engine_->getDocProps()->getStringDef(DOC_PROP_FILE_NAME, "");
+    if (QString::fromUtf8(UnicodeToUtf8(name).c_str()) != documentCacheName(cacheFingerprint_))
+        return true;
+    auto *document = engine_->getDocument();
+    if (document->koblazeCacheMapped() && !document->isCacheFileStale())
+        return true;
+    DocumentCacheScope cache(cacheDirectory_);
+    if (!cache.enabled())
+        return true;
+    // The engine saves in stages and goes on where the last step ended. The
+    // first step only creates and maps the file; the next ones write it.
+    CRTimerUtil limit(milliseconds);
+    if (!document->koblazeCacheMapped()) {
+        const auto mapped = engine_->swapToCache(limit);
+        if (mapped != CR_TIMEOUT)
+            return true;
+        document->setCacheFileStale(true);
+        return false;
+    }
+    const auto result = engine_->updateCache(limit);
+    if (result == CR_TIMEOUT)
+        return false;
+    if (result != CR_DONE)
+        return true;
+    if (document->hasCacheFile()) {
+        if (!document->updateCacheFileName())
+            return true;
+        ldomDocCache::removeObsolete(name, document->getCacheFilePath());
+    }
+    return true;
+}
+
+bool EngineDocument::removeDocumentCache(bool allBooks)
+{
+    const auto directory = cacheDirectory_;
+    const auto name = documentCacheName(cacheFingerprint_);
+    if (directory.isEmpty() || (!allBooks && name.isEmpty()))
+        return false;
+    // A mapped document keeps its cache file open and writes to it. Every
+    // document of the book goes first, the parked whole-book build too.
+    building_.reset();
+    dropSideDocuments();
+    full_.reset();
+    retired_.clear();
+    cache_.clear();
+    searchText_.reset();
+    sourceIndex_.reset();
+    engine_.reset();
+    if (allBooks)
+        return QDir(directory).removeRecursively();
+    // Not DocumentCacheScope: eviction also works when free space is low.
+    const auto path = directory.toUtf8();
+    if (!ldomDocCache::init(Utf8ToUnicode(lString8(path.constData())),
+                            DocumentCacheScope::maxBytes))
+        return false;
+    const bool removed =
+            ldomDocCache::koblazeRemove(Utf8ToUnicode(lString8(name.toUtf8().constData())));
+    ldomDocCache::close();
+    return removed;
 }
 
 FontWeightAxis EngineDocument::weightAxis() const
@@ -575,6 +718,7 @@ void EngineDocument::configure(QSize size, const QJsonObject &settings)
     setExtraFontWeight(0);
     searchText_.reset();
     sourceIndex_.reset();
+    nativePositions_.reset();
     contentsIndex_ = {};
     graphIndex_ = {};
     engine_.reset();
@@ -676,6 +820,7 @@ void EngineDocument::configure(QSize size, const QJsonObject &settings)
     if (columnSpacingPercent_)
         columnSpacing_ = qRound(pixels_ * columnSpacingPercent_ / 100.0);
     hangingPunctuation_ = saved.value("hanging_punctuation").toBool(false);
+    spineNames_.clear();
     engine_ = std::make_unique<ColumnView>();
     engine_->setHangingPunctuation(hangingPunctuation_);
     engine_->setColumns(columns_);
@@ -1341,9 +1486,11 @@ void EngineDocument::applyStyleSheet()
     }
     // Normalize ink in PageDrawBuffer so SVG currentColor keeps its publisher
     // value. Clear CSS backgrounds outside SVG so theme ink stays readable.
+    // An unconditional ::first-letter rule splits joining scripts into separate glyph runs.
+    // Style only first letters that another rule has generated.
     if (normalizeTextColors_)
         overrides +=
-                "*:not(svg, svg *), *:not(svg, svg *)::before, *:not(svg, svg *)::after, *:not(svg, svg *)::first-letter { background-color:transparent !important; }\n";
+                "*:not(svg, svg *), *:not(svg, svg *)::before, *:not(svg, svg *)::after, *:not(svg, svg *)::-cr-existing-first-letter { background-color:transparent !important; }\n";
     overrides +=
             "svg[data-kobalt-fullpage=\"1\"] { width:100% !important; height:100vh !important; }\n";
     // A one-screen-pixel boundary stops a leading illustration's margin from

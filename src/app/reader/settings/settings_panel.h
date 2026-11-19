@@ -49,15 +49,22 @@ enum class SettingsPage {
     System,
     About,
     Kosync,
+    // Shown only in debug mode, after About.
+    Debug,
     // Zen mode's own page. It has no tab: the rail is hidden in Zen mode.
     Zen
 };
 
 struct SettingsPanelInputs
 {
+    // The window that holds the panel's dialogs and sheets. The panel can be
+    // built in a holder before it moves there.
+    QWidget *window = nullptr;
     KeyboardFactory keyboard;
     PageAnimationSupport animationSupport = PageAnimationSupport::Unavailable;
     bool lightSupported = false, warmthSupported = false;
+    bool screenBrightness = false;
+    bool showNativeReaderOptions = true;
     bool debugProgressAvailable = false;
     bool downloadableDictionaries = true;
     bool sleepScreenSupported = false;
@@ -82,6 +89,12 @@ public:
     // Receives a confirmed choice for Open books automatically in Kobalt.
     // Turning it off asks first; turning it on applies at once.
     std::function<void(bool)> automaticOpeningChosen;
+    // A confirmed restore of the appearance defaults or of the text presets,
+    // after its dialog closed.
+    std::function<void()> restoreDefaultsConfirmed, restorePresetsConfirmed;
+    // Each confirmation dialog is made the first time it is needed. The
+    // reader prepares its text as it does for the widgets it built itself.
+    std::function<void(QWidget *)> widgetCreated;
     void showFontChoices(const QString &title, const QVector<ReadingFont> &fonts,
                          const QString &current, const QString &emptyLabel,
                          std::function<void(const QString &)> chosen);
@@ -149,6 +162,18 @@ public:
     // the page, such as returning to the section list.
     std::function<void()> refitRequested;
     void showDictionaries(bool visible);
+    // Shows or hides the Debug tab. Hiding it leaves the Debug page.
+    void showDebug(bool visible);
+    // System > Developer.
+    ui::DescribedOption *debugModeOption = nullptr;
+    // The Debug page. The reader wires the actions and fills the captions.
+    ui::CaptionButton *evictBookCacheButton = nullptr, *clearCachesButton = nullptr,
+                      *clearDiagnosticLogButton = nullptr;
+    ui::DescribedOption *detailedDiagnosticsOption = nullptr;
+    // Device facts. Tapping one reads them again.
+    ui::CaptionButton *debugVersionButton = nullptr, *debugQtButton = nullptr,
+                      *debugFirmwareButton = nullptr, *debugCoresButton = nullptr,
+                      *debugStorageButton = nullptr;
     void showPowerManagement(bool visible);
     int fitContent(QSize availableSize);
     ui::DescribedOption *hideTabLabelsOption = nullptr, *saveWordsOption = nullptr;
@@ -197,11 +222,9 @@ public:
     ui::CaptionButton *buttonControlsButton = nullptr;
     ui::CaptionButton *pageNavigationButton = nullptr, *tapZonesButton = nullptr,
                       *navigationBarButton = nullptr, *tappableLinksButton = nullptr,
-                      *chapterGroupsButton = nullptr;
+                      *annotationInteractionButton = nullptr, *chapterGroupsButton = nullptr;
     ui::DescribedOption *bionicOption = nullptr;
     ui::CaptionButton *refreshButton = nullptr, *resetDefaults = nullptr, *resetPresets = nullptr;
-    QPushButton *keepDefaults = nullptr, *confirmDefaults = nullptr;
-    QPushButton *keepPresets = nullptr, *confirmPresets = nullptr;
     QPushButton *openAcknowledgments = nullptr, *debugProgress = nullptr;
     DictionariesPage *dictionaries = nullptr;
     KosyncPage *kosync = nullptr;
@@ -256,6 +279,11 @@ private:
     static void styleListAction(ui::CaptionButton *button);
     QPointer<ui::ChoiceModal> standbyDialog;
     QPointer<ui::ChoiceModal> automaticOpeningDialog;
+    ui::ChoiceModal *restoreConfirmation();
+    ui::ChoiceModal *restorePresetsConfirmation();
+    ui::ChoiceModal *standbyConfirmation();
+    ui::ChoiceModal *automaticOpeningConfirmation();
+    void dialogCreated(ui::ChoiceModal *dialog);
     QHash<int, StyleSample> stylingSamples;
     // The open styling sheet, if any, and the option its preview shows.
     QPointer<QWidget> stylingPreview;

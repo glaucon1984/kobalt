@@ -720,6 +720,12 @@ Action sessionLists()
                         QDir(QStringLiteral(KOBALT_TEST_FIXTURES))
                                 .absoluteFilePath("../../build/parity-session-XXXXXX"));
                 require(scratch.isValid(), "Cannot create session list profile");
+                // Read the fixture anchors before the session worker starts using CREngine.
+                auto &model = *reader.model;
+                require(model.goTo(model.chapters()[4].position),
+                        "Cannot prepare highlight fixture");
+                const auto hits = model.searchPage("the", model.page()).hits;
+                require(!hits.isEmpty(), "No session highlight fixture");
                 auto owned = std::make_unique<ReaderSession>(test::readerFonts(),
                                                              test::readerPlaceholder());
                 auto &session = *owned;
@@ -818,11 +824,6 @@ Action sessionLists()
                 // with the same fresh slice as the original fixture.
                 go(chapters[8].position);
                 go(chapters[4].position);
-                auto &model = *reader.model;
-                require(model.goTo(model.chapters()[4].position),
-                        "Cannot prepare highlight fixture");
-                const auto hits = model.searchPage("the", model.page()).hits;
-                require(!hits.isEmpty(), "No session highlight fixture");
                 bool saved = false;
                 highlights.save(hits.first().start, hits.first().end, {}, [&](bool ok) {
                     require(ok, "Cannot save session highlight");
@@ -1577,6 +1578,48 @@ Book loadBook(const QString &name)
                  {} };
     return { name, readFile(name), {} };
 }
+
+void reversePreparedGroups()
+{
+    const auto book =
+            readFile(QStringLiteral(KOBALT_TEST_FIXTURES) + "/trevelyans-type-tester.kepub.epub");
+    const auto signature = [](EngineDocument &reader) {
+        const QImage image = reader.image(reader.page()).convertToFormat(QImage::Format_RGBA8888);
+        QCryptographicHash hash(QCryptographicHash::Sha256);
+        for (int row = 0; row < image.height(); ++row)
+            hash.addData(QByteArray::fromRawData(
+                    reinterpret_cast<const char *>(image.constScanLine(row)), image.width() * 4));
+        return qMakePair(reader.pageStart(reader.page()), hash.result());
+    };
+    for (int columns : { 1, 2 }) {
+        EngineDocument reader(test::readerFonts());
+        setChapterModeOverride(1);
+        reader.setChapterSlices(25);
+        QString error;
+        const QSize viewport = columns == 1 ? QSize(700, 940) : QSize(940, 700);
+        require(reader.open(book, viewport,
+                            { { "columns", columns },
+                              { "font_pixels", 28 },
+                              { "line_spacing_version", 1 } },
+                            &error),
+                qPrintable(error));
+        QVector<QPair<QString, QByteArray>> visited;
+        do {
+            reader.prepareAhead([] { return true; });
+            visited.append(signature(reader));
+            reader.releaseRetired();
+        } while (visited.size() < 160 && reader.turnInWindow(1));
+        require(visited.size() >= 26, "Reverse-group fixture did not cross its boundary");
+        for (int i = visited.size() - 2; i >= 0; --i) {
+            reader.prepareAhead([] { return true; });
+            require(reader.turnInWindow(-1), "Reverse traversal stopped before the first page");
+            require(signature(reader) == visited[i],
+                    "Reverse traversal changed the visited passage or pixels");
+            reader.releaseRetired();
+        }
+        setChapterModeOverride(-1);
+    }
+}
 } // namespace
 
 // An argument runs only the scenarios whose name contains it.
@@ -1586,6 +1629,8 @@ int main(int argc, char **argv)
     QGuiApplication app(argc, argv);
 #if __has_include(<koblaze.h>)
     const QString only = argc > 1 ? QString::fromLocal8Bit(argv[1]) : QString();
+    if (only.isEmpty() || only == QLatin1String("reverse groups"))
+        reversePreparedGroups();
     if (only.isEmpty() || only == QLatin1String("non-linear")) {
         groupedNonLinearTurns();
         nonLinearTurns(true, 2);

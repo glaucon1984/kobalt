@@ -25,25 +25,25 @@ QDate monthOf(const QDate &date)
     return QDate(date.year(), date.month(), 1);
 }
 
-void add(BookTotal &total, const ActivitySession &session)
+void add(BookTotal &total, const ActivitySession &session, qint64 milliseconds)
 {
     if (!total.sessions) {
         total.book = session.book;
-        total.identity = session.identity;
         total.first = session.started;
     }
-    // The newest snapshot names and finds the book, as it is shown now.
-    total.sourceKey = session.sourceKey;
-    total.title = session.title;
-    total.author = session.author;
-    total.milliseconds += session.milliseconds;
+    total.milliseconds += milliseconds;
     ++total.sessions;
     total.first = qMin(total.first, session.started);
     total.last = qMax(total.last, session.observed);
 }
 
-void describe(BookTotal &total, const ActivityRecords &records)
+void describe(BookTotal &total, const ActivitySession &session, const ActivityRecords &records)
 {
+    // The newest snapshot names and finds the book, as it is shown now.
+    total.identity = session.identity;
+    total.sourceKey = session.sourceKey;
+    total.title = session.title;
+    total.author = session.author;
     total.percent = records.percent.value(total.identity, -1);
     total.finished = records.finished.contains(total.identity);
 }
@@ -65,11 +65,17 @@ QVector<Streak> streaks(const QMap<QDate, qint64> &days)
     return runs;
 }
 
-// Active time starts at the session's start and fills local hours from there.
-// The session's wall time can be longer than its active time; the reading
-// itself took place at the start of the span.
-void spread(QVector<qint64> &hours, const ActivitySession &session)
+// Older sessions only recorded their total duration. Use their starting
+// time to estimate the local hours when actual observations are unavailable.
+template <typename Visit>
+void visitHours(const ActivitySession &session, Visit visit)
 {
+    if (!session.hours.isEmpty()) {
+        for (auto day = session.hours.cbegin(); day != session.hours.cend(); ++day)
+            for (auto hour = day.value().cbegin(); hour != day.value().cend(); ++hour)
+                visit(day.key(), hour.key(), hour.value());
+        return;
+    }
     qint64 left = session.milliseconds;
     auto cursor = QDateTime::fromMSecsSinceEpoch(session.started);
     while (left > 0) {
@@ -77,7 +83,7 @@ void spread(QVector<qint64> &hours, const ActivitySession &session)
         const qint64 hourLeft =
                 qint64(60 - time.minute()) * 60000 - time.second() * 1000 - time.msec();
         const qint64 used = qMax<qint64>(1, qMin(left, hourLeft));
-        hours[time.hour()] += used;
+        visit(cursor.date(), time.hour(), used);
         left -= used;
         cursor = cursor.addMSecs(used);
     }
@@ -91,17 +97,26 @@ Summary summarize(const ActivityRecords &records, const QDate &today,
     summary.today = today;
     summary.hours = QVector<qint64>(24, 0);
     summary.days = records.days;
+    // Old sessions can share an upgrade date with newly recorded time. Compare
+    // them only with the anonymous totals from older builds.
+    QMap<QDate, qint64> legacy, certain;
+    for (const auto &session : records.sessions) {
+        if (!session.hours.isEmpty())
+            continue;
+        visitHours(session, [&](const QDate &date, int, qint64 milliseconds) {
+            legacy[date] += milliseconds;
+            if (localDate(session.started) == localDate(session.observed))
+                certain[date] += milliseconds;
+        });
+    }
+    for (auto it = legacy.cbegin(); it != legacy.cend(); ++it) {
+        const auto recorded = records.recordedDays.value(it.key());
+        const auto anonymous = records.days.value(it.key()) - recorded;
+        summary.days[it.key()] =
+                recorded + (anonymous ? qMax(anonymous, certain.value(it.key())) : it.value());
+    }
     for (auto it = unsaved.cbegin(); it != unsaved.cend(); ++it)
         summary.days[it.key()] += it.value();
-    // Sessions from before daily totals existed still fill their dates.
-    QMap<QDate, qint64> fallback;
-    for (const auto &session : records.sessions) {
-        const auto date = localDate(session.started);
-        if (!summary.days.contains(date))
-            fallback[date] += session.milliseconds;
-    }
-    for (auto it = fallback.cbegin(); it != fallback.cend(); ++it)
-        summary.days.insert(it.key(), it.value());
     // Nothing after today belongs to the summary, even after a clock change.
     for (auto it = summary.days.begin(); it != summary.days.end();)
         it = it.key() > today ? summary.days.erase(it) : std::next(it);
@@ -140,22 +155,34 @@ Summary summarize(const ActivityRecords &records, const QDate &today,
     QSet<QString> todayBooks, allBooks, monthBooks, bestDayBooks;
     QMap<QDate, QHash<QString, BookTotal>> months;
     QHash<QString, BookTotal> hiddenBooks;
+    QHash<QString, const ActivitySession *> latest;
     for (const auto &session : records.sessions) {
-        if (!countsAsSession(session))
-            continue;
         const auto date = localDate(session.started);
         if (date > today)
             continue;
+        latest.insert(session.book, &session);
+        if (!countsAsSession(session))
+            continue;
         ++summary.sessions;
         allBooks.insert(session.book);
-        if (monthOf(date) == monthOf(today))
-            monthBooks.insert(session.book);
-        if (date == today) {
+        QMap<QDate, qint64> monthTime;
+        bool readToday = false;
+        visitHours(session, [&](const QDate &day, int hour, qint64 milliseconds) {
+            if (day > today)
+                return;
+            monthTime[monthOf(day)] += milliseconds;
+            summary.hours[hour] += milliseconds;
+            if (day == today) {
+                readToday = true;
+                todayBooks.insert(session.book);
+            }
+            if (monthOf(day) == monthOf(today))
+                monthBooks.insert(session.book);
+            if (day == summary.bestDayDate)
+                bestDayBooks.insert(session.book);
+        });
+        if (readToday)
             ++summary.todaySessions;
-            todayBooks.insert(session.book);
-        }
-        if (date == summary.bestDayDate)
-            bestDayBooks.insert(session.book);
         const bool hidden = records.hidden.contains(session.book);
         if (session.milliseconds > summary.longestSession) {
             summary.longestSession = session.milliseconds;
@@ -163,10 +190,10 @@ Summary summarize(const ActivityRecords &records, const QDate &today,
             summary.longestSessionTitle = hidden ? QString() : session.title;
         }
         if (hidden)
-            add(hiddenBooks[session.book], session);
+            add(hiddenBooks[session.book], session, session.milliseconds);
         else
-            add(months[monthOf(date)][session.book], session);
-        spread(summary.hours, session);
+            for (auto month = monthTime.cbegin(); month != monthTime.cend(); ++month)
+                add(months[month.key()][session.book], session, month.value());
     }
     summary.todayBooks = todayBooks.size();
     summary.books = allBooks.size();
@@ -182,7 +209,7 @@ Summary summarize(const ActivityRecords &records, const QDate &today,
         --it;
         MonthBooks month{ it.key(), 0, {} };
         for (auto book : it.value()) {
-            describe(book, records);
+            describe(book, *latest.value(book.book), records);
             month.milliseconds += book.milliseconds;
             month.books.append(book);
         }
@@ -196,7 +223,7 @@ Summary summarize(const ActivityRecords &records, const QDate &today,
     }
 
     for (auto book : hiddenBooks) {
-        describe(book, records);
+        describe(book, *latest.value(book.book), records);
         summary.hiddenBooks.append(book);
     }
     std::sort(summary.hiddenBooks.begin(), summary.hiddenBooks.end(),
@@ -262,17 +289,26 @@ QMap<QDate, qint64> bookDays(const ActivityRecords &records, const QString &book
     QMap<QDate, qint64> days;
     for (const auto &session : records.sessions)
         if (session.book == book && countsAsSession(session) && localDate(session.started) <= today)
-            days[localDate(session.started)] += session.milliseconds;
+            visitHours(session, [&](const QDate &day, int, qint64 milliseconds) {
+                if (day <= today)
+                    days[day] += milliseconds;
+            });
     return days;
 }
 
 BookTotal bookTotal(const ActivityRecords &records, const QString &book, const QDate &today)
 {
     BookTotal total;
-    for (const auto &session : records.sessions)
-        if (session.book == book && countsAsSession(session) && localDate(session.started) <= today)
-            add(total, session);
-    describe(total, records);
+    const ActivitySession *latest = nullptr;
+    for (const auto &session : records.sessions) {
+        if (session.book != book || localDate(session.started) > today)
+            continue;
+        latest = &session;
+        if (countsAsSession(session))
+            add(total, session, session.milliseconds);
+    }
+    if (total.sessions)
+        describe(total, *latest, records);
     return total;
 }
 } // namespace kobalt::activity

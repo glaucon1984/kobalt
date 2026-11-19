@@ -97,7 +97,9 @@ bool FontSources::operator==(const FontSources &other) const
 bool EngineFontInputs::operator==(const EngineFontInputs &other) const
 {
     return sources == other.sources && fallbackFiles == other.fallbackFiles
-            && hyphenationDirectory == other.hyphenationDirectory;
+            && hyphenationDirectory == other.hyphenationDirectory
+            && excludedHyphenation == other.excludedHyphenation
+            && verifiedFontDigests == other.verifiedFontDigests;
 }
 
 QString fontFamilyKey(const QString &family)

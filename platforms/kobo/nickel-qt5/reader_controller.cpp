@@ -263,6 +263,10 @@ public:
                 if (valid)
                     kobalt::ui::prepareOpeningFonts(environment().assets);
                 attempt(false);
+                // The preload at ready skips while the assets are unchecked,
+                // which on a device often outlasts Nickel's startup.
+                if (valid && controller)
+                    controller->preloadLastBook();
             });
             attempt(false);
         });
@@ -441,6 +445,9 @@ public:
                            kobalt::qt::object({ { "startup_ms", double(elapsed.elapsed()) },
                                                 { "opener", fromOpener } }));
         candidate->finishPreviewMigration();
+        // Nickel has finished its startup. Get the book shown last ready, so
+        // tapping it opens at once.
+        candidate->preloadLastBook();
         nh_log("reader: native controller ready");
     }
 
@@ -479,6 +486,7 @@ int initialize()
     kobalt::setDiagnosticSystem(kobalt::nickel::diagnosticSystem());
     kobalt::initializeDiagnostics(QString::fromLatin1(configDir) + "/diagnostics",
                                   kobalt::diagnosticsRequested(QString::fromLatin1(configDir)));
+    kobalt::setDiagnosticsMarker(QString::fromLatin1(configDir));
     kobalt::initializeStandbyDiagnostics();
     kobalt::diagnostic(
             "startup-hooks",

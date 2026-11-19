@@ -605,15 +605,17 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     auto *tabGroup = new QButtonGroup(this);
     const char *tabNames[] = { "rrSettingsDisplay", "rrSettingsControls",     "rrSettingsDefaults",
                                "rrSettingsStyling", "rrSettingsDictionaries", "rrSettingsSystem",
-                               "rrSettingsAbout",   "rrSettingsKosync" };
+                               "rrSettingsAbout",   "rrSettingsKosync",       "rrSettingsDebug" };
     const ui::ControlIcon tabIcons[] = { ui::ControlIcon::Display,      ui::ControlIcon::Swipe,
                                          ui::ControlIcon::Undo,         ui::ControlIcon::Styling,
                                          ui::ControlIcon::Dictionaries, ui::ControlIcon::System,
-                                         ui::ControlIcon::About,        ui::ControlIcon::Sync };
+                                         ui::ControlIcon::About,        ui::ControlIcon::Sync,
+                                         ui::ControlIcon::Debug };
     const QStringList tabs = { strings::get("settings.display"),  strings::get("settings.controls"),
                                strings::get("settings.defaults"), strings::get("settings.styling"),
                                strings::get("settings.lookup"),   strings::get("settings.system"),
-                               strings::get("settings.about"),    strings::get("kosync.title") };
+                               strings::get("settings.about"),    strings::get("kosync.title"),
+                               strings::get("settings.debug") };
     for (int index = 0; index < tabs.size(); ++index) {
         auto *button = makeButton(this, settingsTabs, tabNames[index], tabs[index], [this, index] {
             const bool same = settingsPages->currentIndex() == index;
@@ -642,6 +644,11 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
             button->setEnabled(false);
             button->hide();
             settingsTabs->setStretch(index, 0);
+        }
+        // Debug mode shows it; see showDebug().
+        if (index == int(SettingsPage::Debug)) {
+            button->setEnabled(false);
+            button->hide();
         }
     }
     settingsTabs->removeWidget(settingsTabButtons[int(SettingsPage::Kosync)]);
@@ -738,6 +745,12 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     tappableLinksButton = ui::makeCaptionButton(controlsPage, nullptr, "rrTappableLinks",
                                                 strings::get("settings.tappable_links"), [] { });
     controlsRows->addWidget(tappableLinksButton);
+    section(controlsPage, controlsRows, "rrControlsAnnotationsSection",
+            strings::get("settings.section_annotations"));
+    annotationInteractionButton =
+            ui::makeCaptionButton(controlsPage, nullptr, "rrAnnotationInteraction",
+                                  strings::get("settings.annotation_interaction"), [] { });
+    controlsRows->addWidget(annotationInteractionButton);
     section(controlsPage, controlsRows, "rrControlsMenuSection",
             strings::get("settings.section_reading_menu"));
     menuViewButton = ui::makeCaptionButton(controlsPage, nullptr, "rrDefaultMenuView",
@@ -754,18 +767,23 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
                                     strings::get("settings.minimal_annotation_mode_description"));
     minimalAnnotationOption->hide();
     section(controlsPage, controlsRows, "rrControlsLightSection",
-            strings::get("settings.section_frontlight"));
+            strings::get(inputs.screenBrightness ? "light_panel.brightness"
+                                                 : "settings.section_frontlight"));
     const bool lightSupported = inputs.lightSupported;
-    edgeLightOption = check(controlsPage, "rrEdgeLight", strings::get("reader.edge_light"),
-                            !lightSupported ? strings::get("settings.unsupported_description")
-                                    : inputs.warmthSupported
-                                    ? strings::get("settings.edge_light_description")
-                                    : strings::get("settings.edge_brightness_description"));
+    edgeLightOption = check(
+            controlsPage, "rrEdgeLight",
+            strings::get(inputs.screenBrightness ? "reader.edge_brightness" : "reader.edge_light"),
+            !lightSupported ? strings::get("settings.unsupported_description")
+                    : inputs.warmthSupported
+                    ? strings::get("settings.edge_light_description")
+                    : strings::get("settings.edge_brightness_description"));
     edgeLightOption->setEnabled(lightSupported);
     controlsRows->addWidget(edgeLightOption);
-    lightGestureFeedbackOption = check(controlsPage, "rrLightGestureFeedback",
-                                       strings::get("settings.light_gesture_feedback"),
-                                       strings::get("settings.light_gesture_feedback_description"));
+    lightGestureFeedbackOption =
+            check(controlsPage, "rrLightGestureFeedback",
+                  strings::get(inputs.screenBrightness ? "settings.brightness_gesture_feedback"
+                                                       : "settings.light_gesture_feedback"),
+                  strings::get("settings.light_gesture_feedback_description"));
     lightGestureFeedbackOption->setEnabled(lightSupported);
     controlsRows->addWidget(lightGestureFeedbackOption);
     controlsRows->addStretch(1);
@@ -804,10 +822,11 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
             ui::makeCaptionButton(defaultsPage, resetRow, "rrRestoreDefaults",
                                   strings::get("reader.restore_appearance_defaults"), [this] {
                                       settingsPages->setCurrentIndex(int(SettingsPage::Defaults));
-                                      restoreDialog->fitCard();
-                                      restoreDialog->show();
-                                      restoreDialog->raise();
-                                      restoreDialog->setFocus();
+                                      auto *dialog = restoreConfirmation();
+                                      dialog->fitCard();
+                                      dialog->show();
+                                      dialog->raise();
+                                      dialog->setFocus();
                                   });
     // A list action paints its own label; a text link's underline does not belong here.
     readerStyle(resetDefaults, styles::font(metrics::text::secondary));
@@ -822,10 +841,11 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
             ui::makeCaptionButton(defaultsPage, presetsRow, "rrRestorePresets",
                                   strings::get("text_presets.restore"), [this] {
                                       settingsPages->setCurrentIndex(int(SettingsPage::Defaults));
-                                      restorePresetsDialog->fitCard();
-                                      restorePresetsDialog->show();
-                                      restorePresetsDialog->raise();
-                                      restorePresetsDialog->setFocus();
+                                      auto *dialog = restorePresetsConfirmation();
+                                      dialog->fitCard();
+                                      dialog->show();
+                                      dialog->raise();
+                                      dialog->setFocus();
                                   });
     readerStyle(resetPresets, styles::font(metrics::text::secondary));
     resetPresets->setFixedHeight(metrics::about::actionHeight);
@@ -901,28 +921,20 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     auto *systemRows = new QVBoxLayout(systemPage);
     systemRows->setContentsMargins(0, 0, 0, 0);
     systemRows->setSpacing(0);
-    section(systemPage, systemRows, "rrSystemIntegrationSection",
-            strings::get("settings.section_system_integration"));
+    if (inputs.showNativeReaderOptions)
+        section(systemPage, systemRows, "rrSystemIntegrationSection",
+                strings::get("settings.section_system_integration"));
     automaticOpeningOption = check(
             systemPage, "rrAutomaticBookOpening", strings::get("settings.automatic_book_opening"),
             inputs.automaticBookOpeningSupported
                     ? strings::get("settings.automatic_book_opening_description")
                     : strings::get("settings.unsupported_description"));
     automaticOpeningOption->setEnabled(inputs.automaticBookOpeningSupported);
+    automaticOpeningOption->setVisible(inputs.showNativeReaderOptions);
     systemRows->addWidget(automaticOpeningOption);
     if (inputs.automaticBookOpeningSupported) {
         // Turning automatic opening off sends every later book to Kobo's
         // reader, so ask first.
-        automaticOpeningDialog = new ui::ChoiceModal(
-                parent,
-                { strings::get("settings.automatic_book_opening_off_description"),
-                  strings::get("settings.automatic_book_opening_off_title"),
-                  {} },
-                { strings::get("common.cancel"), "rrKeepAutomaticBookOpening" },
-                { strings::get("settings.automatic_book_opening_off"),
-                  "rrConfirmAutomaticBookOpeningOff" });
-        automaticOpeningDialog->setObjectName("rrAutomaticBookOpeningConfirmation");
-        automaticOpeningDialog->setDimmed(true);
         connect(automaticOpeningOption, &QCheckBox::clicked, this, [this](bool checked) {
             if (checked) {
                 if (automaticOpeningChosen)
@@ -931,21 +943,12 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
             }
             // An unanswered confirmation must never turn the choice off.
             automaticOpeningOption->setChecked(true);
-            automaticOpeningDialog->fitCard();
-            automaticOpeningDialog->show();
-            automaticOpeningDialog->raise();
-            automaticOpeningDialog->secondaryButton()->setFocus();
+            auto *dialog = automaticOpeningConfirmation();
+            dialog->fitCard();
+            dialog->show();
+            dialog->raise();
+            dialog->secondaryButton()->setFocus();
         });
-        connect(automaticOpeningDialog->secondaryButton(), &QPushButton::clicked, this,
-                [this] { dismissAutomaticOpeningConfirmation(); });
-        connect(automaticOpeningDialog->primaryButton(), &QPushButton::clicked, this, [this] {
-            dismissAutomaticOpeningConfirmation();
-            if (pluginsSection)
-                pluginsSection->dismissDialogs();
-            if (automaticOpeningChosen)
-                automaticOpeningChosen(false);
-        });
-        automaticOpeningDialog->dismissed = [this] { dismissAutomaticOpeningConfirmation(); };
     }
     section(systemPage, systemRows, "rrSystemVisibilitySection",
             strings::get("settings.section_feature_visibility"));
@@ -972,32 +975,17 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
                                      strings::get("settings.disable_reader_standby"),
                                      strings::get("settings.disable_reader_standby_description"));
         systemRows->addWidget(disableStandbyOption);
-        standbyDialog = new ui::ChoiceModal(
-                parent,
-                { strings::get("settings.disable_reader_standby_warning"),
-                  strings::get("settings.disable_reader_standby_title"),
-                  {} },
-                { strings::get("common.cancel"), "rrKeepReaderStandby" },
-                { strings::get("settings.disable_reader_standby"), "rrConfirmDisableStandby" });
-        standbyDialog->setObjectName("rrStandbyConfirmation");
-        standbyDialog->setDimmed(true);
         connect(disableStandbyOption, &QCheckBox::clicked, this, [this](bool checked) {
             if (!checked)
                 return;
             // An unanswered confirmation must never enable the preference.
             disableStandbyOption->setChecked(false);
-            standbyDialog->fitCard();
-            standbyDialog->show();
-            standbyDialog->raise();
-            standbyDialog->secondaryButton()->setFocus();
+            auto *dialog = standbyConfirmation();
+            dialog->fitCard();
+            dialog->show();
+            dialog->raise();
+            dialog->secondaryButton()->setFocus();
         });
-        connect(standbyDialog->secondaryButton(), &QPushButton::clicked, this,
-                [this] { dismissStandbyConfirmation(); });
-        connect(standbyDialog->primaryButton(), &QPushButton::clicked, this, [this] {
-            disableStandbyOption->setChecked(true);
-            dismissStandbyConfirmation();
-        });
-        standbyDialog->dismissed = [this] { dismissStandbyConfirmation(); };
     }
     if (inputs.wifiPowerSaverSupported) {
         wifiPowerSaverOption =
@@ -1063,6 +1051,12 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
                 new PluginsSection(systemPage, systemRows, parent, inputs.pluginFolderLabel,
                                    [](ui::CaptionButton *row) { styleListAction(row); });
     }
+    section(systemPage, systemRows, "rrSystemDeveloperSection",
+            strings::get("settings.section_developer"));
+    debugModeOption = check(systemPage, "rrDebugMode", strings::get("settings.debug_mode"),
+                            strings::get("settings.debug_mode_description"));
+    systemRows->addWidget(debugModeOption);
+    connect(debugModeOption, &QCheckBox::toggled, this, [this](bool on) { showDebug(on); });
     systemRows->addStretch(1);
     aboutPage = new AboutPage(settingsPages);
     settingsPages->addWidget(aboutPage);
@@ -1085,8 +1079,48 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     }
     dictionaries = new DictionariesPage(settingsPages);
     settingsPages->insertWidget(int(SettingsPage::Dictionaries), dictionaries);
-    kosync = new KosyncPage(settingsPages, parent, inputs.keyboard);
+    kosync = new KosyncPage(settingsPages, inputs.window ? inputs.window : parent, inputs.keyboard);
     settingsPages->addWidget(kosync);
+    auto *debugPage = new QWidget(settingsPages);
+    debugPage->setObjectName("rrDebugOptions");
+    settingsPages->addWidget(debugPage);
+    auto *debugRows = new QVBoxLayout(debugPage);
+    debugRows->setContentsMargins(0, 0, 0, 0);
+    debugRows->setSpacing(0);
+    section(debugPage, debugRows, "rrDebugCacheSection", strings::get("debug.section_caches"));
+    evictBookCacheButton = ui::makeCaptionButton(debugPage, debugRows, "rrDebugEvictCache",
+                                                 strings::get("debug.evict_cache"), [] { });
+    evictBookCacheButton->setDescription(strings::get("debug.evict_cache_description"));
+    clearCachesButton = ui::makeCaptionButton(debugPage, debugRows, "rrDebugClearCaches",
+                                              strings::get("debug.clear_caches"), [] { });
+    clearCachesButton->setDescription(strings::get("debug.clear_caches_description"));
+    section(debugPage, debugRows, "rrDebugDiagnosticsSection",
+            strings::get("debug.section_diagnostics"));
+    detailedDiagnosticsOption = check(debugPage, "rrDebugDetailedDiagnostics",
+                                      strings::get("debug.detailed_diagnostics"),
+                                      strings::get("debug.detailed_diagnostics_description"));
+    debugRows->addWidget(detailedDiagnosticsOption);
+    clearDiagnosticLogButton = ui::makeCaptionButton(debugPage, debugRows, "rrDebugClearLog",
+                                                     strings::get("debug.clear_log"), [] { });
+    section(debugPage, debugRows, "rrDebugDeviceSection", strings::get("debug.section_device"));
+    debugVersionButton = ui::makeCaptionButton(debugPage, debugRows, "rrDebugVersion",
+                                               strings::get("debug.version"), [] { });
+    debugQtButton = ui::makeCaptionButton(debugPage, debugRows, "rrDebugQt",
+                                          strings::get("debug.qt"), [] { });
+    debugFirmwareButton = ui::makeCaptionButton(debugPage, debugRows, "rrDebugFirmware",
+                                                strings::get("debug.firmware"), [] { });
+    debugCoresButton = ui::makeCaptionButton(debugPage, debugRows, "rrDebugCores",
+                                             strings::get("debug.cores"), [] { });
+    debugStorageButton = ui::makeCaptionButton(debugPage, debugRows, "rrDebugStorage",
+                                               strings::get("debug.storage"), [] { });
+    // The facts open nothing: a tap reads them again.
+    for (auto *fact : { debugVersionButton, debugQtButton, debugFirmwareButton, debugCoresButton,
+                        debugStorageButton })
+        fact->setChevron(false);
+    // As Restore defaults: the action asks before it closes the book.
+    evictBookCacheButton->setCaption(strings::get("settings.asks_first"));
+    clearCachesButton->setCaption(strings::get("settings.asks_first"));
+    debugRows->addStretch(1);
     zenPage = new QWidget(settingsPages);
     zenPage->setObjectName("rrZenSettings");
     settingsPages->addWidget(zenPage);
@@ -1133,37 +1167,6 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
     // The version reads as a description, not as a chosen value.
     zenAboutButton->setDescription(aboutPage->findChild<QLabel *>("rrAboutVersion")->text());
     zenRows->addStretch(1);
-    restoreDialog = new ui::ChoiceModal(
-            parent,
-            { strings::get(
-                      "reader.your_reading_position_stays_the_same_the_defaults_apply_when_you_c"),
-              strings::get("reader.restore_appearance_defaults_prompt"),
-              {},
-              "rrRestoreTitle" },
-            { strings::get("common.cancel"), "rrKeepDefaults" },
-            { strings::get("reader.restore_defaults"), "rrConfirmDefaults" });
-    restoreDialog->setObjectName("rrRestoreConfirmation");
-    restoreDialog->setDimmed(true);
-    restoreDialog->descriptionLabel()->setObjectName("rrRestoreDescription");
-    keepDefaults = restoreDialog->secondaryButton();
-    confirmDefaults = restoreDialog->primaryButton();
-    connect(keepDefaults, &QPushButton::clicked, this, [this] { dismissRestore(); });
-    connect(confirmDefaults, &QPushButton::clicked, this, [this] { dismissRestore(); });
-    restoreDialog->dismissed = [this] { dismissRestore(); };
-    restorePresetsDialog = new ui::ChoiceModal(
-            parent,
-            { strings::get("text_presets.restore_detail"),
-              strings::get("text_presets.restore_prompt"),
-              {} },
-            { strings::get("common.cancel"), "rrKeepPresets" },
-            { strings::get("text_presets.restore_confirm"), "rrConfirmPresets" });
-    restorePresetsDialog->setObjectName("rrRestorePresetsConfirmation");
-    restorePresetsDialog->setDimmed(true);
-    keepPresets = restorePresetsDialog->secondaryButton();
-    confirmPresets = restorePresetsDialog->primaryButton();
-    connect(keepPresets, &QPushButton::clicked, this, [this] { dismissRestore(); });
-    connect(confirmPresets, &QPushButton::clicked, this, [this] { dismissRestore(); });
-    restorePresetsDialog->dismissed = [this] { dismissRestore(); };
     settingsError = new ui::InterfaceLabel(this);
     settingsError->setWordWrap(true);
     settingsError->hide();
@@ -1175,14 +1178,24 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
         optionPage = 0;
     });
     settingsTabButtons.first()->setChecked(true);
-    QVector<ui::DescribedOption *> options = {
-        hideNonlinearOption,    inpageFootnotesOption,      darkOption,
-        bionicOption,           landscapeColumnsOption,     animationOption,
-        edgeLightOption,        lightGestureFeedbackOption, denseGraphOption,
-        hideTabLabelsOption,    wifiPowerSaverOption,       disableStandbyOption,
-        automaticOpeningOption, minimalAnnotationOption,    hideBookOnSleepOption,
-        saveWordsOption
-    };
+    QVector<ui::DescribedOption *> options = { hideNonlinearOption,
+                                               inpageFootnotesOption,
+                                               darkOption,
+                                               bionicOption,
+                                               landscapeColumnsOption,
+                                               animationOption,
+                                               edgeLightOption,
+                                               lightGestureFeedbackOption,
+                                               denseGraphOption,
+                                               hideTabLabelsOption,
+                                               wifiPowerSaverOption,
+                                               disableStandbyOption,
+                                               automaticOpeningOption,
+                                               minimalAnnotationOption,
+                                               hideBookOnSleepOption,
+                                               saveWordsOption,
+                                               debugModeOption,
+                                               detailedDiagnosticsOption };
     options.append(openingCoverOption);
     if (pluginsSection) {
         options.append(pluginsSection->usePluginsOption());
@@ -1222,6 +1235,7 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
                           tapZonesButton,
                           chapterGroupsButton,
                           tappableLinksButton,
+                          annotationInteractionButton,
                           navigationBarButton,
                           menuViewButton,
                           disabledFeaturesButton,
@@ -1249,7 +1263,15 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
                           zenSyncButton,
                           zenAutomaticButton,
                           zenAboutButton,
-                          textForNewBooksButton }) {
+                          textForNewBooksButton,
+                          evictBookCacheButton,
+                          clearCachesButton,
+                          clearDiagnosticLogButton,
+                          debugVersionButton,
+                          debugQtButton,
+                          debugFirmwareButton,
+                          debugCoresButton,
+                          debugStorageButton }) {
         styleListAction(button);
         // The refresh row's caption shows its current choice, set when Settings opens.
         if (button == resetDefaults || button == resetPresets)
@@ -1258,7 +1280,8 @@ SettingsPanel::SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs)
             || button == paragraphSpacingButton || button == trackingButton
             || button == hangingPunctuationButton || button == widowsOrphansButton
             || button == verticalSpacingButton || button == zenSyncButton
-            || button == zenAboutButton || button == renderingButton) {
+            || button == zenAboutButton || button == renderingButton
+            || button == evictBookCacheButton || button == clearCachesButton) {
             button->setMaximumHeight(QWIDGETSIZE_MAX);
             readerStyle(
                     button,
@@ -1548,6 +1571,7 @@ SettingsPanel::~SettingsPanel()
     delete restoreDialog;
     delete restorePresetsDialog;
     delete standbyDialog;
+    delete automaticOpeningDialog;
     delete sheet;
 }
 
@@ -1954,8 +1978,10 @@ void SettingsPanel::showRenderingModes(const QString &current,
         return;
     auto *choices = openChoiceSheet("rrRendering", strings::get("settings.rendering"),
                                     strings::get("settings.rendering_description"));
-    // "fast" is not offered for now: Hybrid replaces it.
-    const QStringList modes{ "hybrid", /* "fast", */ "accurate" };
+    // Hybrid replaces Fast. Debug mode still offers it.
+    QStringList modes{ "hybrid", "accurate" };
+    if (debugModeOption && debugModeOption->isChecked())
+        modes.insert(1, "fast");
     for (const auto &mode : modes) {
         choices->add(QString("rrRendering_%1").arg(mode), renderingModeLabel(mode),
                      strings::get(mode == "accurate" ? "settings.rendering_accurate_description"
@@ -2508,6 +2534,117 @@ void SettingsPanel::presentSheet()
         sheetShown(sheet);
 }
 
+void SettingsPanel::dialogCreated(ui::ChoiceModal *dialog)
+{
+    dialog->setDimmed(true);
+    dialog->hide();
+    if (widgetCreated)
+        widgetCreated(dialog);
+}
+
+ui::ChoiceModal *SettingsPanel::restoreConfirmation()
+{
+    if (restoreDialog)
+        return restoreDialog;
+    restoreDialog = new ui::ChoiceModal(
+            parentWidget(),
+            { strings::get(
+                      "reader.your_reading_position_stays_the_same_the_defaults_apply_when_you_c"),
+              strings::get("reader.restore_appearance_defaults_prompt"),
+              {},
+              "rrRestoreTitle" },
+            { strings::get("common.cancel"), "rrKeepDefaults" },
+            { strings::get("reader.restore_defaults"), "rrConfirmDefaults" });
+    restoreDialog->setObjectName("rrRestoreConfirmation");
+    restoreDialog->descriptionLabel()->setObjectName("rrRestoreDescription");
+    connect(restoreDialog->secondaryButton(), &QPushButton::clicked, this,
+            [this] { dismissRestore(); });
+    connect(restoreDialog->primaryButton(), &QPushButton::clicked, this, [this] {
+        dismissRestore();
+        if (restoreDefaultsConfirmed)
+            restoreDefaultsConfirmed();
+    });
+    restoreDialog->dismissed = [this] { dismissRestore(); };
+    dialogCreated(restoreDialog);
+    return restoreDialog;
+}
+
+ui::ChoiceModal *SettingsPanel::restorePresetsConfirmation()
+{
+    if (restorePresetsDialog)
+        return restorePresetsDialog;
+    restorePresetsDialog = new ui::ChoiceModal(
+            parentWidget(),
+            { strings::get("text_presets.restore_detail"),
+              strings::get("text_presets.restore_prompt"),
+              {} },
+            { strings::get("common.cancel"), "rrKeepPresets" },
+            { strings::get("text_presets.restore_confirm"), "rrConfirmPresets" });
+    restorePresetsDialog->setObjectName("rrRestorePresetsConfirmation");
+    connect(restorePresetsDialog->secondaryButton(), &QPushButton::clicked, this,
+            [this] { dismissRestore(); });
+    connect(restorePresetsDialog->primaryButton(), &QPushButton::clicked, this, [this] {
+        dismissRestore();
+        if (restorePresetsConfirmed)
+            restorePresetsConfirmed();
+    });
+    restorePresetsDialog->dismissed = [this] { dismissRestore(); };
+    dialogCreated(restorePresetsDialog);
+    return restorePresetsDialog;
+}
+
+ui::ChoiceModal *SettingsPanel::automaticOpeningConfirmation()
+{
+    if (automaticOpeningDialog)
+        return automaticOpeningDialog;
+    // Turning automatic opening off sends every later book to Kobo's
+    // reader, so ask first.
+    automaticOpeningDialog =
+            new ui::ChoiceModal(parentWidget(),
+                                { strings::get("settings.automatic_book_opening_off_description"),
+                                  strings::get("settings.automatic_book_opening_off_title"),
+                                  {} },
+                                { strings::get("common.cancel"), "rrKeepAutomaticBookOpening" },
+                                { strings::get("settings.automatic_book_opening_off"),
+                                  "rrConfirmAutomaticBookOpeningOff" });
+    automaticOpeningDialog->setObjectName("rrAutomaticBookOpeningConfirmation");
+    connect(automaticOpeningDialog->secondaryButton(), &QPushButton::clicked, this,
+            [this] { dismissAutomaticOpeningConfirmation(); });
+    connect(automaticOpeningDialog->primaryButton(), &QPushButton::clicked, this, [this] {
+        dismissAutomaticOpeningConfirmation();
+        if (pluginsSection)
+            pluginsSection->dismissDialogs();
+        if (automaticOpeningChosen)
+            automaticOpeningChosen(false);
+    });
+    automaticOpeningDialog->dismissed = [this] { dismissAutomaticOpeningConfirmation(); };
+    dialogCreated(automaticOpeningDialog);
+    return automaticOpeningDialog;
+}
+
+ui::ChoiceModal *SettingsPanel::standbyConfirmation()
+{
+    if (standbyDialog)
+        return standbyDialog;
+    standbyDialog = new ui::ChoiceModal(
+            parentWidget(),
+            { strings::get("settings.disable_reader_standby_warning"),
+              strings::get("settings.disable_reader_standby_title"),
+              {} },
+            { strings::get("common.cancel"), "rrKeepReaderStandby" },
+            { strings::get("settings.disable_reader_standby"), "rrConfirmDisableStandby" });
+    standbyDialog->setObjectName("rrStandbyConfirmation");
+    connect(standbyDialog->secondaryButton(), &QPushButton::clicked, this,
+            [this] { dismissStandbyConfirmation(); });
+    connect(standbyDialog->primaryButton(), &QPushButton::clicked, this, [this] {
+        disableStandbyOption->setChecked(true);
+        dismissStandbyConfirmation();
+    });
+    standbyDialog->dismissed = [this] { dismissStandbyConfirmation(); };
+    dialogCreated(standbyDialog);
+    return standbyDialog;
+}
+
 void SettingsPanel::dismissRestore()
 {
     if (restoreDialog && !restoreDialog->isHidden()) {
@@ -2567,6 +2704,22 @@ void SettingsPanel::showDictionaries(bool visible)
     fitRail();
 }
 
+void SettingsPanel::showDebug(bool visible)
+{
+    auto *button = settingsTabButtons[int(SettingsPage::Debug)];
+    if (button->isVisibleTo(this) == visible && button->isEnabled() == visible)
+        return;
+    button->setVisible(visible);
+    button->setEnabled(visible);
+    if (!visible && settingsPages->currentIndex() == int(SettingsPage::Debug))
+        settingsPages->setCurrentIndex(int(SettingsPage::System));
+    fitRail();
+    // The checkbox changes the tabs while Settings is open: fit the rail to
+    // the panel again, as Hidden features does.
+    if (isVisible() && refitRequested)
+        refitRequested();
+}
+
 void SettingsPanel::updateFeatureOptions()
 {
     const char *names[] = { "navigate", "stats", "annotations",    "bookmarks",
@@ -2581,6 +2734,9 @@ void SettingsPanel::updateFeatureOptions()
     const bool navigate = features::enabled(featurePreferences, features::Navigate);
     const bool stats = features::enabled(featurePreferences, features::Stats);
     navigationBarButton->setVisible(navigate);
+    const bool annotations = features::enabled(featurePreferences, features::Annotations);
+    annotationInteractionButton->setVisible(annotations);
+    findChild<QWidget *>("rrControlsAnnotationsSection")->setVisible(annotations);
     menuViewButton->setVisible(navigate || stats);
     denseGraphOption->setVisible(stats);
     saveWordsOption->setVisible(features::enabled(featurePreferences, features::Words));

@@ -201,11 +201,13 @@ static void hybridFontEdits(const QString &path, quint16 port)
     const auto exact = labels(whole), estimated = labels(hybrid);
     require(exact.size() == positions.size() && estimated.size() == exact.size(),
             "Cannot compare saved-word page numbers before the handoff");
+    // A ready whole book gives chapter mode its exact pages, so the labels
+    // already agree. A lookup during the handoff must still get the exact one.
     int word = 0;
-    while (word < positions.size() && (exact[word] < 0 || estimated[word] == exact[word]))
+    while (word < positions.size() && exact[word] < 0)
         ++word;
-    require(word < positions.size(),
-            "The fixture needs a saved position with a different estimate");
+    require(word < positions.size(), "The fixture needs a saved position with a page");
+    require(estimated == exact, "Chapter mode did not take the pages of the ready whole book");
     // The worker receives this lookup before the adopting turn. Its reply
     // cannot reach the UI until the turn has been requested.
     bool wordLookupFinished = false;
@@ -310,13 +312,19 @@ static void mixedSpreadHandoff()
         while (hybrid.busy() || whole.busy())
             frame.exec();
         require(hybrid.image() == whole.image(), "The turn after the handoff lost its next spread");
+        // The rendering mode is global: each session resizes in its own.
         hybrid.resize(portrait);
+        renderingMode::setOverride(0);
         whole.resize(portrait);
+        renderingMode::setOverride(2);
         while (hybrid.busy() || whole.busy())
             frame.exec();
         require(hybrid.image() == whole.image(),
                 "Rotating after adoption lost the visible passage");
+        require(hybrid.state().contains("book_fraction"),
+                "Rotating after adoption must go back to the chapter, not lay out the whole book");
         if (direction > 0) {
+            renderingMode::setOverride(0);
             whole.resize(landscape);
             frame.exec();
             require(whole.go(0), "Cannot restore the reference cover");
@@ -1458,13 +1466,20 @@ int run(int argc, char **argv)
             require(report.revision == latestRender.revision && report.percent >= 0
                             && report.percent <= 100,
                     "Stale relayout progress reached the replacement job");
-            require(report.overallPercent() >= overall && report.overallPercent() <= 100,
+            require(report.overallPercent() >= overall && report.overallPercent() < 100,
                     "Relayout progress moved backwards at a phase boundary");
             overall = report.overallPercent();
             formatted |= report.stage == OpeningStage::Pages;
         }
         require(formatted && !session->renderProgress().active,
                 "Completed relayout lost formatting progress or kept its progress active");
+        RenderProgress pagination;
+        pagination.stage = OpeningStage::Styles;
+        pagination.percent = 100;
+        require(pagination.overallPercent() == 10, "Styles used the pagination share");
+        pagination.stage = OpeningStage::Pages;
+        pagination.percent = 50;
+        require(pagination.overallPercent() == 54, "Pagination has the wrong share of progress");
         auto bionicSettings = session->state();
         const auto applyBionic = [&](const QString &mode) {
             bionicSettings["bold_reading"] = mode;

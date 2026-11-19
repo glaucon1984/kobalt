@@ -596,9 +596,9 @@ void Reader::openBookmarks()
         return;
     }
     session->cancelPendingTurn();
-    if (general->isVisible() || appearanceEdit.panelOpen()) {
+    if (settingsVisible() || appearanceEdit.panelOpen()) {
         appearanceEdit.request(AppearanceDestination::Bookmarks);
-        if (general->isVisible())
+        if (settingsVisible())
             applySettings();
         else
             finishPreview();
@@ -768,11 +768,11 @@ void Reader::syncPinnedBookmarks()
     const bool visible = features::enabled(preferences, features::Bookmarks) && !pins.isEmpty()
             && topControls->isVisible() && !session->busy() && !lifecycleHidden && !closing
             && !services.suspended() && !annotationMode && !seekOpen && !appearanceEdit.panelOpen()
-            && !general->isVisible() && !menu->isVisible() && !choices->isVisible()
-            && !lightPopup->isVisible() && !bookmarkList->isVisible()
-            && !acknowledgments->isVisible() && !searchPanel->isVisible()
-            && !dictionaryPanel->isVisible() && !linksActive() && !lookupPending && !syncDialog
-            && !kosyncDialog && !finishDialog && !(fieldChooser && fieldChooser->isVisible())
+            && !settingsVisible() && !menu->isVisible() && !choices->isVisible()
+            && !lightPopup->isVisible() && !bookmarkList->isVisible() && !acknowledgmentsVisible()
+            && !searchPanel->isVisible() && !dictionaryPanel->isVisible() && !linksActive()
+            && !lookupPending && !syncDialog && !kosyncDialog && !finishDialog
+            && !(fieldChooser && fieldChooser->isVisible())
             && !(headerFooterView && headerFooterView->isVisible());
     pinnedBookmarks->setVisible(visible);
     if (!visible)
@@ -887,7 +887,8 @@ QString Reader::refreshLabel(kobalt::ScreenRefresh mode)
 // The row's caption shows the mode that Settings saves when it closes.
 void Reader::showScreenRefresh()
 {
-    refreshButton->setCaption(refreshLabel(screenRefreshMode).toUpper());
+    if (refreshButton)
+        refreshButton->setCaption(refreshLabel(screenRefreshMode).toUpper());
 }
 
 // Writes the preferences. A failed write keeps the old ones and shows the
@@ -895,13 +896,17 @@ void Reader::showScreenRefresh()
 bool Reader::savePreferences(const QJsonObject &next)
 {
     if (!writePreferences(next)) {
-        settingsError->setText(strings::get("reader.could_not_save_reader_settings"));
-        settingsError->show();
+        if (settingsError) {
+            settingsError->setText(strings::get("reader.could_not_save_reader_settings"));
+            settingsError->show();
+        }
         return false;
     }
     preferences = next;
-    settingsError->clear();
-    settingsError->hide();
+    if (settingsError) {
+        settingsError->clear();
+        settingsError->hide();
+    }
     return true;
 }
 
@@ -975,6 +980,8 @@ QString sessionTimeoutLabel(int minutes)
 
 void Reader::showSleepScreen()
 {
+    if (!general)
+        return;
     sessionTimeoutButton->setCaption(
             sessionTimeoutLabel(sessionTimeout::minutes(preferences)).toUpper());
     sleepScreenButton->setCaption(
@@ -1136,22 +1143,26 @@ void Reader::openSleepEditor(sleep::Design design)
         loadGalleryCover();
     editor->setWallpapers(sleepWallpaperNames);
     const QPointer<SleepEditor> guard(editor);
-    editor->wallpaperWanted = [this, guard](const QString &name) {
+    const auto requestWallpapers = [this, guard](const QStringList &wanted, QSize bound) {
         if (!session || services.sleepWallpaperDirectories.isEmpty())
             return;
-        const QSize screen = page ? page->size() : size();
-        const int side = qMax(screen.width(), screen.height());
-        session->sleepWallpapers(services.sleepWallpaperDirectories, { name }, QSize(side, side),
-                                 [this, guard, name](QStringList names, QVector<QImage> images) {
-                                     sleepWallpaperNames = names;
-                                     if (!guard)
-                                         return;
-                                     guard->setWallpapers(names);
-                                     guard->setWallpaper(name, images.value(0));
-                                 });
+        session->sleepWallpapers(
+                services.sleepWallpaperDirectories, wanted, bound,
+                [this, guard, wanted, bound](QStringList names, QVector<QImage> images) {
+                    sleepWallpaperNames = names;
+                    if (!guard)
+                        return;
+                    guard->setWallpapers(names);
+                    if (!wanted.isEmpty())
+                        guard->setWallpaper(wanted.first(), bound, images.value(0));
+                });
     };
-    // The list of files, for the background row.
-    editor->wallpaperWanted(setup.custom.sleep.wallpaper);
+    editor->wallpaperWanted = [requestWallpapers](const QString &name, QSize bound) {
+        requestWallpapers({ name }, bound);
+    };
+    // List the choices before the first paint. Only a visible wallpaper needs decoding.
+    if (!setup.arrange)
+        requestWallpapers({}, {});
     editor->help = [this] { showSleepWallpaperHelp(); };
     editor->done = [this, guard] {
         if (!guard)
@@ -1469,20 +1480,12 @@ void Reader::openSleepChoice(const QString &name, const QString &optionPrefix,
     if (sleepPopup) {
         return;
     }
-    namespace chrome = metrics::chrome;
-    sleepPopup = new ui::ModalOverlay(this);
-    sleepPopup->setObjectName(name + "Popup");
-    sleepPopup->setDimmed(true);
-    sleepPopup->setGeometry(rect());
+    const auto sheet = ui::makeChoiceSheet(this, name, heading, description, name + "Title",
+                                            name + "Hint");
+    sleepPopup = sheet.overlay;
     sleepPopup->dismissed = [this] { closeSleepScreen(); };
-    auto *card = sleepPopup->card();
-    card->heading(heading, description, name + "Title", name + "Hint");
-    const int cardWidth =
-            qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance);
-    auto *choices = new ui::RadioList(card);
-    choices->setObjectName(name + "Choices");
+    auto *choices = sheet.list;
     choices->setUniformRows(false);
-    choices->setMinimumRowHeight(chrome::listActionHeight);
     for (const auto &option : options)
         choices->add(optionPrefix + option.value, option.label, option.explanation)
                 ->setEnabled(option.enabled);
@@ -1491,50 +1494,7 @@ void Reader::openSleepChoice(const QString &name, const QString &optionPrefix,
         chosen(index);
         closeSleepScreen();
     };
-    card->rows()->addWidget(choices);
-    choices->setFixedHeight(choices->heightForWidth(cardWidth - 4));
-    card->fitToWidth(cardWidth);
-    const int available = height() - 2 * metrics::notice::sideClearance;
-    if (card->height() > available) {
-        auto *pager = new ui::PagerBar(card, name);
-        card->rows()->addWidget(pager);
-        const int fixed = card->height() - choices->height();
-        const int room = qMax(1, available - fixed - int(chrome::actionHeight));
-        QVector<int> starts{ 0 };
-        int used = 0;
-        for (int row = 0; row < choices->options().size(); ++row) {
-            const int rowHeight = choices->rowHeight(row, cardWidth - 4);
-            if (used && used + rowHeight > room) {
-                starts.append(row);
-                used = 0;
-            }
-            used += rowHeight;
-        }
-        auto page = std::make_shared<int>(0);
-        for (int index = 0; index < starts.size(); ++index)
-            if (starts[index] <= current)
-                *page = index;
-        const auto showPage = [this, choices, pager, card, cardWidth, starts, room, page] {
-            const int first = starts[*page];
-            const int last =
-                    *page + 1 < starts.size() ? starts[*page + 1] : int(choices->options().size());
-            choices->showRows(first, last - first);
-            choices->setFixedHeight(room);
-            pager->setPage(*page, starts.size());
-            card->fitToWidth(cardWidth);
-            sleepPopup->centerCard();
-        };
-        connect(pager->previous, &QPushButton::clicked, this, [page, pager, showPage] {
-            *page = pager->turnTarget(-1);
-            showPage();
-        });
-        connect(pager->next, &QPushButton::clicked, this, [page, pager, showPage] {
-            *page = pager->turnTarget(1);
-            showPage();
-        });
-        showPage();
-    }
-    sleepPopup->centerCard();
+    ui::fitChoiceSheet(sleepPopup, choices);
     for (auto *widget : sleepPopup->findChildren<QWidget *>()) {
         textRefresh(widget);
     }
@@ -1600,7 +1560,8 @@ QString navigationExplanation(pageNavigation::Mode mode)
 
 void Reader::showTapZones()
 {
-    tapZonesButton->setCaption(tapZoneLabel(pageNavigation::tapLayout(preferences)).toUpper());
+    if (tapZonesButton)
+        tapZonesButton->setCaption(tapZoneLabel(pageNavigation::tapLayout(preferences)).toUpper());
 }
 
 void Reader::openTapZones()
@@ -1663,6 +1624,8 @@ void Reader::openTapZones()
 
 void Reader::showPageNavigation()
 {
+    if (!pageNavigationButton)
+        return;
     pageNavigationButton->setCaption(
             navigationLabel(pageNavigation::mode(preferences, services.pageButtons())).toUpper());
 }
@@ -1757,6 +1720,8 @@ void Reader::openPageNavigation()
 
 void Reader::showChapterGroups()
 {
+    if (!chapterGroupsButton)
+        return;
     chapterGroupsButton->setCaption(
             strings::get(preferences.value("chapter_groups").toString() == "off"
                                  ? "settings.chapter_groups_off"
@@ -1794,7 +1759,8 @@ void Reader::openChapterGroups()
 void Reader::showNavigationBarButtons()
 {
     const auto mode = pageNavigation::barButtons(preferences);
-    navigationBarButton->setCaption(barButtonsLabel(mode).toUpper());
+    if (navigationBarButton)
+        navigationBarButton->setCaption(barButtonsLabel(mode).toUpper());
     pageScrubber->setChapterJumps(mode == pageNavigation::BarButtons::Chapters);
 }
 
@@ -1857,7 +1823,8 @@ QString tappableLinksDescription(const QString &mode)
 void Reader::showTappableLinks()
 {
     const auto mode = preferences.value("tappable_links").toString("footnotes");
-    tappableLinksButton->setCaption(tappableLinksLabel(mode).toUpper());
+    if (tappableLinksButton)
+        tappableLinksButton->setCaption(tappableLinksLabel(mode).toUpper());
 }
 
 void Reader::openTappableLinks()
@@ -1881,10 +1848,54 @@ void Reader::openTappableLinks()
                     });
 }
 
+namespace {
+QString annotationInteractionLabel(const QString &mode)
+{
+    return strings::get(mode == "quick" ? "settings.annotation_interaction_quick"
+                                        : "settings.annotation_interaction_toggle");
+}
+} // namespace
+
+void Reader::showAnnotationInteraction()
+{
+    const auto mode = preferences.value("annotation_interaction").toString("toggle");
+    if (annotationInteractionButton)
+        annotationInteractionButton->setCaption(annotationInteractionLabel(mode).toUpper());
+}
+
+void Reader::openAnnotationInteraction()
+{
+    const QStringList modes{ "toggle", "quick" };
+    QVector<ChoiceOption> options;
+    for (const auto &mode : modes)
+        options.append(
+                { "rrAnnotationInteraction_" + mode, annotationInteractionLabel(mode),
+                  strings::get(mode == "quick"
+                                       ? "settings.annotation_interaction_quick_description"
+                                       : "settings.annotation_interaction_toggle_description") });
+    openChoicePopup(annotationInteractionPopup, "rrAnnotationInteraction",
+                    strings::get("settings.annotation_interaction"),
+                    strings::get("settings.annotation_interaction_description"), options,
+                    modes.indexOf(preferences.value("annotation_interaction").toString("toggle")),
+                    [this, modes](int index) {
+                        auto next = preferences;
+                        next["annotation_interaction"] = modes[index];
+                        if (savePreferences(next)) {
+                            showAnnotationInteraction();
+                            // A mode that the toggle opened ends with the toggle.
+                            if (quickAnnotations() && annotationMode)
+                                leaveAnnotations(false);
+                            syncReadingControls();
+                        }
+                        closePopup(annotationInteractionPopup);
+                    });
+}
+
 void Reader::showMenuView()
 {
     const auto mode = pageNavigation::menuView(preferences);
-    menuViewButton->setCaption(menuViewLabel(mode).toUpper());
+    if (menuViewButton)
+        menuViewButton->setCaption(menuViewLabel(mode).toUpper());
 }
 
 void Reader::openMenuView()

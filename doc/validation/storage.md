@@ -7,15 +7,14 @@ These checks cover the profile database, record writers, saves at close and slee
 | Test | Checks |
 | --- | --- |
 | `model.preview-store` | Private preview filenames, exact PNG pixels, invalidation, memory and storage limits, one-time old-cache cleanup, interrupted migration and pending scan recovery, completion persistence, failed and special marker reads, hidden PNGs, preservation of unrelated files and symlinks, and ancestor replacement at the deletion boundary |
-| `model.profile-storage` | The SQLite profile: import, schema checks, single ownership, recovery, backups, synced commits and preservation of beta 8 caches during profile preparation and Blaze cache clearing |
-| `model.record-writer` | Queue order, replacement of pending snapshots, delivery of each independent preference edit and its result, cancellation and wait limits |
+| `model.profile-storage` | The SQLite profile: USB export before first use, import, schema checks, single ownership, recovery, backups, synced commits and preservation of beta 8 caches during profile preparation and Blaze cache clearing |
+| `model.record-writer` | Queue order, replacement of pending snapshots, delivery of each independent preference edit and its result, cancellation, wait limits, and retry after a simulated worker launch failure |
 | `desktop.settingsKeepPendingLibrarySort` | Select Author in the Library, delay its save until the Reader opens, switch on dark mode and verify both settings on disk |
 | `model.save-wait` | Save waits: a report runs the waiting check from the event loop, also from a worker thread; the writer thread reports each write; the fallback timer covers a save that does not report |
 | `model.reading-history` | Reading history, its migration and its recovery |
 | `session.reading-book` | Saved book state, background saves and retries, reading time and history in the session |
-| `platform.nickel-event-save` | Nickel's event flush against a competing database writer |
-| `platform.nickel-reading-save` | The native reading-time save worker: queued intervals, held flushes and timeouts |
-| `lifecycle.closeWaitsFor*`, `lifecycle.closeRetriesRequiredNativeSaves`, `lifecycle.sleepWaitsForNativeTimeBeforePosition` | Saves and their order at close and sleep |
+| `platform.nickel-save-trace` | The `native-save-slow` warning of a slow Nickel save, with its stages |
+| `lifecycle.closeWaitsFor*`, `lifecycle.closeWritesPositionBeforeNativeTime`, `lifecycle.closeRetriesRequiredNativeSaves`, `lifecycle.sleepWritesPositionBeforeNativeTime` | Saves and their order at close and sleep |
 | `lifecycle.background*`, `lifecycle.standaloneReadingHistory`, `lifecycle.activityBatchesAndLowBattery` | Reading history and activity saves through background, resume and low battery |
 
 `lifecycle.activityBatchesAndLowBattery` waits for standby to request the activity save after the page turn's queued refresh. It checks standby both before and after a failed background save completes. Standby may resume during retry cooldown only after pending writes end. The check retains the unsaved position until an explicit successful checkpoint.
@@ -36,7 +35,7 @@ The Kobo adapters reserve their own default-database transaction before they cal
 
 The profile ownership marker can be empty, because the OS-lock implementation also uses an empty marker normally. Symlink, directory and FIFO markers are refused. A failed recovery releases ownership so another process can retry. The marker stays after a normal release, so another process cannot lock a replacement inode while a contender holds the original one.
 
-`lifecycle.slowCloseSave` holds the native reading-time callback through the close deadline. After sleep and wake, Keep reading allows a page turn while the write is pending. The late reply leaves the book open. Retry while the writer is pending closes the book once the writer finishes. Both rows check the final native position write.
+`lifecycle.slowCloseSave` holds the native reading-time callback through the close deadline. After sleep and wake, Keep reading allows a page turn while the write is pending. The late reply leaves the book open. Retry while the writer is pending closes the book once the writer finishes. Both rows check the final native position write. When only the host's records still wait, the timeout notice also offers Close without waiting; `lifecycle.closeWithoutWaitingForHost` checks that it closes at once, keeps Kobalt's saved place and writes no native position.
 
 `lifecycle.sleepCancelsPendingExit` puts the reader to sleep while an ordinary close is waiting, both before and after the timeout notice appears. The first page turn on wake succeeds with the native save still pending. The test delivers the late reply, turns another page, then checks that a fresh Exit closes the book.
 

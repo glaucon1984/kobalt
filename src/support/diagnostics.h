@@ -19,6 +19,33 @@ void pauseDiagnostics(bool paused);
 bool diagnosticsActive();
 void initializeDiagnostics(const QString &directory, bool detailed = true);
 bool diagnosticsRequested(const QString &profile);
+// Makes detailed logging switchable at runtime: `profile` is the folder whose
+// diagnostics-enabled file diagnosticsRequested() reads at startup. Builds
+// with verbose diagnostics compiled in ignore it and stay detailed.
+void setDiagnosticsMarker(const QString &profile);
+// The marker file, or empty when detailed logging cannot be switched.
+QString diagnosticsMarker();
+bool detailedDiagnostics();
+// Takes effect for the events logged from now on. With a marker, the logging
+// worker also writes or removes it, so that the next start agrees.
+void setDetailedDiagnostics(bool detailed);
+// Removes the log and the older generations that rotation keeps, on the
+// logging worker.
+void clearDiagnosticLog();
+// The bytes of the log and its older generations. Reads storage: call it
+// from diagnosticTask().
+qint64 diagnosticLogBytes();
+// The host's device fields, such as the firmware, as the startup event has
+// them. Reads storage on Kobo: call it from diagnosticTask().
+QJsonObject diagnosticStartupFields();
+// The log file, or empty before initializeDiagnostics().
+QString diagnosticLogPath();
+// Runs `task` on the logging worker, in the order of the queue, also
+// while detailed logging is off. For small storage work that belongs to the
+// log, such as its marker or its size, and for the Debug page's storage
+// facts. Works without a log file. False when the queue is full. Accepted
+// callbacks stay queued for the next submission or flush if startup fails.
+bool diagnosticTask(std::function<void()> task);
 
 // Start/end records survive an unfinished operation. They enqueue only small
 // fields; JSON formatting and file writes stay on the diagnostic worker.
@@ -53,24 +80,29 @@ void diagnosticInput();
 void reportDescriptorExhaustion(const char *context, int error = errno);
 // Explicit performance sample, collected and delivered on the logging worker.
 // Once the base is known, it also has `kobalt_rss_kib` and `kobalt_peak_kib`:
-// resident and peak memory above that base.
+// resident and peak memory above that base. Accepted callbacks stay queued
+// for the next submission or flush if the worker cannot start.
 void sampleDiagnosticMemory(std::function<void(QJsonObject)> done);
 // Bounded diagnostic sampling on the logging worker, in request order.
-// Returns false when the queue is full. The callback must not wait for input.
+// Returns false when the queue is full. Accepted callbacks retry on the next
+// submission or flush if startup fails. The callback must not wait for input.
 bool sampleDiagnostics(std::function<void()> sample);
 // Records the process's resident memory as the base for Kobalt's own share,
 // once per process. Call it just before the first book opens. On Kobo the
 // base is Nickel with Kobalt loaded but not yet reading, so the share leaves
 // out the host. Logs a `memory-base` event.
 void markMemoryBase();
-// Waits until queued events are in the log file. False when `milliseconds`
-// pass first; a negative value waits without a limit. For tests and tools
+// Waits until queued events are in the log file. False if startup fails or
+// `milliseconds` pass first. A negative value waits without a limit. For tests and tools
 // that read the file and lifecycle boundaries where input is blocked.
 bool flushDiagnostics(int milliseconds = -1);
 // Whether warning, error and lifecycle batches sync storage. Normal
 // evaluation uses the same policy as reading. Legacy baselines may opt out.
 void setDiagnosticsSync(bool enabled);
-// Receives every event that is written, on the thread that wrote it. An empty
+// Resource measurements observe events in memory. Returns the previous file policy.
+bool setDiagnosticFileWrites(bool enabled);
+bool diagnosticWriterIdle();
+// Receives emitted events on the originating thread, including when file writes are off. An empty
 // function removes the observer.
 void setDiagnosticObserver(std::function<void(const QJsonObject &)> observer);
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
