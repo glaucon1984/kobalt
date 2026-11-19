@@ -60,7 +60,7 @@ public:
     // The owner decides eligibility. Without `connect`, only an existing
     // connection may be used. With it, a missing connection is prepared in the
     // background first, under connectingFinishBudget instead of finishBudget.
-    // An older HTTP request finishes before the final read/write exchange starts.
+    // An older upload finishes before the final read/write exchange starts.
     // The same deadline covers that wait and the exchange. Cancel drops done.
     void flush(bool enabled, Done done, bool connect = false);
     void cancel();
@@ -73,6 +73,8 @@ public:
     bool needsSync(const QString &position) const { return progress_.needsSync(position); }
 
     Progress candidate() const { return progress_.candidate(); }
+
+    QJsonObject deferredBaseline() const { return progress_.deferredBaseline(); }
 
     void keepLocal() { progress_.keepLocal(); }
 
@@ -96,7 +98,7 @@ private:
     Reconciler progress_;
     Done readerReady_, finished_;
     quint64 epoch_ = 0;
-    bool connecting_ = false, authenticating_ = false, finishing_ = false;
+    bool connecting_ = false, authenticating_ = false, uploading_ = false, finishing_ = false;
     bool flushWaiting_ = false, releaseWifi_ = false, retryRead_ = false;
     int backgroundFailures_ = 0;
 

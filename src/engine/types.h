@@ -3,6 +3,8 @@
 #include <QPoint>
 #include <QRect>
 #include <QString>
+#include <QStringList>
+#include <QSize>
 #include <QVector>
 #include <functional>
 
@@ -20,6 +22,17 @@ struct PagePreview
 
 enum class OpeningStage { Content, Text, Styles, Pages, Ready };
 using OpeningProgress = std::function<void(OpeningStage, int)>;
+
+inline constexpr int openingBarEngine = 94;
+inline constexpr int openingBarWindow = 98;
+
+inline int openingProgressPercent(OpeningStage stage, int percent)
+{
+    // Whole-book pagination takes most of the engine's opening time.
+    constexpr int starts[] = { 0, 3, 14, 19, 90, openingBarEngine };
+    const int index = int(stage);
+    return starts[index] + (starts[index + 1] - starts[index]) * qBound(0, percent, 100) / 100;
+}
 
 struct ChapterProgress
 {
@@ -39,19 +52,49 @@ struct SearchHit
 
 enum class SearchScope { Book, Chapter, Before, After };
 
+// A few lines of text drawn with the reading fonts, without a document: a
+// centred heading, then paragraphs. For previews of text settings.
+struct TextSampleRequest
+{
+    // The reading font, or empty for the default one.
+    QString face;
+    // The text size in pixels of the canvas.
+    int pixels = 0;
+    // The line height in percent of the text size, as the reader sets it.
+    int lineSpacing = 100;
+    // "left", "justify", "center" or "right".
+    QString alignment;
+    // Breaks words at line ends, as the reader does with hyphenation on.
+    bool hyphenate = false;
+    // The value of a variable weight axis, or 400.
+    int weight = 400;
+    // The reader's weight_steps: added thickness in steps of 1/256 em.
+    int extraWeight = 0;
+    // In points; 0 follows the text size at `ppi`.
+    double opticalSize = 0;
+    int ppi = 300;
+    QSize canvas;
+    int margin = 0;
+    QString heading;
+    QStringList paragraphs;
+};
+
 struct SearchCursor
 {
     int block = 0, offset = 0;
     // In chapter mode, the spine item that the search is in. The block and
     // offset count in the document that has its text.
     int item = 0;
-    // The first spine item of the document whose blocks the cursor counts.
+    // The range of spine items in the document whose blocks the cursor counts.
     // Background preparation can replace that document with an overlapping unit.
-    int firstItem = -1;
+    int firstItem = -1, lastItem = -1;
     // In chapter mode a long spine item is laid out in parts, and only the
     // part with a layout has text to search. Where the part that the search
     // is in starts, as a count of the text before it.
     int slice = 0;
+    // Normalization can map adjacent matches to the same source range.
+    QString previousStart, previousEnd;
+    bool prepareWholeBook = false;
 };
 
 struct SearchBatch

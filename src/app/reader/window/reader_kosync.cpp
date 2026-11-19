@@ -13,13 +13,22 @@ QByteArray Reader::kosyncDocument() const
     return kosyncClient->filenameMatching() ? session->syncFilenameDigest() : session->syncDigest();
 }
 
+double Reader::kosyncPercentage() const
+{
+    if (session->state().contains("book_fraction"))
+        return session->progressFraction();
+    return session->pages() > 1 ? double(session->page()) / (session->pages() - 1) : 0;
+}
+
 void Reader::kosyncStatus(const QString &message)
 {
     kosyncMessage = message;
-    kosyncPage->setLastSync(kosyncClient->lastSync());
-    kosyncPage->setStatus(message, syncCoordinator->busy());
+    if (kosyncPage) {
+        kosyncPage->setLastSync(kosyncClient->lastSync());
+        kosyncPage->setStatus(message, syncCoordinator->busy());
+    }
     updateKosyncToolbar();
-    if (general->isVisible() && !lifecycleHidden && !closing && !exportRunning) {
+    if (settingsVisible() && !lifecycleHidden && !closing && !exportRunning) {
         fitSettings();
         refresh();
     }
@@ -40,12 +49,7 @@ void Reader::buildKosync()
                 Coordinator::Context state;
                 state.document = kosyncDocument();
                 state.local.position = session->state().value("position").toString();
-                // With only a part of the book laid out, the page numbers
-                // are those of the part. The percentage is of the whole book.
-                state.local.percentage = session->state().contains("book_fraction")
-                        ? session->progressFraction()
-                        : session->pages() > 1 ? double(session->page()) / (session->pages() - 1)
-                                               : 0;
+                state.local.percentage = kosyncPercentage();
                 state.metadata = { session->syncFilename(), session->title().trimmed(),
                                    session->author().trimmed() };
                 const bool hidden =
@@ -91,8 +95,8 @@ void Reader::buildKosync()
                 case Coordinator::EventKind::Completed: {
                     const QPointer<Reader> guard(this);
                     finishKosync(event.message, event.finalUpload);
-                    if (guard && event.interactiveConnectionFailed && !general->isVisible()
-                        && !closing && !lifecycleHidden) {
+                    if (guard && event.interactiveConnectionFailed && !settingsVisible() && !closing
+                        && !lifecycleHidden) {
                         page->notice = event.message;
                         page->update();
                     }
@@ -106,6 +110,21 @@ void Reader::buildKosync()
     kosyncClient->setDefaultDeviceName(services.deviceName.isEmpty()
                                                ? QStringLiteral("Kobalt")
                                                : services.deviceName + QStringLiteral(" (Kobalt)"));
+    const auto status = book->usesNativeCloudSync()
+            ? strings::get("kosync.native_sync")
+            : strings::get(kosyncClient->signedIn() ? "kosync.signed_in" : "kosync.signed_out");
+    kosyncStatus(kosyncClient->storageError().isEmpty() ? status : kosyncClient->storageError());
+    kosyncOpeningGrace.setObjectName("rrKosyncOpeningGrace");
+    kosyncOpeningGrace.setSingleShot(true);
+    connect(&kosyncOpeningGrace, &QTimer::timeout, this, [this] {
+        if (kosyncOpening)
+            showKosyncOpening();
+        finishKosyncPresentation();
+    });
+}
+
+void Reader::buildKosyncPage()
+{
     kosyncPage->setNativeCloudSync(book->nativeSyncPolicy());
     const auto account = [this] {
         kosyncPage->setFilenameMatching(kosyncClient->filenameMatching());
@@ -151,13 +170,15 @@ void Reader::buildKosync()
         if (syncCoordinator->busy())
             return;
         const auto server = kosyncPage->server(), username = kosyncPage->username();
-        const auto password = kosyncPage->takePassword();
-        if (!kosync::validLogin(server, username, password)) {
-            kosyncStatus(strings::get("kosync.invalid_account"));
+        const auto password = kosyncPage->password();
+        const auto error = kosync::loginError(server, username, password);
+        if (!error.isEmpty()) {
+            kosyncStatus(error);
             return;
         }
         syncCoordinator->login(server, username, password, [this, account](const QString &error) {
             if (error.isEmpty()) {
+                kosyncPage->clearPassword();
                 ++kosyncChoiceEpoch;
                 kosyncPositionFailed = false;
                 kosyncPromptDeferred = false;
@@ -170,6 +191,7 @@ void Reader::buildKosync()
     kosyncPage->logoutRequested = [this, account] {
         cancelKosync();
         if (kosyncClient->logout()) {
+            kosyncPage->clearPassword();
             syncCoordinator->resetProgress();
             kosyncPositionFailed = false;
             kosyncPromptDeferred = false;
@@ -196,17 +218,9 @@ void Reader::buildKosync()
     };
     kosyncPage->syncRequested = [this] { synchronizeKosync(true); };
     updateKosyncFeatures();
-    const auto status = book->usesNativeCloudSync()
-            ? strings::get("kosync.native_sync")
-            : strings::get(kosyncClient->signedIn() ? "kosync.signed_in" : "kosync.signed_out");
-    kosyncStatus(kosyncClient->storageError().isEmpty() ? status : kosyncClient->storageError());
-    kosyncOpeningGrace.setObjectName("rrKosyncOpeningGrace");
-    kosyncOpeningGrace.setSingleShot(true);
-    connect(&kosyncOpeningGrace, &QTimer::timeout, this, [this] {
-        if (kosyncOpening)
-            showKosyncOpening();
-        finishKosyncPresentation();
-    });
+    // The status that arrived before Settings was built.
+    kosyncPage->setLastSync(kosyncClient->lastSync());
+    kosyncPage->setStatus(kosyncMessage, syncCoordinator->busy());
 }
 
 // While you read, a changed position syncs once the chosen interval has passed
@@ -239,6 +253,8 @@ qint64 Reader::kosyncClock() const
 
 void Reader::updateKosyncFeatures()
 {
+    if (!kosyncPage)
+        return;
     // A desktop e-reader preview shows what a Kobo offers. A desktop window
     // or a phone layout offers only what its host supports.
     const bool ereaderPreview =
@@ -511,7 +527,8 @@ void Reader::restartKosync()
 
 void Reader::finishKosync(const QString &message, bool finishing)
 {
-    kosyncPage->setLastSync(kosyncClient->lastSync());
+    if (kosyncPage)
+        kosyncPage->setLastSync(kosyncClient->lastSync());
     const bool opening = kosyncOpening;
     auto *notice = dynamic_cast<KosyncNotice *>(kosyncDialog.data());
     const bool showSuccess = !finishing && !closing && !lifecycleHidden && !exportRunning && notice
@@ -521,11 +538,12 @@ void Reader::finishKosync(const QString &message, bool finishing)
     else
         hideKosyncOpening();
     kosyncMessage = message;
-    kosyncPage->setStatus(message, false);
+    if (kosyncPage)
+        kosyncPage->setStatus(message, false);
     updateKosyncToolbar();
     if (!finishing && !closing && !lifecycleHidden && !exportRunning) {
         // A failure can need more lines than the preceding Syncing message.
-        if (general->isVisible())
+        if (settingsVisible())
             fitSettings();
         if (opening && message != strings::get("kosync.up_to_date")
             && message != strings::get("kosync.pending"))
@@ -558,7 +576,7 @@ void Reader::showKosyncChoice()
     if (!syncCoordinator->pendingProgress() || kosyncPositionFailed || kosyncPromptDeferred
         || positionPromptOpen() || closing || lifecycleHidden || !isVisible() || session->busy()
         || services.suspended() || book->deviceTransition() || book->pendingProgress()
-        || topControls->isVisible() || general->isVisible() || annotationMode
+        || topControls->isVisible() || settingsVisible() || annotationMode
         || searchPanel->isVisible() || dictionaryPanel->isVisible()
         || (imageViewer && imageViewer->isVisible()) || linksActive() || lookupPending
         || appearanceEdit.panelOpen())
@@ -615,8 +633,9 @@ void Reader::showKosyncChoice()
                     kosyncPositionFailed = true;
                     kosyncClient->setAutomatic(false);
                     updateKosyncToolbar();
-                    kosyncPage->setAccount(kosyncClient->server(), kosyncClient->username(), true,
-                                           kosyncClient->automatic());
+                    if (kosyncPage)
+                        kosyncPage->setAccount(kosyncClient->server(), kosyncClient->username(),
+                                               true, kosyncClient->automatic());
                 }
                 page->notice = error.isEmpty() ? strings::get("kosync.resumed") : error;
                 kosyncStatus(page->notice);

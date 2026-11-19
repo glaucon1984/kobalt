@@ -49,8 +49,18 @@ public:
     {
         ReadingEstimates estimates;
         const bool available = reading_.estimates(activity, &estimates);
-        return progress_->write(expected, location, percent, finished,
-                                available ? &estimates : nullptr, &activity);
+        // The session ends, and its reading time is saved, in this transaction.
+        NativeProgressExtra extra;
+        extra.apply = [this](void *volume) { reading_.endIn(volume); };
+        const auto result = progress_->write(expected, location, percent, finished,
+                                             available ? &estimates : nullptr, &activity, &extra);
+        reading_.saved(extra.committed);
+        // A write that failed before it could end the session, such as on a
+        // busy database or a conflict, ends it now, so the time spent on the
+        // error or the choice is not counted. The next save adds the seconds.
+        if (!extra.committed)
+            reading_.endSession();
+        return result;
     }
 
     NativeActivityResult markReading() override
@@ -92,9 +102,17 @@ public:
         });
     }
 
-    bool readingSavePending() const override { return reading_.savePending(); }
-
-    void retryFailedReadingSave() override { reading_.retryFailedSave(); }
+    void retryFailedReadingSave(std::function<void(NativeActivityResult)> done,
+                                ReadingSaveRetry mode) override
+    {
+        if (!done)
+            return;
+        reading_.retryFailedSave(
+                [done = std::move(done)](bool saved) {
+                    done(saved ? NativeActivityResult::Completed : NativeActivityResult::Failed);
+                },
+                mode == ReadingSaveRetry::Explicit);
+    }
 
 private:
     // Page events keep one lookup of Nickel's record until Nickel signals a

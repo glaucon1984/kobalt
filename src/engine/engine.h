@@ -20,10 +20,31 @@
 #include <QString>
 #include <QStringList>
 #include <QVector>
+#include <atomic>
 #include <functional>
 #include <memory>
 
 namespace kobalt {
+class LayoutProgress
+{
+public:
+    int percent() const { return percent_.load(); }
+    bool estimateComplete() const { return estimateComplete_.load(); }
+
+    void reset()
+    {
+        percent_ = 0;
+        estimateComplete_ = false;
+    }
+
+    void setEstimateProgress(int measured, int items);
+    void setBuildProgress(int percent);
+
+private:
+    std::atomic_int percent_{ 0 };
+    std::atomic_bool estimateComplete_{ false };
+};
+
 // One open book in one rendering engine. The application reaches an engine
 // only through this interface. All calls stay on the engine worker thread.
 // A position is a string that only the engine that made it can read; a
@@ -31,6 +52,10 @@ namespace kobalt {
 class Engine
 {
 public:
+    // A reader keeps its progress when a prepared layout replaces its document.
+    const std::shared_ptr<LayoutProgress> progress = std::make_shared<LayoutProgress>();
+
+    Engine &operator=(Engine &&) { return *this; }
     virtual ~Engine() = default;
     // The name of the engine, for cache identity and for code that still
     // needs one specific engine.
@@ -64,6 +89,23 @@ public:
     virtual bool openedFromCache() const = 0;
     // Writes the parsed book and its pages to the cache, for the next opening.
     virtual bool saveDocumentCache() = 0;
+
+    // Writes part of the parsed-book cache, for at most `milliseconds`. True
+    // when nothing is left to write, also when there is no cache to write.
+    virtual bool saveDocumentCacheStep(int milliseconds)
+    {
+        Q_UNUSED(milliseconds);
+        return true;
+    }
+
+    // Debug mode: destroys every document of this book, then removes the
+    // book's entries from the parsed-book cache, or the whole cache with
+    // `allBooks`. The engine shows nothing afterwards; the reader closes.
+    virtual bool removeDocumentCache(bool allBooks)
+    {
+        Q_UNUSED(allBooks);
+        return false;
+    }
     // Shared count, on the owning engine thread. Populates the Stats graph
     // from source anchors. Counts visible source text once, including
     // non-linear spine fragments; excludes SVG and ruby annotation text.
@@ -199,6 +241,11 @@ public:
     virtual bool loadNextImage() = 0;
     // The idle book keeps its active layout, not images or an alternate layout.
     virtual void releaseImages() = 0;
+
+    // Destroys the documents that a page turn or a change of appearance
+    // replaced. Their teardown can write the parsed-book cache, so it waits
+    // for idle time instead of holding up the turn.
+    virtual void releaseRetired() { }
     // Compares the cached images of two pages ahead of a turn between them.
     // Cache key of a page's cached image, or 0. Never draws.
     virtual qint64 cachedImageKey(int page) const = 0;
@@ -288,11 +335,9 @@ public:
     // True once the build of that document has started.
     virtual bool fullDocumentStarted() const { return false; }
 
-    // The reader turns the count on when the user reads, and off while the
-    // user changes settings. The engine worker reads it.
-    virtual void setBackgroundCount(bool enabled) { Q_UNUSED(enabled); }
-
-    virtual bool backgroundCount() const { return false; }
+    // True when the last build for the appearance in force gave no usable
+    // book. It is not tried again until the appearance changes.
+    virtual bool fullDocumentFailed() const { return false; }
 
     // Turns `delta` pages. Past the first or the last page that the engine
     // has, it loads the spine item there and continues. False at an end of
@@ -338,10 +383,21 @@ public:
     // The title of the chapter that contains `position`, chosen like the
     // header's chapter. Empty when the book has no usable contents.
     virtual QString chapterTitle(const QString &position) const = 0;
+
+    // Draws `request` in gray: white paper, black ink. Null when the engine
+    // cannot draw text samples.
+    virtual QImage drawTextSample(const TextSampleRequest &request)
+    {
+        Q_UNUSED(request);
+        return {};
+    }
     virtual QJsonObject state() const = 0;
+    // state() without the page estimate, which costs more to make. Enough
+    // to compare the settings.
+    virtual QJsonObject settingsState() const = 0;
 };
 
-// The engine that reads books: CREngine.
+// Creates the Blaze adapter used by the reader.
 std::unique_ptr<Engine> createEngine(EngineFontInputs fonts);
 
 // 1 opens the books that follow in chapter mode and 0 opens them as a whole.

@@ -1,3 +1,4 @@
+#include "app/reader/settings/sleep_editor.h"
 #include "app/reader/settings/sleep_gallery.h"
 #include <QLineEdit>
 #include "app/reader/views/sleep_screen.h"
@@ -432,6 +433,7 @@ void Reader::showFinishChoice()
             { strings::get("finish.still_reading"), "rrStillReading" },
             { strings::get("finish.mark_finished"), "rrMarkFinished" });
     finishDialog = choice;
+    finishChoiceForExit = exitPending;
     finishDialog->setObjectName("rrFinishBook");
     finishDialog->setGeometry(rect());
     auto *card = finishDialog->card();
@@ -594,9 +596,9 @@ void Reader::openBookmarks()
         return;
     }
     session->cancelPendingTurn();
-    if (general->isVisible() || appearanceEdit.panelOpen()) {
+    if (settingsVisible() || appearanceEdit.panelOpen()) {
         appearanceEdit.request(AppearanceDestination::Bookmarks);
-        if (general->isVisible())
+        if (settingsVisible())
             applySettings();
         else
             finishPreview();
@@ -766,11 +768,11 @@ void Reader::syncPinnedBookmarks()
     const bool visible = features::enabled(preferences, features::Bookmarks) && !pins.isEmpty()
             && topControls->isVisible() && !session->busy() && !lifecycleHidden && !closing
             && !services.suspended() && !annotationMode && !seekOpen && !appearanceEdit.panelOpen()
-            && !general->isVisible() && !menu->isVisible() && !choices->isVisible()
-            && !lightPopup->isVisible() && !bookmarkList->isVisible()
-            && !acknowledgments->isVisible() && !searchPanel->isVisible()
-            && !dictionaryPanel->isVisible() && !linksActive() && !lookupPending && !syncDialog
-            && !kosyncDialog && !finishDialog && !(fieldChooser && fieldChooser->isVisible())
+            && !settingsVisible() && !menu->isVisible() && !choices->isVisible()
+            && !lightPopup->isVisible() && !bookmarkList->isVisible() && !acknowledgmentsVisible()
+            && !searchPanel->isVisible() && !dictionaryPanel->isVisible() && !linksActive()
+            && !lookupPending && !syncDialog && !kosyncDialog && !finishDialog
+            && !(fieldChooser && fieldChooser->isVisible())
             && !(headerFooterView && headerFooterView->isVisible());
     pinnedBookmarks->setVisible(visible);
     if (!visible)
@@ -885,7 +887,8 @@ QString Reader::refreshLabel(kobalt::ScreenRefresh mode)
 // The row's caption shows the mode that Settings saves when it closes.
 void Reader::showScreenRefresh()
 {
-    refreshButton->setCaption(refreshLabel(screenRefreshMode).toUpper());
+    if (refreshButton)
+        refreshButton->setCaption(refreshLabel(screenRefreshMode).toUpper());
 }
 
 // Writes the preferences. A failed write keeps the old ones and shows the
@@ -893,13 +896,17 @@ void Reader::showScreenRefresh()
 bool Reader::savePreferences(const QJsonObject &next)
 {
     if (!writePreferences(next)) {
-        settingsError->setText(strings::get("reader.could_not_save_reader_settings"));
-        settingsError->show();
+        if (settingsError) {
+            settingsError->setText(strings::get("reader.could_not_save_reader_settings"));
+            settingsError->show();
+        }
         return false;
     }
     preferences = next;
-    settingsError->clear();
-    settingsError->hide();
+    if (settingsError) {
+        settingsError->clear();
+        settingsError->hide();
+    }
     return true;
 }
 
@@ -973,6 +980,8 @@ QString sessionTimeoutLabel(int minutes)
 
 void Reader::showSleepScreen()
 {
+    if (!general)
+        return;
     sessionTimeoutButton->setCaption(
             sessionTimeoutLabel(sessionTimeout::minutes(preferences)).toUpper());
     sleepScreenButton->setCaption(
@@ -983,14 +992,22 @@ void Reader::showSleepScreen()
 
 void Reader::closeSleepScreen()
 {
+    closeSleepEditor();
     if (sleepGallery) {
         sleepGallery->hide();
         sleepGallery->deleteLater();
         sleepGallery.clear();
     }
     if (!sleepPopup) {
-        if (sleep::mode(preferences) != sleep::Mode::Overlay)
+        if (!sleep::uses(preferences, sleep::Mode::Overlay))
             sleepOverlay = {};
+        // The gallery and the editor keep the cover while they are open.
+        // Release it once no sleep look draws it.
+        if (!sleep::uses(preferences, sleep::Mode::Cover)) {
+            ++sleepCoverRequest;
+            sleepCover = {};
+            sleepCoverSource = {};
+        }
         return;
     }
     closePopup(sleepPopup);
@@ -1042,7 +1059,15 @@ void Reader::openSleepScreen()
         next[sleep::followOrientationKey] = checked;
         return saveSleepPreferences(next);
     };
+    sleepGallery->setCustom(sleep::custom(preferences));
+    sleepGallery->setPlaces(sleepPlaces());
+    sleepGallery->setWallpapers(sleepWallpaper, sleepOffWallpaper);
     sleepGallery->chosen = [this](sleep::Design design) {
+        // Custom is chosen when its editor closes.
+        if (design == sleep::Design::Custom) {
+            openSleepEditor(design);
+            return;
+        }
         auto next = preferences;
         sleep::setDesign(next, design);
         next.remove("kobalt_sleep_screen");
@@ -1058,6 +1083,8 @@ void Reader::openSleepScreen()
     sleepGallery->customize = [this](sleep::Design design) {
         if (design == sleep::Design::Night)
             editSleepGreeting();
+        else
+            openSleepEditor(design);
     };
     if (!sleepCover.isNull())
         sleepGallery->setCover(sleepCover);
@@ -1074,6 +1101,161 @@ void Reader::openSleepScreen()
     sleepGallery->raise();
     if (sleepOverlay.isNull())
         prepareSleepOverlay();
+    prepareSleepWallpapers();
+}
+
+QHash<int, sleep::Place> Reader::sleepPlaces() const
+{
+    QHash<int, sleep::Place> places;
+    const auto own = book ? book->sleepPositions() : QJsonObject();
+    for (const auto design : sleep::customStatuses)
+        places.insert(int(design), sleep::place(preferences, own, design));
+    return places;
+}
+
+void Reader::openSleepEditor(sleep::Design design)
+{
+    if (sleepEditor || !sleepGallery)
+        return;
+    SleepEditor::Setup setup;
+    setup.arrange = design != sleep::Design::Custom;
+    setup.custom = sleep::custom(preferences);
+    setup.preset = sleepGallery->look(design);
+    const auto status = sleep::statusDesign(setup.preset);
+    setup.bookOnly = book && book->sleepPositions().contains(sleep::value(status));
+    setup.sample = sleepPreviewSample();
+    setup.screen = sleep::followsReading(preferences) || !page
+            ? (page ? page->size() : size())
+            : QSize(qMin(page->width(), page->height()), qMax(page->width(), page->height()));
+    setup.places = sleepPlaces();
+    // Holding Custom before it was ever saved starts from the chosen design,
+    // when that design is a backdrop with one status.
+    if (!setup.arrange && !preferences.contains(sleep::customKey)) {
+        sleep::Layer start;
+        if (sleep::asLayer(sleep::design(preferences), sleep::savedTile(preferences), start))
+            setup.custom.sleep = setup.custom.off = start;
+    }
+    auto *editor = new SleepEditor(this, setup);
+    sleepEditor = editor;
+    editor->setGeometry(sleepGallery->geometry());
+    editor->setImages(sleepCover, page ? page->snapshot(true) : QImage(), sleepOverlay);
+    if (sleepCover.isNull())
+        loadGalleryCover();
+    editor->setWallpapers(sleepWallpaperNames);
+    const QPointer<SleepEditor> guard(editor);
+    const auto requestWallpapers = [this, guard](const QStringList &wanted, QSize bound) {
+        if (!session || services.sleepWallpaperDirectories.isEmpty())
+            return;
+        session->sleepWallpapers(
+                services.sleepWallpaperDirectories, wanted, bound,
+                [this, guard, wanted, bound](QStringList names, QVector<QImage> images) {
+                    sleepWallpaperNames = names;
+                    if (!guard)
+                        return;
+                    guard->setWallpapers(names);
+                    if (!wanted.isEmpty())
+                        guard->setWallpaper(wanted.first(), bound, images.value(0));
+                });
+    };
+    editor->wallpaperWanted = [requestWallpapers](const QString &name, QSize bound) {
+        requestWallpapers({ name }, bound);
+    };
+    // List the choices before the first paint. Only a visible wallpaper needs decoding.
+    if (!setup.arrange)
+        requestWallpapers({}, {});
+    editor->help = [this] { showSleepWallpaperHelp(); };
+    editor->done = [this, guard] {
+        if (!guard)
+            return;
+        auto next = preferences;
+        auto global = next.value(sleep::placesKey).toObject();
+        auto own = book ? book->sleepPositions() : QJsonObject();
+        const auto ownBefore = own;
+        const auto keep = [&](sleep::Design design, sleep::Place place, bool forBook) {
+            if (forBook) {
+                // A book's own place is kept even when it is the default, so
+                // it still wins over a moved global one.
+                own[sleep::value(design)] = sleep::value(
+                        place == sleep::Place::Default ? sleep::defaultPlace(design) : place);
+            } else {
+                sleep::setPlace(global, design, place);
+                own.remove(sleep::value(design));
+            }
+        };
+        const auto moved = guard->moved();
+        for (auto it = moved.constBegin(); it != moved.constEnd(); ++it) {
+            const auto design = sleep::Design(it.key());
+            const bool forBook =
+                    guard->arranging() ? guard->bookOnly() : own.contains(sleep::value(design));
+            keep(design, it.value(), forBook && book);
+        }
+        // Ticking "Only for this book" without moving keeps the current place
+        // for this book; clearing it returns the book to the global place.
+        if (guard->arranging() && book && !moved.contains(int(guard->arranged()))) {
+            const auto design = guard->arranged();
+            const auto key = sleep::value(design);
+            if (!guard->bookOnly())
+                own.remove(key);
+            else if (!own.contains(key))
+                keep(design, sleepPlaces().value(int(design)), true);
+        }
+        if (global.isEmpty())
+            next.remove(sleep::placesKey);
+        else
+            next[sleep::placesKey] = global;
+        const bool custom = !guard->arranging();
+        if (custom) {
+            sleep::setCustom(next, guard->custom());
+            sleep::setDesign(next, sleep::Design::Custom);
+            next.remove("kobalt_sleep_screen");
+        }
+        if (book && own != ownBefore) {
+            book->setSleepPositions(own);
+            QJsonObject snapshot;
+            book->checkpoint(&snapshot, true);
+        }
+        if (!saveSleepPreferences(next))
+            return;
+        closeSleepEditor();
+        if (custom) {
+            // The gallery stays open and may open the editor again, so keep a
+            // cover that is already decoded; closing the gallery releases it.
+            if (sleepCover.isNull())
+                prepareSleepCover();
+            if (sleep::uses(preferences, sleep::Mode::Overlay))
+                prepareSleepOverlay();
+            prepareSleepWallpapers();
+            // Back to the list of lock screens, with Custom chosen.
+            if (sleepGallery) {
+                sleepGallery->setCustom(sleep::custom(preferences));
+                sleepGallery->setCurrent(sleep::Design::Custom);
+            }
+        }
+        if (sleepGallery)
+            sleepGallery->setPlaces(sleepPlaces());
+    };
+    for (auto *widget : editor->findChildren<QWidget *>())
+        textRefresh(widget);
+    textRefresh(editor);
+    editor->show();
+    editor->raise();
+}
+
+void Reader::closeSleepEditor()
+{
+    if (!sleepEditor)
+        return;
+    sleepEditor->hide();
+    sleepEditor->deleteLater();
+    sleepEditor.clear();
+}
+
+void Reader::updateSleepWallpaperOption()
+{
+    if (sleepGallery)
+        sleepGallery->setWallpapers(sleepWallpaper, sleepOffWallpaper);
+    if (sleepEditor)
+        sleepEditor->setWallpapers(sleepWallpaperNames);
 }
 
 void Reader::loadGalleryCover()
@@ -1092,6 +1274,9 @@ void Reader::loadGalleryCover()
                 guard->sleepCoverSource = std::move(source);
                 if (guard->sleepGallery)
                     guard->sleepGallery->setCover(image);
+                // An editor opened before the cover arrived shows it now.
+                if (guard->sleepEditor)
+                    guard->sleepEditor->setCover(image);
             },
             services.coverImagePath);
 }
@@ -1234,6 +1419,38 @@ void Reader::showSleepOverlayHelp()
     notice->primaryButton()->setFocus();
 }
 
+void Reader::showSleepWallpaperHelp()
+{
+    if (sleepPopup)
+        return;
+    // The same explaining card as the PNG help, above the Custom editor.
+    // The folder to put the images in is the host's.
+#ifdef KOBALT_POCKETBOOK
+    const auto help = strings::get("sleep.wallpaper_help_pocketbook");
+#else
+    const auto help = strings::get("sleep.wallpaper_help");
+#endif
+    auto *notice = new ui::NoticeModal(
+            this,
+            { help, strings::get("sleep.wallpaper_help_title"), {}, "rrSleepWallpaperHelpTitle" },
+            { strings::get("common.ok"), "rrSleepWallpaperHelpClose" });
+    sleepPopup = notice;
+    notice->setObjectName("rrSleepWallpaperHelpPopup");
+    notice->setGeometry(rect());
+    notice->dismissed = [this] { closePopup(sleepPopup); };
+    connect(notice->primaryButton(), &QPushButton::clicked, this,
+            [this] { closePopup(sleepPopup); });
+    notice->card()->fitToWidth(
+            qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance));
+    notice->centerCard();
+    for (auto *widget : notice->findChildren<QWidget *>())
+        textRefresh(widget);
+    textRefresh(notice);
+    notice->show();
+    notice->raise();
+    notice->primaryButton()->setFocus();
+}
+
 void Reader::updateSleepOverlayOption()
 {
     if (!sleepGallery)
@@ -1273,20 +1490,12 @@ void Reader::openSleepChoice(const QString &name, const QString &optionPrefix,
     if (sleepPopup) {
         return;
     }
-    namespace chrome = metrics::chrome;
-    sleepPopup = new ui::ModalOverlay(this);
-    sleepPopup->setObjectName(name + "Popup");
-    sleepPopup->setDimmed(true);
-    sleepPopup->setGeometry(rect());
+    const auto sheet = ui::makeChoiceSheet(this, name, heading, description, name + "Title",
+                                            name + "Hint");
+    sleepPopup = sheet.overlay;
     sleepPopup->dismissed = [this] { closeSleepScreen(); };
-    auto *card = sleepPopup->card();
-    card->heading(heading, description, name + "Title", name + "Hint");
-    const int cardWidth =
-            qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance);
-    auto *choices = new ui::RadioList(card);
-    choices->setObjectName(name + "Choices");
+    auto *choices = sheet.list;
     choices->setUniformRows(false);
-    choices->setMinimumRowHeight(chrome::listActionHeight);
     for (const auto &option : options)
         choices->add(optionPrefix + option.value, option.label, option.explanation)
                 ->setEnabled(option.enabled);
@@ -1295,50 +1504,7 @@ void Reader::openSleepChoice(const QString &name, const QString &optionPrefix,
         chosen(index);
         closeSleepScreen();
     };
-    card->rows()->addWidget(choices);
-    choices->setFixedHeight(choices->heightForWidth(cardWidth - 4));
-    card->fitToWidth(cardWidth);
-    const int available = height() - 2 * metrics::notice::sideClearance;
-    if (card->height() > available) {
-        auto *pager = new ui::PagerBar(card, name);
-        card->rows()->addWidget(pager);
-        const int fixed = card->height() - choices->height();
-        const int room = qMax(1, available - fixed - int(chrome::actionHeight));
-        QVector<int> starts{ 0 };
-        int used = 0;
-        for (int row = 0; row < choices->options().size(); ++row) {
-            const int rowHeight = choices->rowHeight(row, cardWidth - 4);
-            if (used && used + rowHeight > room) {
-                starts.append(row);
-                used = 0;
-            }
-            used += rowHeight;
-        }
-        auto page = std::make_shared<int>(0);
-        for (int index = 0; index < starts.size(); ++index)
-            if (starts[index] <= current)
-                *page = index;
-        const auto showPage = [this, choices, pager, card, cardWidth, starts, room, page] {
-            const int first = starts[*page];
-            const int last =
-                    *page + 1 < starts.size() ? starts[*page + 1] : int(choices->options().size());
-            choices->showRows(first, last - first);
-            choices->setFixedHeight(room);
-            pager->setPage(*page, starts.size());
-            card->fitToWidth(cardWidth);
-            sleepPopup->centerCard();
-        };
-        connect(pager->previous, &QPushButton::clicked, this, [page, pager, showPage] {
-            *page = pager->turnTarget(-1);
-            showPage();
-        });
-        connect(pager->next, &QPushButton::clicked, this, [page, pager, showPage] {
-            *page = pager->turnTarget(1);
-            showPage();
-        });
-        showPage();
-    }
-    sleepPopup->centerCard();
+    ui::fitChoiceSheet(sleepPopup, choices);
     for (auto *widget : sleepPopup->findChildren<QWidget *>()) {
         textRefresh(widget);
     }
@@ -1404,7 +1570,8 @@ QString navigationExplanation(pageNavigation::Mode mode)
 
 void Reader::showTapZones()
 {
-    tapZonesButton->setCaption(tapZoneLabel(pageNavigation::tapLayout(preferences)).toUpper());
+    if (tapZonesButton)
+        tapZonesButton->setCaption(tapZoneLabel(pageNavigation::tapLayout(preferences)).toUpper());
 }
 
 void Reader::openTapZones()
@@ -1467,6 +1634,8 @@ void Reader::openTapZones()
 
 void Reader::showPageNavigation()
 {
+    if (!pageNavigationButton)
+        return;
     pageNavigationButton->setCaption(
             navigationLabel(pageNavigation::mode(preferences, services.pageButtons())).toUpper());
 }
@@ -1561,6 +1730,8 @@ void Reader::openPageNavigation()
 
 void Reader::showChapterGroups()
 {
+    if (!chapterGroupsButton)
+        return;
     chapterGroupsButton->setCaption(
             strings::get(preferences.value("chapter_groups").toString() == "off"
                                  ? "settings.chapter_groups_off"
@@ -1598,7 +1769,8 @@ void Reader::openChapterGroups()
 void Reader::showNavigationBarButtons()
 {
     const auto mode = pageNavigation::barButtons(preferences);
-    navigationBarButton->setCaption(barButtonsLabel(mode).toUpper());
+    if (navigationBarButton)
+        navigationBarButton->setCaption(barButtonsLabel(mode).toUpper());
     pageScrubber->setChapterJumps(mode == pageNavigation::BarButtons::Chapters);
 }
 
@@ -1661,7 +1833,8 @@ QString tappableLinksDescription(const QString &mode)
 void Reader::showTappableLinks()
 {
     const auto mode = preferences.value("tappable_links").toString("footnotes");
-    tappableLinksButton->setCaption(tappableLinksLabel(mode).toUpper());
+    if (tappableLinksButton)
+        tappableLinksButton->setCaption(tappableLinksLabel(mode).toUpper());
 }
 
 void Reader::openTappableLinks()
@@ -1685,10 +1858,54 @@ void Reader::openTappableLinks()
                     });
 }
 
+namespace {
+QString annotationInteractionLabel(const QString &mode)
+{
+    return strings::get(mode == "quick" ? "settings.annotation_interaction_quick"
+                                        : "settings.annotation_interaction_toggle");
+}
+} // namespace
+
+void Reader::showAnnotationInteraction()
+{
+    const auto mode = preferences.value("annotation_interaction").toString("toggle");
+    if (annotationInteractionButton)
+        annotationInteractionButton->setCaption(annotationInteractionLabel(mode).toUpper());
+}
+
+void Reader::openAnnotationInteraction()
+{
+    const QStringList modes{ "toggle", "quick" };
+    QVector<ChoiceOption> options;
+    for (const auto &mode : modes)
+        options.append(
+                { "rrAnnotationInteraction_" + mode, annotationInteractionLabel(mode),
+                  strings::get(mode == "quick"
+                                       ? "settings.annotation_interaction_quick_description"
+                                       : "settings.annotation_interaction_toggle_description") });
+    openChoicePopup(annotationInteractionPopup, "rrAnnotationInteraction",
+                    strings::get("settings.annotation_interaction"),
+                    strings::get("settings.annotation_interaction_description"), options,
+                    modes.indexOf(preferences.value("annotation_interaction").toString("toggle")),
+                    [this, modes](int index) {
+                        auto next = preferences;
+                        next["annotation_interaction"] = modes[index];
+                        if (savePreferences(next)) {
+                            showAnnotationInteraction();
+                            // A mode that the toggle opened ends with the toggle.
+                            if (quickAnnotations() && annotationMode)
+                                leaveAnnotations(false);
+                            syncReadingControls();
+                        }
+                        closePopup(annotationInteractionPopup);
+                    });
+}
+
 void Reader::showMenuView()
 {
     const auto mode = pageNavigation::menuView(preferences);
-    menuViewButton->setCaption(menuViewLabel(mode).toUpper());
+    if (menuViewButton)
+        menuViewButton->setCaption(menuViewLabel(mode).toUpper());
 }
 
 void Reader::openMenuView()

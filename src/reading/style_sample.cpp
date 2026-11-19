@@ -448,6 +448,56 @@ StyleSample render(const EngineFontInputs &fonts, const StyleSampleRequest &requ
 }
 } // namespace
 
+void setTextSampleText(TextSampleRequest &request)
+{
+    static const auto text = [] {
+        QPair<QString, QStringList> result;
+        bool inExcerpt = false;
+        for (const auto &block : sampleDocument(false, false).blocks) {
+            if (!block.paragraph && result.first.isEmpty())
+                result.first = block.text;
+            if (!block.paragraph)
+                continue;
+            // This paragraph shows hyphenation within the first few lines at the default size.
+            if (block.text.startsWith(QLatin1String("Either the well was very deep")))
+                inExcerpt = true;
+            if (inExcerpt)
+                result.second.append(block.text);
+            if (result.second.size() == paragraphSampleCount)
+                break;
+        }
+        return result;
+    }();
+    request.heading = text.first;
+    request.paragraphs = text.second;
+}
+
+void renderTextSample(EngineFontInputs fonts, TextSampleRequest request, QObject *context,
+                      std::function<void(QImage)> finished)
+{
+    QPointer<QObject> guard(context);
+    // The sample uses CREngine's global fonts, so it is drawn on the
+    // reader's engine worker. A document that is never opened costs nothing.
+    kobalt::qt::invoke(
+            engineWorker(),
+            [guard, fonts = std::move(fonts), request = std::move(request),
+             finished = std::move(finished)] {
+                QImage image;
+                {
+                    EngineJob activity;
+                    image = createEngine(fonts)->drawTextSample(request);
+                }
+                kobalt::qt::invoke(
+                        qApp,
+                        [guard, finished, image = std::move(image)] {
+                            if (guard)
+                                finished(image);
+                        },
+                        Qt::QueuedConnection);
+            },
+            Qt::QueuedConnection);
+}
+
 QJsonObject styleSampleSettings(QJsonObject state)
 {
     for (const auto *key :
@@ -516,24 +566,33 @@ QJsonObject styleSamplePageSettings(const QJsonObject &reading)
 }
 
 void renderStyleSample(EngineFontInputs fonts, StyleSampleRequest request, QObject *context,
-                       std::function<void(StyleSample)> finished)
+                       std::function<void(StyleSample)> finished, std::function<void()> yielded)
 {
     QPointer<QObject> guard(context);
+    const auto queued = engineWorkRequests();
+    auto *worker = yielded ? engineWorkerForIdle() : engineWorker();
     // The sample document shares CREngine's global fonts and caches, so it is
     // created, used and destroyed on the reader's engine worker.
     kobalt::qt::invoke(
-            engineWorker(),
-            [guard, fonts = std::move(fonts), request = std::move(request),
-             finished = std::move(finished)] {
+            worker,
+            [guard, yielded = std::move(yielded), queued, fonts = std::move(fonts),
+             request = std::move(request), finished = std::move(finished)] {
+                bool deferred = false;
                 StyleSample result;
                 {
                     EngineJob activity;
-                    result = render(fonts, request);
+                    deferred = yielded && engineWorkRequests() != queued;
+                    if (!deferred)
+                        result = render(fonts, request);
                 }
                 kobalt::qt::invoke(
                         qApp,
-                        [guard, finished, result = std::move(result)]() mutable {
-                            if (guard)
+                        [guard, finished, yielded, deferred, result = std::move(result)]() mutable {
+                            if (!guard)
+                                return;
+                            if (deferred)
+                                yielded();
+                            else
                                 finished(std::move(result));
                         },
                         Qt::QueuedConnection);

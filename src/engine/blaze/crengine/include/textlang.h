@@ -2,6 +2,8 @@
 #define __TEXTLANG_H_INCLUDED__
 
 #include "crsetup.h"
+#include <utility>
+#include <vector>
 
 #if USE_HARFBUZZ==1
 #include <hb.h>
@@ -223,12 +225,11 @@ public:
     static HyphMethod * getMainLangHyphMethod(); // For HyphMan::hyphenate()
 
     static void resetCounters();
-    /// koblaze: the quote nesting levels of the language configurations, in
-    /// their order. A host that pauses work on one document to work on
-    /// another saves them before and restores them after. Stores at most
-    /// `size` levels and returns how many there are.
-    static int koblazeQuoteLevels( int * levels, int size );
-    static void koblazeSetQuoteLevels( const int * levels, int count );
+    // Only languages with open quotes need a record. Another document
+    // can add languages or change their lookup order while layout is parked.
+    typedef std::vector<std::pair<lString32, int>> QuoteLevels;
+    static QuoteLevels koblazeQuoteLevels();
+    static void koblazeSetQuoteLevels( const QuoteLevels & levels );
 
     // For frontend info about TextLangMan status and seen langs
     static LVPtrVector<TextLangCfg> * getLangCfgList() {
@@ -249,7 +250,7 @@ class TextLangCfg
 {
     friend class TextLangMan;
     lString32 _lang_tag;
-    HyphMethod * _hyph_method;
+    mutable HyphMethod * _hyph_method = NULL;
 
     lString32 _open_quote1;
     lString32 _close_quote1;
@@ -283,7 +284,7 @@ public:
 
     HyphMethod * getHyphMethod() const {
         if ( !TextLangMan::_overridden_hyph_method )
-            return _hyph_method;
+            return getDefaultHyphMethod();
         if ( !TextLangMan::_hyphenation_enabled )
             return TextLangMan::_no_hyph_method;
         if ( TextLangMan::_hyphenation_soft_hyphens_only )
@@ -292,11 +293,9 @@ public:
             return _use_grapheme_based_hyphenation ? TextLangMan::_grapheme_hyph_method
                                                    : TextLangMan::_algo_hyph_method;
         // Should not be reached
-        return _hyph_method;
+        return getDefaultHyphMethod();
     }
-    HyphMethod * getDefaultHyphMethod() const {
-        return _hyph_method;
-    }
+    HyphMethod * getDefaultHyphMethod() const;
 
     lString32 & getOpeningQuote( bool update_level=true );
     lString32 & getClosingQuote( bool update_level=true );

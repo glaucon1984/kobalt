@@ -196,11 +196,10 @@ int main(int argc, char **argv) {
     // and the rest of the start, which take several seconds the PIN screen would spend dark.
     pocketbook::restoreStandbyLight("launch");
 
-    // Every book is a new process here, and verifying the bundle reads and hashes 46 MB of fonts
-    // before the first frame (about 4 s on the Era Lite): record it, so that only a bundle that
-    // changed is read again. Next to the binary, not in the profile: it describes this install.
+    // Every book is a new process here, and hashing the whole bundle takes about 4 s on the
+    // Era Lite. The bundle records what it verified in assets/.verified.json, so a later process
+    // reads again only a file whose size or modification time changed.
     AssetBundle assets(base + "/assets", QStringLiteral(KOBALT_VERSION));
-    assets.setVerificationRecord(base + "/assets-verified.json");
     QElapsedTimer assetClock;
     assetClock.start();
     const bool assetsAvailable = assets.available();

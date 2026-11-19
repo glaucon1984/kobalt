@@ -27,17 +27,14 @@ set(CRE_SRCS
     crengine/src/hyphman.cpp
     crengine/src/lstridmap.cpp
     crengine/src/lvdocview.cpp
-    crengine/src/lvdocview_vert.cpp
     crengine/src/lvdrawbuf.cpp
     crengine/src/lvfnt.cpp
     crengine/src/lvfntman.cpp
-    crengine/src/lvfntman_vert.cpp
     crengine/src/lvimg.cpp
     crengine/src/lvmemman.cpp
     crengine/src/lvopc.cpp
     crengine/src/lvpagesplitter.cpp
     crengine/src/lvrend.cpp
-    crengine/src/lvrend_vert_diag.cpp
     crengine/src/lvstream.cpp
     crengine/src/lvstring.cpp
     crengine/src/lvstsheet.cpp
@@ -56,6 +53,19 @@ set(CRE_SRCS
     crengine/src/textlang.cpp
     crengine/src/txtselector.cpp
     crengine/src/wordfmt.cpp
+    extensions/chapter_layout.cpp
+    extensions/css_ancestors.cpp
+    extensions/document_fonts.cpp
+    extensions/font_selection.cpp
+    extensions/layout_control.cpp
+    extensions/page_spacing.cpp
+    extensions/shaping_options.cpp
+    extensions/spine_window.cpp
+    extensions/word_cache.cpp
+    extensions/vertical/lvdocview_vert.cpp
+    extensions/vertical/lvfntman_vert.cpp
+    extensions/vertical/vertical_boxes.cpp
+    extensions/vertical/lvrend_vert_diag.cpp
 )
 
 # helpers (options) {{{

@@ -1,5 +1,7 @@
 # Bookmarks and annotations checks
 
+The bookmark-session checks also prepare neighboring slices in Fast and Hybrid modes, add and remove a bookmark on the displayed passage, and reopen the saved store to verify that a later bookmark survives. They run against the existing JSON and SQLite storage variants.
+
 Label `annotations`. Build `mac-tests`, then run `ctest --preset mac -L annotations` from `platforms/desktop/`. `ctest --preset mac -N -L annotations` lists its tests.
 
 These checks cover bookmarks, pinned bookmarks, bookmark returns, highlights, notes, annotation mode, the annotation list, the annotation database and annotation export. The `model` checks hold the stores and the database, the `session` checks run each editing case in separate JSON and SQLite processes, and the `desktop`, `lifecycle` and `ui` checks drive the production reader.
@@ -9,6 +11,10 @@ These checks cover bookmarks, pinned bookmarks, bookmark returns, highlights, no
 SQLite is the default backend, with an explicit legacy JSON override as documented in [Storage compatibility](../storage.md). A constrained SQLite fixture checks rollback after `SQLITE_FULL`. It does not simulate a full FAT volume or physical power loss. To run only the annotation order cases, use `kobalt-annotation-database-tests --order-regressions [TEMP_PARENT]`. An explicit parent keeps the temporary databases inside a controlled writable test directory.
 
 Right-click annotation entry is a host capability. Desktop enables it; other hosts leave it disabled. Pointer checks cover a normal click, mixed-button gestures, revealed links and a disabled capability.
+
+`desktop.annotationNotes` drives the note flow through the production reader: Add note on a draft, Cancel, an injected SQLite failure and retry with the draft intact, Add note on a saved highlight, the compact menu of a noted highlight, Color with Discard and Apply changes, Edit note and removal by saving an empty note. `model.highlight-session` checks that compact records report which highlights have notes, that excerpts carry notes, that a note written on a compact record keeps its text and chapter, and that whitespace-only and oversized notes are handled. The gallery tour captures the note editor, a noted highlight and its Color step. These checks use the widget keyboard. Nickel's text-box keyboard receiver is checked only against pewter; typing into it, and what its return key does, still need device validation.
+
+`desktop.quickAnnotations` chooses Quick annotation mode in Settings, checks that the Annotate button is hidden, and drives a hold and drag across words through the production reader. It checks the release menu, saving, Clear selection and Look up, leaving annotation mode after each, and holding a saved highlight. The `quickAnnotation` gallery case captures the setting's choices and the menu over an outlined selection.
 
 `AnnotationDraft` owns selection endpoints, punctuation policies, the resolved range, viewport identity and draft geometry. The reader owns gestures, popovers and persistence decisions. `model.annotation-draft` checks that overlap rejection preserves the previous selection, reversed endpoints retain resolved policies, old asynchronous responses cannot replace a newer selection, and image decoding keeps current geometry when its markup is older. Save preparation uses a separate revision: sleep invalidates interactive queries but does not abandon a pending save. Abandoned saves cannot clear a newer draft. Existing desktop and lifecycle checks cover dragging across pages, editing, save failures and annotation frames.
 

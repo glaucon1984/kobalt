@@ -31,7 +31,9 @@ page covers installing and using it. [Building](building.md#pocketbook) covers t
   the current page, the cover with a bookmark or a card, and the designs that draw a whole
   screen of their own), with progress and battery, in the
   orientation the device is held in; the "PNG over text" design draws a transparent PNG of
-  yours from `applications/kobalt/screensaver` over the dimmed page. The power-off screen shows the same design marked
+  yours from `applications/kobalt/screensaver` over the dimmed page, and the Custom design can
+  use an image of yours from `applications/kobalt/wallpapers` as its background and give power
+  off a look of its own. Otherwise the power-off screen shows the same design marked
   "Powered off" (as on Kobo, so a switched-off device is told from a sleeping one at a glance),
   and the boot screen shows the page as it was, when the PocketBook's Power-off logo and Boot
   logo settings (Settings → Personalize → Logos) are the book cover.
@@ -116,7 +118,9 @@ What the installer does, in case you prefer to do it by hand:
   The firmware runs file handlers from `system/bin`, that is why the launcher is in both places.
   Kobalt's settings, bookmarks and dictionaries live in `applications/kobalt/profile/` and
   `applications/kobalt/dictionaries/`; those are kept across updates, as are the plugins in
-  `applications/kobalt/plugins/` and their data in `applications/kobalt/plugin-data/`.
+  `applications/kobalt/plugins/` and their data in `applications/kobalt/plugin-data/`, and
+  your sleep screen images in `applications/kobalt/screensaver/` and
+  `applications/kobalt/wallpapers/`.
 - Adds `kobalt.app` to the EPUB line of `system/config/extensions.cfg` (the "Open with" list),
   first on the line, since the first app listed is what opens a book that has no "Open with"
   choice of its own; after the existing default with the keep-default option. A copy of the
@@ -251,7 +255,7 @@ What to expect:
 - `--output <folder>` writes the converted dictionary there and leaves the device alone;
   `--check <folder> <pair> [word…]` reads such a folder back by the rules of Kobalt's reader.
 
-**Beside the catalogue's instead of in its place** (builds with the blaze engine): Kobalt also
+**Beside the catalogue's instead of in its place** (since 0.12.0): Kobalt also
 reads StarDict dictionaries unpacked in folders under `applications/kobalt/dictionaries/` and
 lists them in the lookup chooser next to the downloaded ones, so a dictionary of yours and the
 catalogue's can both be used. Kobalt takes them as they are only in its own form (StarDict 2.4.2,

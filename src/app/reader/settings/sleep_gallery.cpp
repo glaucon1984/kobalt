@@ -16,6 +16,8 @@
 
 #include <QHBoxLayout>
 #include <QMouseEvent>
+#include <QPolygonF>
+#include <QRegion>
 #include <QPainter>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -42,11 +44,18 @@ public:
             // A long press on an entry that has options opens them instead of choosing.
             auto *owner = this->gallery;
             if (pressed < 0 || !owner->customize
-                || owner->entries_[pressed].design != sleep::Design::Night)
+                || !owner->customizable(owner->entries_[pressed].design))
                 return;
-            held = true;
-            owner->customize(owner->entries_[pressed].design);
+            const auto design = owner->entries_[pressed].design;
+            cancelPress();
+            owner->customize(design);
         });
+    }
+
+    void cancelPress()
+    {
+        hold.stop();
+        pressed = -1;
     }
 
     QRect cell(int slot) const
@@ -87,6 +96,14 @@ public:
     }
 
 protected:
+    bool event(QEvent *event) override
+    {
+        if (event->type() == QEvent::TouchCancel || event->type() == QEvent::UngrabMouse
+            || event->type() == QEvent::Hide)
+            cancelPress();
+        return QWidget::event(event);
+    }
+
     void paintEvent(QPaintEvent *) override
     {
         QPainter painter(this);
@@ -108,20 +125,30 @@ protected:
     // Accept the press so the release, which chooses, comes here too.
     void mousePressEvent(QMouseEvent *event) override
     {
+        if (event->button() != Qt::LeftButton)
+            return QWidget::mousePressEvent(event);
         event->accept();
+        cancelPress();
         pressed = entryAt(event->pos());
-        held = false;
-        hold.start();
+        if (pressed >= 0)
+            hold.start();
+    }
+
+    void mouseMoveEvent(QMouseEvent *event) override
+    {
+        if (entryAt(event->pos()) != pressed)
+            cancelPress();
+        QWidget::mouseMoveEvent(event);
     }
 
     void mouseReleaseEvent(QMouseEvent *event) override
     {
-        hold.stop();
+        if (event->button() != Qt::LeftButton)
+            return QWidget::mouseReleaseEvent(event);
         const int index = entryAt(event->pos());
-        const bool wasHeld = held;
-        held = false;
-        pressed = -1;
-        if (index < 0 || wasHeld)
+        const bool selected = index >= 0 && index == pressed;
+        cancelPress();
+        if (!selected)
             return;
         const auto entry = gallery->entries_[index];
         if (!entry.enabled) {
@@ -129,8 +156,11 @@ protected:
                 gallery->unavailable(entry.design);
             return;
         }
-        gallery->current_ = entry.design;
-        update();
+        // Custom is chosen when its editor closes with Done.
+        if (entry.design != sleep::Design::Custom) {
+            gallery->current_ = entry.design;
+            update();
+        }
         if (gallery->chosen)
             gallery->chosen(entry.design);
     }
@@ -195,7 +225,6 @@ private:
     SleepGallery *gallery;
     QTimer hold;
     int pressed = -1;
-    bool held = false;
 };
 
 SleepGallery::SleepGallery(QWidget *parent, QVector<Entry> entries, sleep::Design current,
@@ -298,7 +327,10 @@ int SleepGallery::pageCount() const
 
 void SleepGallery::showPage(int page)
 {
-    pageIndex_ = qBound(0, page, pageCount() - 1);
+    const int next = qBound(0, page, pageCount() - 1);
+    if (next != pageIndex_)
+        grid_->cancelPress();
+    pageIndex_ = next;
     pager_->setPage(pageIndex_, pageCount());
     grid_->update();
 }
@@ -323,6 +355,59 @@ void SleepGallery::setSample(const sleep::Snapshot &sample)
     sample_ = sample;
     previews_.clear();
     grid_->update();
+}
+
+void SleepGallery::setCustom(const sleep::Custom &custom)
+{
+    custom_ = custom;
+    previews_.remove(int(sleep::Design::Custom));
+    grid_->update();
+}
+
+void SleepGallery::setWallpapers(const QImage &sleeping, const QImage &poweredOff)
+{
+    wallpaper_ = sleeping;
+    offWallpaper_ = poweredOff;
+    previews_.remove(int(sleep::Design::Custom));
+    grid_->update();
+}
+
+void SleepGallery::setPlaces(const QHash<int, sleep::Place> &places)
+{
+    places_ = places;
+    previews_.clear();
+    grid_->update();
+}
+
+void SleepGallery::setCurrent(sleep::Design design)
+{
+    current_ = design;
+    grid_->update();
+}
+
+sleep::Look SleepGallery::look(sleep::Design design, bool poweredOff) const
+{
+    if (design == sleep::Design::Custom) {
+        const auto &layer = poweredOff && !custom_.same ? custom_.off : custom_.sleep;
+        return { layer.status, layer.backdrop, sleep::tileFor(layer.status) };
+    }
+    auto tile = sleep::Tile::None;
+    if (design == sleep::Design::Bookmark)
+        tile = sleep::Tile::Bookmark;
+    else if (design == sleep::Design::Card)
+        tile = sleep::Tile::Card;
+    else if (design == sleep::Design::Page || design == sleep::Design::Overlay)
+        tile = sample_.tile;
+    return { design, sleep::backdrop(design), tile };
+}
+
+bool SleepGallery::customizable(sleep::Design design) const
+{
+    if (design == sleep::Design::Night || design == sleep::Design::Custom)
+        return true;
+    if (design == sleep::Design::Stock)
+        return false;
+    return !sleep::places(sleep::statusDesign(look(design))).isEmpty();
 }
 
 void SleepGallery::setOverlay(const QImage &overlay)
@@ -406,19 +491,32 @@ QImage SleepGallery::preview(const Entry &entry, QSize size)
                  Qt::AlignLeft | Qt::AlignVCenter, status);
         }
     } else {
-        auto shot = sample_;
-        shot.design = entry.design;
-        shot.mode = sleep::backdrop(entry.design);
-        if (!sleep::tiled(entry.design))
-            shot.tile = sleep::Tile::None;
-        else if (entry.design == sleep::Design::Bookmark)
-            shot.tile = sleep::Tile::Bookmark;
-        else if (entry.design == sleep::Design::Card)
-            shot.tile = sleep::Tile::Card;
-        else if (entry.design == sleep::Design::Cover)
-            shot.tile = sleep::Tile::None;
-        paintSleepPreview(painter, QRectF(QPointF(), QSizeF(size)), screen_, cover_, pageImage_,
-                          overlay_, shot);
+        const auto draw = [&](bool poweredOff) {
+            const auto chosen = look(entry.design, poweredOff);
+            auto shot = sample_;
+            shot.design = chosen.design;
+            shot.mode = chosen.mode;
+            shot.tile = chosen.tile;
+            shot.place = places_.value(int(sleep::statusDesign(chosen)), sleep::Place::Default);
+            if (poweredOff)
+                shot.dark = true;
+            paintSleepPreview(painter, QRectF(QPointF(), QSizeF(size)), screen_, cover_, pageImage_,
+                              overlay_, shot, poweredOff ? offWallpaper_ : wallpaper_,
+                              poweredOff ? SleepStatus::PoweredOff : SleepStatus::Sleeping);
+        };
+        draw(false);
+        if (entry.design == sleep::Design::Custom && !custom_.same) {
+            // A different power-off screen fills the lower-right half.
+            QPolygonF half;
+            half << QPointF(size.width(), 0) << QPointF(size.width(), size.height())
+                 << QPointF(0, size.height());
+            painter.save();
+            painter.setClipRegion(QRegion(half.toPolygon()));
+            draw(true);
+            painter.restore();
+            painter.setPen(QPen(ui::themeColors(this).ink, ui::px(2)));
+            painter.drawLine(QPointF(size.width(), 0), QPointF(0, size.height()));
+        }
     }
     painter.end();
     previews_.insert(key, image);

@@ -26,6 +26,11 @@ list(FILTER kobo_shared_sources EXCLUDE REGEX "/src/engine/blaze/")
 file(GLOB_RECURSE engine_adapter ${kobo_glob_options} "${kobo_source}/engine/blaze/adapter/*.cpp" "${kobo_source}/engine/blaze/adapter/*.h")
 list(APPEND kobo_shared_sources ${engine_adapter})
 list(FILTER kobo_shared_sources EXCLUDE REGEX "/(library|app/library)/")
+# Activity's book covers use the Library's EPUB cover reader and its
+# thumbnail loader on every platform.
+list(APPEND kobo_shared_sources
+    "${kobo_source}/library/book_metadata.cpp" "${kobo_source}/library/book_metadata.h"
+    "${kobo_source}/library/cover_thumbnails.cpp" "${kobo_source}/library/cover_thumbnails.h")
 # The adapters of this SDK's firmware.
 file(GLOB kobo_adapter_sources ${kobo_glob_options}
     "${kobo_directory}/common/*.cpp" "${kobo_directory}/common/*.h"
@@ -35,7 +40,9 @@ if(KOBALT_QT_MAJOR EQUAL 5)
     file(GLOB kobo_wifi_idle_sources ${kobo_glob_options}
         "${kobo_directory}/nickel-fixes/wifi-idle/*.cpp"
         "${kobo_directory}/nickel-fixes/wifi-idle/*.h")
-    list(APPEND kobo_adapter_sources ${kobo_wifi_idle_sources})
+    list(APPEND kobo_adapter_sources ${kobo_wifi_idle_sources}
+        "${kobo_directory}/nickel-fixes/wifi-idle/nickelfix/memory.cc"
+        "${kobo_directory}/nickel-fixes/wifi-idle/nickelfix/kepub-reader/detour.cc")
 endif()
 set(kobo_c_sources "${kobo_directory}/common/install.c" "${kobo_directory}/common/startup_recovery.c")
 # NickelHook's loader, linked into the mod library only.
@@ -43,7 +50,8 @@ set(kobo_hooks "${kobo_directory}/toolchains/nickelhook-qt6")
 set(kobo_hook_sources "${kobo_hooks}/nh.c" "${kobo_hooks}/resources.c")
 # An evaluation package (KOBALT_EVAL_PACKAGE) adds the scenario player and
 # this definition.
-set(kobo_eval_sources "${kobo_source}/scenario/player.cpp")
+set(kobo_eval_sources "${kobo_source}/scenario/player.cpp"
+    "${kobo_source}/scenario/resources.cpp")
 set(kobo_eval_definitions KOBALT_SCENARIO_PLAYER)
 
 # Options of the application objects and the mod library, on top of the

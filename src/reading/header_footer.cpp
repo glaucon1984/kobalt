@@ -76,21 +76,23 @@ QString calculating()
 }
 
 // A percent that is known, or nothing.
-QString percent(int value)
+QString percent(qint64 tenths, bool decimal)
 {
-    return value >= 0 ? strings::get("common.percent").arg(qBound(0, value, 100)) : QString();
+    if (tenths < 0)
+        return {};
+    const auto whole = tenths / 10;
+    return strings::get("common.percent")
+            .arg(decimal ? QString("%1.%2").arg(whole).arg(tenths % 10) : QString::number(whole));
 }
 
 QString percentDone(int page, int pages, bool decimal)
 {
     if (pages <= 0)
         return {};
-    if (!decimal)
-        return strings::get("common.percent").arg(pageProgressPercent(qMax(1, page) - 1, pages));
     // Keep the existing page count and round down at the selected precision.
     // Integer arithmetic avoids rounding a penultimate page up to 100.0%.
     const qint64 tenths = 1000 * qint64(qBound(1, page, pages)) / pages;
-    return strings::get("common.percent").arg(QString("%1.%2").arg(tenths / 10).arg(tenths % 10));
+    return percent(tenths, decimal);
 }
 
 // Beside a name the page reads 5 of 33, so the slash does not compete with
@@ -105,6 +107,37 @@ QString pageOf(int page, int pages, bool estimated)
 QString milliseconds(qint64 value)
 {
     return value >= 0 ? strings::get("header_footer.milliseconds").arg(value) : QString();
+}
+
+// The last turn time, then the layout: fast while the engine lays out a
+// chapter at a time, with the progress or failure of the whole book, and
+// full once it has the whole book, with how long that took.
+QString bookStatus(const Values &values)
+{
+    QString detail;
+    if (values.wholeBook) {
+        if (values.wholeBookMilliseconds >= 0) {
+            const double seconds = values.wholeBookMilliseconds / 1000.0;
+            detail = strings::get("header_footer.status.seconds")
+                             .arg(QString::number(seconds, 'f', seconds < 10 ? 1 : 0));
+        }
+    } else if (values.wholeBookFailed) {
+        detail = strings::get("header_footer.status.failed");
+    } else if (values.wholeBookPercent >= 0) {
+        detail = strings::get("common.percent").arg(values.wholeBookPercent);
+    }
+    const auto mode = strings::get(values.wholeBook ? "header_footer.status.full"
+                                                    : "header_footer.status.fast");
+    const auto layout =
+            strings::get("header_footer.status.layout")
+                    .arg(detail.isEmpty() ? mode
+                                          : strings::get("header_footer.status.with_detail")
+                                                    .arg(mode, detail));
+    if (values.pageTurnMilliseconds < 0)
+        return layout;
+    return strings::get("header_footer.status.parts")
+            .arg(strings::get("header_footer.status.turn").arg(values.pageTurnMilliseconds),
+                 layout);
 }
 
 QString joined(const QString &name, const QString &position)
@@ -240,6 +273,8 @@ QString fieldValue(Field field)
         return QStringLiteral("page_turn_time");
     case Field::ChapterLoadTime:
         return QStringLiteral("chapter_load_time");
+    case Field::BookStatus:
+        return QStringLiteral("book_status");
     }
     return QStringLiteral("nothing");
 }
@@ -391,18 +426,18 @@ Content content(Field field, const Values &values, bool uppercase)
         result.text = values.chapter;
         break;
     case Field::ChapterPage:
-        result.text = values.percentRead >= 0
+        result.text = values.percentTenths >= 0
                 ? calculating()
                 : pageFraction(values.chapterPage, values.chapterPages,
                                values.chapterPagesEstimated);
         break;
     case Field::BookPage:
-        result.text = values.percentRead >= 0
+        result.text = values.percentTenths >= 0
                 ? calculating()
                 : pageFraction(values.page, values.pages, values.pagesEstimated);
         break;
     case Field::ChapterPagesLeft:
-        if (values.percentRead >= 0) {
+        if (values.percentTenths >= 0) {
             result.text = calculating();
         } else if (values.chapterPages > 0) {
             // The current page is still to be read, as in Stats: the last page shows 1.
@@ -415,14 +450,14 @@ Content content(Field field, const Values &values, bool uppercase)
         break;
     case Field::ChapterAndPage:
         result.chapterTitle = values.chapter;
-        result.chapterPosition = values.percentRead >= 0
+        result.chapterPosition = values.percentTenths >= 0
                 ? calculating()
                 : pageOf(values.chapterPage, values.chapterPages, values.chapterPagesEstimated);
         result.text = joined(result.chapterTitle, result.chapterPosition);
         break;
     case Field::TitleAndPage:
         result.text = joined(values.title,
-                             values.percentRead >= 0
+                             values.percentTenths >= 0
                                      ? calculating()
                                      : pageOf(values.page, values.pages, values.pagesEstimated));
         break;
@@ -454,13 +489,13 @@ Content content(Field field, const Values &values, bool uppercase)
                 timeLeft(values.bookMilliseconds, values.learningPace, values.approximateTime);
         break;
     case Field::ChapterPercent:
-        result.text = values.percentRead >= 0
-                ? percent(values.chapterPercentRead)
+        result.text = values.percentTenths >= 0
+                ? percent(values.chapterPercentTenths, values.decimalPercentages)
                 : percentDone(values.chapterPage, values.chapterPages, values.decimalPercentages);
         break;
     case Field::BookPercent:
-        result.text = values.percentRead >= 0
-                ? percent(values.percentRead)
+        result.text = values.percentTenths >= 0
+                ? percent(values.percentTenths, values.decimalPercentages)
                 : percentDone(values.page, values.pages, values.decimalPercentages);
         break;
     case Field::PageTurnTime:
@@ -468,6 +503,9 @@ Content content(Field field, const Values &values, bool uppercase)
         break;
     case Field::ChapterLoadTime:
         result.text = milliseconds(values.chapterLoadMilliseconds);
+        break;
+    case Field::BookStatus:
+        result.text = bookStatus(values);
         break;
     }
     if (uppercase) {
@@ -526,6 +564,8 @@ QString fieldLabel(Field field)
         return strings::get("header_footer.field.page_turn_time");
     case Field::ChapterLoadTime:
         return strings::get("header_footer.field.chapter_load_time");
+    case Field::BookStatus:
+        return strings::get("header_footer.field.book_status");
     }
     return {};
 }
@@ -539,6 +579,8 @@ QString fieldDescription(Field field)
     case Field::ChapterTimeLeft:
     case Field::BookTimeLeft:
         return strings::get("header_footer.field_description.time_left");
+    case Field::BookStatus:
+        return strings::get("header_footer.field_description.book_status");
     default:
         return {};
     }

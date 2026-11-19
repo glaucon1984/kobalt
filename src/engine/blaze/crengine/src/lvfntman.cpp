@@ -19,9 +19,9 @@
 #include <stdio.h>
 
 #include "../include/lvfntman.h"
-#include "../include/lvfntman_vert.h"  // fork-only: TTB glyph metrics cache
-#include "../include/lvfntman_vert_buffer.h"
-#include "../include/lvtextfm_vert_diag.h"
+#include "../../extensions/vertical/lvfntman_vert.h"  // Blaze: TTB glyph metrics cache
+#include "../../extensions/vertical/lvfntman_vert_buffer.h"
+#include "../../extensions/vertical/lvtextfm_vert_diag.h"
 #include "../include/lvstream.h"
 #include "../include/lvdrawbuf.h"
 #include "../include/lvstyles.h"
@@ -50,6 +50,7 @@
 
 #if (USE_FREETYPE==1)
 
+#include "../../extensions/embedded_font_cache.h"
 #include <ft2build.h>
 #include <freetype/freetype.h>
 #include <freetype/ftoutln.h>    // for FT_Outline_Embolden()
@@ -74,8 +75,8 @@
 #if USE_HARFBUZZ==1
 #include <hb.h>
 #include <hb-ft.h>
+#include "../../extensions/word_cache.h"
 #include <hb-ot.h>
-#include <string>
 #include <unordered_map>
 #include <vector>
 #include <cstdlib>
@@ -1116,58 +1117,6 @@ public:
     }
 };
 
-// koblaze: see koblaze.h.
-static int koblaze_pair_kerning = -1;
-
-void koblazeSetPairKerning(bool enabled)
-{
-    koblaze_pair_kerning = enabled ? 1 : 0;
-}
-
-bool koblazePairKerning()
-{
-    // Until a host chooses, KOBLAZE_PAIR_KERNING=1 in the environment turns it on.
-    if ( koblaze_pair_kerning < 0 ) {
-        const char * value = getenv("KOBLAZE_PAIR_KERNING");
-        koblaze_pair_kerning = value && value[0] == '1' ? 1 : 0;
-    }
-    return koblaze_pair_kerning == 1;
-}
-
-static int koblaze_word_widths = -1;
-
-void koblazeSetWordWidths(bool enabled)
-{
-    koblaze_word_widths = enabled ? 1 : 0;
-}
-
-bool koblazeWordWidths()
-{
-    // Until a host chooses, KOBLAZE_WORD_WIDTHS=1 in the environment turns it on.
-    if ( koblaze_word_widths < 0 ) {
-        const char * value = getenv("KOBLAZE_WORD_WIDTHS");
-        koblaze_word_widths = value && value[0] == '1' ? 1 : 0;
-    }
-    return koblaze_word_widths == 1;
-}
-
-static int koblaze_word_pairs = -1;
-
-void koblazeSetWordPairs(bool enabled)
-{
-    koblaze_word_pairs = enabled ? 1 : 0;
-}
-
-bool koblazeWordPairs()
-{
-    // Until a host chooses, KOBLAZE_WORD_PAIRS=1 in the environment turns it on.
-    if ( koblaze_word_pairs < 0 ) {
-        const char * value = getenv("KOBLAZE_WORD_PAIRS");
-        koblaze_word_pairs = value && value[0] == '1' ? 1 : 0;
-    }
-    return koblaze_word_pairs == 1;
-}
-
 class LVFreeTypeFace;
 
 static LVFontGlyphCacheItem * newItem( LVFontLocalGlyphCache * local_cache, lChar32 ch, FT_GlyphSlot slot ) // , bool drawMonochrome
@@ -1763,7 +1712,7 @@ protected:
     LVFontGlyphSignedMetricCache     _lsbcache; // glyph left side bearing cache
     LVFontGlyphSignedMetricCache     _rsbcache; // glyph right side bearing cache
     LVFontLocalGlyphCache            _glyph_cache;
-    // Fork-only: per-face TTB metrics cache for vertical-rl/lr rendering.
+    // Blaze: per-face TTB metrics cache for vertical-rl/lr rendering.
     LVFontVertGlyphMetricsCache      _vert_metrics_cache;
     LVFontVertBodyMetricsCache       _vert_body_metrics_cache;
     bool           _drawMonochrome;
@@ -1782,9 +1731,12 @@ protected:
     LVFontVariations _variations; // variable font axis values applied to this instance
 #if USE_HARFBUZZ==1
     hb_font_t* _hb_font;
+    hb_script_t _capsScript = HB_SCRIPT_INVALID;
+    hb_language_t _capsLanguage = HB_LANGUAGE_INVALID;
+    int _capsFeatures = 0;
     hb_buffer_t* _hb_buffer;
     LVArray<hb_feature_t> _hb_features;
-    // koblaze: pair kerning from memory. See koblazeKernRun().
+    // Blaze: pair kerning from memory. See koblazeKernRun().
     struct KoblazeKern {
         hb_position_t advance; // added to the advance of the first glyph
         bool usable;           // false: this pair needs the whole run shaped
@@ -1797,57 +1749,19 @@ protected:
     // The face stops using the memory when a check against HarfBuzz fails.
     bool _koblaze_kern_failed = false;
     unsigned int _koblaze_kern_runs = 0;
-    // koblaze: word widths from memory. See koblazeMeasureWords().
-    // A word is a record of ints in _koblaze_words; _koblaze_word_table
-    // holds the offset of each record plus one, by the hash of its text.
-    enum {
-        KW_HASH, KW_LEN, KW_USABLE,
-        KW_FIRST_GLYPH, KW_FIRST_END,   // the first glyph and the end of its cluster
-        KW_LAST_GLYPH, KW_LAST_CLUSTER, // the last glyph and the character that holds its advance
-        KW_LAST_ADVANCE,
-        KW_KERN_AFTER,  // added to the advance of the last glyph before a space
-        KW_KERN_BEFORE, // added to the advance of a space before this word
-        KW_TEXT         // then for each character: text, 26.6 advance, pixel advance, bits
-    };
+    blaze::WordCache _word_cache;
     enum { KW_BIT_GLYPH = 1, KW_BIT_ADVANCE = 2 };
-    enum { KW_UNKNOWN = INT_MIN, KW_UNUSABLE = INT_MIN + 1 };
-    enum { KW_MAX_LEN = 48, KW_MAX_WORDS = 50000 };
-    std::vector<int> _koblaze_words;
-    std::vector<unsigned int> _koblaze_word_table;
-    unsigned int _koblaze_word_count = 0;
-    // The kerning of each glyph before and after a space, by glyph.
-    std::vector<int> _koblaze_space_kern[2];
-    // koblaze: words built from pairs. See koblazeBuildWord(). The glyph
-    // and advance of each character alone, and what each pair of
-    // characters adds to the advance of its first glyph.
-    enum { KW_CHARS = 0x250 + 0x203B - 0x2010 };
-    std::vector<int> _koblaze_char_glyph;
-    std::vector<int> _koblaze_char_advance;
-    std::unordered_map<unsigned int, int> _koblaze_pair_kern;
+    enum { KW_MAX_LEN = 48, KW_EXTENDED = 0x250, KW_PUNCT = KW_EXTENDED + 0x100,
+           KW_CHARS = KW_PUNCT + 0x203B - 0x2010 };
     bool _koblaze_build_failed = false;
     unsigned int _koblaze_built_words = 0;
     std::vector<int> _koblaze_built_check;
-    // The memory of each other language of this face. A font can have
-    // other glyphs and kerning for another language.
-    struct KoblazeWordMemory {
-        hb_language_t language;
-        std::vector<int> words;
-        std::vector<unsigned int> table;
-        unsigned int count;
-        std::vector<int> space_kern[2];
-        std::vector<int> char_glyph;
-        std::vector<int> char_advance;
-        std::unordered_map<unsigned int, int> pair_kern;
-    };
-    enum { KW_MAX_LANGUAGES = 8 };
-    std::vector<KoblazeWordMemory> _koblaze_word_memories;
-    hb_language_t _koblaze_word_language = HB_LANGUAGE_INVALID;
     bool _koblaze_words_failed = false;
     unsigned int _koblaze_word_runs = 0;
     // The result that the next comparison with HarfBuzz expects.
     std::vector<lUInt16> _koblaze_check_widths;
     std::vector<lUInt8> _koblaze_check_flags;
-    // Fork (vertical-rl): tracks the is_vertical state _hb_features was built
+    // Blaze: tracks the is_vertical state _hb_features was built
     // for, so the hot paths (measureText/DrawTextString) only rebuild the
     // feature list when the vertical state actually changes. -1 = never built.
     int _hb_features_is_vertical = -1;
@@ -2115,665 +2029,25 @@ public:
     }
 
     #if USE_HARFBUZZ==1
-    void koblazeClearKerning() {
-        _koblaze_kern.clear();
-        _koblaze_kern_systems.clear();
-        _koblaze_features_nokern.clear();
-        _koblaze_kern_failed = false;
-        _koblaze_kern_runs = 0;
-    }
-
-    // Shapes the codepoints of _koblaze_text from `from` for `count` into
-    // `buffer`, with the given features.
+    void koblazeClearKerning();
     void koblazeShape( hb_buffer_t * buffer, unsigned int from, unsigned int count, hb_script_t script,
-                       hb_language_t language, int flags, const LVArray<hb_feature_t> & features ) {
-        hb_buffer_clear_contents(buffer);
-        for ( unsigned int k = 0; k < count; k++ )
-            hb_buffer_add(buffer, _koblaze_text[from + k], k);
-        hb_buffer_set_content_type(buffer, HB_BUFFER_CONTENT_TYPE_UNICODE);
-        hb_buffer_set_direction(buffer, HB_DIRECTION_LTR);
-        hb_buffer_set_script(buffer, script);
-        hb_buffer_set_language(buffer, language);
-        hb_buffer_set_flags(buffer, (hb_buffer_flags_t)flags); // NOLINT(clang-analyzer-optin.core.EnumCastOutOfRange)
-        hb_shape(_hb_font, buffer, features.ptr(), (unsigned int)features.length());
-    }
-
-    // koblaze: what the kern feature adds to the advance of `left` before
-    // `right`, asked of HarfBuzz once for each pair of glyphs. The two
-    // characters are shaped alone, with and without kerning. The pair is
-    // not usable when that gives other glyphs than the run has, or when
-    // kerning moves anything but the advance of the first glyph: the run
-    // is then shaped as a whole.
+                       hb_language_t language, int flags, const LVArray<hb_feature_t> & features );
     KoblazeKern koblazeKernPair( unsigned int left_first, unsigned int left_count, unsigned int right_first,
                                  unsigned int right_count, hb_codepoint_t left, hb_codepoint_t right,
-                                 hb_script_t script, hb_language_t language ) {
-        KoblazeKern result = { 0, false };
-        hb_position_t without[2] = { 0, 0 };
-        for ( int pass = 0; pass < 2; pass++ ) {
-            // The characters of the two glyphs alone, without what is between them.
-            hb_buffer_clear_contents(_koblaze_buffer);
-            for ( unsigned int k = 0; k < left_count; k++ )
-                hb_buffer_add(_koblaze_buffer, _koblaze_text[left_first + k], 0);
-            for ( unsigned int k = 0; k < right_count; k++ )
-                hb_buffer_add(_koblaze_buffer, _koblaze_text[right_first + k], 1);
-            hb_buffer_set_content_type(_koblaze_buffer, HB_BUFFER_CONTENT_TYPE_UNICODE);
-            hb_buffer_set_direction(_koblaze_buffer, HB_DIRECTION_LTR);
-            hb_buffer_set_script(_koblaze_buffer, script);
-            hb_buffer_set_language(_koblaze_buffer, language);
-            const LVArray<hb_feature_t> & features = pass == 0 ? _koblaze_features_nokern : _hb_features;
-            hb_shape(_hb_font, _koblaze_buffer, features.ptr(), (unsigned int)features.length());
-            unsigned int glyphs = 0;
-            hb_glyph_info_t * info = hb_buffer_get_glyph_infos(_koblaze_buffer, &glyphs);
-            hb_glyph_position_t * pos = hb_buffer_get_glyph_positions(_koblaze_buffer, NULL);
-            if ( glyphs != 2 || info[0].codepoint != left || info[1].codepoint != right
-                    || pos[0].y_advance || pos[1].y_advance || pos[0].x_offset || pos[0].y_offset
-                    || pos[1].x_offset || pos[1].y_offset )
-                return result;
-            if ( pass == 0 ) {
-                without[0] = pos[0].x_advance;
-                without[1] = pos[1].x_advance;
-            }
-            else {
-                if ( pos[1].x_advance != without[1] )
-                    return result;
-                result.advance = pos[0].x_advance - without[0];
-            }
-        }
-        result.usable = true;
-        return result;
-    }
-
-    // The characters that HarfBuzz passes over when it matches a pair.
-    static bool koblazeIgnorable( hb_codepoint_t c ) {
-        return c == 0x00AD || c == 0x034F || c == 0x061C || (c >= 0x200B && c <= 0x200F)
-                || (c >= 0x202A && c <= 0x202E) || (c >= 0x2060 && c <= 0x206F) || c == 0xFEFF
-                || (c >= 0xFE00 && c <= 0xFE0F) || (c >= 0x180B && c <= 0x180E);
-    }
-
-    // koblaze: _hb_buffer holds a left-to-right horizontal run that was
-    // shaped without the kern feature, and _koblaze_text holds its
-    // characters. Add the kerning of each pair of neighbors from memory.
-    // A book has a few thousand different pairs, so nearly every pair is
-    // found there, and the kerning lookups of the font are not walked for
-    // every glyph. Returns false when the run is not plain enough for this:
-    // a cluster of several glyphs, a glyph that is moved, or a pair that is
-    // not usable. The caller then shapes the run as a whole.
-    bool koblazeKernRun( hb_script_t script, hb_language_t language ) {
-        unsigned int glyphs = 0;
-        hb_glyph_info_t * info = hb_buffer_get_glyph_infos(_hb_buffer, &glyphs);
-        hb_glyph_position_t * pos = hb_buffer_get_glyph_positions(_hb_buffer, NULL);
-        const unsigned int len = (unsigned int)_koblaze_text.size();
-        for ( unsigned int g = 0; g < glyphs; g++ ) {
-            // One glyph for each cluster, in the order of the text.
-            if ( info[g].cluster >= len || (g > 0 && info[g].cluster <= info[g - 1].cluster) || (g == 0 && info[g].cluster != 0) )
-                return false;
-            if ( info[g].codepoint == 0 || pos[g].y_advance || pos[g].x_offset || pos[g].y_offset )
-                return false;
-        }
-        // Each script and language of the face has its own pairs.
-        unsigned int system = 0;
-        for ( ; system < _koblaze_kern_systems.size(); system++ ) {
-            if ( _koblaze_kern_systems[system].first == script && _koblaze_kern_systems[system].second == language )
-                break;
-        }
-        if ( system == _koblaze_kern_systems.size() ) {
-            if ( system >= 255 )
-                return false;
-            _koblaze_kern_systems.push_back(std::make_pair(script, language));
-        }
-        int left = -1;
-        for ( unsigned int g = 0; g < glyphs; g++ ) {
-            const unsigned int first = info[g].cluster, end = g + 1 < glyphs ? info[g + 1].cluster : len;
-            // A cluster of only passed-over characters does not take part.
-            bool ignorable = true;
-            for ( unsigned int c = first; c < end && ignorable; c++ )
-                ignorable = koblazeIgnorable(_koblaze_text[c]);
-            if ( ignorable )
-                continue;
-            if ( left >= 0 ) {
-                const unsigned long long key = ((unsigned long long)(info[left].codepoint & 0xFFFFFFF) << 36)
-                        | ((unsigned long long)(info[g].codepoint & 0xFFFFFFF) << 8) | system;
-                std::unordered_map<unsigned long long, KoblazeKern>::const_iterator found = _koblaze_kern.find(key);
-                KoblazeKern kern;
-                if ( found != _koblaze_kern.end() ) {
-                    kern = found->second;
-                }
-                else {
-                    const unsigned int left_first = info[left].cluster;
-                    const unsigned int left_end = (unsigned int)left + 1 < glyphs ? info[left + 1].cluster : len;
-                    kern = koblazeKernPair(left_first, left_end - left_first, first, end - first,
-                                           info[left].codepoint, info[g].codepoint, script, language);
-                    if ( _koblaze_kern.size() > 60000 )
-                        _koblaze_kern.clear();
-                    _koblaze_kern[key] = kern;
-                }
-                if ( !kern.usable )
-                    return false;
-                pos[left].x_advance += kern.advance;
-            }
-            left = (int)g;
-        }
-        return true;
-    }
-
-    // koblaze: shapes the run in _hb_buffer. With pair kerning from memory
-    // it shapes without the kern feature and adds the kerning; it checks the
-    // result against HarfBuzz for the first runs of a face and for one run
-    // in fifty after that, and stops for the face when they differ.
-    void koblazeShapeRun( bool usable ) {
-        if ( !usable || _koblaze_kern_failed || !koblazePairKerning() ) {
-            hb_shape(_hb_font, _hb_buffer, _hb_features.ptr(), (unsigned int)_hb_features.length());
-            return;
-        }
-        unsigned int len = 0;
-        hb_glyph_info_t * added = hb_buffer_get_glyph_infos(_hb_buffer, &len);
-        const hb_script_t script = hb_buffer_get_script(_hb_buffer);
-        const hb_language_t language = hb_buffer_get_language(_hb_buffer);
-        const int flags = (int)hb_buffer_get_flags(_hb_buffer);
-        _koblaze_text.resize(len);
-        for ( unsigned int k = 0; k < len; k++ )
-            _koblaze_text[k] = added[k].codepoint;
-        if ( !_koblaze_buffer )
-            _koblaze_buffer = hb_buffer_create();
-        if ( _koblaze_features_nokern.length() == 0 ) {
-            for ( int f = 0; f < _hb_features.length(); f++ )
-                _koblaze_features_nokern.add(_hb_features[f]);
-            hb_feature_t off;
-            if ( hb_feature_from_string("-kern", -1, &off) )
-                _koblaze_features_nokern.add(off);
-        }
-        hb_shape(_hb_font, _hb_buffer, _koblaze_features_nokern.ptr(), (unsigned int)_koblaze_features_nokern.length());
-        const bool kerned = len >= 2 ? koblazeKernRun(script, language) : true;
-        const bool check = kerned && ( _koblaze_kern_runs < 200 || _koblaze_kern_runs % 50 == 0 );
-        _koblaze_kern_runs++;
-        if ( kerned && !check )
-            return;
-        if ( kerned ) {
-            // The same run as a whole, for comparison.
-            koblazeShape(_koblaze_buffer, 0, len, script, language, flags, _hb_features);
-            unsigned int glyphs = 0, expected = 0;
-            hb_glyph_info_t * info = hb_buffer_get_glyph_infos(_hb_buffer, &glyphs);
-            hb_glyph_position_t * pos = hb_buffer_get_glyph_positions(_hb_buffer, NULL);
-            hb_glyph_info_t * whole_info = hb_buffer_get_glyph_infos(_koblaze_buffer, &expected);
-            hb_glyph_position_t * whole_pos = hb_buffer_get_glyph_positions(_koblaze_buffer, NULL);
-            bool same = glyphs == expected;
-            for ( unsigned int g = 0; same && g < glyphs; g++ )
-                same = info[g].codepoint == whole_info[g].codepoint && info[g].cluster == whole_info[g].cluster
-                        && pos[g].x_advance == whole_pos[g].x_advance && pos[g].x_offset == whole_pos[g].x_offset
-                        && pos[g].y_offset == whole_pos[g].y_offset && pos[g].y_advance == whole_pos[g].y_advance;
-            if ( same )
-                return;
-            _koblaze_kern_failed = true;
-            CRLog::warn("koblaze: kerning from memory differs from HarfBuzz for %s, run %u: off for this face",
-                        _faceName.c_str(), _koblaze_kern_runs);
-        }
-        // Shape the run as a whole.
-        koblazeShape(_hb_buffer, 0, len, script, language, flags, _hb_features);
-    }
-
-    // Exchanges the memory in use with the one in `memory`.
-    void koblazeSwapWords( KoblazeWordMemory & memory ) {
-        std::swap(memory.language, _koblaze_word_language);
-        memory.words.swap(_koblaze_words);
-        memory.table.swap(_koblaze_word_table);
-        std::swap(memory.count, _koblaze_word_count);
-        memory.space_kern[0].swap(_koblaze_space_kern[0]);
-        memory.space_kern[1].swap(_koblaze_space_kern[1]);
-        memory.char_glyph.swap(_koblaze_char_glyph);
-        memory.char_advance.swap(_koblaze_char_advance);
-        memory.pair_kern.swap(_koblaze_pair_kern);
-    }
-
-    // Makes the memory of `language` the one in use.
-    void koblazeUseWords( hb_language_t language ) {
-        if ( language == _koblaze_word_language )
-            return;
-        size_t found = 0;
-        while ( found < _koblaze_word_memories.size() && _koblaze_word_memories[found].language != language )
-            found++;
-        if ( found == _koblaze_word_memories.size() ) {
-            // A new language takes the place of the oldest one when there are many.
-            if ( found >= KW_MAX_LANGUAGES )
-                _koblaze_word_memories.erase(_koblaze_word_memories.begin());
-            KoblazeWordMemory empty;
-            empty.language = language;
-            empty.count = 0;
-            _koblaze_word_memories.push_back(empty);
-            found = _koblaze_word_memories.size() - 1;
-        }
-        koblazeSwapWords(_koblaze_word_memories[found]);
-    }
-
-    void koblazeClearWords() {
-        _koblaze_word_memories.clear();
-        _koblaze_word_language = HB_LANGUAGE_INVALID;
-        koblazeForgetWords();
-        _koblaze_words_failed = false;
-        _koblaze_word_runs = 0;
-        _koblaze_build_failed = false;
-        _koblaze_built_words = 0;
-    }
-
-    // Empties the memory in use.
-    void koblazeForgetWords() {
-        _koblaze_words.clear();
-        _koblaze_word_table.clear();
-        _koblaze_word_count = 0;
-        _koblaze_space_kern[0].clear();
-        _koblaze_space_kern[1].clear();
-        _koblaze_char_glyph.clear();
-        _koblaze_char_advance.clear();
-        _koblaze_pair_kern.clear();
-    }
-
-    // What a character can be in a word that is measured from memory:
-    // 0 nothing, 1 inside a word only, 2 also first or last, 3 a Latin
-    // letter. Marks and characters that HarfBuzz passes over can join the
-    // glyph of a neighbor, so they are not allowed at the edge of a word.
-    static int koblazeWordChar( lChar32 c ) {
-        if ( c < 0x250 ) {
-            if ( c < 0x21 || (c >= 0x7F && c < 0xA0) )
-                return 0;
-            if ( c == 0xAD )
-                return 1;
-            if ( (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') )
-                return 3;
-            if ( c < 0xC0 )
-                return c == 0xAA || c == 0xBA ? 3 : 2;
-            return c == 0xD7 || c == 0xF7 ? 2 : 3;
-        }
-        if ( c >= 0x2010 && c <= 0x2027 )
-            return 2;
-        if ( c >= 0x2030 && c <= 0x203A )
-            return 2;
-        if ( c >= 0x1E00 && c <= 0x1EFF )
-            return 3;
-        if ( c < 0x370 ) // phonetic letters, modifier letters and marks
-            return 1;
-        if ( c >= 0x2000 && c <= 0x206F ) // spaces and joiners, but no direction marks
-            return c == 0x200E || c == 0x200F || (c >= 0x2028 && c <= 0x202E) || c >= 0x2066 ? 0 : 1;
-        if ( (c >= 0x20A0 && c <= 0x20CF) || (c >= 0x2100 && c <= 0x214F) || (c >= 0xFB00 && c <= 0xFB06) || c == 0xFEFF )
-            return 1;
-        return 0;
-    }
-
-    // Shapes `count` characters as Latin text into _koblaze_buffer.
-    void koblazeShapeWord( const lChar32 * text, int count, const lChar32 * more = NULL, int more_count = 0 ) {
-        hb_buffer_clear_contents(_koblaze_buffer);
-        for ( int k = 0; k < count; k++ )
-            hb_buffer_add(_koblaze_buffer, (hb_codepoint_t)text[k], k);
-        for ( int k = 0; k < more_count; k++ )
-            hb_buffer_add(_koblaze_buffer, (hb_codepoint_t)more[k], count + k);
-        hb_buffer_set_content_type(_koblaze_buffer, HB_BUFFER_CONTENT_TYPE_UNICODE);
-        hb_buffer_set_direction(_koblaze_buffer, HB_DIRECTION_LTR);
-        hb_buffer_set_script(_koblaze_buffer, HB_SCRIPT_LATIN);
-        hb_buffer_set_language(_koblaze_buffer, _koblaze_word_language);
-        hb_shape(_hb_font, _koblaze_buffer, _hb_features.ptr(), (unsigned int)_hb_features.length());
-    }
-
-    // koblaze: the record of a word, shaped at its first use. Returns its
-    // offset in _koblaze_words, which stays valid until the memory is
-    // cleared; pointers into _koblaze_words do not.
-    unsigned int koblazeWord( const lChar32 * text, int len, unsigned int hash ) {
-        if ( _koblaze_word_table.empty() )
-            _koblaze_word_table.assign(4096, 0);
-        unsigned int mask = (unsigned int)_koblaze_word_table.size() - 1;
-        unsigned int slot = hash & mask;
-        for ( ; _koblaze_word_table[slot]; slot = (slot + 1) & mask ) {
-            const int * word = &_koblaze_words[_koblaze_word_table[slot] - 1];
-            if ( word[KW_HASH] != (int)hash || word[KW_LEN] != len )
-                continue;
-            int k = 0;
-            while ( k < len && word[KW_TEXT + 4 * k] == (int)text[k] )
-                k++;
-            if ( k == len )
-                return _koblaze_word_table[slot] - 1;
-        }
-        // A new word.
-        const unsigned int offset = (unsigned int)_koblaze_words.size();
-        _koblaze_words.resize(offset + KW_TEXT + 4 * len, 0);
-        _koblaze_word_table[slot] = offset + 1;
-        _koblaze_word_count++;
-        if ( _koblaze_word_count * 2 > _koblaze_word_table.size() ) {
-            std::vector<unsigned int> table(_koblaze_word_table.size() * 2, 0);
-            mask = (unsigned int)table.size() - 1;
-            for ( size_t old = 0; old < _koblaze_word_table.size(); old++ ) {
-                if ( !_koblaze_word_table[old] )
-                    continue;
-                unsigned int to = (unsigned int)_koblaze_words[_koblaze_word_table[old] - 1 + KW_HASH] & mask;
-                while ( table[to] )
-                    to = (to + 1) & mask;
-                table[to] = _koblaze_word_table[old];
-            }
-            _koblaze_word_table.swap(table);
-        }
-        int * word = &_koblaze_words[offset];
-        word[KW_HASH] = (int)hash;
-        word[KW_LEN] = len;
-        word[KW_KERN_AFTER] = KW_UNKNOWN;
-        word[KW_KERN_BEFORE] = KW_UNKNOWN;
-        for ( int k = 0; k < len; k++ )
-            word[KW_TEXT + 4 * k] = (int)text[k];
-        if ( _koblaze_build_failed || !koblazeWordPairs() || !koblazeBuildWord(text, len, word) ) {
-            koblazeFillWord(text, len, word);
-            return offset;
-        }
-        // Compare the first words that are built, and one in sixteen after that.
-        _koblaze_built_words++;
-        if ( _koblaze_built_words > 500 && _koblaze_built_words % 16 != 0 )
-            return offset;
-        const int size = KW_TEXT + 4 * len;
-        _koblaze_built_check.assign(word, word + size);
-        for ( int k = KW_USABLE; k < size; k++ ) {
-            if ( k < KW_TEXT ? (k != KW_KERN_AFTER && k != KW_KERN_BEFORE) : ((k - KW_TEXT) & 3) != 0 )
-                word[k] = 0;
-        }
-        koblazeFillWord(text, len, word);
-        for ( int k = 0; k < size; k++ ) {
-            if ( word[k] != _koblaze_built_check[k] ) {
-                _koblaze_build_failed = true;
-                CRLog::warn("koblaze: a word built from pairs differs from HarfBuzz for %s, word %u: off for this face",
-                            _faceName.c_str(), _koblaze_built_words);
-                break;
-            }
-        }
-        return offset;
-    }
-
-    // koblaze: fills the record of a word from its characters and pairs
-    // of characters, with no shaping of the word. HarfBuzz is asked once
-    // for each character alone and once for each pair. Returns false when
-    // the word holds a character or a pair that is not plain: more or
-    // fewer glyphs than characters, other glyphs in the pair than alone,
-    // or a glyph that moves. HarfBuzz then shapes the word.
-    bool koblazeBuildWord( const lChar32 * text, int len, int * word ) {
-        if ( _koblaze_char_glyph.empty() ) {
-            _koblaze_char_glyph.assign(KW_CHARS, KW_UNKNOWN);
-            _koblaze_char_advance.assign(KW_CHARS, 0);
-        }
-        int index = 0, glyph = 0, advance = 0;
-        for ( int t = len - 1; t >= 0; t-- ) {
-            // Only characters that can be at the edge of a word: no marks,
-            // and nothing that HarfBuzz passes over.
-            const lChar32 c = text[t];
-            if ( koblazeWordChar(c) < 2 )
-                return false;
-            const int next_index = index, next_glyph = glyph, next_advance = advance;
-            index = c < 0x250 ? (int)c : (int)c - 0x2010 + 0x250;
-            if ( _koblaze_char_glyph[index] == KW_UNKNOWN ) {
-                koblazeShapeWord(&c, 1);
-                unsigned int glyphs = 0;
-                const hb_glyph_info_t * info = hb_buffer_get_glyph_infos(_koblaze_buffer, &glyphs);
-                const hb_glyph_position_t * pos = hb_buffer_get_glyph_positions(_koblaze_buffer, NULL);
-                const bool plain = glyphs == 1 && info[0].codepoint != 0 && !pos[0].y_advance && !pos[0].x_offset && !pos[0].y_offset;
-                _koblaze_char_glyph[index] = plain ? (int)info[0].codepoint : KW_UNUSABLE;
-                _koblaze_char_advance[index] = plain ? pos[0].x_advance : 0;
-            }
-            glyph = _koblaze_char_glyph[index];
-            advance = _koblaze_char_advance[index];
-            if ( glyph == KW_UNUSABLE )
-                return false;
-            int raw = advance;
-            if ( t + 1 < len ) {
-                const unsigned int key = (unsigned int)index * KW_CHARS + (unsigned int)next_index;
-                std::unordered_map<unsigned int, int>::const_iterator found = _koblaze_pair_kern.find(key);
-                int kern;
-                if ( found != _koblaze_pair_kern.end() ) {
-                    kern = found->second;
-                }
-                else {
-                    koblazeShapeWord(text + t, 2);
-                    unsigned int glyphs = 0;
-                    const hb_glyph_info_t * info = hb_buffer_get_glyph_infos(_koblaze_buffer, &glyphs);
-                    const hb_glyph_position_t * pos = hb_buffer_get_glyph_positions(_koblaze_buffer, NULL);
-                    const bool plain = glyphs == 2 && (int)info[0].codepoint == glyph && (int)info[1].codepoint == next_glyph
-                            && info[0].cluster == 0 && info[1].cluster == 1 && pos[1].x_advance == next_advance
-                            && !pos[0].y_advance && !pos[1].y_advance && !pos[0].x_offset && !pos[0].y_offset
-                            && !pos[1].x_offset && !pos[1].y_offset;
-                    kern = plain ? pos[0].x_advance - advance : KW_UNUSABLE;
-                    _koblaze_pair_kern[key] = kern;
-                }
-                if ( kern == KW_UNUSABLE )
-                    return false;
-                raw += kern;
-            }
-            word[KW_TEXT + 4 * t + 1] = raw ? raw + _synth_weight_strength : 0;
-            word[KW_TEXT + 4 * t + 2] = raw ? FONT_METRIC_TO_PX(raw + _synth_weight_strength) : 0;
-            word[KW_TEXT + 4 * t + 3] = raw ? KW_BIT_GLYPH | KW_BIT_ADVANCE : KW_BIT_GLYPH;
-            if ( t == len - 1 ) {
-                word[KW_LAST_GLYPH] = glyph;
-                word[KW_LAST_CLUSTER] = t;
-                word[KW_LAST_ADVANCE] = advance;
-            }
-        }
-        word[KW_FIRST_GLYPH] = glyph;
-        word[KW_FIRST_END] = 1;
-        word[KW_USABLE] = 1;
-        return true;
-    }
-
-    // koblaze: fills the record of a word from the glyphs that HarfBuzz
-    // gives for it. The record stays unusable when the word is not plain
-    // enough to measure from memory.
-    void koblazeFillWord( const lChar32 * text, int len, int * word ) {
-        koblazeShapeWord(text, len);
-        unsigned int glyphs = 0;
-        const hb_glyph_info_t * info = hb_buffer_get_glyph_infos(_koblaze_buffer, &glyphs);
-        const hb_glyph_position_t * pos = hb_buffer_get_glyph_positions(_koblaze_buffer, NULL);
-        // Every glyph is in this font, and the clusters follow the text.
-        if ( glyphs == 0 || info[0].cluster != 0 )
-            return;
-        for ( unsigned int g = 0; g < glyphs; g++ ) {
-            if ( info[g].codepoint == 0 || (int)info[g].cluster >= len || (g > 0 && info[g].cluster < info[g - 1].cluster) )
-                return;
-        }
-        // The same sums as measureText() makes for each character.
-        unsigned int g = 0;
-        for ( int t = 0; t < len; t++ ) {
-            int advance_64 = 0, advance = 0, bits = 0;
-            for ( ; g < glyphs && (int)info[g].cluster <= t; g++ ) {
-                bits |= KW_BIT_GLYPH;
-                if ( pos[g].x_advance ) {
-                    advance_64 += pos[g].x_advance + _synth_weight_strength;
-                    advance += FONT_METRIC_TO_PX(pos[g].x_advance + _synth_weight_strength);
-                    bits |= KW_BIT_ADVANCE;
-                }
-            }
-            word[KW_TEXT + 4 * t + 1] = advance_64;
-            word[KW_TEXT + 4 * t + 2] = advance;
-            word[KW_TEXT + 4 * t + 3] = bits;
-        }
-        word[KW_FIRST_GLYPH] = (int)info[0].codepoint;
-        word[KW_FIRST_END] = len;
-        for ( unsigned int n = 1; n < glyphs; n++ ) {
-            if ( info[n].cluster != 0 ) {
-                word[KW_FIRST_END] = (int)info[n].cluster;
-                break;
-            }
-        }
-        word[KW_LAST_GLYPH] = (int)info[glyphs - 1].codepoint;
-        word[KW_LAST_CLUSTER] = (int)info[glyphs - 1].cluster;
-        word[KW_LAST_ADVANCE] = pos[glyphs - 1].x_advance;
-        word[KW_USABLE] = 1;
-    }
-
-    // koblaze: what HarfBuzz adds to the advance of the glyph `left` when
-    // the glyph `right` follows it. One of the two is the space, and the
-    // answer is kept for the other glyph, so HarfBuzz is asked once for
-    // each glyph and side. Each side is the text of one cluster.
-    // KW_UNUSABLE when the pair gives other glyphs than each side alone,
-    // or when anything else moves.
+                                 hb_script_t script, hb_language_t language );
+    bool koblazeKernRun( hb_script_t script, hb_language_t language );
+    void koblazeShapeRun( bool usable );
+    void koblazeClearWords();
+    void koblazeShapeWord( const lChar32 * text, int count, const lChar32 * more = NULL, int more_count = 0 );
+    unsigned int koblazeWord( const lChar32 * text, int len, unsigned int hash );
+    bool koblazeBuildWord( const lChar32 * text, int len, int * word );
+    void koblazeFillWord( const lChar32 * text, int len, int * word );
     int koblazeWordKern( const lChar32 * left_text, int left_len, int left, const lChar32 * right_text,
-                         int right_len, int right, bool space_is_left ) {
-        std::vector<int> & known = _koblaze_space_kern[space_is_left ? 1 : 0];
-        const size_t glyph = (size_t)(space_is_left ? right : left);
-        if ( glyph >= known.size() )
-            known.resize(glyph + 256, KW_UNKNOWN);
-        if ( known[glyph] == KW_UNKNOWN )
-            known[glyph] = koblazeShapePair(left_text, left_len, left, right_text, right_len, right);
-        return known[glyph];
-    }
-
+                         int right_len, int right, bool space_is_left );
     int koblazeShapePair( const lChar32 * left_text, int left_len, int left, const lChar32 * right_text,
-                          int right_len, int right ) {
-        hb_position_t alone[2];
-        for ( int side = 0; side < 2; side++ ) {
-            koblazeShapeWord(side ? right_text : left_text, side ? right_len : left_len);
-            unsigned int glyphs = 0;
-            const hb_glyph_info_t * info = hb_buffer_get_glyph_infos(_koblaze_buffer, &glyphs);
-            const hb_glyph_position_t * pos = hb_buffer_get_glyph_positions(_koblaze_buffer, NULL);
-            if ( glyphs != 1 || (int)info[0].codepoint != (side ? right : left) )
-                return KW_UNUSABLE;
-            alone[side] = pos[0].x_advance;
-        }
-        koblazeShapeWord(left_text, left_len, right_text, right_len);
-        unsigned int glyphs = 0;
-        const hb_glyph_info_t * info = hb_buffer_get_glyph_infos(_koblaze_buffer, &glyphs);
-        const hb_glyph_position_t * pos = hb_buffer_get_glyph_positions(_koblaze_buffer, NULL);
-        if ( glyphs != 2 || (int)info[0].codepoint != left || (int)info[1].codepoint != right
-                || info[0].cluster != 0 || (int)info[1].cluster != left_len || pos[1].x_advance != alone[1]
-                || pos[0].y_advance || pos[1].y_advance || pos[0].x_offset || pos[0].y_offset
-                || pos[1].x_offset || pos[1].y_offset )
-            return KW_UNUSABLE;
-        return pos[0].x_advance - alone[0];
-    }
-
-    // koblaze: measures a run of plain left-to-right Latin text from the
-    // memory of its words, as measureText() does with HarfBuzz. The run is
-    // split at each space; a space is a word of its own. The glyphs of a
-    // word do not depend on its neighbors, except that the font can kern
-    // the space with the glyph next to it, which is added here. Returns
-    // false when the run does not qualify; measureText() then shapes it.
+                          int right_len, int right );
     bool koblazeMeasureWords( const lChar32 * text, int len, lUInt16 * widths, lUInt8 * flags, int max_width,
-                              TextLangCfg * lang_cfg, int letter_spacing, lUInt32 hints, lUInt16 & last_fit ) {
-        if ( _koblaze_words_failed || !koblazeWordWidths() )
-            return false;
-        if ( hints & (LFNT_HINT_IS_VERTICAL | LFNT_HINT_DIRECTION_IS_RTL | LFNT_HINT_DIRECTION_IS_TTB | LFNT_HINT_IS_FALLBACK_FONT) )
-            return false;
-        // Without a fallback font, measureText() replaces missing characters first.
-        if ( getFallbackFont(false).isNull() )
-            return false;
-        if ( _hb_features_is_vertical != 0 )
-            setupHBFeatures(false);
-        const hb_language_t language = lang_cfg ? lang_cfg->getHBLanguage() : hb_language_get_default();
-        koblazeUseWords(language);
-        if ( _koblaze_word_count > KW_MAX_WORDS )
-            koblazeForgetWords();
-        if ( !_koblaze_buffer )
-            _koblaze_buffer = hb_buffer_create();
-        static const lChar32 space = ' ';
-        const bool fractional = getFractionalGlyphPositioningGranularity() > 1;
-        bool has_latin = false;
-        int cur_width = 0, cur_width_64 = 0;
-        last_fit = 0;
-        // Finds the word that starts at `from`: its end and its record.
-        // Returns false when the run does not qualify.
-        auto find = [&]( int from, int & end, unsigned int & offset ) -> bool {
-            unsigned int hash = 2166136261u;
-            if ( text[from] == space ) {
-                end = from + 1;
-                hash = (hash ^ (unsigned int)space) * 16777619u;
-            }
-            else {
-                int kind = koblazeWordChar(text[from]);
-                if ( kind < 2 )
-                    return false;
-                for ( end = from; end < len && text[end] != space; end++ ) {
-                    kind = koblazeWordChar(text[end]);
-                    if ( kind == 0 )
-                        return false;
-                    has_latin = has_latin || kind == 3;
-                    hash = (hash ^ (unsigned int)text[end]) * 16777619u;
-                }
-                if ( kind < 2 || end - from > KW_MAX_LEN )
-                    return false;
-            }
-            offset = koblazeWord(text + from, end - from, hash);
-            return _koblaze_words[offset + KW_USABLE] != 0;
-        };
-        int start = 0, end = 0, next_end = 0;
-        unsigned int offset = 0, next_offset = 0;
-        if ( !find(0, end, offset) )
-            return false;
-        for ( ;; ) {
-            const bool more = end < len;
-            if ( more && !find(end, next_end, next_offset) )
-                return false;
-            // The kerning between this word and the next one.
-            int kern = 0;
-            if ( more ) {
-                const int * word = &_koblaze_words[offset];
-                const int * next = &_koblaze_words[next_offset];
-                if ( text[end] == space ) {
-                    if ( word[KW_KERN_AFTER] == KW_UNKNOWN ) {
-                        const int kerned = koblazeWordKern(text + start + word[KW_LAST_CLUSTER], end - start - word[KW_LAST_CLUSTER],
-                                                           word[KW_LAST_GLYPH], &space, 1, next[KW_FIRST_GLYPH], false);
-                        _koblaze_words[offset + KW_KERN_AFTER] = kerned;
-                    }
-                    kern = _koblaze_words[offset + KW_KERN_AFTER];
-                }
-                else {
-                    if ( next[KW_KERN_BEFORE] == KW_UNKNOWN ) {
-                        const int kerned = koblazeWordKern(&space, 1, word[KW_LAST_GLYPH], text + end, next[KW_FIRST_END],
-                                                           next[KW_FIRST_GLYPH], true);
-                        _koblaze_words[next_offset + KW_KERN_BEFORE] = kerned;
-                    }
-                    kern = _koblaze_words[next_offset + KW_KERN_BEFORE];
-                }
-                if ( kern == KW_UNUSABLE )
-                    return false;
-            }
-            const int * word = &_koblaze_words[offset];
-            if ( kern && ( !word[KW_LAST_ADVANCE] || !(word[KW_LAST_ADVANCE] + kern) ) )
-                return false;
-            const int * record = word + KW_TEXT;
-            for ( int t = start; t < end; t++, record += 4 ) {
-                int advance_64 = record[1], advance = record[2];
-                if ( kern && t - start == word[KW_LAST_CLUSTER] ) {
-                    advance_64 += kern;
-                    advance += FONT_METRIC_TO_PX(word[KW_LAST_ADVANCE] + _synth_weight_strength + kern)
-                               - FONT_METRIC_TO_PX(word[KW_LAST_ADVANCE] + _synth_weight_strength);
-                }
-                bool has_advance;
-                if ( fractional ) {
-                    cur_width_64 += advance_64;
-                    cur_width = FONT_METRIC_TO_PX(cur_width_64);
-                    has_advance = (record[3] & KW_BIT_ADVANCE) != 0;
-                }
-                else {
-                    cur_width += advance;
-                    has_advance = advance != 0;
-                }
-                if ( !(record[3] & KW_BIT_GLYPH) ) {
-                    flags[t] = LCHAR_IS_CLUSTER_TAIL;
-                }
-                else {
-                    flags[t] = GET_CHAR_FLAGS(text[t]);
-                    if ( !has_advance ) {
-                        flags[t] |= LCHAR_IS_CLUSTER_TAIL;
-                    }
-                    else if ( fractional ) {
-                        cur_width_64 += letter_spacing * 64;
-                        cur_width = FONT_METRIC_TO_PX(cur_width_64);
-                    }
-                    else {
-                        cur_width += letter_spacing;
-                    }
-                }
-                widths[t] = (lUInt16)cur_width;
-                if ( cur_width > max_width )
-                    return has_latin; // measureText() stops here too
-                last_fit = (lUInt16)(t + 1);
-            }
-            if ( !more )
-                break;
-            start = end;
-            end = next_end;
-            offset = next_offset;
-        }
-        // HarfBuzz shapes a run without a letter with other rules.
-        return has_latin;
-    }
+                              TextLangCfg * lang_cfg, int letter_spacing, lUInt32 hints, lUInt16 & last_fit );
     #endif
 
     void clearCache() {
@@ -3461,6 +2735,42 @@ public:
         return ch_glyph_index;
     }
 
+    bool hasNativeCaps(lChar32 ch, TextLangCfg *lang, int feature) {
+#if USE_HARFBUZZ==1
+        FONT_GUARD
+        if (!_hb_font)
+            return false;
+        const auto script = hb_unicode_script(hb_unicode_funcs_get_default(), ch);
+        const auto language = lang ? lang->getHBLanguage() : hb_language_get_default();
+        if (script != _capsScript || language != _capsLanguage) {
+            _capsScript = script;
+            _capsLanguage = language;
+            _capsFeatures = 0;
+            hb_tag_t scripts[HB_OT_MAX_TAGS_PER_SCRIPT], languages[HB_OT_MAX_TAGS_PER_LANGUAGE];
+            unsigned ns = HB_OT_MAX_TAGS_PER_SCRIPT, nl = HB_OT_MAX_TAGS_PER_LANGUAGE;
+            hb_ot_tags_from_script_and_language(script, language, &ns, scripts, &nl, languages);
+            auto *face = hb_font_get_face(_hb_font);
+            unsigned si, li;
+            hb_ot_layout_table_select_script(face, HB_OT_TAG_GSUB, ns, scripts, &si, nullptr);
+            if (si != HB_OT_LAYOUT_NO_SCRIPT_INDEX) {
+                hb_ot_layout_script_select_language(face, HB_OT_TAG_GSUB, si, nl, languages, &li);
+                if (hb_ot_layout_language_find_feature(face, HB_OT_TAG_GSUB, si, li, HB_TAG('s','m','c','p'), nullptr))
+                    _capsFeatures |= LFNT_OT_FEATURES_P_SMCP;
+                if (hb_ot_layout_language_find_feature(face, HB_OT_TAG_GSUB, si, li, HB_TAG('c','2','s','c'), nullptr))
+                    _capsFeatures |= LFNT_OT_FEATURES_P_C2SC;
+            }
+        }
+        return (_capsFeatures & feature) != 0;
+#else
+        return false;
+#endif
+    }
+
+    bool hasOwnGlyph(lChar32 code) override {
+        FONT_GUARD
+        return getCharIndex(code, 0) != 0;
+    }
+
     /** \brief get glyph info
         \param glyph is pointer to glyph_info_t struct to place retrieved info
         \return true if glyh was found
@@ -3911,7 +3221,7 @@ public:
         // measure character widths
 
     #if USE_HARFBUZZ==1
-        // koblaze: plain Latin runs are measured from the memory of their
+        // Blaze: plain Latin runs are measured from the memory of their
         // words. A sample of them is also shaped, for comparison.
         bool koblaze_measured = false;
         bool koblaze_check = false;
@@ -5523,7 +4833,7 @@ public:
             if ( _hb_features_is_vertical != (is_vertical_draw ? 1 : 0) )
                 setupHBFeatures(is_vertical_draw);
 
-            // Fork-only: switch HarfBuzz to TTB direction for vertical text so the
+            // Blaze: switch HarfBuzz to TTB direction for vertical text so the
             // shaper uses vmtx-based positioning (matching measureText), and we can
             // read y_advance / y_offset for proper TTB-context placement.  Override
             // the LTR/RTL direction that may have been set above from flags.
@@ -5783,7 +5093,7 @@ public:
                             w_64 = glyph_pos[i].x_advance + _synth_weight_strength;
                             w = FONT_METRIC_TO_PX(w_64);
                         }
-                        // Fork-only: TTB shaping in vertical mode carries the
+                        // Blaze: TTB shaping in vertical mode carries the
                         // advance in y_advance (negative, y-up) instead of
                         // x_advance. Override w with abs(y_advance) when present.
                         if (is_vertical_draw && glyph_pos[i].y_advance) {
@@ -5870,7 +5180,7 @@ public:
                                     ? draw_x + item->origin_x
                                     : x + item->origin_x + FONT_METRIC_TO_PX(glyph_pos[i].x_offset);
                                 int gy = y + _baseline - item->origin_y - FONT_METRIC_TO_PX(glyph_pos[i].y_offset);
-                                // Fork-only: vertical-rl/lr placement.
+                                // Blaze: vertical-rl/lr placement.
                                 //
                                 // Virtual-body / central-baseline model (JLReq 2.1.1,
                                 // LuaTeX-ja's capsule_glyph_tate): ordinary CJK is put in a
@@ -6642,6 +5952,11 @@ public:
 
 };
 
+#if USE_HARFBUZZ==1
+// Blaze: The shaping methods use the private FreeType face and its HarfBuzz buffers.
+#include "../../extensions/fast_shaping.inc"
+#endif
+
 /// Transparent proxy that forwards every LVFont pure virtual to a wrapped font.
 /// Inherit from this instead of LVFont when only a subset of methods differ;
 /// override just those - the rest are handled here.
@@ -6653,6 +5968,7 @@ protected:
 public:
     explicit LVFontProxy(LVFontRef f) : _wrappedRef(f), _font(f.get()) {}
 
+    bool hasOwnGlyph(lChar32 code) override { return _font->hasOwnGlyph(code); }
     virtual bool getGlyphInfo(lUInt32 c, glyph_info_t* g, lChar32 d=0, bool gi=false, bool fb=false)
         { return _font->getGlyphInfo(c, g, d, gi, fb); }
     virtual bool getGlyphExtraMetric(glyph_extra_metric_t m, lUInt32 c, int& v,
@@ -6716,6 +6032,7 @@ class LVFontSmallCapsTransform : public LVFontProxy
 {
     LVFontRef  _smallRef;  // keeps the small font alive
     LVFont   * _smallFont; // fast pointer; matches _smallRef throughout lifetime (same pattern as LVFontProxy::_wrappedRef/_font)
+    LVFreeTypeFace * _nativeCaps; // owned by the normal font reference
     bool       _allCaps; // true for all-small-caps (c2sc): uppercase is shrunk too
 
     static lChar32 toUppercase(lChar32 ch) {
@@ -6727,10 +6044,21 @@ class LVFontSmallCapsTransform : public LVFontProxy
     static bool isUppercase(lChar32 ch) {
         return (lGetCharProps(ch) & CH_PROP_UPPER) != 0;
     }
-    void mapChar(lChar32 ch, LVFont*& font, lChar32& mapped) const {
-        if (isLowercase(ch))                  { font = _smallFont; mapped = toUppercase(ch); }
-        else if (_allCaps && isUppercase(ch)) { font = _smallFont; mapped = ch; }
-        else                                   { font = _font;      mapped = ch; }
+    void mapChar(lChar32 ch, LVFont*& font, lChar32& mapped, TextLangCfg *lang = NULL) const {
+        font = _font;
+        mapped = ch;
+        const bool lower = isLowercase(ch);
+        if (lower || (_allCaps && isUppercase(ch))) {
+            if (_nativeCaps && _nativeCaps->hasNativeCaps(ch, lang,
+                    lower ? LFNT_OT_FEATURES_P_SMCP : LFNT_OT_FEATURES_P_C2SC))
+                return;
+            const auto upper = lower ? toUppercase(ch) : ch;
+            // Leave missing characters to normal fallback at their original size and case.
+            if (_smallFont->hasOwnGlyph(upper)) {
+                font = _smallFont;
+                mapped = upper;
+            }
+        }
     }
     // Per-character font/glyph mapping, plus buffer for the longest
     // possible run, so consecutive characters routed to the same font can be
@@ -6746,20 +6074,36 @@ class LVFontSmallCapsTransform : public LVFontProxy
               widths(new lUInt16[len]), flags(new lUInt8[len]) {}
         ~MappedRun() { delete[] font; delete[] mapped; delete[] widths; delete[] flags; }
     };
-    void fillMappedRun(const lChar32 * text, int len, MappedRun & run) const {
-        for (int i = 0; i < len; i++)
-            mapChar(text[i], run.font[i], run.mapped[i]);
+    bool fillMappedRun(const lChar32 * text, int len, MappedRun & run, TextLangCfg *lang) const {
+        bool synthetic = false;
+        for (int i = 0; i < len; i++) {
+            mapChar(text[i], run.font[i], run.mapped[i], lang);
+#if USE_HARFBUZZ==1
+            // Keep accents in the shaping run of the reduced capital they follow.
+            if (i && run.font[i - 1] == _smallFont && run.font[i] != _smallFont) {
+                const auto category = hb_unicode_general_category(hb_unicode_funcs_get_default(), text[i]);
+                if (category == HB_UNICODE_GENERAL_CATEGORY_NON_SPACING_MARK
+                        || category == HB_UNICODE_GENERAL_CATEGORY_SPACING_MARK
+                        || category == HB_UNICODE_GENERAL_CATEGORY_ENCLOSING_MARK) {
+                    run.font[i] = _smallFont;
+                    run.mapped[i] = text[i];
+                }
+            }
+#endif
+            synthetic |= run.font[i] == _smallFont;
+        }
+        return synthetic;
     }
 public:
-    LVFontSmallCapsTransform(LVFontRef normalFont, LVFontRef smallFont, bool allCaps = false)
-        : LVFontProxy(normalFont), _smallRef(smallFont), _smallFont(smallFont.get()), _allCaps(allCaps) {}
+    LVFontSmallCapsTransform(LVFontRef normalFont, LVFontRef smallFont, LVFreeTypeFace *nativeCaps, bool allCaps)
+        : LVFontProxy(normalFont), _smallRef(smallFont), _smallFont(smallFont.get()), _nativeCaps(nativeCaps), _allCaps(allCaps) {}
 
     virtual void setBitmapMode(bool m)           { LVFontProxy::setBitmapMode(m); _smallFont->setBitmapMode(m); }
     virtual void setKerningMode(kerning_mode_t m) { LVFontProxy::setKerningMode(m); _smallFont->setKerningMode(m); }
     virtual void setHintingMode(hinting_mode_t m) { LVFontProxy::setHintingMode(m); _smallFont->setHintingMode(m); }
     virtual void clearCache() { LVFontProxy::clearCache(); _smallFont->clearCache(); }
     virtual void Clear()      { LVFontProxy::Clear();      _smallRef.Clear(); }
-    virtual bool hasOTMathSupport() const { return false; }
+    virtual bool hasOTMathSupport() const { return _nativeCaps && _font->hasOTMathSupport(); }
 
     virtual int getCharWidth(lChar32 ch, lChar32 d=0)
         { LVFont* f; lChar32 m; mapChar(ch, f, m); return f->getCharWidth(m, d); }
@@ -6768,7 +6112,14 @@ public:
     virtual int getRightSideBearing(lChar32 ch, bool n=false, bool i=false)
         { LVFont* f; lChar32 m; mapChar(ch, f, m); return f->getRightSideBearing(m, n, i); }
     virtual bool getGlyphInfo(lUInt32 c, glyph_info_t* g, lChar32 d=0, bool gi=false, bool fb=false)
-        { LVFont* f; lChar32 m; mapChar((lChar32)c, f, m); return f->getGlyphInfo((lUInt32)m, g, d, gi, fb); }
+        {
+            if (gi) return _font->getGlyphInfo(c, g, d, true, fb);
+            LVFont* f; lChar32 m; mapChar((lChar32)c, f, m); return f->getGlyphInfo((lUInt32)m, g, d, false, fb);
+        }
+    bool collectGlyphSVGPath(SVGGlyphsCollector *svg, lUInt32 c, bool gi=false, bool fb=false) override {
+        if (gi) return _font->collectGlyphSVGPath(svg, c, true, fb);
+        LVFont* f; lChar32 m; mapChar((lChar32)c, f, m); return f->collectGlyphSVGPath(svg, m, false, fb);
+    }
     virtual bool getGlyphExtraMetric(glyph_extra_metric_t mt, lUInt32 c, int& v,
                                       bool s=true, lChar32 d=0, bool fb=false)
         { LVFont* f; lChar32 m; mapChar((lChar32)c, f, m); return f->getGlyphExtraMetric(mt, (lUInt32)m, v, s, d, fb); }
@@ -6778,7 +6129,8 @@ public:
         if (len <= 0)
             return 0;
         MappedRun run(len);
-        fillMappedRun(text, len, run);
+        if (!fillMappedRun(text, len, run, lc))
+            return _font->getTextWidth(text, len, lc);
         lUInt32 w = 0;
         int i = 0;
         while (i < len) {
@@ -6805,7 +6157,8 @@ public:
         if (len <= 0)
             return 0;
         MappedRun run(len);
-        fillMappedRun(text, len, run);
+        if (!fillMappedRun(text, len, run, lc))
+            return _font->measureText(text, len, widths, flags, max_width, def_char, lc, ls, ah, hints);
         int total = 0;
         int i = 0;
         while (i < len) {
@@ -6838,7 +6191,9 @@ public:
         lUInt32 noDecFlags = flags & ~LFNT_DRAW_DECORATION_MASK;
         if (len > 0) {
             MappedRun run(len);
-            fillMappedRun(text, len, run);
+            if (!fillMappedRun(text, len, run, lc))
+                return _font->DrawTextString(buf, x, y, text, len, def_char, palette, addHyphen,
+                        lc, flags, letter_spacing, width, text_decoration_back_gap, target_w, target_h, svg);
             int i = 0;
             while (i < len) {
                 LVFont* f = run.font[i];
@@ -7896,6 +7251,7 @@ class LVFontSelector {
         return best;
     }
 
+public:
     // requested: opsz (font-optical-sizing) and wdth (font-width); wght and
     //            ital/slnt come from the weight/italic parameters.
     // computed:  the full axis set to hand to FreeType, clamped to the face's
@@ -7953,6 +7309,7 @@ class LVFontSelector {
         return computed;
     }
 
+private:
     // Whether a face may be used by the given document/DocFragment at all.
     static bool faceVisible(const LVFontFace& face, int documentId, int docFragmentIdx)
     {
@@ -8706,7 +8063,7 @@ public:
         // Release all cached font instances before touching the glyph cache or
         // library: LVFreeTypeFace destructors call FT_Done_Face and flush their
         // local glyph cache, both of which require these to still be alive.
-        // koblaze: a font holds its fallback fonts, and a fallback font can
+        // Blaze: a font holds its fallback fonts, and a fallback font can
         // hold the first one again. Such a ring keeps itself alive after
         // the cache lets go of it. Take the links apart first.
         _instance_cache.forEachFont([](LVFontRef & font) { font->clearFontRefs(); });
@@ -9195,13 +8552,12 @@ public:
             hb_face_t* hb_face = hb_ft_face_create(ft_face, NULL);
             if (hb_ot_math_has_data(hb_face))
                 def.has_ot_math = true;
-            { // native small-caps ('smcp' GSUB feature); absence triggers synthesis
-                hb_tag_t smcp = HB_TAG('s','m','c','p');
-                unsigned feat_idx = 0;
-                if (hb_ot_layout_language_find_feature(hb_face, HB_OT_TAG_GSUB,
-                        0, HB_OT_LAYOUT_DEFAULT_LANGUAGE_INDEX, smcp, &feat_idx))
-                    def.has_small_caps = true;
-            }
+            // Small caps can be declared under any script, regardless of script order.
+            const hb_tag_t tags[] = { HB_TAG('s','m','c','p'), HB_TAG('c','2','s','c'), HB_TAG_NONE };
+            auto *matches = hb_set_create();
+            hb_ot_layout_collect_features(hb_face, HB_OT_TAG_GSUB, nullptr, nullptr, tags, matches);
+            def.has_small_caps = !hb_set_is_empty(matches);
+            hb_set_destroy(matches);
             hb_face_destroy(hb_face);
         }
         #endif
@@ -9347,38 +8703,51 @@ public:
 
         // Apply small-caps synthesis: wrap with a transform that routes lowercase
         // letters to uppercase glyphs rendered at ~75% of the normal size.
-        bool needsSmallCaps = (features & (LFNT_OT_FEATURES_P_SMCP | LFNT_OT_FEATURES_P_C2SC))
-                               && !face.has_small_caps;
+        bool needsSmallCaps = (features & (LFNT_OT_FEATURES_P_SMCP | LFNT_OT_FEATURES_P_C2SC));
         if (needsSmallCaps) {
             int small_size = (size * 3 + 2) / 4; // ~75%, rounded up
             if (small_size < 1) small_size = 1;
-            // Carry wdth/opsz through verbatim: computeVariations() only honours
-            // `requested` for those two axes. ital/slnt are NOT taken from
-            // `requested` - computeVariations() derives them solely from the
-            // `italic` bool - so pass the original CSS-requested `italic` flag
-            // (not `face.is_italic || italicize`, which is false for axis-based
-            // oblique faces like Acumin's slnt axis) so the small font's selector
-            // pass recomputes the same slant the main face got.
-            LVFontVariations smallVars;
-            if (computed_variations.wdth_set)
-                smallVars.set(LVFONT_TAG_WDTH, computed_variations.wdth);
+            auto smallVars = computed_variations;
             if (computed_variations.opsz_set)
                 smallVars.set(LVFONT_TAG_OPSZ, computed_variations.opsz * 0.75f);
             // Downscaled glyphs lose apparent stroke thickness, so request a bit
             // of extra weight on the small font to compensate.
             int small_weight = weight + 100;
             if (small_weight > 1000) small_weight = 1000;
-            LVFontRef smallRef = GetFont(small_size, small_weight, italic,
-                                         face.css_family, face.typeface,
-                                         features & ~(LFNT_OT_FEATURES_P_SMCP | LFNT_OT_FEATURES_P_C2SC),
-                                         face.documentId, false, smallVars.empty() ? NULL : &smallVars);
+            // Use the selected face. Matching the family again can lose a
+            // chapter-scoped embedded face or choose a different weight face.
+            auto smallRef = fontForFace(face, small_size, small_weight, italic,
+                    features & ~(LFNT_OT_FEATURES_P_SMCP | LFNT_OT_FEATURES_P_C2SC),
+                    _font_selector.computeVariations(face, smallVars, small_weight, italic));
             if (!smallRef.isNull())
-                ref = LVFontRef(new LVFontSmallCapsTransform(ref, smallRef,
+                ref = LVFontRef(new LVFontSmallCapsTransform(ref, smallRef, face.has_small_caps ? font : nullptr,
                                     (features & LFNT_OT_FEATURES_P_C2SC) != 0));
         }
 
         _instance_cache.put(key, ref);
         return ref;
+    }
+
+    LVFontRef fontForFace(const LVFontFace& face, int size, int weight, bool italic,
+                          int features, const LVFontVariations& computed_variations)
+    {
+        int face_size = size;
+        if (face.css_family == css_ff_monospace && GetMonospaceSizeScale() != 100)
+            face_size = size * GetMonospaceSizeScale() / 100;
+
+        LVFontInstanceKey key;
+        key.face_id          = face.id();
+        key.size             = size;
+        key.face_size        = face_size;
+        key.features         = features;
+        key.requested_weight = weight;
+        key.requested_italic = italic;
+        key.computed_variations_hash = computed_variations.hash();
+
+        LVFontRef cached = _instance_cache.get(key);
+        if (!cached.isNull()) return cached;
+
+        return loadAndCache(face, size, face_size, weight, italic, features, computed_variations, key);
     }
 
     virtual LVFontRef GetFont(int size, int weight, bool italic, css_font_family_t css_family, lString8 typeface,
@@ -9387,7 +8756,6 @@ public:
     {
         FONT_MAN_GUARD
 
-        // 1. Select face + synthesis via LVFontSelector.
         LVFontVariations requested = variations ? *variations : LVFontVariations();
         lString8 preferred;
         if (useBias) {
@@ -9402,27 +8770,7 @@ public:
                          typeface.c_str(), weight, (int)italic, (int)css_family);
             return LVFontRef(NULL);
         }
-
-        // 2. Build instance cache key.
-        int face_size = size;
-        if (m.face->css_family == css_ff_monospace && GetMonospaceSizeScale() != 100)
-            face_size = size * GetMonospaceSizeScale() / 100;
-
-        LVFontInstanceKey key;
-        key.face_id          = m.face->id();
-        key.size             = size;
-        key.face_size        = face_size;
-        key.features         = features;
-        key.requested_weight = weight;
-        key.requested_italic = italic;
-        key.computed_variations_hash = m.computed_variations.hash();
-
-        // 3. Return cached instance if available; otherwise load and cache.
-        LVFontRef cached = _instance_cache.get(key);
-        if (!cached.isNull()) return cached;
-
-        return loadAndCache(*m.face, size, face_size, weight, italic,
-                            features, m.computed_variations, key);
+        return fontForFace(*m.face, size, weight, italic, features, m.computed_variations);
     }
 
     bool checkCharSet( FT_Face face )
@@ -9491,18 +8839,17 @@ public:
     }
     */
 
+    // Blaze: Chapter documents share font bytes until the reader switches books.
+    blaze::EmbeddedFontCache _embeddedFontCache;
+
+    void koblazeForgetFontData() {
+        _embeddedFontCache.clear();
+    }
+
     /// registers document font
     // Note: publishers can specify font-variant/font-feature-settings/font-variation-settings
     // in the @font-face declaration.
     // todo: parse it and pass it here, and set it on the non-instantiated font (instead of -1)
-    // koblaze: the data of embedded fonts by file name and size.
-    std::unordered_map<std::string, LVByteArrayRef> _koblazeFontData;
-    size_t _koblazeFontDataBytes = 0;
-    void koblazeForgetFontData() {
-        _koblazeFontData.clear();
-        _koblazeFontDataBytes = 0;
-    }
-
     virtual bool RegisterDocumentFont(int documentId, LVContainerRef container, lString32 name, lString8 faceName, int weight, int width, bool italic, int docFragmentIdx = -1) {
         FONT_MAN_GUARD
         if (container.isNull()) // no container to resolve src: url() against (e.g. a styletweak)
@@ -9540,24 +8887,7 @@ public:
             printf("CRE WARNING: document font '%s' ignored: file too big\n", LCSTR(name));
             return false;
         }
-        // koblaze: the data of this font from an earlier document of the
-        // same book, or read it now and keep it.
-        const std::string dataKey = std::string(name8.c_str()) + ':' + std::to_string((unsigned long long)size);
-        LVByteArrayRef buf;
-        std::unordered_map<std::string, LVByteArrayRef>::const_iterator known = _koblazeFontData.find(dataKey);
-        if ( known != _koblazeFontData.end() ) {
-            buf = known->second;
-        }
-        else {
-            buf = stream->GetData();
-            if ( !buf.isNull() ) {
-                // A book rarely embeds more than a few megabytes of fonts.
-                if ( _koblazeFontDataBytes + size > 32u * 1024 * 1024 )
-                    koblazeForgetFontData();
-                _koblazeFontData[dataKey] = buf;
-                _koblazeFontDataBytes += size;
-            }
-        }
+        LVByteArrayRef buf = _embeddedFontCache.read(name8, stream, size);
         if (!buf)
             return false;
 
@@ -9790,6 +9120,24 @@ public:
     // Font instances will be created as need from the LVFontDef name or buf.
     // (The similar functions do most of the same work, and some code
     // could be factorized between them.)
+    virtual bool RegisterStaticFontFace(lString8 name, int index, lString8 family,
+                                       int weight, bool italic)
+    {
+        FONT_MAN_GUARD
+        if (name.empty() || family.empty() || index < 0)
+            return false;
+        LVFontFace face;
+        face.file_path = name;
+        face.face_index = index;
+        face.typeface = family;
+        face.css_family = css_ff_sans_serif;
+        face.is_italic = italic;
+        face.setAxisInfo(LVFONT_TAG_WGHT, weight, weight);
+        face.setAxisInfo(LVFONT_TAG_ITAL, italic ? 1.0f : 0.0f, italic ? 1.0f : 0.0f);
+        face.setAxisInfo(LVFONT_TAG_WDTH, 100.0f, 100.0f);
+        return tryRegisterFace(face);
+    }
+
     virtual bool RegisterFont( lString8 name )
     {
         FONT_MAN_GUARD

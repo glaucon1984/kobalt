@@ -165,7 +165,9 @@
 "kosync.reader_timeout" = "Sync could not finish while the reader was busy. Try again after the current operation finishes. Your reading position was kept.";
 "kosync.connecting" = "Connecting to Wi-Fi…";
 "kosync.invalid_response" = "The server response is not compatible with KOSync. Check the server URL and path prefix. Your reading position was kept.";
-"kosync.invalid_account" = "Enter an HTTP or HTTPS server URL, username and password. The URL cannot contain credentials, a query or a fragment.";
+"kosync.invalid_server" = "Enter an HTTP or HTTPS server URL without credentials, a query or a fragment.";
+"kosync.invalid_username" = "Enter a valid KOSync username.";
+"kosync.missing_password" = "Enter your KOSync password.";
 "kosync.native_sync" = "This book uses Kobo’s built-in sync system. KOSync is unavailable for this copy.";
 "kosync.kobo_cloud" = "This book uses Kobo Cloud to sync reading progress. KOSync is unavailable for this copy.";
 "kosync.unavailable" = "Sync is unavailable for this book or account.";
@@ -251,7 +253,7 @@
 "library.folder_unavailable" = "This folder cannot be read. Add it again to give Kobalt access.";
 
 /* about */
-"about.description" = "An alternative EPUB reader with a CREngine renderer and a Qt reading interface, with a focus on speed and an excellent user experience.";
+"about.description" = "An EPUB reader with a Qt interface, powered by Blaze, Kobalt’s fork of CREngine.";
 /* Arguments: %1, %2 */
 "about.version" = "Version %1 (Qt%2)";
 
@@ -545,9 +547,24 @@
 "header_footer.field.battery_warning" = "Battery warning";
 "header_footer.field.page_turn_time" = "Page turn time";
 "header_footer.field.chapter_load_time" = "Chapter load time";
+"header_footer.field.book_status" = "Book status";
 /* Arguments: %1 */
 "header_footer.field_description.battery_warning" = "Shows the battery only below %1%.";
 "header_footer.field_description.time_left" = "Estimated from your reading pace.";
+"header_footer.field_description.book_status" = "The last turn time and the layout: fast while one chapter is laid out, full once the whole book is. Updates every 5 seconds.";
+"header_footer.status.fast" = "fast";
+"header_footer.status.full" = "full";
+"header_footer.status.failed" = "failed";
+/* Arguments: %1 */
+"header_footer.status.seconds" = "%1s";
+/* Arguments: %1 the layout mode, %2 its progress, failure or time */
+"header_footer.status.with_detail" = "%1 (%2)";
+/* Arguments: %1 */
+"header_footer.status.layout" = "layout: %1";
+/* Arguments: %1 */
+"header_footer.status.turn" = "turn: %1ms";
+/* Arguments: %1 the turn time, %2 the layout */
+"header_footer.status.parts" = "%1 | %2";
 
 /* image */
 "image.unavailable" = "Image could not be loaded";
@@ -562,6 +579,8 @@
 
 /* light_panel */
 "light_panel.automatic_brightness" = "Automatic brightness";
+"light_panel.system_brightness" = "Follow system brightness";
+"light_panel.system_brightness_description" = "Use Android's brightness setting. Manual adjustments are remembered for reading.";
 "light_panel.automatic_brightness_description" = "Uses the ambient light sensor. Manual adjustments turn this off.";
 "light_panel.automatic_warmth" = "Follow Kobo warmth schedule";
 "light_panel.automatic_warmth_description" = "Uses the bedtime set in Kobo settings. Manual warmth adjustments turn this off.";
@@ -598,9 +617,18 @@
 "opening.may_take_a_while" = "This may take a while";
 "closing.failed" = "Couldn't save your progress";
 "closing.failed_detail" = "Your progress couldn’t be saved, so the book is still open. Please try again. If this keeps happening, back up your data.";
+"closing.timeout" = "Saving is taking longer than usual";
+"closing.timeout_detail" = "The save may still finish. You can keep reading or try closing the book again.";
+"sleep.reading_time_failed" = "Couldn't save reading time";
+"sleep.reading_time_failed_detail" = "The reading time from before sleep could not be saved. You can retry here without leaving this page.";
+"sleep.reading_time_retry_failed" = "Reading time still couldn’t be saved. You can try again or keep reading.";
+"sleep.retry_save" = "Retry save";
 "closing.retry" = "Retry save and close";
 "closing.quit" = "Quit without saving";
 "closing.quit_warning" = "Quitting now may lose unsaved progress or annotations.";
+"closing.close_now" = "Close without waiting";
+"closing.close_now_detail" = "Your place in this book is saved. If you close now, Kobo’s reading time and progress might not be updated.";
+"closing.close_now_detail_pocketbook" = "Your place in this book is saved. If you close now, the reading progress in the PocketBook library might not be updated.";
 "closing.return" = "Keep reading";
 
 /* reader */
@@ -648,6 +676,8 @@
 "settings.light_gesture_feedback" = "Show frontlight gesture pop-up";
 "settings.light_gesture_feedback_description" = "Show the level after a pause in swiping. Turn off to adjust the light without a pop-up or its cleanup refresh.";
 "reader.edge_light" = "Swipe along edges to adjust frontlight";
+"reader.edge_brightness" = "Swipe along the left edge to adjust brightness";
+"settings.brightness_gesture_feedback" = "Show brightness gesture pop-up";
 "reader.enable_page_animations" = "Page turn animations";
 "reader.exit" = "Exit Kobalt";
 "reader.fail_next_native_save" = "Fail next native save";
@@ -715,7 +745,6 @@
 "reader.restore_defaults" = "Restore defaults";
 "reader.return_to_passage" = "Return to passage";
 "reader.follow_link" = "Follow link";
-"reader.link_dictionary" = "Dictionary";
 "reader.dismiss_link" = "Dismiss";
 "reader.stay_here" = "Stay here and forget return position";
 /* Arguments: %1 */
@@ -791,6 +820,9 @@
 "settings.plugin_data_deleted" = "Saved data deleted.";
 "settings.plugin_data_not_deleted" = "Saved data was not deleted: %1";
 "settings.section_engine" = "Engine";
+"settings.section_developer" = "Developer";
+"settings.debug_mode" = "Debug mode";
+"settings.debug_mode_description" = "Show the Debug tab, the debug fields of the header and footer, and the Faster engine.";
 "settings.opening_cover" = "Do not show book cover while opening";
 "settings.opening_cover_description" = "Always show the Kobalt logo when opening a book.";
 "settings.rendering" = "Rendering engine";
@@ -850,6 +882,7 @@
 "settings.section_screen" = "Screen refresh";
 "settings.section_navigation" = "Navigation";
 "settings.section_links" = "Links";
+"settings.section_annotations" = "Annotations";
 "settings.section_chapter_list" = "Chapter List";
 "settings.chapter_groups" = "Collapsible chapters";
 "settings.chapter_groups_hint" = "Choose whether chapter groups can collapse and how they open.";
@@ -979,7 +1012,66 @@
 "sleep.design_letter" = "Letter";
 "sleep.design_page" = "Reading page";
 "sleep.design_overlay" = "PNG over text";
+"sleep.design_custom" = "Custom";
+"sleep.custom_title" = "Customize Lock & Sleep Screen";
+"sleep.custom_editing" = "Screen";
+"sleep.custom_background" = "Background";
+"sleep.custom_status" = "Status";
+"sleep.custom_same" = "Same screen for sleep and power off";
+"sleep.custom_same_description" = "Turn this off to choose a different screen for when the device is switched off.";
+"sleep.backdrop_cover" = "Book cover";
+"sleep.backdrop_page" = "Reading page";
+"sleep.backdrop_overlay" = "PNG over page";
+"sleep.backdrop_wallpaper" = "Wallpaper";
+"sleep.backdrop_plain" = "Blank";
+"sleep.status_none" = "None";
+"sleep.wallpaper_random" = "Random wallpaper";
+"sleep.wallpaper_help_title" = "Wallpapers";
+"sleep.wallpaper_help" = "Did you know you can use your own wallpapers? Copy PNG or JPEG images to .adds/kobalt/wallpapers on your Kobo. Each image becomes a step in the Background row, and Random wallpaper picks a different one every time your Kobo sleeps.";
+"sleep.wallpaper_help_pocketbook" = "Did you know you can use your own wallpapers? Copy PNG or JPEG images to applications/kobalt/wallpapers on your PocketBook. Each image becomes a step in the Background row, and Random wallpaper picks a different one every time your PocketBook sleeps.";
+/* Arguments: %1 position, %2 count */
+"sleep.step_count" = "%1 of %2";
+/* Arguments: %1 sleep screen name */
+"sleep.arrange_title" = "%1 position";
+/* Arguments: %1 sleep screen name in lowercase */
+"sleep.arrange_hint" = "Tap a dashed area to move the %1.";
+"sleep.arrange_book_only" = "Only for this book";
+"sleep.arrange_book_only_description" = "Other books keep their own position.";
+"sleep.place_top_left" = "Top left";
+"sleep.place_top_right" = "Top right";
+"sleep.place_bottom_left" = "Bottom left";
+"sleep.place_bottom_right" = "Bottom right";
+"sleep.place_left" = "Left";
+"sleep.place_right" = "Right";
+"sleep.place_top" = "Top";
+"sleep.place_bottom" = "Bottom";
 "settings.about" = "About";
+"settings.debug" = "Debug";
+"debug.section_caches" = "Caches";
+"debug.evict_cache" = "Evict book cache";
+"debug.evict_cache_description" = "Remove the parsed copy and the pages of this book, then close it. Your place, bookmarks and annotations stay.";
+"debug.evict_cache_title" = "Evict Book Cache?";
+"debug.evict_cache_confirm_description" = "The book closes. The next opening parses and lays out the book again.";
+"debug.evict" = "Evict";
+"debug.clear_caches" = "Clear all caches";
+"debug.clear_caches_description" = "Remove the parsed copies of all books and the preview tiles, then close the book. Reading data stays.";
+"debug.clear_caches_title" = "Clear All Caches?";
+"debug.clear_caches_confirm_description" = "The book closes. Every book parses and lays out again when it opens.";
+"debug.clear" = "Clear";
+"debug.section_diagnostics" = "Diagnostics";
+"debug.detailed_diagnostics" = "Detailed diagnostics";
+"debug.detailed_diagnostics_description" = "Write timings and background work to the diagnostic log. Applies at once and after a restart.";
+"debug.detailed_diagnostics_fixed" = "This build always writes timings and background work to the diagnostic log.";
+"debug.clear_log" = "Clear diagnostic log";
+"debug.section_device" = "Device";
+"debug.version" = "Version";
+"debug.qt" = "Qt";
+"debug.firmware" = "Firmware";
+"debug.cores" = "Processor cores";
+"debug.cores_value" = "%1 of %2 online";
+"debug.storage" = "Free storage";
+"debug.storage_value" = "%1 free, caches %2";
+"debug.unknown" = "Unknown";
 "settings.edge_light_description" = "Swipe up or down along the left edge for brightness, and along the right edge for warmth.";
 "settings.edge_brightness_description" = "Swipe up or down along the left edge for brightness.";
 
@@ -1114,6 +1206,184 @@
 "stats.duration_hours" = "%1 h %2 min";
 /* Arguments: %1, %2 */
 "stats.duration_clock" = "%1:%2";
+/* Activity: the reading history behind Stats. */
+"activity.title" = "Activity";
+/* The page of one book in Activity. */
+"activity.book_title" = "Book Activity";
+"activity.hidden_title" = "Hidden Books";
+/* The row at the end of Books that opens the hidden books. */
+"activity.hidden_books" = "Hidden books";
+/* The band over the hidden books' list. */
+"activity.hidden" = "Hidden";
+"activity.hide_book" = "Hide from Books";
+"activity.show_book" = "Show in Books";
+"activity.delete_book" = "Delete activity";
+"activity.delete_title" = "Delete Reading Activity?";
+/* Arguments: %1 is the book's title. */
+"activity.delete_detail" = "All reading sessions of “%1” will be deleted, and their time removed from your daily totals and streaks. This cannot be undone.";
+"activity.delete_confirm" = "Delete";
+"activity.close" = "Close Activity";
+/* The alert the first time Activity opens. */
+"activity.welcome_title" = "Welcome to Activity";
+"activity.welcome_description" = "Activity shows your reading time and reading stats on this device. It doesn't sync, so if you also read on another device, your streaks and totals here won't include that reading.";
+"activity.loading" = "Loading reading history…";
+"activity.unavailable" = "Reading history is unavailable right now.";
+"activity.change_not_saved" = "Could not save the change to your reading history.";
+"activity.empty" = "Your reading time appears here after your first reading session.";
+"activity.no_books" = "Books you read appear here.";
+"activity.tab_overview" = "OVERVIEW";
+"activity.tab_calendar" = "CALENDAR";
+"activity.tab_books" = "BOOKS";
+"activity.tab_records" = "RECORDS";
+/* The Activity row in Stats: today's reading. */
+"activity.row_started" = "Just started reading";
+/* Arguments: %1 */
+"activity.row_minutes" = "%1 min today";
+/* Hours and minutes read today. Arguments: %1, %2 */
+"activity.row_hours" = "%1h %2m today";
+/* Today's reading and the streak in days. Arguments: %1, %2 */
+"activity.row_streak" = "%1 · %2-day streak";
+/* Hours and minutes in a small place, such as "1 h 04". Arguments: %1, %2 */
+"activity.duration_short" = "%1 h %2";
+"activity.hours_unit" = "h";
+/* Minutes in a narrow calendar day. Arguments: %1 */
+"activity.duration_compact_minutes" = "%1m";
+/* Hours and minutes in a narrow calendar day, such as "1h04". Arguments: %1, %2 */
+"activity.duration_compact_hours" = "%1h%2";
+/* Whole hours on a chart scale, such as "2 h". Arguments: %1 */
+"activity.duration_hours" = "%1 h";
+/* The unit beside a number of hours when minutes follow, such as "h 10 min". Arguments: %1 */
+"activity.hours_minutes_unit" = "h %1 min";
+"activity.hours" = "hours";
+"activity.today" = "Today";
+"activity.streak" = "Streak";
+"activity.day" = "day";
+"activity.days" = "days";
+/* Arguments: %1 */
+"activity.best_streak" = "Best %1 days";
+/* Arguments: %1 */
+"activity.best_streak_one" = "Best %1 day";
+"activity.best_yet" = "Your best yet";
+"activity.no_reading_today" = "No reading yet today";
+/* Arguments: %1 */
+"activity.session_count" = "%1 session";
+/* Arguments: %1 */
+"activity.sessions_count" = "%1 sessions";
+/* Arguments: %1 */
+"activity.book_count" = "%1 book";
+/* Arguments: %1 */
+"activity.books_count" = "%1 books";
+"activity.this_week" = "This week";
+"activity.all_time" = "All time";
+/* Arguments: %1 */
+"activity.since" = "Since %1";
+"activity.reading" = "Reading";
+/* The average reading time per day. Arguments: %1 */
+"activity.per_day" = "≈ %1 a day";
+"activity.finished" = "Finished";
+"activity.book" = "book";
+"activity.books_unit" = "books";
+/* Arguments: %1 */
+"activity.in_progress" = "%1 in progress";
+"activity.sessions" = "Sessions";
+/* Arguments: %1 */
+"activity.average" = "%1 average";
+"activity.days_read" = "Days read";
+/* Arguments: %1 */
+"activity.of_days" = "of %1 days";
+/* Arguments: %1 */
+"activity.of_days_one" = "of %1 day";
+"activity.saved_words" = "Saved words";
+/* Arguments: %1 */
+"activity.this_week_count" = "%1 this week";
+"activity.books" = "Books";
+/* Arguments: %1 */
+"activity.this_month_count" = "%1 this month";
+"activity.longest" = "Longest";
+"activity.this_month" = "This month";
+/* Reading days of the days in the month so far. Arguments: %1, %2 */
+"activity.days_of" = "%1 of %2 days";
+/* Arguments: %1, %2 */
+"activity.days_of_one" = "%1 of %2 day";
+"activity.less" = "Less";
+"activity.more" = "More";
+/* Arguments: %1 */
+"activity.day_read" = "%1 day read";
+/* Arguments: %1 */
+"activity.days_read_count" = "%1 days read";
+"activity.finished_mark" = "Finished";
+"activity.time_read" = "Time read";
+"activity.to_finish" = "To finish";
+"activity.last_read" = "Last read";
+/* The date the book may be finished at the recent pace. Arguments: %1 */
+"activity.around" = "≈ by %1";
+"activity.estimate" = "≈ at your pace";
+"activity.progress" = "Progress";
+/* Arguments: %1 */
+"activity.started" = "Started %1";
+"activity.time_per_day" = "Time per day";
+"activity.at_recent_pace" = "at your recent pace";
+/* A session's progress, such as "21% → 22%". Arguments: %1, %2 */
+"activity.range" = "%1 → %2";
+/* Arguments: %1 */
+"activity.today_at" = "Today, %1";
+/* Arguments: %1 */
+"activity.yesterday_at" = "Yesterday, %1";
+"activity.when_you_read" = "When you read";
+/* The busiest two hours of the day. Arguments: %1, %2 */
+"activity.mostly" = "Mostly %1 – %2";
+"activity.records" = "Records";
+"activity.longest_session" = "Longest session";
+"activity.most_in_day" = "Most in one day";
+"activity.longest_streak" = "Longest streak";
+"activity.milestones" = "Milestones";
+/* Arguments: %1, %2 */
+"activity.progress_of" = "%1 / %2";
+"activity.milestone_first_book" = "First book";
+"activity.milestone_books" = "Books";
+"activity.milestone_hours" = "Hours";
+"activity.milestone_streak" = "Day streak";
+"activity.milestone_days_read" = "Days read";
+"activity.all_milestones" = "All milestones";
+/* The title of the screen with every milestone. */
+"activity.milestones_title" = "Milestones";
+/* Milestones reached of all. Arguments: %1, %2 */
+"activity.reached_of" = "%1 of %2";
+"activity.milestones_books" = "Books finished";
+"activity.milestones_hours" = "Hours read";
+"activity.milestones_streak" = "Streaks";
+"activity.milestones_days" = "Reading days";
+/* Under each kind on the Milestones screen: where the reader stands, then the next milestone. */
+"activity.phrase_books_none" = "You haven't finished a book here yet.";
+"activity.phrase_books_one" = "You've finished one book.";
+/* Arguments: %1 */
+"activity.phrase_books" = "You've finished %1 books.";
+"activity.phrase_hours_none" = "Your reading hours start here.";
+"activity.phrase_hours_one" = "You've read for one hour.";
+/* Arguments: %1 */
+"activity.phrase_hours" = "You've read for %1 hours.";
+"activity.phrase_streak_none" = "Read today to start a streak.";
+"activity.phrase_streak_one" = "Your longest streak is one day.";
+/* Arguments: %1 */
+"activity.phrase_streak" = "Your longest streak is %1 days.";
+/* The streak line while the longest streak is still going. Arguments: %1 */
+"activity.phrase_streak_ongoing" = "Your current ongoing streak is at %1 days.";
+"activity.phrase_streak_ongoing_one" = "Your current ongoing streak is at one day.";
+/* The longest streak's length and the day it ended. Arguments: %1, %2 */
+"activity.phrase_streak_ended" = "Your longest streak of %1 days ended on %2.";
+/* Arguments: %1 */
+"activity.phrase_streak_ended_one" = "Your longest streak of one day ended on %1.";
+"activity.phrase_current_none" = "You have no streak going now.";
+"activity.phrase_current_one" = "Your current streak is one day.";
+/* Arguments: %1 */
+"activity.phrase_current" = "Your current streak is %1 days.";
+"activity.phrase_days_none" = "Each day you read counts here.";
+"activity.phrase_days_one" = "You've read on one day.";
+/* Arguments: %1 */
+"activity.phrase_days" = "You've read on %1 days.";
+/* The distance to the next milestone and its target. Arguments: %1, %2 */
+"activity.phrase_next" = "%1 more to reach %2.";
+"activity.phrase_all" = "You've reached every milestone.";
 
 "opening.native" = "Letting Kobo handle this book";
 "opening.protected" = "This book is protected";
@@ -1193,6 +1463,7 @@
 "reader.lock_landscape" = "Lock landscape";
 
 "reader.both" = "Both";
+"reader.lock_current_rotation" = "Lock current rotation";
 "reader.formatting_warning" = "Formatting warning";
 "reader.formatting_warning_description" = "This page uses unsupported formatting. You can keep reading, but some text or layout may not appear as intended.";
 
@@ -1208,8 +1479,7 @@
 "settings.minimal_annotation_mode_description" = "Hide the annotation bar. Tap text or blank space, then choose Stop highlighting to exit.";
 
 /* annotations */
-"annotations.style_section" = "Style";
-"annotations.actions_section" = "Actions";
+"annotations.style" = "Style";
 "annotations.title" = "Annotate";
 "annotations.tab" = "Annotations";
 "annotations.close" = "Close annotations";
@@ -1265,13 +1535,21 @@
 "annotations.next_matches" = "Next highlights";
 "annotations.save_then_edit" = "Save selection and edit highlight";
 "annotations.discard_then_edit" = "Discard selection and edit highlight";
+"annotations.add_note" = "Add note";
+"annotations.look_up" = "Look up";
+"annotations.edit_note" = "Edit note";
+"annotations.discard" = "Discard";
+"annotations.note_placeholder" = "Write a note";
+"annotations.note_save_failed" = "Could not save the note. Your text is kept.";
+"annotations.note_too_long" = "This note is too long to save.";
+"annotations.note" = "Note";
 
 "annotations.color_yellow" = "Yellow";
 "annotations.color_green" = "Green";
 "annotations.color_blue" = "Blue";
 "annotations.color_pink" = "Pink";
 "annotations.color_gray" = "Gray";
-"annotations.color_section" = "Color";
+"annotations.color" = "Color";
 
 "annotations.color_failed" = "Could not save color. Try again.";
 
@@ -1397,6 +1675,12 @@
 "settings.tappable_links_off_description" = "Long press and choose Follow link to avoid accidental opening.";
 "settings.tappable_links_footnotes_description" = "Tap footnotes to open them. Long press other links, then choose Follow link.";
 "settings.tappable_links_all_description" = "Tap footnotes and links to open them.";
+"settings.annotation_interaction" = "Highlighting";
+"settings.annotation_interaction_description" = "Choose how to start a highlight.";
+"settings.annotation_interaction_toggle" = "Toggleable annotation mode";
+"settings.annotation_interaction_toggle_description" = "Turn on Annotate in the reading menu, then hold text to highlight it. Outside the mode, holding text looks it up in a dictionary of your choice.";
+"settings.annotation_interaction_quick" = "Quick annotation mode";
+"settings.annotation_interaction_quick_description" = "Hold text to highlight it, add a note or look it up. The Annotate button is hidden.";
 "settings.vertical_spacing" = "Vertical page spacing";
 "settings.vertical_spacing_mode" = "Page spacing";
 "settings.vertical_spacing_description" = "Adjust blank space on nearly full pages.";

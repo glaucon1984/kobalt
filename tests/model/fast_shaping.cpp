@@ -1,5 +1,6 @@
 #include "check.h"
 #include "engine_fixtures.h"
+#include "engine/blaze/extensions/word_cache.h"
 #include "reader_inputs.h"
 #include "engine/blaze/adapter/engine_document.h"
 #include <QGuiApplication>
@@ -11,16 +12,50 @@ using kobalt::EngineDocument;
 namespace {
 const QSize viewport(800, 1136);
 
-void open(EngineDocument &model, int characters, const QString &face)
+void checkWordCache()
 {
-    const QByteArray prose("The reader crossed the quiet room and opened the book. ");
-    QByteArray body;
-    int remaining = characters;
-    while (remaining > 0) {
-        const auto text = prose.left(qMin(remaining, prose.size()));
-        body += "<p>" + text + "</p>";
-        remaining -= text.size();
+    blaze::WordCache cache;
+    const auto english = hb_language_from_string("en", -1);
+    const auto turkish = hb_language_from_string("tr", -1);
+    cache.selectLanguage(english);
+    const auto first = cache.findOrAdd(U"ink", 3, 42);
+    const auto collision = cache.findOrAdd(U"pen", 3, 42);
+    require(first.inserted && collision.inserted && first.offset != collision.offset,
+            "Different words with the same hash must have separate records");
+    cache.record(first.offset)[blaze::word::KW_LAST_ADVANCE] = 17;
+
+    // Grow past the initial table's load limit, then revisit both collided words.
+    for (unsigned int i = 0; i < 2100; ++i) {
+        const lChar32 letter = 0x3000 + i;
+        cache.findOrAdd(&letter, 1, i);
     }
+    for (unsigned int i = 0; i < 2100; ++i) {
+        const lChar32 letter = 0x3000 + i;
+        require(!cache.findOrAdd(&letter, 1, i).inserted,
+                "Growing the table lost the word that triggered the rehash");
+    }
+    cache.selectLanguage(turkish);
+    const auto other = cache.findOrAdd(U"ink", 3, 42);
+    require(other.inserted, "A new language must shape the word for itself");
+    cache.record(other.offset)[blaze::word::KW_LAST_ADVANCE] = 23;
+    cache.selectLanguage(english);
+    const auto ink = cache.findOrAdd(U"ink", 3, 42);
+    const auto pen = cache.findOrAdd(U"pen", 3, 42);
+    require(!ink.inserted && !pen.inserted && ink.offset == first.offset
+                    && pen.offset == collision.offset
+                    && cache.record(ink.offset)[blaze::word::KW_LAST_ADVANCE] == 17,
+            "Changing language and growing the table must preserve earlier word metrics");
+
+    cache.clear();
+    for (const auto language : { english, turkish }) {
+        cache.selectLanguage(language);
+        require(cache.findOrAdd(U"ink", 3, 42).inserted,
+                "Clearing the face must discard records in every language");
+    }
+}
+
+void open(EngineDocument &model, const QByteArray &body, const QString &face)
+{
     auto files = kobalt::test::engineBook(false, 1, 1);
     files["OEBPS/c1.xhtml"] = kobalt::test::publisherHtml(body);
     QMap<QString, qint64> sizes;
@@ -36,6 +71,19 @@ void open(EngineDocument &model, int characters, const QString &face)
     QString error;
     require(model.openResources(resources, sizes, viewport, { { "font_face", face } }, &error),
             qPrintable(error));
+}
+
+void open(EngineDocument &model, int characters, const QString &face)
+{
+    const QByteArray prose("The reader crossed the quiet room and opened the book. ");
+    QByteArray body;
+    int remaining = characters;
+    while (remaining > 0) {
+        const auto text = prose.left(qMin(remaining, prose.size()));
+        body += "<p>" + text + "</p>";
+        remaining -= text.size();
+    }
+    open(model, body, face);
 }
 
 void checkChoice(EngineDocument &model, bool expected)
@@ -59,11 +107,37 @@ void compare(EngineDocument &automatic, EngineDocument &reference)
                 "Conditional shaping changed page pixels");
     }
 }
+
+void checkExtendedLatin()
+{
+    // Warm the word cache past its initial shaping checks before introducing ḷ.
+    // The old glyph index for ḷ was also the index for w.
+    QByteArray body("<p>w a ");
+    for (int word = 0; word < 853; ++word) {
+        int digits = word;
+        for (int i = 0; i < 5; ++i) {
+            body += "abcd"[digits % 4];
+            digits /= 4;
+        }
+        body += ' ';
+    }
+    body += "</p>";
+    body += ("<p>" + QByteArray(u8"ḷ ").repeated(71) + "</p>").repeated(95);
+    EngineDocument fast(kobalt::test::readerFonts()), normal(kobalt::test::readerFonts());
+    qputenv("KOBALT_FAST_SHAPING", "1");
+    open(fast, body, "Libron");
+    qputenv("KOBALT_FAST_SHAPING", "0");
+    open(normal, body, "Libron");
+    qunsetenv("KOBALT_FAST_SHAPING");
+    compare(fast, normal);
+}
 } // namespace
 
 int main(int argc, char **argv)
 {
     QGuiApplication app(argc, argv);
+    checkWordCache();
+    checkExtendedLatin();
     for (const auto &face : { QStringLiteral("Libron"), kobalt::test::alternateReadingFace(),
                               kobalt::test::headingReadingFace() }) {
         for (int characters : { 8000, 249999, 250000 }) {

@@ -14,13 +14,14 @@
 *******************************************************/
 
 #include "crsetup.h"
+#include "../../extensions/css_ancestors.h"
 
 #include "../include/lvstsheet.h"
 #include "../include/lvtinydom.h"
 #include "../include/fb2def.h"
 #include "../include/lvstream.h"
 #include "../include/lvrend.h"   // for -cr-only-if:
-#include "../include/lvlogical.h"
+#include "../../extensions/vertical/lvlogical.h"
 
 // define to dump all tokens
 //#define DUMP_CSS_PARSING
@@ -419,6 +420,7 @@ enum LVCssSelectorPseudoElement
     csspe_after  = 2,   // ::after
     csspe_first_letter  = 3,   // ::first-letter
     csspe_first_line    = 4,   // ::first-line
+    csspe_existing_first_letter = 5, // User-agent styling of an existing pseudo element.
 };
 
 static const char * css_pseudo_elements[] =
@@ -427,6 +429,7 @@ static const char * css_pseudo_elements[] =
     "after",
     "first-letter",
     "first-line",
+    "-cr-existing-first-letter",
     NULL
 };
 
@@ -7790,7 +7793,8 @@ bool LVCssSelector::check( const ldomNode * node, bool allow_cache ) const
         }
         // We might be the pseudoElem that was created by this selector: we need to
         // confirm that by checking the rules on the real element that created us.
-        if ( _pseudo_elem == csspe_first_letter && node->hasAttribute(attr_FirstLetter) ) {
+        if ( (_pseudo_elem == csspe_first_letter || _pseudo_elem == csspe_existing_first_letter)
+             && node->hasAttribute(attr_FirstLetter) ) {
             // We need to find among ancestors the one that got to get a HasFirstLetter attribute
             // (this pseudoElem FirstLetter can be its grandchild), which is the
             // one that matched initially.
@@ -7839,6 +7843,9 @@ bool LVCssSelector::check( const ldomNode * node, bool allow_cache ) const
             // This pseudo-element node doesn't match this selector's pseudo-element type
             return false;
         }
+    }
+    else if ( _pseudo_elem == csspe_existing_first_letter ) {
+        return false; // Never request a first letter on the originating element.
     }
     else if ( _id==0 && node->isBoxingNode() ) {
         // Don't apply "... *" or '.classname' selectors to boxing nodes
@@ -8328,7 +8335,7 @@ bool LVCssSelector::parse( const char * &str, lxmlDocBase * doc, bool useragent_
                         if ( *str==':' ) // skip double ::
                             str++;
                         int n = parse_name( str, css_pseudo_elements, -1 );
-                        if (n != -1) {
+                        if (n != -1 && (useragent_sheet || n+1 != csspe_existing_first_letter)) {
                             _pseudo_elem = n+1; // starts at 1
                             _specificity += WEIGHT_SPECIFICITY_ELEMENT;
                             // Done with this selector: we expect ::before and ::after
@@ -8420,38 +8427,9 @@ bool LVCssSelector::parse( const char * &str, lxmlDocBase * doc, bool useragent_
     }
 exit:
     _rules = start;
+    // Blaze: Build the ancestor filter from the parsed rule chain so apply() can skip impossible matches.
     initAncestorRequirements();
     return res;
-}
-
-void LVCssSelector::initAncestorRequirements()
-{
-    _ancestorIds.clear();
-    _ancestorClasses.clear();
-    // Only the combinators move the checked node: a child or descendant
-    // combinator to an ancestor, a sibling combinator to a sibling. The other
-    // rules check the node that the last combinator reached.
-    bool ancestor = false;
-    for ( const LVCssSelectorRule * rule = _rules.get(); rule; rule = rule->getNext() ) {
-        switch ( rule->getType() ) {
-        case cssrt_parent:
-        case cssrt_ancessor:
-            ancestor = true;
-            if ( rule->getId() )
-                _ancestorIds.push_back( rule->getId() );
-            break;
-        case cssrt_predecessor:
-        case cssrt_predsibling:
-            ancestor = false;
-            break;
-        case cssrt_class:
-            if ( ancestor )
-                _ancestorClasses.push_back( rule->getValueHash() );
-            break;
-        default:
-            break;
-        }
-    }
 }
 
 static bool skip_until_end_of_rule( const char * &str )
@@ -8473,6 +8451,12 @@ void LVCssSelector::applyToPseudoElement( const ldomNode * node, css_style_rec_t
         // It masquerades as a pseudoElem: get the source pseudoElem for the following
         // checks (the style remains the one of the cloneNode).
         node = node->getCloneNodeSource();
+    }
+    if ( _pseudo_elem == csspe_existing_first_letter ) {
+        // Apply the decoration without changing display or marking this pseudo as active.
+        // A previously generated first letter stays hidden when its author rule is gone.
+        _decl->apply(style);
+        return;
     }
     if ( node->getNodeId() == el_pseudoElem ) {
         if (    ( _pseudo_elem == csspe_before && node->hasAttribute(attr_Before) )
@@ -8582,68 +8566,6 @@ LVStyleSheet::LVStyleSheet( LVStyleSheet & sheet )
     _selector_count = sheet._selector_count;
 }
 
-template<typename F>
-static void for_each_split(const lChar32 *begin, F functor) {
-    const lChar32 *end = begin;
-    while (*end) {
-        if (*end == ' ') {
-            if (end > begin)
-                functor(begin, end);
-            begin = end + 1;
-        }
-        ++end;
-    }
-    if (end > begin)
-        functor(begin, end);
-}
-
-// koblaze: the element names and the classes of all the ancestors of a
-// node, read when a selector first asks for them. It holds every node on the
-// way to the root, which includes all the nodes that the child and
-// descendant combinators of a selector can reach.
-class LVCssAncestors
-{
-    const ldomNode * _node;
-    bool _idsRead = false;
-    bool _classesRead = false;
-    LVArray<lUInt16> _ids;
-    LVArray<lUInt32> _classes;
-public:
-    explicit LVCssAncestors( const ldomNode * node ) : _node(node) { }
-    bool hasId( lUInt16 id ) {
-        if ( !_idsRead ) {
-            _idsRead = true;
-            for ( const ldomNode * n = _node->getParentNode(); n; n = n->getParentNode() )
-                _ids.add( n->getNodeId() );
-        }
-        for ( int i = 0; i < _ids.length(); i++ ) {
-            if ( _ids[i] == id )
-                return true;
-        }
-        return false;
-    }
-    bool hasClass( lUInt32 hash ) {
-        if ( !_classesRead ) {
-            _classesRead = true;
-            // The same attribute and the same split as the class rules and
-            // LVStyleSheet::apply() use.
-            for ( const ldomNode * n = _node->getParentNode(); n; n = n->getParentNode() ) {
-                if ( !n->isElement() )
-                    continue;
-                const lString32 & v = n->getAttributeValue(attr_class);
-                for_each_split(v.c_str(), [&](const lChar32 *begin, const lChar32 *end) {
-                    _classes.add(lString32::getHash(begin, end));
-                });
-            }
-        }
-        for ( int i = 0; i < _classes.length(); i++ ) {
-            if ( _classes[i] == hash )
-                return true;
-        }
-        return false;
-    }
-};
-
 bool LVCssSelector::quickAncestorCheck( LVCssAncestors & ancestors ) const
 {
     for ( lUInt16 id : _ancestorIds ) {
@@ -8734,11 +8656,9 @@ void LVStyleSheet::apply( const ldomNode * node, css_style_rec_t * style ) const
 
     LVArray<lUInt32> class_hash_array;
     const lString32 &v = node->getEffectiveAttributeValue(attr_class);
-    for_each_split(v.c_str(), [&](const lChar32 *begin, const lChar32 *end) {
-        class_hash_array.add(lString32::getHash(begin, end));
-    });
+    appendCssClassHashes(v, class_hash_array);
 
-    // koblaze: a cloneNode is checked as its source node, which has other
+    // Blaze: a cloneNode is checked as its source node, which has other
     // ancestors.
     LVCssAncestors ancestors( node );
     bool check_ancestors = node->getNodeId() != el_cloneNode;

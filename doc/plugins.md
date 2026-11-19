@@ -30,7 +30,7 @@ Kobalt reads the folders when the reader opens a book, on the plugin thread. A p
 
 ## Hooks
 
-`main.lua` runs once when the book opens. It defines global functions for the hooks it handles and can leave any of them out.
+`main.lua` runs once when the book opens. It defines global functions for the hooks it handles and can leave any of them out. A book that Kobalt [prepares ahead of its opening](reader/opening.md) loads no plugin until the reader opens it, so a prepared book that is never opened calls no hook.
 
 ```lua
 function book_opened(book) end   -- book.title, book.language

@@ -102,7 +102,7 @@ extern const int gDOMVersionCurrent = DOM_VERSION_CURRENT;
 
 /// change in case of incompatible changes in swap/cache file format to avoid using incompatible swap file
 // increment to force complete reload/reparsing of old file
-// vwm4: style-cache records now persist writing-mode-related properties.
+// Blaze: vwm4 style-cache records now persist writing-mode-related properties.
 // Older records hash those properties but do not serialize them, making every
 // vertical document fail style restoration and trigger a full render.
 #define CACHE_FILE_FORMAT_VERSION "3.05.84k-vwm4"
@@ -268,7 +268,7 @@ enum CacheFileBlockType {
 #include "../include/fb2def.h"
 #if BUILD_LITE!=1
 #include "../include/lvrend.h"
-#include "../include/lvlogical.h"
+#include "../../extensions/vertical/lvlogical.h"
 #include "../include/chmfmt.h"
 #endif
 #include "../include/crtest.h"
@@ -3503,7 +3503,7 @@ void ldomDataStorageManager::compact( lUInt32 reservedSpace, const ldomTextStora
 						// Keep the chunk in memory when the cache file cannot take it.
 						sumsize += p->_bufsize;
 					}
-					// koblaze: each chunk is packed and written. Other
+					// Blaze: each chunk is packed and written. Other
 					// work can have the engine between two of them.
 					koblazePausePoint();
 				}
@@ -5179,7 +5179,7 @@ ldomDocument::~ldomDocument()
     clearRendBlockCache();
     clearAlternateLayout();
 #endif
-    // koblaze: free the nodes that are not packed away while the document
+    // Blaze: free the nodes that are not packed away while the document
     // is still registered. After that a node no longer finds its document,
     // and its cleanup does nothing. A document that is destroyed before
     // its first layout has such nodes.
@@ -5732,257 +5732,6 @@ bool ldomDocument::partialRender( ldomNode * node ) {
     // a cache save, and will soon reload the document from that new cache.
 }
 
-lvdom_element_render_method ldomDocument::koblazeSourceMethod( ldomNode * node, lvdom_element_render_method method ) const
-{
-    if ( method == erm_invisible && _koblazeChangedMethodsKnown ) {
-        const auto found = _koblazeChangedMethods.find( node->getDataIndex() );
-        if ( found != _koblazeChangedMethods.end() )
-            return (lvdom_element_render_method)found->second;
-    }
-    return method;
-}
-
-void ldomDocument::koblazeChangeRendMethod( ldomNode * node, lvdom_element_render_method method )
-{
-    _koblazeChangedMethods.emplace( node->getDataIndex(), (lUInt8)node->getRendMethod() );
-    node->setRendMethod( method );
-}
-
-bool ldomDocument::koblazeRelayout()
-{
-    if ( !_koblazeChangedMethodsKnown )
-        return false;
-    for ( const auto & change : _koblazeChangedMethods )
-        getTinyNode( change.first )->setRendMethod( (lvdom_element_render_method)change.second );
-    _koblazeChangedMethods.clear();
-    // A full render clears these with the styles.
-    _renderedBlockCache.clear();
-    resetNodeNumberingProps();
-    _koblazeRelayout = true;
-    return true;
-}
-
-bool ldomDocument::koblazeSaveLayout()
-{
-    _koblazeSavedLayout.reset();
-    if ( !_rendered || _partial_rerendering_enabled || _pagesData.error() )
-        return false;
-    std::unique_ptr<KoblazeSavedLayout> saved( new KoblazeSavedLayout(_pagesData.size()) );
-    saved->rects.resize(_elemCount + 1);
-    saved->methods.resize(_elemCount + 1);
-    for ( int i = 0; i <= _elemCount; ++i ) {
-        ldomNode * node = &_elemList[i >> TNC_PART_SHIFT][i & TNC_PART_MASK];
-        if ( !node->isElement() )
-            continue;
-        node->getRenderData(saved->rects[i]);
-        saved->methods[i] = (lUInt8)node->getRendMethod();
-    }
-    saved->pages << _pagesData;
-    if ( saved->pages.error() )
-        return false;
-    saved->header = _hdr;
-    saved->elements = _elemCount;
-    saved->texts = _textCount;
-    saved->sliceFirst = _koblazeSliceFirst;
-    saved->sliceLast = _koblazeSliceLast;
-    saved->spineItemChars = _koblazeSpineItemChars;
-    saved->changedMethods = _koblazeChangedMethods;
-    saved->changedMethodsKnown = _koblazeChangedMethodsKnown;
-    _koblazeSavedLayout = std::move(saved);
-    return true;
-}
-
-bool ldomDocument::koblazeRestoreLayout( LVRendPageList * pages )
-{
-    std::unique_ptr<KoblazeSavedLayout> saved = std::move(_koblazeSavedLayout);
-    // A layout with the same styles adds no nodes. Do not put geometry on
-    // another tree.
-    if ( !saved || saved->elements != _elemCount || saved->texts != _textCount )
-        return false;
-    clearRendBlockCache();
-    resetNodeNumberingProps();
-    for ( int i = 0; i <= _elemCount; ++i ) {
-        ldomNode * node = &_elemList[i >> TNC_PART_SHIFT][i & TNC_PART_MASK];
-        if ( !node->isElement() )
-            continue;
-        node->setRenderData(saved->rects[i]);
-        node->setRendMethod((lvdom_element_render_method)saved->methods[i]);
-    }
-    _koblazeChangedMethods = saved->changedMethods;
-    _koblazeChangedMethodsKnown = saved->changedMethodsKnown;
-    _koblazeRelayout = false;
-    _koblazeSliceFirst = saved->sliceFirst;
-    _koblazeSliceLast = saved->sliceLast;
-    _koblazeSpineItemChars = saved->spineItemChars;
-    _pagesData.swap(saved->pages);
-    _hdr = saved->header;
-    _nodeStyleHash = 0;
-    _doc_rendering_hash = _hdr.getRenderingHash();
-    _pagesData.setPos(0);
-    pages->clear();
-    if ( !pages->deserialize(_pagesData) ) {
-        _rendered = false;
-        return false;
-    }
-    _rendered = true;
-    _toc_from_cache_valid = false;
-    m_toc.invalidatePageNumbers();
-    m_pagemap.invalidatePageInfo();
-    return true;
-}
-
-int ldomDocument::koblazeTextLength( ldomNode * node )
-{
-    const lUInt32 key = node->getDataIndex();
-    std::unordered_map<lUInt32, int>::const_iterator known = _koblazeTextLengths.find(key);
-    if ( known != _koblazeTextLengths.end() )
-        return known->second;
-    int length = 0;
-    if ( node->isText() ) {
-        length = node->getText().length();
-    }
-    else {
-        const int count = node->getChildCount();
-        for ( int i = 0; i < count; i++ )
-            length += koblazeTextLength( node->getChildNode(i) );
-    }
-    _koblazeTextLengths[key] = length;
-    return length;
-}
-
-int ldomDocument::koblazeTextBefore( ldomNode * root, ldomNode * target )
-{
-    int before = 0;
-    for ( ldomNode * node = target; node != root; ) {
-        ldomNode * parent = node->getParentNode();
-        if ( !parent )
-            return -1;
-        const int count = parent->getChildCount();
-        std::vector<int> & prefix = _koblazeTextPrefixes[parent->getDataIndex()];
-        if ( (int)prefix.size() != count ) {
-            // The characters before each child. A layout can add boxes, so
-            // a list of another size is counted again.
-            prefix.assign(count, 0);
-            int sum = 0;
-            for ( int i = 0; i < count; i++ ) {
-                prefix[i] = sum;
-                sum += koblazeTextLength( parent->getChildNode(i) );
-            }
-        }
-        const int index = node->getNodeIndex();
-        if ( index < 0 || index >= count )
-            return -1;
-        before += prefix[index];
-        node = parent;
-    }
-    return before;
-}
-
-// A block without text, such as an image, has no characters to place it by:
-// it sits at the count of the text before it. At the border of two slices
-// that count is in both. Such a block belongs to the slice that ends at it,
-// so that it is laid out once: a slice starts with a block that has text.
-bool ldomDocument::koblazeEmptyBlockInSlice( int start ) const
-{
-    if ( _koblazeSliceFirst <= 0 )
-        return start <= _koblazeSliceLast;
-    return start > _koblazeSliceFirst && start <= _koblazeSliceLast;
-}
-
-// A table adds its lines to the pages without the flow, so the page break
-// rules after it come from the block before the table. When the block before
-// the slice is a table, the block before that table is laid out too.
-bool ldomDocument::koblazeTableEndsSliceAfter( ldomNode * node, int end )
-{
-    ldomNode * next = NULL;
-    for ( ldomNode * n = node; n && !next && n->getNodeId() != el_DocFragment; n = n->getParentNode() ) {
-        ldomNode * parent = n->getParentNode();
-        if ( !parent )
-            return false;
-        const int count = parent->getChildCount();
-        for ( int i = n->getNodeIndex() + 1; i < count && !next; i++ ) {
-            ldomNode * child = parent->getChildNode(i);
-            if ( koblazeTextLength(child) > 0 && !child->isElement() )
-                return false;
-            if ( child->isElement() && child->getRendMethod() != erm_invisible )
-                next = child;
-        }
-    }
-    // The first block in it, through containers.
-    while ( next && next->getRendMethod() == erm_block ) {
-        ldomNode * first = NULL;
-        const int count = next->getChildCount();
-        for ( int i = 0; i < count && !first; i++ ) {
-            ldomNode * child = next->getChildNode(i);
-            if ( koblazeTextLength(child) > 0 && !child->isElement() )
-                return false;
-            if ( child->isElement() && child->getRendMethod() != erm_invisible )
-                first = child;
-        }
-        next = first;
-    }
-    return next && next->getRendMethod() == erm_table
-            && end + koblazeTextLength(next) == _koblazeSliceFirst;
-}
-
-bool ldomDocument::koblazeEnterBlock( ldomNode * node, bool spineItem, bool container )
-{
-    if ( _koblazeSliceLast <= 0 || spineItem )
-        return true;
-    // Use the same offsets as saved passages. Hidden blocks and floats
-    // are not always visited by the main flow.
-    ldomNode * body = node;
-    for ( ldomNode * parent = node->getParentNode(); parent; parent = parent->getParentNode() ) {
-        if ( parent->getNodeId() == el_DocFragment )
-            break;
-        if ( parent->getRendMethod() != erm_block )
-            return true;
-        body = parent;
-    }
-    if ( body->getNodeId() != el_body || !body->getParentNode() ||
-            body->getParentNode()->getNodeId() != el_DocFragment )
-        return true;
-    const int length = koblazeTextLength(node);
-    if ( node == body && length > _koblazeSpineItemChars )
-        _koblazeSpineItemChars = length;
-    const int start = koblazeTextBefore(body, node);
-    if ( node->getNodeId() == el_floatBox && node->isFloatingBox() )
-        _koblazeSliceHasFloats = true;
-    if ( container ) {
-        // A container with text in the slice is entered, and its blocks are
-        // placed by their source offsets. Containers outside the slice are left out as
-        // a whole, with its margins and page breaks.
-        if ( length > 0 && start + length > _koblazeSliceFirst && start < _koblazeSliceLast )
-            return true;
-        if ( length == 0 && koblazeEmptyBlockInSlice(start) )
-            return true;
-        // The container that ends where the slice starts holds the block
-        // before the slice. See below.
-        if ( length > 0 && _koblazeSliceFirst > 0 && start + length == _koblazeSliceFirst )
-            return true;
-        if ( length > 0 && _koblazeSliceFirst > 0 && start + length < _koblazeSliceFirst
-                && koblazeTableEndsSliceAfter(node, start + length) )
-            return true;
-    }
-    if ( container )
-        return false;
-    const bool inside = length > 0 ? start >= _koblazeSliceFirst && start < _koblazeSliceLast
-                                   : koblazeEmptyBlockInSlice(start);
-    if ( inside && !_koblazeFirstBlock && _koblazeSliceFirst > 0 )
-        _koblazeFirstBlock = node;
-    // The space above the first block of the slice depends on the block
-    // before it: their margins collapse. That block is laid out too, so
-    // that the first page is the page of the whole spine item. Its lines
-    // are not added to the pages: see koblazeSkipLinesUntil().
-    if ( !inside && !_koblazeFirstBlock && _koblazeSliceFirst > 0
-            && ( length > 0 ? start + length == _koblazeSliceFirst : start == _koblazeSliceFirst ) )
-        return true;
-    if ( !inside && !_koblazeFirstBlock && _koblazeSliceFirst > 0 && length > 0
-            && start + length < _koblazeSliceFirst && koblazeTableEndsSliceAfter(node, start + length) )
-        return true;
-    return inside;
-}
-
 bool ldomDocument::render( LVRendPageList * pages, LVDocViewCallback * callback, int width, int dy,
                            bool showCover, int y0, font_ref_t def_font, int def_interline_space,
                            CRPropRef props, int usable_left_overflow, int usable_right_overflow )
@@ -6129,7 +5878,7 @@ bool ldomDocument::render( LVRendPageList * pages, LVDocViewCallback * callback,
 
         _rendered = false;
     }
-    // koblaze: koblazeRelayout() asks for a layout with the current styles.
+    // Blaze: koblazeRelayout() asks for a layout with the current styles.
     bool relayout = _koblazeRelayout;
     _koblazeRelayout = false;
     if ( !_rendered || relayout ) {
@@ -6181,7 +5930,7 @@ bool ldomDocument::render( LVRendPageList * pages, LVDocViewCallback * callback,
         gc();
         CRLog::trace("finalizing... fonts.length=%d", _fonts.length());
         context.Finalize();
-        // koblaze: two forced page breaks with nothing between them give a
+        // Blaze: two forced page breaks with nothing between them give a
         // page without height: an empty page before a chapter. The first
         // page of a document never is one, so a host that loads a book in
         // parts would show such a page for some parts only. It asks for
@@ -9947,7 +9696,7 @@ ldomNode * ldomDocumentWriter::OnTagOpen( const lChar32 * nsname, const lChar32 
 
 ldomDocumentWriter::~ldomDocumentWriter()
 {
-    // koblaze: this finishes the document, with passes that have stop checks.
+    // Blaze: this finishes the document, with passes that have stop checks.
     KoblazeNoCancel noCancel;
     while (_currNode)
         _currNode = pop( _currNode, _currNode->getElement()->getNodeId() );
@@ -17095,7 +16844,7 @@ lString32 ldomXRange::getHRef()
 }
 
 
-// koblaze: deletes a document when a stop unwinds the stack. Declare it
+// Blaze: deletes a document when a stop unwinds the stack. Declare it
 // before the writer of the document, so that the writer goes first.
 struct KoblazeStoppedDocument {
     ldomDocument * doc;
@@ -17109,6 +16858,12 @@ ldomDocument * LVParseXMLStream( LVStreamRef stream,
 {
     if ( stream.isNull() )
         return NULL;
+    // Blaze: a document made without a free slot shares the nodes of
+    // another one (the 4-bit _docIndex wraps to 15). Callers handle NULL.
+    if ( ldomDocument::koblazeFreeDocumentSlots() <= 0 ) {
+        CRLog::error("%s: no free document slot", "LVParseXMLStream");
+        return NULL;
+    }
     bool error = true;
     ldomDocument * doc;
     doc = new ldomDocument();
@@ -17122,7 +16877,7 @@ ldomDocument * LVParseXMLStream( LVStreamRef stream,
 
     /// FB2 format
     LVFileFormatParser * parser = new LVXMLParser(stream, &writer);
-    // koblaze: a host can stop a load here. Do not leak the parser, and
+    // Blaze: a host can stop a load here. Do not leak the parser, and
     // see KoblazeStoppedDocument for the document: the engine has few slots.
     try {
         if ( parser->CheckFormat() ) {
@@ -17151,6 +16906,12 @@ ldomDocument * LVParseHTMLStream( LVStreamRef stream,
 {
     if ( stream.isNull() )
         return NULL;
+    // Blaze: a document made without a free slot shares the nodes of
+    // another one (the 4-bit _docIndex wraps to 15). Callers handle NULL.
+    if ( ldomDocument::koblazeFreeDocumentSlots() <= 0 ) {
+        CRLog::error("%s: no free document slot", "LVParseHTMLStream");
+        return NULL;
+    }
     bool error = true;
     ldomDocument * doc;
     doc = new ldomDocument();
@@ -17164,7 +16925,7 @@ ldomDocument * LVParseHTMLStream( LVStreamRef stream,
 
     /// FB2 format
     LVFileFormatParser * parser = new LVHTMLParser(stream, &writerFilter);
-    // koblaze: a host can stop a load here. Do not leak the parser, and
+    // Blaze: a host can stop a load here. Do not leak the parser, and
     // see KoblazeStoppedDocument for the document: the engine has few slots.
     try {
         if ( parser->CheckFormat() ) {
@@ -19075,7 +18836,7 @@ ContinuousOperationResult ldomDocument::saveChanges( CRTimerUtil & maxTime, LVDo
     }
 
     CRLog::trace("ldomDocument::saveChanges(timeout=%d stage=%d)", maxTime.interval(), _mapSavingStage);
-    setCacheFileStale(true);
+    _cacheFileStale = true;
 
     switch (_mapSavingStage) {
     default:
@@ -19161,6 +18922,7 @@ ContinuousOperationResult ldomDocument::saveChanges( CRTimerUtil & maxTime, LVDo
         }
         if (!maxTime.infinite())
             _cacheFile->flush(false, maxTime); // intermediate flush
+        _mapSavingStage = 6;
         CHECK_EXPIRATION("saving props data")
         if (progressCallback) progressCallback->OnSaveCacheFileProgress(45);
         // fall through
@@ -19177,6 +18939,7 @@ ContinuousOperationResult ldomDocument::saveChanges( CRTimerUtil & maxTime, LVDo
         }
         if (!maxTime.infinite())
             _cacheFile->flush(false, maxTime); // intermediate flush
+        _mapSavingStage = 7;
         CHECK_EXPIRATION("saving ID data")
         if (progressCallback) progressCallback->OnSaveCacheFileProgress(50);
         // fall through
@@ -19193,6 +18956,7 @@ ContinuousOperationResult ldomDocument::saveChanges( CRTimerUtil & maxTime, LVDo
         }
         if (!maxTime.infinite())
             _cacheFile->flush(false, maxTime); // intermediate flush
+        _mapSavingStage = 8;
         CHECK_EXPIRATION("saving page data")
         if (progressCallback) progressCallback->OnSaveCacheFileProgress(60);
         // fall through
@@ -19206,6 +18970,7 @@ ContinuousOperationResult ldomDocument::saveChanges( CRTimerUtil & maxTime, LVDo
         }
         if (!maxTime.infinite())
             _cacheFile->flush(false, maxTime); // intermediate flush
+        _mapSavingStage = 9;
         CHECK_EXPIRATION("saving node data")
         if (progressCallback) progressCallback->OnSaveCacheFileProgress(70);
         // fall through
@@ -19252,6 +19017,7 @@ ContinuousOperationResult ldomDocument::saveChanges( CRTimerUtil & maxTime, LVDo
         }
         if (!maxTime.infinite())
             _cacheFile->flush(false, maxTime); // intermediate flush
+        _mapSavingStage = 10;
         CHECK_EXPIRATION("saving TOC data")
         if (progressCallback) progressCallback->OnSaveCacheFileProgress(80);
         // fall through
@@ -19274,6 +19040,7 @@ ContinuousOperationResult ldomDocument::saveChanges( CRTimerUtil & maxTime, LVDo
                 CRLog::error("Error while saving embedded font data");
                 return CR_ERROR;
             }
+            _mapSavingStage = 12;
             CHECK_EXPIRATION("saving embedded fonts")
         }
         if (progressCallback) progressCallback->OnSaveCacheFileProgress(95);
@@ -19287,6 +19054,7 @@ ContinuousOperationResult ldomDocument::saveChanges( CRTimerUtil & maxTime, LVDo
                 CRLog::error("Error while updating index of cache file");
                 return CR_ERROR;
             }
+            _mapSavingStage = 13;
             CHECK_EXPIRATION("flushing")
         }
         if (progressCallback) progressCallback->OnSaveCacheFileProgress(100);
@@ -19435,7 +19203,7 @@ lUInt32 tinyNodeCollection::calcStyleHash(bool already_rendered, lUInt32 force_n
             ldomNode * buf = _elemList[i];
             if ( !buf ) continue; // avoid clang-tidy warning
             for ( int j=0; j<sz; j++ ) {
-                // koblaze: a host can stop work in the background.
+                // Blaze: a host can stop work in the background.
                 if ( (j & 127) == 0 )
                     koblazeCheckCancel();
                 if ( buf[j].isElement() ) {
@@ -19738,15 +19506,6 @@ public:
     bool writeIndex(bool force = false)
     {
         lString32 filename = _cacheDir + "cr3cache.inx";
-        if (_oldStreamSize == 0)
-        {
-            LVStreamRef oldStream = LVOpenFileStream(filename.c_str(), LVOM_READ);
-            if (!oldStream.isNull()) {
-                _oldStreamSize = (lUInt32)oldStream->GetSize();
-                _oldStreamCRC = (lUInt32)oldStream->getcrc32();
-            }
-        }
-
         // fill buffer
         SerialBuf buf( 16384, true );
         buf.putMagic( doccache_magic );
@@ -19759,10 +19518,10 @@ public:
             buf << item->size;
             CRLog::trace("cache item: %s %d", LCSTR(item->filename), (int)item->size);
         }
+        const lUInt32 newCRC = buf.getCRC();
         buf.putCRC( buf.pos() - start );
         if ( buf.error() )
             return false;
-        lUInt32 newCRC = buf.getCRC();
         lUInt32 newSize = buf.pos();
 
         // check to avoid rewritting of identical file
@@ -19815,6 +19574,8 @@ public:
             if ( buf.error() )
                 return false;
 
+            _oldStreamCRC = lStr_crc32(0, sb->getReadOnly(), buf.pos() - sizeof(lUInt32));
+            _oldStreamSize = buf.pos();
             CRLog::info( "Document cache index file read ok, %d files in cache, %d bytes", _files.length(), totalSize );
             return true;
         } else {
@@ -20122,13 +19883,35 @@ public:
         return writeIndex(true) && result;
     }
 
+    // Blaze: removeObsolete() without a file to keep.
+    bool koblazeRemove( lString32 filename )
+    {
+        lString32 suffix(".00000000.0.cr3");
+        lString32 prefix = makeFileName(filename, 0, 0);
+        prefix = prefix.substr(0, prefix.length() - suffix.length()) + ".";
+        bool result = true;
+        for ( int i=0; i<_files.length(); ) {
+            lString32 path = _cacheDir + _files[i]->filename;
+            if ( _files[i]->filename.startsWith(prefix) ) {
+                if ( !LVFileExists(path) || LVDeleteFile(path) ) {
+                    _files.erase(i, 1);
+                    continue;
+                }
+                CRLog::error("Cannot delete cache file %s", UnicodeToUtf8(path).c_str());
+                result = false;
+            }
+            i++;
+        }
+        return writeIndex(true) && result;
+    }
+
     virtual ~ldomDocCacheImpl()
     {
     }
 };
 
 static ldomDocCacheImpl * _cacheInstance = NULL;
-// koblaze: set while a document that uses the cache is parked and other
+// Blaze: set while a document that uses the cache is parked and other
 // documents have the engine. Those must not reach the cache of the parked one.
 static bool koblaze_doc_cache_suspended = false;
 
@@ -20188,6 +19971,11 @@ bool ldomDocCache::removeObsolete( lString32 filename, lString32 cachePath )
     return _cacheInstance && !koblaze_doc_cache_suspended && _cacheInstance->removeObsolete(filename, cachePath);
 }
 
+bool ldomDocCache::koblazeRemove( lString32 filename )
+{
+    return _cacheInstance && !koblaze_doc_cache_suspended && _cacheInstance->koblazeRemove(filename);
+}
+
 /// delete all cache files
 bool ldomDocCache::clear()
 {
@@ -20226,112 +20014,6 @@ bool ldomDocCache::enabled()
 
 
 #if BUILD_LITE!=1
-
-// Layout snapshots live only as long as their document. They retain immutable
-// styles and node geometry; text, resources and the DOM are shared. Fonts are
-// resolved through the normal cache-loading path when restoring a layout.
-bool ldomDocument::retainLayout(size_t maxBytes)
-{
-    clearAlternateLayout();
-    if (!_rendered || _partial_rerendering_enabled || _pagesData.error())
-        return false;
-    const size_t base = sizeof(LayoutSnapshot) + _pagesData.size();
-    if (base > maxBytes || size_t(_elemCount + 1) > (maxBytes - base) / sizeof(LayoutNode))
-        return false;
-    std::unique_ptr<LayoutSnapshot> snapshot(new LayoutSnapshot(_pagesData.size()));
-    snapshot->nodes.reserve(_elemCount + 1);
-    snapshot->bytes = base + size_t(_elemCount + 1) * sizeof(LayoutNode);
-    std::set<css_style_rec_t *> styles;
-    for (int i = 0; i <= _elemCount; ++i) {
-        ldomNode *node = &_elemList[i >> TNC_PART_SHIFT][i & TNC_PART_MASK];
-        if (!node->isElement())
-            continue;
-        LayoutNode entry;
-        entry.node = node;
-        entry.parent = node->getParentNode() ? node->getParentNode()->getDataIndex() : 0;
-        entry.name = node->getNodeId();
-        entry.children = node->getChildCount();
-        node->getRenderData(entry.rect);
-        // Snapshots own a style reference, not another node index reference.
-        entry.style = _styles.get(getNodeStyleIndex(node->getDataIndex()));
-        entry.method = node->getRendMethod();
-        // Account for unique retained styles, including their variable data.
-        if (!entry.style.isNull() && styles.insert(entry.style.get()).second) {
-            SerialBuf style(1024, false);
-            entry.style->serialize(style);
-            snapshot->bytes += sizeof(css_style_rec_t) + style.size();
-            if (style.error() || snapshot->bytes > maxBytes)
-                return false;
-        }
-        snapshot->nodes.push_back(entry);
-    }
-    snapshot->pages << _pagesData;
-    if (snapshot->pages.error())
-        return false;
-    snapshot->header = _hdr;
-    snapshot->maxBytes = maxBytes;
-    snapshot->elements = _elemCount;
-    snapshot->texts = _textCount;
-    _alternateLayout = std::move(snapshot);
-    return true;
-}
-
-bool ldomDocument::swapLayout(LVRendPageList *pages)
-{
-    if (!_alternateLayout || !_rendered || _partial_rerendering_enabled)
-        return false;
-    LayoutSnapshot &snapshot = *_alternateLayout;
-    if (snapshot.elements != _elemCount || snapshot.texts != _textCount) {
-        clearAlternateLayout();
-        return false;
-    }
-    // A render can add auto-boxes. Do not apply geometry to a different tree.
-    for (const LayoutNode &entry : snapshot.nodes) {
-        ldomNode *node = entry.node;
-        if (!node->isElement() || node->getNodeId() != entry.name ||
-            node->getChildCount() != entry.children ||
-            (node->getParentNode() ? node->getParentNode()->getDataIndex() : 0) != entry.parent) {
-            clearAlternateLayout();
-            return false;
-        }
-    }
-    // Capture the departing layout before changing any geometry. Both snapshots
-    // fit the same cap; two exist only during this exchange.
-    std::unique_ptr<LayoutSnapshot> target = std::move(_alternateLayout);
-    retainLayout(target->maxBytes);
-    clearRendBlockCache();
-    resetNodeNumberingProps();
-    for (LayoutNode &entry : target->nodes) {
-        entry.node->setRenderData(entry.rect);
-        // The cache loader rebuilds font references from empty node indices.
-        clearNodeStyle(entry.node->getDataIndex());
-        entry.node->setStyle(entry.style);
-        entry.node->setRendMethod(entry.method);
-    }
-    _koblazeChangedMethods.clear();
-    _koblazeChangedMethodsKnown = false;
-    if (!updateLoadedStyles(true)) {
-        clearAlternateLayout();
-        _rendered = false;
-        return false;
-    }
-    _pagesData.swap(target->pages);
-    _hdr = target->header;
-    _nodeStyleHash = 0;
-    _doc_rendering_hash = _hdr.getRenderingHash();
-    _pagesData.setPos(0);
-    pages->clear();
-    if (!pages->deserialize(_pagesData)) {
-        clearAlternateLayout();
-        _rendered = false;
-        return false;
-    }
-    _toc_from_cache_valid = false;
-    m_toc.invalidatePageNumbers();
-    m_pagemap.invalidatePageInfo();
-    setCacheFileStale(true);
-    return true;
-}
 
 /// save document formatting parameters after render
 void ldomDocument::updateRenderContext()
@@ -20609,7 +20291,7 @@ void ldomNode::destroy()
     getDocument()->recycleTinyNode( _handle._dataIndex );
 }
 
-// koblaze: the index of a child with the masked `dataIndex` in `children`,
+// Blaze: the index of a child with the masked `dataIndex` in `children`,
 // or -1. A node is the child of one parent, once, so at most one entry
 // matches. Walks over siblings ask for the index of the child next to the
 // one asked last, so the entries beside the last result are tried before
@@ -21565,7 +21247,7 @@ void ldomNode::recurseElementsDeepFirst( void (*pFun)( ldomNode * node ) )
 #if BUILD_LITE!=1
 static void updateRendMethod( ldomNode * node )
 {
-    // koblaze: a host can stop work in the background.
+    // Blaze: a host can stop work in the background.
     static unsigned koblazeSteps = 0;
     if ( (++koblazeSteps & 63) == 0 )
         koblazeCheckCancel();
@@ -21602,7 +21284,7 @@ static void updateStyleDataRecursive( ldomNode * node, LVDocViewCallback * progr
 {
     if ( !node->isElement() )
         return;
-    // koblaze: a host can stop a style pass in the background.
+    // Blaze: a host can stop a style pass in the background.
     static unsigned koblazeSteps = 0;
     if ( (++koblazeSteps & 31) == 0 )
         koblazeCheckCancel();
@@ -22525,7 +22207,7 @@ bool ldomNode::getNodeListMarker( int & counterValue, lString32 & marker, int & 
                 break;
             }
 
-            // koblaze: the numbers of the list, when the layout has them.
+            // Blaze: the numbers of the list, when the layout has them.
             ListNumberingPropsRef listProps = getDocument()->getNodeNumberingProps( parent->getDataIndex() );
             if ( !listProps.isNull() ) {
                 std::unordered_map<lUInt32, int>::const_iterator known = listProps->counters.find( getDataIndex() );
@@ -23341,7 +23023,7 @@ bool ldomDocument::registerFontFace(lString32 url, lString8 face, int weight, in
     if (url.empty() || face.empty())
         return false;
     int docFragIdx = _parsingDocFragmentIdx;
-    // koblaze: the host does not use the fonts of this document. List the
+    // Blaze: the host does not use the fonts of this document. List the
     // font, and do not read its file.
     if ( !getDocFlag(DOC_FLAG_ENABLE_DOC_FONTS) && !_koblazeReadingFont ) {
         if ( !_fontList.findByUrlAndDocFragment(url, docFragIdx) ) {
@@ -23377,37 +23059,6 @@ bool ldomDocument::registerFontFace(lString32 url, lString8 face, int weight, in
         _fontMap.clear();
     }
     return registered;
-}
-
-// koblaze: a host that turns the fonts of the document off gives every
-// element its own font. A rule that it does not reach, such as one for
-// ::first-letter, can still name a font of the book. That font is read when
-// a style first asks for it, so the text looks as with the fonts on.
-void ldomDocument::koblazeReadFontsFor( const lString8 & families )
-{
-    if ( _koblazeUnreadFonts.empty() || families.empty() )
-        return;
-    lString8 wanted = families;
-    wanted.lowercase();
-    int i = 0;
-    while ( i < _koblazeUnreadFonts.length() ) {
-        LVEmbeddedFontDef * def = _koblazeUnreadFonts.get(i);
-        lString8 face = def->getFace();
-        face.lowercase();
-        // font_name holds each name in quotes.
-        if ( wanted.pos(cs8("\"") + face + cs8("\"")) < 0 ) {
-            i++;
-            continue;
-        }
-        const int parsing = _parsingDocFragmentIdx;
-        _parsingDocFragmentIdx = def->getDocFragmentIdx();
-        _koblazeReadingFont = true;
-        registerFontFace(def->getUrl(), def->getFace(), def->getWeight(), def->getWidth(),
-                         def->getItalic(), def->getIsLocal());
-        _koblazeReadingFont = false;
-        _parsingDocFragmentIdx = parsing;
-        _koblazeUnreadFonts.erase(i, 1);
-    }
 }
 
 /// returns object image stream

@@ -377,6 +377,10 @@ ReaderHostServices readerServices() {
     // Transparent PNGs for the "PNG over text" sleep screen, next to the profile (the installer
     // leaves the folder alone; the user reaches it over USB).
     result.sleepOverlayDirectories = QStringList{ QStringLiteral("/mnt/ext1/applications/kobalt/screensaver") };
+    // Wallpapers for the Custom sleep screen, beside them and reached the same way.
+    result.sleepWallpaperDirectories = QStringList{ QStringLiteral("/mnt/ext1/applications/kobalt/wallpapers") };
+    // No native reader to hand books to, so Settings leaves out the System integration section.
+    result.showNativeReaderOptions = false;
     // Lua plugins and what they save, next to the profile as on Kobo (.adds/kobalt/plugins): the
     // installer leaves both folders alone. Books are files on user storage, so sidecars stay on.
     result.pluginDirectory = [] {

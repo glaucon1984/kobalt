@@ -90,12 +90,18 @@ struct ReaderHostServices
     // or previews a device that does.
     bool readerStandbySupported = false;
     bool systemRotation = false;
+    bool showNativeReaderOptions = true;
     bool downloadableDictionaries = true;
+    // Build the window ahead of its opening. It stays quiet until
+    // ReaderWindow::activate(); see that function.
+    bool quiet = false;
     // Optional host-resolved high-resolution cover. The reader decodes it on
     // its worker and falls back to the publication cover if it is unusable.
     QString coverImagePath;
     // Optional host paths for user-supplied sleep PNGs.
     QStringList sleepOverlayDirectories;
+    // Optional host paths for user-supplied sleep wallpapers.
+    QStringList sleepWallpaperDirectories;
     // Optional live native preferences for the stock sleep-screen preview.
     std::function<sleep::NativePreview()> nativeSleepPreview;
     // Optional resolver of the Lua plugin folder. It runs on the plugin thread,
@@ -113,11 +119,6 @@ struct ReaderHostServices
     // Optional host reader-selection preference. Both callbacks are supplied
     // together; a successful write affects future book openings.
     std::function<bool()> automaticBookOpening;
-    // True for a host that shows its own opening view until the reader is
-    // ready. The reader then draws the previews of the text presets that
-    // are not stored yet before it reports ready, so that the first page
-    // turns do not wait for them.
-    bool textPresetsBeforePresentation = false;
     std::function<bool(bool)> setAutomaticBookOpening;
     std::function<QString()> clock;
     // Optional monotonic milliseconds for interval checks; tests replace it.
@@ -133,6 +134,9 @@ struct ReaderHostServices
     // Optional local time of day in milliseconds for the reader's minute tick;
     // tests replace it.
     std::function<int()> millisecondsOfDay;
+    // Optional UTC milliseconds that decide today's date in Activity; tests
+    // replace it so captures keep their dates.
+    std::function<qint64()> activityMilliseconds;
     std::function<BatteryStatus()> battery;
     // Optional native notifications. The subscription ends with context.
     std::function<void(QObject *context, std::function<void()> changed)> observeBattery;
@@ -167,6 +171,8 @@ struct ReaderHostServices
     KeyboardFactory keyboard;
     // Optional on hosts whose operating system already supplies connectivity.
     SyncNetworkFactory syncNetwork;
+    // Optional durable handoff after a successful local checkpoint on app pause.
+    std::function<void(const QJsonObject &)> deferKosync;
     // Optional HTTP access for KOSync requests; tests replace it. Hosts leave
     // it empty, and the KOSync client then uses its own.
     std::function<std::unique_ptr<QNetworkAccessManager>()> kosyncHttp;

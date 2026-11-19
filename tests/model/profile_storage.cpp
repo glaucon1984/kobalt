@@ -90,6 +90,23 @@ int main(int argc, char **argv)
     QTemporaryDir root;
     require(root.isValid(), "Temporary profile");
     {
+        QTemporaryDir usbRoot;
+        require(usbRoot.isValid(), "Temporary USB profile");
+        const storage::Paths paths{ usbRoot.path() };
+        storage::closeProfile(true);
+        storage::closeProfile();
+        require(!storage::drainWriterThread(), "Closing an unused profile started the worker");
+        QString error;
+        const auto transaction = [](QSqlDatabase &) { return true; };
+        require(!storage::profileTransaction(paths.directory, transaction, &error)
+                        && error == "storage-unavailable" && !QFileInfo::exists(paths.database()),
+                "First database use during USB export accessed the profile");
+        storage::reopenProfile();
+        require(storage::profileTransaction(paths.directory, transaction, &error),
+                "First database use after USB disconnect failed");
+        storage::closeProfile();
+    }
+    {
         QTemporaryDir batchRoot;
         const storage::Paths batch{ batchRoot.path() };
         const QJsonObject oldBook{ { "schema", 1 },
@@ -280,6 +297,20 @@ int main(int argc, char **argv)
             "Settings cleanup lost intent");
     require(storage::readJson(paths.preferences()) == clean.object,
             "Clean settings were not persisted");
+    const auto known = qt::object({ { "old", true }, { "choice", 1 } });
+    auto withNewField = known;
+    withNewField["future"] = 7;
+    auto savedPreferences = clean.object;
+    savedPreferences["private_optional"] = withNewField;
+    require(storage::writePreferences(paths.preferences(), savedPreferences)
+                    && storage::updatePreferences(
+                            paths.preferences(), qt::object({ { "private_optional", known } }),
+                            qt::object(
+                                    { { "private_optional", qt::object({ { "choice", 2 } }) } })),
+            "Apply an edit based on earlier settings");
+    require(storage::readJson(paths.preferences()).value("private_optional").toObject()
+                    == qt::object({ { "choice", 2 }, { "future", 7 } }),
+            "Editing an older settings snapshot lost a new field or restored a removed one");
     // Until beta 7 the Wi-Fi power saver setting is never saved, and reading
     // the settings removes a saved one.
     require(storage::writePreferences(paths.preferences(),

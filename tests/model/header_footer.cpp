@@ -233,8 +233,8 @@ int main()
     // and show no percentage in their place; the percentage fields keep theirs.
     auto noPages = values;
     noPages.page = noPages.pages = noPages.chapterPage = noPages.chapterPages = 0;
-    noPages.percentRead = 42;
-    noPages.chapterPercentRead = 30;
+    noPages.percentTenths = 427;
+    noPages.chapterPercentTenths = 309;
     const auto calculating = strings::get("header_footer.calculating");
     for (const auto field : { Field::ChapterPage, Field::BookPage, Field::ChapterPagesLeft })
         require(content(field, noPages, false).text == calculating,
@@ -243,6 +243,11 @@ int main()
                     && content(Field::ChapterPercent, noPages, false).text
                             == QStringLiteral("30%"),
             "The percentage fields keep their percentage");
+    noPages.decimalPercentages = true;
+    require(content(Field::BookPercent, noPages, false).text == QStringLiteral("42.7%")
+                    && content(Field::ChapterPercent, noPages, false).text
+                            == QStringLiteral("30.9%"),
+            "Chapter mode lost decimal precision before estimates arrived");
     require(content(Field::ChapterAndPage, estimated, false).text == QStringLiteral("6 of ~20"),
             "An estimated total beside a name needs its mark");
     auto missingTotal = values;
@@ -372,7 +377,7 @@ int main()
     for (const auto field : fields)
         require(fieldDescription(field).isEmpty()
                         == (field != Field::BatteryWarning && field != Field::ChapterTimeLeft
-                            && field != Field::BookTimeLeft),
+                            && field != Field::BookTimeLeft && field != Field::BookStatus),
                 "A field has the wrong description");
     // Every field is offered, each once.
     for (const auto field : fields)
@@ -459,9 +464,42 @@ int main()
                     && content(Field::ChapterLoadTime, values, false).text
                             == QStringLiteral("0 ms"),
             "A performance time is wrong");
-    require(std::end(choosableFields)[-2] == Field::PageTurnTime
-                    && std::end(choosableFields)[-1] == Field::ChapterLoadTime,
-            "The performance times are not together at the end of the list");
+    require(std::end(choosableFields)[-3] == Field::PageTurnTime
+                    && std::end(choosableFields)[-2] == Field::ChapterLoadTime
+                    && std::end(choosableFields)[-1] == Field::BookStatus,
+            "The debug fields are not together at the end of the list");
+    // Book status: the last turn time, then fast with the layout's progress
+    // or failure, or full with the time the whole book took when it is known.
+    Values status;
+    require(content(Field::BookStatus, status, false).text == QStringLiteral("layout: fast"),
+            "Book status without a turn or progress is wrong");
+    status.wholeBookPercent = 37;
+    require(content(Field::BookStatus, status, false).text == QStringLiteral("layout: fast (37%)"),
+            "Book status does not show the layout's progress");
+    status.pageTurnMilliseconds = 22;
+    require(content(Field::BookStatus, status, false).text
+                    == QStringLiteral("turn: 22ms | layout: fast (37%)"),
+            "Book status does not lead with the turn time");
+    require(content(Field::BookStatus, status, true).text
+                    == QStringLiteral("TURN: 22MS | LAYOUT: FAST (37%)"),
+            "Book status does not follow the slot's capitals");
+    status.wholeBookFailed = true;
+    require(content(Field::BookStatus, status, false).text
+                    == QStringLiteral("turn: 22ms | layout: fast (failed)"),
+            "Book status does not show a failed build");
+    status = {};
+    status.wholeBook = true;
+    require(content(Field::BookStatus, status, false).text == QStringLiteral("layout: full"),
+            "Book status of a whole book is not full");
+    status.wholeBookMilliseconds = 9249;
+    require(content(Field::BookStatus, status, false).text == QStringLiteral("layout: full (9.2s)"),
+            "Book status does not show a short whole-book time with a decimal");
+    status.wholeBookMilliseconds = 55400;
+    require(content(Field::BookStatus, status, false).text == QStringLiteral("layout: full (55s)"),
+            "Book status does not show a long whole-book time in whole seconds");
+    require(!fieldDescription(Field::BookStatus).isEmpty()
+                    && field("book_status") == Field::BookStatus,
+            "Book status has no description or saved name");
     auto timed = standard;
     timed.slotFields[2] = Field::PageTurnTime;
     timed.slotFields[4] = Field::ChapterLoadTime;

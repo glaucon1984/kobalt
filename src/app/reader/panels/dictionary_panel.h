@@ -11,6 +11,7 @@
 #include <QLabel>
 #include "ui/dialogs/modals.h"
 #include <QPointer>
+class QLineEdit;
 
 namespace kobalt {
 // A sheet across the full width, fixed to the screen edge away from the word.
@@ -54,6 +55,7 @@ protected:
 
 private:
     ui::PagerBar *pages, *choicesPaging;
+    KeyboardFactory keyboardFactory;
     std::unique_ptr<KeyboardController> keyboard;
     // On a narrow sheet, `actions` opens a menu with edit, search and save.
     ui::CellButton *dictionary, *close, *edit, *submit, *search, *actions;

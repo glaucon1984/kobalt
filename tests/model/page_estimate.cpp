@@ -20,9 +20,11 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QSet>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <lvdocview.h>
+#include <textlang.h>
 
 using namespace kobalt;
 
@@ -30,6 +32,12 @@ namespace kobalt {
 // Reads the spine items of an open book, for the comparison with real pages.
 struct ReaderLocationProbe
 {
+    static QString estimateLayout(EngineDocument &model)
+    {
+        require(model.initializeFonts(), "Cannot register estimate test fonts");
+        return model.estimateKey(model.settingsState());
+    }
+
     // Exercises the nested layout used during reflow and saved-position resolution.
     static bool layoutSliceWithCancelledCaller(EngineDocument &model, bool duringExtension)
     {
@@ -145,6 +153,50 @@ struct ReaderLocationProbe
     }
 
     static void forgetRefusedFullDocument(EngineDocument &model) { model.fullFailed_.clear(); }
+
+    // The place of `position` in its spine item, read from its XHTML.
+    static double readTextFraction(const EngineDocument &model, int item, const QString &position)
+    {
+        return model.readTextFraction(item, position);
+    }
+
+    // Drops the saved part of the page estimate record, so that the next
+    // state() makes it again.
+    static void forgetRecord(EngineDocument &model)
+    {
+        model.source_->pageEstimate.record = {};
+        model.source_->pageEstimate.wholeRecord = {};
+    }
+
+    static int retired(const EngineDocument &model) { return int(model.retired_.size()); }
+
+    static QVector<int> spineItemStarts(const EngineDocument &model)
+    {
+        return model.spineItemStarts(0, model.spineItemCount_ - 1);
+    }
+
+    // The same through positionOf(), one spine item at a time.
+    static QVector<int> spineItemStartsByLocation(const EngineDocument &model)
+    {
+        QStringList starts;
+        for (const auto &href : model.spineItems()) {
+            Location start;
+            start.href = href;
+            starts.append(model.positionOf(start));
+        }
+        auto pages = model.pagesOf(starts);
+        for (int i = pages.size() - 1; i >= 0; --i) {
+            if (pages[i] < 0 && !starts[i].isEmpty())
+                pages[i] = i + 1 < pages.size() ? pages[i + 1] : model.pages();
+        }
+        return pages;
+    }
+
+    // True when the prepared whole book knows where its spine items start.
+    static bool wholeBookStartsFound(const EngineDocument &model)
+    {
+        return model.full_ && !model.full_->source_->pageEstimate.wholeKey.isEmpty();
+    }
 
     static void abandonFullBuild(EngineDocument &model) { model.dropSideDocuments(); }
 
@@ -754,6 +806,29 @@ void record()
     for (int i = 0; i < F::Count; ++i)
         require(restored.model().weight[i] == before.weight[i],
                 "Restored pages do not change the weights");
+    // A layout of a part of a restored spine item does not make it
+    // incomplete: the restored pages stay until every part has a layout.
+    restored.restore({ { 0, 12 } });
+    require(restored.counted(), "Every spine item has its pages");
+    restored.observe(1, 0, 100, 250, 4);
+    require(restored.counted() && restored.completeItems().value(1) == 30
+                    && std::fabs(restored.itemPages(1) - 30) < 1e-9,
+            "A layout of one part dropped the restored pages of its spine item");
+    restored.restoreParts({ { 0, 0, 100, 250, 5 } });
+    require(restored.counted() && restored.completeItems().value(0) == 12,
+            "Restored parts dropped the restored pages of their spine item");
+    restored.observe(1, 100, 250, 250, 25);
+    require(restored.completeItems().value(1) == 29,
+            "The parts of a spine item replace its restored pages once they cover it");
+    restored.setLayout(PageEstimateLayout(), 0);
+    require(!restored.counted(), "Another page forgets the restored pages");
+
+    PageEstimateRecord whole = record;
+    whole.wholeBook = true;
+    require(PageEstimateRecord::fromJson(whole.toJson(), &loaded) && loaded.wholeBook,
+            "A record of the whole book keeps its mark");
+    require(PageEstimateRecord::fromJson(json, &loaded) && !loaded.wholeBook,
+            "A record of chapter mode has no mark");
 }
 
 #if __has_include(<koblaze.h>)
@@ -929,6 +1004,32 @@ void openFiles(EngineDocument &model, const test::BookFiles &files)
     require(model.go(0), "Cannot go to the first page");
 }
 
+void selectionAcrossSliceAfterReflow()
+{
+    const auto files = test::engineBook(false, 1, 220);
+    EngineDocument whole(test::readerFonts()), chapters(test::readerFonts());
+    const QJsonObject large{ { "font_pixels", 32 }, { "line_spacing_version", 1 } };
+    openResources(whole, files, large);
+    chapters.setChapterSlices(25);
+    openResources(chapters, files,
+                  { { "font_pixels", 28 },
+                    { "line_spacing_version", 1 },
+                    { "koblaze_first_spine_item", 0 },
+                    { "koblaze_last_spine_item", 0 } });
+    require(chapters.applyAppearance(appearance::Patch(large), { 600, 800 }),
+            "Cannot reflow selection fixture");
+    while (chapters.page() + 1 < chapters.pages())
+        require(chapters.turnInWindow(1), "Cannot reach the selection slice boundary");
+    require(chapters.continuesAfter(), "Selection fixture has no following slice");
+    require(whole.goTo(chapters.pageStart(chapters.page())), "Cannot locate the reference page");
+    const auto expected = whole.annotationPageEdges();
+    const auto actual = chapters.annotationPageEdges();
+    require(expected.continuesAfter && actual.continuesAfter
+                    && actual.first.text == expected.first.text
+                    && actual.last.text == expected.last.text,
+            "Reflow disabled selection across a slice boundary");
+}
+
 // An exclusive highlight end at the next page start belongs to the preceding page,
 // including when that chapter's layout has left the window.
 void offscreenRangeEnd()
@@ -962,6 +1063,17 @@ void offscreenRangeEnd()
         const auto actual = chapters.bookPages(range, {}, true);
         require(actual.size() == 2 && actual.at(1) == p,
                 "An offscreen highlight end included the next page");
+    }
+    for (int turn = 0; turn < 12; ++turn)
+        require(chapters.turnInWindow(1), "Cannot reach a later chapter slice");
+    require(chapters.prepareFullDocument({}) == Engine::FullDocument::Ready,
+            "Cannot prepare the reference page count");
+    const QStringList ends{ whole.pageStart(1), "/body/DocFragment[2].0",
+                            "/body/DocFragment[2]/body/p[1]/text().0" };
+    for (const auto &end : ends) {
+        const QStringList range{ whole.pageStart(0), end };
+        require(chapters.bookPages(range, {}, true) == whole.bookPages(range, {}, true),
+                "An exclusive chapter-start end included that chapter from a later slice");
     }
 }
 
@@ -1037,6 +1149,51 @@ void emptyItem()
     }
 }
 
+void exactPagesAfterAppearanceChange()
+{
+    const auto files = test::engineBook(false, 1, 220);
+    EngineDocument chapter(test::readerFonts()), reference(test::readerFonts());
+    openFiles(chapter, files);
+    require(chapter.prepareFullDocument({}) == Engine::FullDocument::Ready,
+            "Cannot prepare the first layout");
+    const int original = chapter.roughPages().pages;
+    const QJsonObject larger{ { "font_pixels", 48 }, { "line_spacing_version", 1 } };
+    require(chapter.applyAppearance(appearance::Patch(larger)), "Cannot enlarge the text");
+    openResources(reference, files, larger);
+    require(reference.pages() != original, "Font change must alter pagination");
+    const auto before = chapter.roughPages();
+    require(before.pages == 0 || before.pagesEstimated || before.pages == reference.pages(),
+            "A stale whole-book layout supplied an exact count after reflow");
+    require(chapter.prepareFullDocument({}) == Engine::FullDocument::Ready,
+            "Cannot prepare the second layout");
+    const auto after = chapter.roughPages();
+    require(!after.pagesEstimated && after.pages == reference.pages(),
+            "The new layout must supply the exact total");
+}
+
+void normalizedSearchRanges()
+{
+    const auto files = test::publisherPackage(
+            "en", "Search", { { "one.xhtml", test::publisherHtml("<p>ﬀ q&#x315;&#x300;</p>") } },
+            "<itemref idref='one.xhtml'/>");
+    EngineDocument model(test::readerFonts());
+    openResources(model, files, {});
+    const auto match = [&](const QString &query, const QString &source) {
+        SearchBatch batch;
+        QVector<SearchHit> hits;
+        for (int i = 0; !batch.done && i < 100; ++i) {
+            batch = model.searchText(query, batch.cursor, 1);
+            hits += batch.hits;
+        }
+        require(batch.done && hits.size() == 1 && hits.first().text == source
+                        && hits.first().start != hits.first().end,
+                "A normalized match must return its original source text once across batches");
+    };
+    match("f", "ﬀ");
+    match(QStringLiteral("q\u0300\u0315"), QStringLiteral("q\u0315\u0300"));
+    match(QStringLiteral("\u0300\u0315"), QStringLiteral("\u0315\u0300"));
+}
+
 // A long spine item has a layout for one part at a time. A search of the
 // book must find the matches in every part, as in the whole book.
 void searchLongItem()
@@ -1096,6 +1253,69 @@ void searchLongItem()
             "Chapter mode must give the text around a hit as the whole book does");
     require(model.pageStart(model.page()) == shown,
             "The text around the hits must not move the page on screen");
+}
+
+// Chapter mode rules out the spine items that cannot hold a query before it
+// loads them. A word that markup or hidden text splits stays findable, as in
+// the whole book. So does a letter whose combining marks markup splits: the
+// search puts the marks in canonical order across the inline element.
+void searchSplitWords()
+{
+    // Each spine item is long enough to be a unit of its own, so that the
+    // search must decide whether to load it.
+    const QByteArray filler = "<p>"
+            + QByteArray("The reader turns the page and the text goes on without a break. ")
+                      .repeated(3)
+            + "</p>";
+    const auto page = [&](const QByteArray &head, const QByteArray &body) {
+        return "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>Part</title>" + head
+                + "</head><body>" + filler.repeated(300) + body + "</body></html>";
+    };
+    test::BookFiles files;
+    files["start.xhtml"] = page({}, "<p>Nothing to find here.</p>");
+    files["markup.xhtml"] = page({}, "<p>The ze<i>bra</i> runs.</p>");
+    files["hidden.xhtml"] = page("<style>.gone{display:none}</style>",
+                                 "<p>A ze<span class=\"gone\">qq</span>bra hides.</p>");
+    files["apart.xhtml"] = page({}, "<p>Zest and bravery, all apart.</p>");
+    files["across.xhtml"] = page({}, "<p>The <b>z</b><i>e</i>bra<span>s</span> run.</p>");
+    files["marks.xhtml"] = page({}, "<p>a&#x301;<span>&#x323;</span>b</p>");
+    files = test::publisherPackage(
+            "en", "Split", files,
+            "<itemref idref=\"start.xhtml\"/><itemref idref=\"markup.xhtml\"/>"
+            "<itemref idref=\"hidden.xhtml\"/><itemref idref=\"apart.xhtml\"/>"
+            "<itemref idref=\"across.xhtml\"/><itemref idref=\"marks.xhtml\"/>");
+    const auto hits = [](EngineDocument &model, const QString &query) {
+        QStringList starts;
+        SearchCursor cursor;
+        for (int round = 0; round < 100000; ++round) {
+            const auto batch = model.searchText(query, cursor, 100);
+            for (const auto &hit : batch.hits)
+                starts.append(hit.start);
+            cursor = batch.cursor;
+            if (batch.done)
+                return starts;
+        }
+        require(false, "The search must end");
+        return starts;
+    };
+    EngineDocument whole(test::readerFonts());
+    openResources(whole, files, { { "font_pixels", 28 }, { "line_spacing_version", 1 } });
+    EngineDocument model(test::readerFonts());
+    openFiles(model, files);
+    // A with a dot below and an acute accent, then b.
+    const auto marked = QString::fromUtf8("\u1ea1\u0301b");
+    for (const auto &query :
+         { QStringLiteral("zebra"), QStringLiteral("zebras"), QStringLiteral("bravery"),
+           QStringLiteral("zest"), QStringLiteral("nothing"), marked }) {
+        const auto expected = hits(whole, query);
+        require(hits(model, query) == expected,
+                qPrintable(QString("Chapter mode must find \"%1\" as the whole book does")
+                                   .arg(query)));
+        if (query == QLatin1String("zebra"))
+            require(expected.size() >= 3, "The fixture splits the word three times");
+        if (query == marked)
+            require(expected.size() == 1, "The fixture holds the marked letter once");
+    }
 }
 
 // In a long spine item, a forward step to the first page of a slice that is
@@ -1585,6 +1805,13 @@ void pageFormattingWarnings()
             require(false, "Page warning did not follow visible computed CSS");
         }
     }
+    // A skipped first word leaves no preceding underline to extend.
+    const QByteArray decorated = "<p><span class='skip'>Hidden</span> <u>Visible words</u></p>";
+    EngineDocument hidden(test::readerFonts()), transparent(test::readerFonts());
+    openResources(hidden, book(".skip{visibility:hidden}", decorated), {});
+    openResources(transparent, book(".skip{color:transparent}", decorated), {});
+    require(hidden.image(0) == transparent.image(0),
+            "Hidden or transparent leading words changed the following underline");
     const auto pages = book("p{page-break-before:always}.bad{writing-mode:sideways-rl}",
                             "<p>First supported page.</p><p class='bad'>Unsupported page.</p>"
                             "<p>Last supported page.</p>");
@@ -2050,11 +2277,13 @@ void parkedFullDocument(const std::function<void(EngineDocument &)> &openWhole, 
                                 .toHex());
     };
     QStringList reference;
+    QJsonValue referenceRead;
     {
         EngineDocument whole(test::readerFonts());
         openWhole(whole);
         for (int page = 0; page < whole.pages(); ++page)
             reference.append(record(whole, page));
+        referenceRead = whole.state().value("page_estimate").toObject().value("read");
     }
     EngineDocument model(test::readerFonts());
     QString error;
@@ -2090,9 +2319,15 @@ void parkedFullDocument(const std::function<void(EngineDocument &)> &openWhole, 
         if (between)
             between();
     }
+    require(Probe::wholeBookStartsFound(model),
+            "The build must find where the spine items start before the switch");
     require(model.setChapterMode(false, appearance::Patch(QJsonObject{}), {}, {}, {}),
             "The prepared document must be shown");
     require(model.pages() == reference.size(), "A parked build changed the page count");
+    require(!referenceRead.isUndefined()
+                    && model.state().value("page_estimate").toObject().value("read")
+                            == referenceRead,
+            "A parked build changed the pages of a spine item");
     int different = 0;
     for (int page = 0; page < model.pages(); ++page)
         different += record(model, page) != reference[page];
@@ -2207,6 +2442,54 @@ void parkedPublisherFonts()
                        });
 }
 
+void parkedQuoteLevels()
+{
+    TextLangMan::resetCounters();
+    const auto tag = [](int i) { return lString32(U"en-x-") + lString32::itoa(i); };
+    for (int i = 0; i < 70; ++i) {
+        auto *language = TextLangMan::getTextLangCfg(tag(i), true);
+        for (int depth = 0; depth <= i; ++depth)
+            language->getOpeningQuote();
+    }
+    const auto saved = TextLangMan::koblazeQuoteLevels();
+    require(saved.size() == 70, "All open quote levels must be saved");
+    TextLangMan::resetCounters();
+    for (int i = 69; i >= 0; --i)
+        TextLangMan::getTextLangCfg(tag(i), true);
+    TextLangMan::getTextLangCfg(U"fr", true)->getOpeningQuote();
+    TextLangMan::koblazeSetQuoteLevels(saved);
+    auto restored = TextLangMan::koblazeQuoteLevels();
+    require(restored.size() == saved.size(), "A parked language was lost");
+    for (const auto &level : saved)
+        require(std::find(restored.begin(), restored.end(), level) != restored.end(),
+                "A preview changed quote nesting");
+    TextLangMan::resetCounters();
+}
+
+void parkedVariableFont()
+{
+    const auto book = pagesBook();
+    EngineDocument preview(test::readerFonts());
+    openResources(preview, book, { { "font_face", "Libron" }, { "font_pixels", 28 } });
+    const auto catalog = discoverReadingFonts(test::readerFonts().sources);
+    for (const auto &font : catalog) {
+        for (const auto &file : font.files) {
+            if (QFileInfo(file).fileName() != "AmstelvarAlpha-VF.ttf")
+                continue;
+            const QJsonObject settings{ { "font_face", font.family },
+                                        { "font_weight", font.weightAxis.maximum },
+                                        { "font_optical_size", font.opticalSizeAxis.maximum },
+                                        { "font_pixels", 28 },
+                                        { "line_spacing_version", 1 } };
+            parkedFullDocument([&](EngineDocument &model) { openResources(model, book, settings); },
+                               3, "variable font with a static preview", 13, {},
+                               [&] { preview.image(0); });
+            return;
+        }
+    }
+    require(false, "Missing variable font fixture");
+}
+
 // A book that is in the parsed-book cache gives the whole book without
 // parsing: the try right after a book opens takes it. A book that is not
 // there waits until the reader asks for the whole build.
@@ -2249,6 +2532,88 @@ void fullDocumentFromCache(const QByteArray &bytes)
             "The cache is not asked again for the same page");
     require(fresh.prepareFullDocument({}) == Engine::FullDocument::Ready,
             "The whole build must still work");
+}
+
+// The word count of a whole book goes into its parsed-book cache, also when
+// the cache file was written before the count. A cached opening then reads it
+// instead of counting the book again.
+void wordCountsInCache(const QByteArray &bytes)
+{
+    const Page page;
+    QTemporaryDir cacheRoot;
+    require(cacheRoot.isValid(), "Cannot create a document cache directory");
+    const auto directory = cacheRoot.path() + "/.cache";
+    const QByteArray fingerprint(64, 'd'), policy("word-count-test");
+    QString error;
+    const auto open = [&](EngineDocument &model) {
+        model.setDocumentCache(directory, fingerprint, policy, 1024 * 1024);
+        require(model.open(bytes, page.viewport, page.settings(), &error), qPrintable(error));
+    };
+    // A cache file without the count, as an opening that was left before
+    // its count leaves it.
+    {
+        EngineDocument first(test::readerFonts());
+        open(first);
+        require(first.saveDocumentCache(), "Cannot save the parsed book");
+    }
+    qint64 total = -1;
+    {
+        EngineDocument second(test::readerFonts());
+        open(second);
+        require(second.openedFromCache(), "The book must open from its cache");
+        const auto counts = second.wordCounts({});
+        require(counts.total > 0 && !counts.cached, "The cache must not have the count yet");
+        total = counts.total;
+        require(second.saveDocumentCache(), "Cannot save the count");
+    }
+    EngineDocument third(test::readerFonts());
+    open(third);
+    const auto counts = third.wordCounts({});
+    require(third.openedFromCache() && counts.cached && counts.total == total,
+            "A cached opening must read the word count, not count the book again");
+}
+
+// The parsed-book cache can be written in short steps while the reader
+// reads. A book saved that way opens from the cache with the same pages.
+void documentCacheInSteps(const QByteArray &bytes)
+{
+    const Page page;
+    QTemporaryDir cacheRoot;
+    require(cacheRoot.isValid(), "Cannot create a document cache directory");
+    const auto directory = cacheRoot.path() + "/.cache";
+    const QByteArray fingerprint(64, 'e'), policy("step-test");
+    QString error;
+    QStringList starts;
+    QImage shown;
+    int steps = 0;
+    {
+        EngineDocument whole(test::readerFonts());
+        whole.setDocumentCache(directory, fingerprint, policy, 1024 * 1024);
+        require(whole.open(bytes, page.viewport, page.settings(), &error), qPrintable(error));
+        for (int page = 0; page < whole.pages(); ++page)
+            starts.append(whole.pageStart(page));
+        // Pages are turned between the steps, as the reader does.
+        while (!whole.saveDocumentCacheStep(1)) {
+            require(++steps < 100000, "The steps must end");
+            whole.go(steps % whole.pages());
+            whole.image(whole.page());
+        }
+        require(whole.go(whole.pages() / 2), "Cannot go to the middle");
+        shown = whole.image(whole.page());
+        // Nothing is left for the close.
+        require(whole.saveDocumentCacheStep(1), "A saved cache must need no more steps");
+    }
+    require(steps > 1, "The fixture must take more than one step");
+    EngineDocument cached(test::readerFonts());
+    cached.setDocumentCache(directory, fingerprint, policy, 1024 * 1024);
+    require(cached.open(bytes, page.viewport, page.settings(), &error) && cached.openedFromCache(),
+            "A book saved in steps must open from its cache");
+    QStringList cachedStarts;
+    for (int page = 0; page < cached.pages(); ++page)
+        cachedStarts.append(cached.pageStart(page));
+    require(cachedStarts == starts && cached.go(cached.pages() / 2)
+                    && cached.image(cached.page()) == shown,
+            "A book saved in steps must open with the same pages");
 }
 
 // Abandonment can happen after a cached document opened, at its word count.
@@ -2409,6 +2774,9 @@ void reopenCounted()
         require(!next.pagesEstimated && next.page == rough.page + 1 && next.pages == shown.pages,
                 "Reading on in a counted book must keep its real page numbers");
         rough = next;
+        const auto cached = model.state();
+        Probe::forgetRecord(model);
+        require(model.state() == cached, "A kept record differs from a new one");
     }
     // A damaged part drops only the parts of its spine item.
     auto damaged = saved.value("page_estimate").toObject();
@@ -2421,6 +2789,230 @@ void reopenCounted()
     require(PageEstimateRecord::fromJson(damaged, &partial)
                     && partial.parts.size() < record.parts.size() && partial.read == record.read,
             "A damaged part must not drop the rest of the record");
+}
+
+// A next slice that other work stops brings the shown slice back with the
+// pages that were drawn, so that the waiting turn need not draw them again.
+void stoppedNextSliceKeepsImages()
+{
+    EngineDocument model(test::readerFonts());
+    openFiles(model, pagesBook());
+    QString error;
+    require(model.showSpineItems(3, 3, &error) && model.go(0), qPrintable(error));
+    int turns = 0;
+    while (Probe::visiblePages(model) <= 0 || model.page() < Probe::visiblePages(model)) {
+        require(model.turnInWindow(1) && ++turns < 100, "The fixture needs a later slice");
+    }
+    const int page = model.page();
+    model.image(page);
+    model.image(page - 1);
+    const int cached = model.cachedPages();
+    const auto key = model.cachedImageKey(page);
+    const int first = Probe::sliceFirst(model);
+    for (int budget = 1; budget < 40; budget += 3) {
+        int seen = 0;
+        model.prepareAhead([&] { return ++seen <= budget; });
+        if (Probe::sliceFirst(model) != first)
+            break;
+        require(model.page() == page && model.cachedPages() == cached
+                        && model.cachedImageKey(page) == key,
+                "A stopped next slice dropped the drawn pages of the shown slice");
+    }
+}
+
+// What the page estimate measured in the text does not depend on the layout:
+// the whole book and a new text size keep it.
+void measurementsKeptAcrossLayouts()
+{
+    EngineDocument model(test::readerFonts());
+    openFiles(model, pagesBook());
+    while (model.refinePageEstimate()) { }
+    require(Probe::map(model).allMeasured(), "The chapter must measure the book");
+    require(model.prepareFullDocument({}) == Engine::FullDocument::Ready
+                    && model.setChapterMode(false, appearance::Patch(QJsonObject{}), {}, {}, {}),
+            "The whole book must be shown");
+    require(Probe::map(model).allMeasured(), "The whole book must keep the measurements");
+    require(model.setChapterMode(true, appearance::Patch(qt::object({ { "font_pixels", 30 } })), {},
+                                 {}, {}),
+            "A new text size must go back to the chapter");
+    require(Probe::map(model).allMeasured() && !model.refinePageEstimate(),
+            "A new text size must not measure the book again");
+}
+
+// The documents that a switch replaces wait for idle time: their teardown
+// can write the parsed-book cache.
+void retiredUntilIdle()
+{
+    EngineDocument model(test::readerFonts());
+    openFiles(model, pagesBook());
+    require(model.prepareFullDocument({}) == Engine::FullDocument::Ready
+                    && model.setChapterMode(false, appearance::Patch(QJsonObject{}), {}, {}, {}),
+            "The whole book must be shown");
+    require(Probe::retired(model) == 1, "The chapter must wait for idle time");
+    model.releaseRetired();
+    require(Probe::retired(model) == 0, "Idle time must release the chapter");
+    require(model.setChapterMode(true, appearance::Patch(qt::object({ { "font_pixels", 30 } })), {},
+                                 {}, {})
+                    && Probe::retired(model) == 1,
+            "The whole book must wait for idle time");
+    model.releaseRetired();
+    require(Probe::retired(model) == 0 && model.turnInWindow(1),
+            "The chapter must read on after the release");
+}
+
+// Where each spine item starts in the whole book, from one walk over its
+// fragments, is where positionOf() puts the start of each.
+void spineItemStartsInOneWalk()
+{
+    QFile book(QStringLiteral(KOBALT_TEST_FIXTURES) + "/trevelyans-type-tester.kepub.epub");
+    require(book.open(QIODevice::ReadOnly), "Cannot read the Type Tester");
+    const auto bytes = book.readAll();
+    for (const auto &files : { pagesBook(), test::engineBook(false, 6, 20) }) {
+        EngineDocument model(test::readerFonts());
+        openResources(model, files, { { "font_pixels", 28 }, { "line_spacing_version", 1 } });
+        const auto starts = Probe::spineItemStarts(model);
+        require(!starts.isEmpty() && starts == Probe::spineItemStartsByLocation(model),
+                "The spine items must start where positionOf() puts them");
+    }
+    EngineDocument tester(test::readerFonts());
+    QString error;
+    require(tester.open(bytes, { 600, 800 }, {}, &error), qPrintable(error));
+    require(Probe::spineItemStarts(tester) == Probe::spineItemStartsByLocation(tester),
+            "The spine items of the Type Tester must start where positionOf() puts them");
+}
+
+// A book with more spine items than the record holds keeps those nearest to
+// the page. The record is made again only in another spine item, and is the
+// same as a new one.
+void largeWholeBookRecord()
+{
+    EngineDocument whole(test::readerFonts());
+    openResources(whole, test::engineBook(false, PageEstimateRecord::maxRead + 20, 1),
+                  { { "font_pixels", 28 }, { "line_spacing_version", 1 } });
+    require(whole.pages() > PageEstimateRecord::maxRead, "The fixture needs many spine items");
+    const QVector<int> pages{ 0, 1, whole.pages() / 2, whole.pages() / 2 + 1, whole.pages() - 1 };
+    // Read on without forgetting: the record is kept between the pages.
+    QVector<QJsonValue> kept;
+    for (const int page : pages) {
+        require(whole.go(page), "Cannot go to a page of the large book");
+        kept.append(whole.state().value("page_estimate"));
+    }
+    for (int i = 0; i < pages.size(); ++i) {
+        require(whole.go(pages[i]), "Cannot go to a page of the large book");
+        Probe::forgetRecord(whole);
+        const auto fresh = whole.state().value("page_estimate");
+        PageEstimateRecord record;
+        require(PageEstimateRecord::fromJson(fresh, &record)
+                        && record.read.size() == PageEstimateRecord::maxRead,
+                "A large book keeps the most spine items that a record holds");
+        require(kept[i] == fresh, "A kept record of a large book differs from a new one");
+    }
+}
+
+// A parked build goes on only with room for the documents of the package
+// files: a document made without room would share the nodes of another one.
+void fullBuildWaitsForRoom()
+{
+    EngineDocument model(test::readerFonts());
+    openFiles(model, pagesBook());
+    int seen = 0;
+    require(model.prepareFullDocument([&] { return ++seen <= 3; }) == Engine::FullDocument::Stopped,
+            "The build must park");
+    std::vector<std::unique_ptr<ldomDocument>> others;
+    while (ldomDocument::koblazeFreeDocumentSlots() > 2)
+        others.push_back(std::make_unique<ldomDocument>());
+    require(model.prepareFullDocument({}) == Engine::FullDocument::None,
+            "A build without room for its documents must wait");
+    // The engine itself refuses a short-lived document without a slot.
+    while (ldomDocument::koblazeFreeDocumentSlots() > 0)
+        others.push_back(std::make_unique<ldomDocument>());
+    static char xml[] = "<package><metadata/></package>";
+    require(!LVParseXMLStream(LVCreateMemoryStream(xml, int(sizeof(xml) - 1), true, LVOM_READ)),
+            "A document without a free slot would share another document's nodes");
+    others.clear();
+    require(model.prepareFullDocument({}) == Engine::FullDocument::Ready
+                    && model.setChapterMode(false, appearance::Patch(QJsonObject{}), {}, {}, {}),
+            "The build must go on once there is room");
+}
+
+// The contents of spine items without a layout point to their starts. A
+// read of the XHTML finds the start of the text there, which the book pages
+// skip.
+void chapterStartsNeedNoRead()
+{
+    for (const auto &files : { pagesBook(), test::engineBook(false, 6, 20) }) {
+        EngineDocument model(test::readerFonts());
+        openFiles(model, files);
+        int starts = 0;
+        for (const auto &chapter : model.chapters()) {
+            const int item = spineItemIndex(chapter.position);
+            if (item <= 0)
+                continue;
+            ++starts;
+            // A spine item without text has no place: the book pages count
+            // it as its start.
+            require(Probe::readTextFraction(model, item, chapter.position) <= 0,
+                    "The start of an unread spine item must be the start of its text");
+        }
+        require(starts > 0, "The fixture needs chapters outside the window");
+    }
+}
+
+// A layout of the whole book saves the real pages of every spine item. The
+// book opens in chapter mode with them, also in a later slice of a long
+// spine item, and reads on with the page numbers of the whole book.
+void reopenWholeBook()
+{
+    const auto previous = qgetenv("KOBALT_CHAPTER_PAGES");
+    qputenv("KOBALT_CHAPTER_PAGES", "6");
+    const auto restore = qScopeGuard([previous] {
+        if (previous.isNull())
+            qunsetenv("KOBALT_CHAPTER_PAGES");
+        else
+            qputenv("KOBALT_CHAPTER_PAGES", previous);
+    });
+    const auto files = pagesBook();
+    EngineDocument chapter(test::readerFonts());
+    openFiles(chapter, files);
+    QString error;
+    require(chapter.showSpineItems(3, 3, &error) && chapter.go(0), qPrintable(error));
+    for (int turn = 0; turn < 10; ++turn)
+        require(chapter.turnInWindow(1), "The fixture is too short to read on");
+    require(Probe::sliceFirst(chapter) > 0, "The fixture needs a later slice");
+    const auto middle = chapter.pageStart(chapter.page());
+
+    EngineDocument whole(test::readerFonts());
+    openResources(whole, files, { { "font_pixels", 28 }, { "line_spacing_version", 1 } });
+    QStringList starts;
+    for (int page = 0; page < whole.pages(); ++page)
+        starts.append(whole.pageStart(page));
+    require(whole.goTo(middle) && starts.indexOf(middle) == whole.page(),
+            "The page of chapter mode must be a page of the whole book");
+    auto saved = whole.state();
+    PageEstimateRecord record;
+    require(PageEstimateRecord::fromJson(saved.value("page_estimate"), &record) && record.wholeBook
+                    && record.read.size() == record.spineItems && record.shown == whole.page() + 1,
+            "The whole book must save the pages of every spine item");
+    saved["koblaze_first_spine_item"] = 3;
+    saved["koblaze_last_spine_item"] = 3;
+
+    EngineDocument model(test::readerFonts());
+    model.setChapterSlices(6);
+    openResources(model, files, saved);
+    require(Probe::sliceFirst(model) > 0, "The book must open in a later slice");
+    auto rough = model.roughPages();
+    std::printf("reopened whole book: page %d of %d, whole book page %d of %d\n", rough.page,
+                rough.pages, whole.page() + 1, whole.pages());
+    require(!rough.pagesEstimated && rough.page == whole.page() + 1 && rough.pages == whole.pages(),
+            "The book must open with the pages of the whole book");
+    for (int turn = 0; turn < 12; ++turn) {
+        require(model.turnInWindow(1), "The fixture is too short to read on");
+        rough = model.roughPages();
+        const int page = starts.indexOf(model.pageStart(model.page()));
+        require(page >= 0 && !rough.pagesEstimated && rough.page == page + 1
+                        && rough.pages == whole.pages(),
+                "Reading on must keep the pages of the whole book");
+    }
 }
 
 // The first complete estimate stays while the reader reads. A spine item
@@ -2795,9 +3387,39 @@ void chapterSurvey(const QString &path)
 #endif
 } // namespace
 
+// The layout progress only goes forward within one layout: estimate work
+// that resumes after the build has passed it does not pull it back.
+void layoutProgressForward()
+{
+    using namespace kobalt;
+    LayoutProgress progress;
+    progress.setEstimateProgress(5, 10);
+    require(progress.percent() == 7 && !progress.estimateComplete(),
+            "Partial estimate progress was not recorded");
+    progress.setBuildProgress(75);
+    require(progress.percent() == 78 && !progress.estimateComplete(),
+            "Build progress changed whether the estimate was complete");
+    progress.setEstimateProgress(10, 10);
+    require(progress.percent() == 78 && progress.estimateComplete(),
+            "Finished estimate did not preserve the published build progress");
+    progress.setBuildProgress(50);
+    require(progress.percent() == 78, "An earlier build slice moved the progress back");
+    progress.setBuildProgress(99);
+    require(progress.percent() == 99, "An unfinished whole book showed completion");
+    progress.setBuildProgress(100);
+    require(progress.percent() == 100, "A ready whole book did not show completion");
+    LayoutProgress other;
+    other.reset();
+    require(progress.percent() == 100, "Opening a second reader reset the first");
+    progress.reset();
+    require(progress.percent() == 0 && !progress.estimateComplete(),
+            "A new layout kept the old progress");
+}
+
 int main(int argc, char **argv)
 {
     QGuiApplication app(argc, argv);
+    layoutProgressForward();
 #if __has_include(<koblaze.h>)
     if (argc > 2 && QByteArray(argv[1]) == "--chapter") {
         chapterSurvey(QString::fromLocal8Bit(argv[2]));
@@ -2829,7 +3451,27 @@ int main(int argc, char **argv)
     hiddenHeadingOnChapterReflow();
     hiddenHeadingAtHandoff();
 #endif
+    {
+        QTemporaryDir directory;
+        const auto path = directory.filePath("Amstelvar.ttf");
+        require(QFile::copy(QStringLiteral(KOBALT_TEST_FIXTURES) + "/AmstelvarAlpha-VF.ttf", path),
+                "Cannot copy the estimate test font");
+        auto inputs = test::readerFonts();
+        inputs.sources.sideloadDirectory = directory.path();
+        const auto layout = [&] {
+            EngineDocument model(inputs);
+            return ReaderLocationProbe::estimateLayout(model);
+        };
+        const auto before = layout();
+        require(layout() == before, "Reopening with the same font changed the layout key");
+        QFile font(path);
+        require(font.open(QIODevice::Append) && font.write("x", 1) == 1,
+                "Cannot change the estimate test font");
+        font.close();
+        require(layout() != before, "Replacing a font under the same family kept the layout key");
+    }
     offscreenRangeEnd();
+    selectionAcrossSliceAfterReflow();
     savedPlaceOutsideOpeningWindow();
     returnToEvictedBookmark();
     reopenAfterWholeBookPreparation();
@@ -2855,12 +3497,24 @@ int main(int argc, char **argv)
     laterCounted();
     chaptersMeasuredInIdle();
     reopenCounted();
+    reopenWholeBook();
+    chapterStartsNeedNoRead();
+    fullBuildWaitsForRoom();
+    spineItemStartsInOneWalk();
+    largeWholeBookRecord();
+    retiredUntilIdle();
+    measurementsKeptAcrossLayouts();
+    stoppedNextSliceKeepsImages();
     manyItemJumps();
     fullDocument();
     fullDocumentKeepsPublisherFonts();
     parkedPublisherFonts();
+    parkedVariableFont();
+    parkedQuoteLevels();
     fullDocumentPixels();
     fullDocumentFromCache(bytes);
+    wordCountsInCache(bytes);
+    documentCacheInSteps(bytes);
     abandonedOpenedDocument(bytes);
     // KOBALT_PARKED_BOOK names another EPUB for the same check, for a book
     // that is not a fixture.
@@ -2925,7 +3579,10 @@ int main(int argc, char **argv)
     observations();
     emptyItem();
     laterSlice();
+    exactPagesAfterAppearanceChange();
+    normalizedSearchRanges();
     searchLongItem();
+    searchSplitWords();
     keptObservations();
 #endif
     std::printf("PASS: page estimate measurement, map, saved record and chapter mode pages\n");

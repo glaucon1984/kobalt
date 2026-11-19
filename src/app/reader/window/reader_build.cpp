@@ -233,7 +233,7 @@ Reader::Reader(std::unique_ptr<kobalt::ReadingBook> openedBook,
     setAttribute(Qt::WA_DeleteOnClose);
     // Member timers belong to the window, so a check of its children finds them.
     for (auto *timer : { &kosyncOpeningGrace, &renderNoticeTimer, &resizeTimer, &annotationModeHide,
-                         &brightnessHide, &lightFeedback })
+                         &annotationReopen, &brightnessHide, &lightFeedback })
         timer->setParent(this);
     presentation = services.presentation(this);
     Q_ASSERT(presentation);
@@ -249,8 +249,6 @@ Reader::Reader(std::unique_ptr<kobalt::ReadingBook> openedBook,
         QString error;
         dictionary->select(book->identity(), book->dictionaryChoice(), &error);
     }
-    kobalt::platform::setReaderRefreshWindow(this);
-    qApp->installEventFilter(this);
     setWindowModality(Qt::ApplicationModal);
     // A damaged settings file still falls back to the defaults, as a
     // missing one does, but the diagnostics say which it was.
@@ -261,23 +259,12 @@ Reader::Reader(std::unique_ptr<kobalt::ReadingBook> openedBook,
                            { { "status", kobalt::storage::readStatusName(savedSettings.status) } },
                            false);
     preferences = appearance::readerPreferences(savedSettings.object, book->layoutPreferences());
-    // Remember this book's layout as the last layout in the shared profile.
-    // A damaged settings file is left for the next explicit settings save to
-    // replace.
-    const bool settingsReadable = savedSettings.status == kobalt::storage::ReadStatus::Ok
-            || savedSettings.status == kobalt::storage::ReadStatus::Missing;
-    if (settingsReadable && !session->temporaryTypography()) {
-        auto global = appearance::globalPreferences(preferences);
-        appearance::rememberTextLayout(global, session->state());
-        appearance::rememberPageMargins(global, session->state());
-        if (global != savedSettings.object) {
-            // The shared settings must be on disk before the reader uses them.
-            // The window is still being built, so no input can arrive.
-            mainthread::AllowBlocking allow("remembered layout before reader input");
-            if (!kobalt::storage::writePreferences(book->paths().preferences(), global))
-                kobalt::diagnostic("last-appearance-unsaved", {},
-                                   kobalt::DiagnosticSeverity::Error);
-        }
+    // activate() remembers this book's layout. A damaged settings file is left
+    // for the next explicit settings save to replace.
+    if (savedSettings.status == kobalt::storage::ReadStatus::Ok
+        || savedSettings.status == kobalt::storage::ReadStatus::Missing) {
+        storedSettings = savedSettings.object;
+        storedSettingsReadable = true;
     }
     if (kobalt::annotationDatabaseEnabled())
         savedWords = std::make_unique<kobalt::SavedWords>(book->paths().directory);
@@ -299,8 +286,17 @@ Reader::Reader(std::unique_ptr<kobalt::ReadingBook> openedBook,
             refresh();
         }
     };
+    highlights->saved = [this] {
+        if (noteEditor && noteEditor->saving())
+            noteEditor->saved();
+    };
     // A highlight save on the writer thread failed and the saved list is back.
     highlights->saveFailed = [this] {
+        if (noteEditor && noteEditor->saving()) {
+            noteEditor->setError(strings::get("annotations.note_save_failed"));
+            if (!exitPending)
+                return;
+        }
         kobalt::qt::later(0, this, [this] {
             if (exitPending) {
                 failExit(closeRequest, strings::get("annotations.change_not_saved"));
@@ -371,14 +367,19 @@ Reader::Reader(std::unique_ptr<kobalt::ReadingBook> openedBook,
     built("toolbar");
     buildBottomControls();
     built("bottom_controls");
-    const auto appearanceLayout = buildMenu();
+    appearanceLayout = buildMenu();
     built("menu");
     buildOverlays();
     built("overlays");
-    buildAppearance(appearanceLayout);
-    built("appearance");
-    buildSettings();
-    built("settings");
+    // The Text and Layout controls are built when the menu first opens one
+    // of them; see ensureAppearance().
+    // Settings is built when it first opens; see ensureSettings(). KOSync
+    // runs without it, and lookups use the book's language.
+    buildKosync();
+    if (services.downloadableDictionaries)
+        static_cast<kobalt::DictionaryManager *>(dictionary.get())
+                ->setLanguage(session->state().value("language").toString());
+    built("kosync");
     buildNotices();
     built("notices");
     buildAnnotations();
@@ -391,6 +392,86 @@ Reader::Reader(std::unique_ptr<kobalt::ReadingBook> openedBook,
     menu->hide();
     topControls->hide();
     bottomControls->hide();
+    connect(header, &QPushButton::clicked, this, [this] {
+        if (topControls->isVisible()) {
+            flashAfterMenu = true;
+            dismissControls();
+        } else
+            showControls();
+    });
+    // Keep the displayed page untouched while a turn renders. Refreshing
+    // at request time sends the old page to the panel a second time.
+    this->session->updated = [this] { refresh(); };
+    this->session->renderProgressChanged = [this] {
+        if (session->renderProgress().active) {
+            book->pauseLocalPace();
+        }
+        refreshRenderNotice();
+    };
+    this->session->turnBoundary = [this](int direction) { turnPage(direction, 0, false); };
+    this->session->settled = [this] { preparePanels(); };
+    connect(QGuiApplication::primaryScreen(), &QScreen::geometryChanged, this,
+            [this](const QRect &geometry) {
+                if (isVisible() && !closing)
+                    setGeometry(geometry);
+            });
+    resize(QGuiApplication::primaryScreen()->size());
+    // A quiet window decodes its sleep images when it is activated; they are
+    // large and not needed before the book shows.
+    if (!services.quiet)
+        prepareSleepImages();
+    book->onPositionSaved([this](const QString &position, quint64 epoch) {
+        if (sleepSave == SleepSave::Idle || epoch != wakePositionEpoch || lifecycleHidden || closing
+            || exitPending || position.isEmpty() || position == sleepSavePosition)
+            return;
+        // The newer position is on storage. Retire the wake prompt; Nickel still
+        // owns any uncommitted time and any write already in flight.
+        if (sleepSave == SleepSave::Failed && closeSaveError)
+            closeSaveError->dismissed();
+        sleepSave = SleepSave::Idle;
+    });
+    book->onCheckpointFailed([this] { localSaveDue = true; });
+    connectPageInput();
+    openingStages["build_ms"] = building.nsecsElapsed() / 1e6;
+    if (!services.quiet)
+        start();
+}
+
+void Reader::prepareSleepImages()
+{
+    prepareSleepCover();
+    loadTodayReading();
+    if (sleep::uses(preferences, sleep::Mode::Overlay))
+        prepareSleepOverlay();
+    prepareSleepWallpapers();
+}
+
+// Everything that acts outside the window: input, the clock, the shared
+// settings and the host's observers. A quiet window waits for activate().
+void Reader::start()
+{
+    started = true;
+    kobalt::platform::setReaderRefreshWindow(this);
+    qApp->installEventFilter(this);
+    startPlugins();
+    // Remember this book's layout as the last layout in the shared profile.
+    if (storedSettingsReadable && !session->temporaryTypography()) {
+        auto global = appearance::globalPreferences(preferences);
+        appearance::rememberTextLayout(global, session->state());
+        appearance::rememberPageMargins(global, session->state());
+        if (global != storedSettings) {
+            // The shared settings must be on disk before the reader uses them.
+            // The window is not shown yet, so no input can arrive.
+            mainthread::AllowBlocking allow("remembered layout before reader input");
+            if (!kobalt::storage::updatePreferences(book->paths().preferences(), storedSettings,
+                                                    global))
+                kobalt::diagnostic("last-appearance-unsaved", {},
+                                   kobalt::DiagnosticSeverity::Error);
+        }
+    }
+    storedSettings = {};
+    storedSettingsReadable = false;
+    startClock();
     if (services.observeBluetooth)
         services.observeBluetooth(this, [this](bool enabled) {
             if (menuBluetooth->active() == enabled)
@@ -409,34 +490,6 @@ Reader::Reader(std::unique_ptr<kobalt::ReadingBook> openedBook,
                 && topControls->isVisible() && !lifecycleHidden)
                 syncNavigation();
         });
-    connect(header, &QPushButton::clicked, this, [this] {
-        if (topControls->isVisible()) {
-            flashAfterMenu = true;
-            dismissControls();
-        } else
-            showControls();
-    });
-    // Keep the displayed page untouched while a turn renders. Refreshing
-    // at request time sends the old page to the panel a second time.
-    this->session->updated = [this] { refresh(); };
-    this->session->renderProgressChanged = [this] {
-        if (session->renderProgress().active) {
-            book->pauseLocalPace();
-        }
-        refreshRenderNotice();
-    };
-    this->session->turnBoundary = [this](int direction) { turnPage(direction, 0, false); };
-    this->session->idle = [this] { resumeTextPresetPrerender(); };
-    connect(QGuiApplication::primaryScreen(), &QScreen::geometryChanged, this,
-            [this](const QRect &geometry) {
-                if (isVisible() && !closing)
-                    setGeometry(geometry);
-            });
-    resize(QGuiApplication::primaryScreen()->size());
-    prepareSleepCover();
-    loadTodayReading();
-    if (sleep::mode(preferences) == sleep::Mode::Overlay)
-        prepareSleepOverlay();
     const auto battery = services.battery();
     lowBattery = !battery.charging && !battery.fullyCharged && battery.percent >= 0
             && battery.percent <= 5;
@@ -448,15 +501,77 @@ Reader::Reader(std::unique_ptr<kobalt::ReadingBook> openedBook,
             updateSleepBattery();
         });
     }
-    book->onCheckpointFailed([this] { localSaveDue = true; });
-    connectPageInput();
     // Android can suspend the app without hiding the embedded reader widget.
     connect(qApp, &QGuiApplication::applicationStateChanged, this, [this] {
         observeReading();
         if (services.suspended())
             book->checkpointReadingHistory();
     });
-    openingStages["build_ms"] = building.nsecsElapsed() / 1e6;
+}
+
+// Plugins load their book here and not with the window: a quiet window that is
+// never activated must not tell them of a book that was never opened.
+void Reader::startPlugins()
+{
+    if (!services.pluginDirectory)
+        return;
+    const QUrl source(book->identity());
+    kobalt::plugins::Context context;
+    context.bookFile = source.isLocalFile() ? source.toLocalFile() : QString();
+    context.sidecars = services.bookSidecars;
+    kobalt::plugins::Book about;
+    about.identity = book->identity();
+    about.title = session->title();
+    about.language = session->state().value("language").toString();
+    about.key = BookmarkStore::bookKey(book->identity(), book->fingerprint());
+    appliedPluginSwitches = kobalt::plugins::switchesFrom(preferences);
+    plugins = std::make_unique<kobalt::plugins::PluginHost>(services.pluginDirectory,
+                                                            services.pluginDataDirectory, context,
+                                                            about, appliedPluginSwitches);
+    connectPluginSettings();
+}
+
+// Settings and the plugins are made in either order: a quiet window can build
+// Settings before activate() starts the plugins.
+void Reader::connectPluginSettings()
+{
+    auto *section = general ? static_cast<kobalt::reader::SettingsPanel *>(general)->pluginsSection
+                            : nullptr;
+    if (!section)
+        return;
+    section->setApplied(appliedPluginSwitches);
+    if (!plugins)
+        return;
+    section->setBlocked(plugins->pluginsBlocked());
+    section->setStatuses(plugins->statuses());
+    plugins->statusChanged = [section](const QVector<kobalt::plugins::PluginStatus> &list) {
+        section->setStatuses(list);
+    };
+    section->deleteRequested = [this](const QString &id, std::function<void(bool, QString)> done) {
+        if (plugins)
+            plugins->deleteData(id, std::move(done));
+    };
+}
+
+void Reader::activate(const kobalt::ReaderNotice &notice, const QString &coverImagePath)
+{
+    if (started)
+        return;
+    services.startupNotice = notice;
+    services.coverImagePath = coverImagePath;
+    prepareSleepImages();
+    // The KOSync interval counts from the opening, not from the build.
+    kosyncIntervalClock.start();
+    start();
+}
+
+std::unique_ptr<kobalt::ReaderSession> Reader::releaseQuiet()
+{
+    if (started)
+        return {};
+    // Nothing of this window reached storage, Nickel or the screen.
+    closeWithoutSaving = true;
+    return session->retained();
 }
 
 void Reader::buildReadingPage()
@@ -493,21 +608,6 @@ void Reader::buildReadingPage()
         askPlugins(lookupText);
     };
     dictionaryPanel->searchRequested = [this](const QString &query) { openSearch(query); };
-    if (services.pluginDirectory) {
-        const QUrl source(book->identity());
-        kobalt::plugins::Context context;
-        context.bookFile = source.isLocalFile() ? source.toLocalFile() : QString();
-        context.sidecars = services.bookSidecars;
-        kobalt::plugins::Book about;
-        about.identity = book->identity();
-        about.title = session->title();
-        about.language = session->state().value("language").toString();
-        about.key = BookmarkStore::bookKey(book->identity(), book->fingerprint());
-        appliedPluginSwitches = kobalt::plugins::switchesFrom(preferences);
-        plugins = std::make_unique<kobalt::plugins::PluginHost>(
-                services.pluginDirectory, services.pluginDataDirectory, context, about,
-                appliedPluginSwitches);
-    }
     dictionaryPanel->chosen = [this](const QString &id) {
         if (lifecycleHidden || services.suspended() || closing)
             return;
@@ -581,7 +681,7 @@ void Reader::buildReadingPage()
     searchPanel->selected = [this](kobalt::SearchHit hit) {
         closeSearch();
         pendingSearchHit = hit;
-        this->session->goTo(hit.start);
+        this->session->goTo(hit.start, true);
     };
     page->held = [this](QPoint point) {
         if (beginAnnotationDrag(point, -1))
@@ -605,7 +705,7 @@ void Reader::buildReadingPage()
     page->imageHeld = [this](QPoint point) {
         if (session->busy() || lifecycleHidden || closing || exitPending || exportRunning
             || annotationSaving || services.suspended() || book->deviceTransition()
-            || appearanceEdit.panelOpen() || general->isVisible() || searchPanel->isVisible()
+            || appearanceEdit.panelOpen() || settingsVisible() || searchPanel->isVisible()
             || linksActive() || !pageImageAtPoint(page->image, point))
             return false;
         // Small image-only note references keep their link/selection behavior.
@@ -650,7 +750,7 @@ void Reader::startClockTimer()
         if (chapterGraph->isVisible()) {
             updateReadingStats();
         }
-        if (!chromeTicks() || topControls->isVisible() || general->isVisible()
+        if (!chromeTicks() || topControls->isVisible() || settingsVisible()
             || dictionaryPanel->isVisible() || searchPanel->isVisible() || linksActive()) {
             return;
         }
@@ -690,7 +790,7 @@ void Reader::startClockTimer()
             updateMenuStatus();
             return;
         }
-        if (!chromeTicks() || general->isVisible() || dictionaryPanel->isVisible()
+        if (!chromeTicks() || settingsVisible() || dictionaryPanel->isVisible()
             || searchPanel->isVisible() || linksActive())
             return;
         const auto before = page->slotContents;
@@ -701,7 +801,6 @@ void Reader::startClockTimer()
         // out of the page-turn image and colour refresh policy.
         page->refreshContent();
     });
-    startClock();
 }
 
 void Reader::buildToolbar()
@@ -853,7 +952,7 @@ void Reader::buildToolbar()
                            // visible top bar does not repaint twice. Ignore taps then.
                            if (appearanceEdit.applying())
                                return;
-                           if (general->isVisible())
+                           if (settingsVisible())
                                applySettings();
                            else
                                openSettings();
@@ -1042,6 +1141,11 @@ void Reader::buildOverlays()
     chapterGraph->changed = [this] { saveSoon(); };
     chapterGraph->denseChanged = [this](bool dense) { setDenseGraph(dense); };
     chapterGraph->setDense(preferences.value("dense_stats_chart").toBool(false));
+    // Activity needs the reading history; the legacy diagnostic backend has none.
+    if (book->tracksReadingHistory()) {
+        chapterGraph->activityRequested = [this] { openActivity(); };
+        chapterGraph->setActivity({});
+    }
     choices = new ChoiceScreen(this);
     choices->hide();
     pinnedBookmarks = new BookmarkTray(this);
@@ -1087,6 +1191,7 @@ void Reader::buildOverlays()
                 }
             }
             rows->append({ excerpt.id, chapter, excerpt.text, {}, -1, false });
+            rows->last().note = excerpt.note;
         }
         return true;
     };
@@ -1205,6 +1310,7 @@ void Reader::buildAppearance(const kobalt::reader::AppearanceLayout &layout)
     hyphenButtons = appearance.hyphenButtons;
     rotationButtons = appearance.rotationButtons;
     autoRotateOption = appearance.autoRotateOption;
+    lockRotationOption = appearance.lockRotationOption;
     connect(fontButton, &QPushButton::clicked, this, [this] {
         if (choices->isVisible() && choosingTypography) {
             choices->hide();
@@ -1325,8 +1431,10 @@ void Reader::buildAppearance(const kobalt::reader::AppearanceLayout &layout)
                                  { "updates_enabled", updatesEnabled() },
                                  { "resize_pending", resizePending } },
                                false);
-            this->orientation->configure(
-                    kobalt::qt::object({ { "orientation", value }, { "auto_rotate", false } }));
+            auto settings = orientation->settings();
+            settings["orientation"] = value;
+            settings["auto_rotate"] = false;
+            orientation->configure(settings);
             kobalt::diagnostic("reader-orientation-dispatched",
                                { { "target_orientation", value },
                                  { "width", width() },
@@ -1350,6 +1458,14 @@ void Reader::buildAppearance(const kobalt::reader::AppearanceLayout &layout)
                     this->orientation->setAutomatic(true)
                             ? QString()
                             : strings::get("reader.the_orientation_sensor_is_unavailable"));
+            refresh();
+        });
+    if (lockRotationOption)
+        connect(lockRotationOption, &QPushButton::clicked, this, [this] {
+            if (!rotationControlsBlocked()) {
+                orientation->toggleLock();
+                appearanceEdit.clearError();
+            }
             refresh();
         });
     headerFooterRow = appearance.headerFooterRow;
@@ -1424,21 +1540,7 @@ void Reader::buildAppearance(const kobalt::reader::AppearanceLayout &layout)
             editCustom([on](kobalt::headerfooter::Layout &custom) { custom.progressBar = on; });
         });
     }
-    fieldChooser = new kobalt::reader::FieldChooser(this);
-    fieldChooser->selected = [this, editCustom](kobalt::headerfooter::Field field) {
-        const int slot = fieldChooser->slot();
-        editCustom([slot, field](kobalt::headerfooter::Layout &custom) {
-            custom.slotFields[slot] = field;
-        });
-        // A choice ends the list, as choosing a chapter does.
-        closeFieldChooser();
-    };
-    fieldChooser->uppercaseChanged = [this, editCustom](bool on) {
-        const int slot = fieldChooser->slot();
-        editCustom(
-                [slot, on](kobalt::headerfooter::Layout &custom) { custom.uppercase[slot] = on; });
-    };
-    fieldChooser->done = [this] { closeFieldChooser(); };
+    fieldChooserEdit = editCustom;
     // The views belong to the Layout panel and leave with it. The Text tab
     // replaces it with the Text page, which also closes them.
     menu->installEventFilter(this);
@@ -1454,13 +1556,144 @@ void Reader::buildAppearance(const kobalt::reader::AppearanceLayout &layout)
     }
 }
 
-void Reader::buildSettings()
+kobalt::reader::FieldChooser *Reader::ensureFieldChooser()
+{
+    if (fieldChooser)
+        return fieldChooser;
+    fieldChooser = new kobalt::reader::FieldChooser(this);
+    fieldChooser->hide();
+    const auto editCustom = fieldChooserEdit;
+    fieldChooser->selected = [this, editCustom](kobalt::headerfooter::Field field) {
+        const int slot = fieldChooser->slot();
+        editCustom([slot, field](kobalt::headerfooter::Layout &custom) {
+            custom.slotFields[slot] = field;
+        });
+        // A choice ends the list, as choosing a chapter does.
+        closeFieldChooser();
+    };
+    fieldChooser->uppercaseChanged = [this, editCustom](bool on) {
+        const int slot = fieldChooser->slot();
+        editCustom(
+                [slot, on](kobalt::headerfooter::Layout &custom) { custom.uppercase[slot] = on; });
+    };
+    fieldChooser->done = [this] { closeFieldChooser(); };
+    // The reader's text, as the widgets built with the window have it.
+    textRefresh(fieldChooser);
+    for (auto *child : fieldChooser->findChildren<QWidget *>())
+        textRefresh(child);
+    return fieldChooser;
+}
+
+void Reader::preparePanels()
+{
+    // Long enough that a reader who just turned a page is reading it.
+    static constexpr qint64 quietMilliseconds = 2000;
+    if ((general && appearanceBuilt) || panelsWaiting || closing || exitPending || lifecycleHidden
+        || services.suspended())
+        return;
+    const qint64 quiet = inputQuiet.isValid() ? inputQuiet.elapsed() : quietMilliseconds;
+    // One panel at a time, so a tap meets one build at most.
+    if (quiet < quietMilliseconds || session->busy() || builtPanelNow) {
+        // One timer at a time, and only while a book is being read: a hidden
+        // reader builds the panels when they first open.
+        panelsWaiting = true;
+        const qint64 wait =
+                quiet < quietMilliseconds ? quietMilliseconds - quiet : quietMilliseconds;
+        builtPanelNow = false;
+        qt::later(int(wait), this, [this] {
+            panelsWaiting = false;
+            preparePanels();
+        });
+        return;
+    }
+    {
+        // Text and Layout open more often than Settings, so they come first.
+        DiagnosticOperation prepare("reader-panels-prepare");
+        if (!appearanceBuilt)
+            ensureAppearance();
+        else
+            ensureSettings();
+    }
+    builtPanelNow = true;
+    preparePanels();
+}
+
+void Reader::ensureAppearance()
+{
+    if (appearanceBuilt)
+        return;
+    appearanceBuilt = true;
+    QSet<QWidget *> before;
+    for (auto *widget : findChildren<QWidget *>())
+        before.insert(widget);
+    // The window built these controls before it had a theme. Some take
+    // colours from the theme while they are made, so they are made without
+    // it and get it below.
+    const auto dark = property("reader_dark");
+    setProperty("reader_dark", QVariant());
+    buildAppearance(appearanceLayout);
+    setProperty("reader_dark", dark);
+    // As for Settings: polishing applies the style sheets, which replace the
+    // gray roles, and the theme restores them, as for the window's widgets.
+    QVector<QWidget *> added;
+    for (auto *widget : findChildren<QWidget *>())
+        if (!before.contains(widget)) {
+            widget->ensurePolished();
+            added.append(widget);
+        }
+    for (auto *widget : added) {
+        if (themeReady)
+            themeWidget(widget, themePalette);
+        else
+            textRefresh(widget);
+    }
+}
+
+void Reader::ensureSettings()
+{
+    if (general)
+        return;
+    // The panel is built as the window built its controls before it had a
+    // theme: without the dark flag, so its style sheets are the light ones.
+    // The theme below replaces them, which polishes each widget with the
+    // theme's colors, as applyTheme did for the window's widgets. The panel
+    // is built straight into the window: moving a built panel there made Qt
+    // resolve the style of every widget again, a third of the build on a Kobo.
+    const auto dark = property("reader_dark");
+    if (themeReady)
+        setProperty("reader_dark", false);
+    buildSettings(this);
+    // The first fit picks the list or the rail for this screen and restyles
+    // the panel for it. Do it before the theme, as the window build did.
+    fitSettings();
+    general->hide();
+    setProperty("reader_dark", dark);
+    // Polishing applies the style sheets, which replace the gray roles. The
+    // theme restores them, so it comes after, as for the window's widgets.
+    general->ensurePolished();
+    for (auto *widget : general->findChildren<QWidget *>())
+        widget->ensurePolished();
+    if (themeReady) {
+        themeWidget(general, themePalette);
+        for (auto *widget : general->findChildren<QWidget *>())
+            themeWidget(widget, themePalette);
+    } else {
+        textRefresh(general);
+        for (auto *widget : general->findChildren<QWidget *>())
+            textRefresh(widget);
+    }
+}
+
+void Reader::buildSettings(QWidget *parent)
 {
     kobalt::reader::SettingsPanelInputs settingsInputs;
+    settingsInputs.window = this;
     settingsInputs.keyboard = services.keyboard;
     settingsInputs.downloadableDictionaries = services.downloadableDictionaries;
     settingsInputs.animationSupport = services.animationSupport();
     settingsInputs.lightSupported = services.lightAvailable();
+    settingsInputs.screenBrightness = light->hasSystemBrightness();
+    settingsInputs.showNativeReaderOptions = services.showNativeReaderOptions;
     settingsInputs.warmthSupported = warmthSupported;
     settingsInputs.sleepScreenSupported = presentation->supportsSleepScreen();
     settingsInputs.automaticBookOpeningSupported =
@@ -1470,25 +1703,11 @@ void Reader::buildSettings()
     settingsInputs.debugProgressAvailable = bool(services.development.simulateProgress);
     settingsInputs.plugins = bool(services.pluginDirectory);
     settingsInputs.pluginFolderLabel = services.pluginFolderLabel;
-    auto *settings = new kobalt::reader::SettingsPanel(this, settingsInputs);
-    if (auto *section = settings->pluginsSection) {
-        section->setApplied(appliedPluginSwitches);
-        if (plugins) {
-            section->setBlocked(plugins->pluginsBlocked());
-            section->setStatuses(plugins->statuses());
-            plugins->statusChanged = [section](const QVector<kobalt::plugins::PluginStatus> &list) {
-                section->setStatuses(list);
-            };
-            section->deleteRequested = [this](const QString &id,
-                                              std::function<void(bool, QString)> done) {
-                if (plugins)
-                    plugins->deleteData(id, std::move(done));
-            };
-        }
-    }
+    auto *settings = new kobalt::reader::SettingsPanel(parent, settingsInputs);
     general = settings;
+    connectPluginSettings();
     kosyncPage = settings->kosync;
-    buildKosync();
+    buildKosyncPage();
     settings->refitRequested = [this] {
         fitSettings();
         refresh();
@@ -1506,7 +1725,6 @@ void Reader::buildSettings()
         auto *manager = static_cast<kobalt::DictionaryManager *>(dictionary.get());
         auto *dictionarySettings = settings->dictionaries;
         dictionarySettings->setLanguage(session->state().value("language").toString());
-        manager->setLanguage(session->state().value("language").toString());
         const auto catalog = kobalt::DictionaryManager::catalog();
         dictionarySettings->setCatalog(catalog);
         auto updateDictionaries = [this, manager, dictionarySettings, catalog,
@@ -1558,6 +1776,7 @@ void Reader::buildSettings()
     pageNavigationButton = settings->pageNavigationButton;
     tapZonesButton = settings->tapZonesButton;
     tappableLinksButton = settings->tappableLinksButton;
+    annotationInteractionButton = settings->annotationInteractionButton;
     navigationBarButton = settings->navigationBarButton;
     chapterGroupsButton = settings->chapterGroupsButton;
     menuViewButton = settings->menuViewButton;
@@ -1679,6 +1898,7 @@ void Reader::buildSettings()
                                                showSettingsFonts();
                                            });
     });
+    buildDebugSettings();
     connect(settings->renderingButton, &QPushButton::clicked, this, [this, settings] {
         settings->showRenderingModes(settingsRenderingMode, [this](const QString &mode) {
             settingsRenderingMode = mode;
@@ -1716,6 +1936,8 @@ void Reader::buildSettings()
     connect(sleepScreenButton, &QPushButton::clicked, this, [this] { openSleepScreen(); });
     connect(sessionTimeoutButton, &QPushButton::clicked, this, [this] { openSessionTimeout(); });
     connect(tappableLinksButton, &QPushButton::clicked, this, [this] { openTappableLinks(); });
+    connect(annotationInteractionButton, &QPushButton::clicked, this,
+            [this] { openAnnotationInteraction(); });
     connect(tapZonesButton, &QPushButton::clicked, this, [this] { openTapZones(); });
     connect(chapterGroupsButton, &QPushButton::clicked, this, [this] { openChapterGroups(); });
     connect(navigationBarButton, &QPushButton::clicked, this,
@@ -1747,12 +1969,28 @@ void Reader::buildSettings()
     connect(refreshButton, &QPushButton::clicked, this, [this] { openScreenRefresh(); });
     connect(settings->openAcknowledgments, &QPushButton::clicked, this, [this] {
         kobalt::ui::PanelTiming timing("acknowledgments");
+        if (!acknowledgments) {
+            acknowledgments = new kobalt::Acknowledgments(this);
+            acknowledgments->finished = [this] {
+                acknowledgments->hide();
+                general->raise();
+                syncNavigation();
+            };
+        }
+        acknowledgments->setGeometry(searchPanel->geometry());
         acknowledgments->open();
         timing.finish(acknowledgments);
         for (auto *widget : acknowledgments->findChildren<QWidget *>())
             textRefresh(widget);
     });
-    connect(settings->confirmDefaults, &QPushButton::clicked, this, [this] {
+    // A dialog that the panel makes later gets the reader's text, as the
+    // widgets built with the window did.
+    settings->widgetCreated = [this](QWidget *widget) {
+        textRefresh(widget);
+        for (auto *child : widget->findChildren<QWidget *>())
+            textRefresh(child);
+    };
+    settings->restoreDefaultsConfirmed = [this] {
         restoringDefaults = true;
         inpageFootnotesOption->setChecked(false);
         settingsUiFontFace.clear();
@@ -1786,13 +2024,13 @@ void Reader::buildSettings()
         resetDefaults->setText(strings::get("reader.defaults_selected"));
         resetDefaults->setEnabled(false);
         settingsPages->setCurrentIndex(int(SettingsPage::Defaults));
-    });
-    connect(settings->confirmPresets, &QPushButton::clicked, this, [this, settings] {
+    };
+    settings->restorePresetsConfirmed = [this, settings] {
         restoringPresets = true;
         settings->resetPresets->setText(strings::get("text_presets.restore_selected"));
         settings->resetPresets->setEnabled(false);
         settingsPages->setCurrentIndex(int(SettingsPage::Defaults));
-    });
+    };
     if (settings->debugProgress)
         connect(settings->debugProgress, &QPushButton::clicked, this,
                 [this] { showProgressDebug(); });
@@ -1804,14 +2042,6 @@ void Reader::buildSettings()
 
 void Reader::buildNotices()
 {
-    acknowledgments = new kobalt::Acknowledgments(this);
-    // The navigation hides its panel edges while Acknowledgments covers the reader.
-    acknowledgments->finished = [this] {
-        acknowledgments->hide();
-        general->raise();
-        syncNavigation();
-    };
-    acknowledgments->hide();
     busyNotice = new kobalt::ui::ModalOverlay(this);
     busyNotice->setDimmed(true);
     busyNotice->card()->message(strings::get("reader.applying_appearance_changes"),
@@ -1841,6 +2071,9 @@ void Reader::buildNotices()
     annotationModeNotice = new ui::AnnotationModeNotice(this);
     annotationModeNotice->setObjectName("rrAnnotationModeNotice");
     annotationModeNotice->hide();
+    annotationReopen.setSingleShot(true);
+    annotationReopen.setInterval(metrics::selection::reopenMilliseconds);
+    connect(&annotationReopen, &QTimer::timeout, this, [this] { reopenAnnotationActions(); });
     annotationModeHide.setSingleShot(true);
     annotationModeHide.setInterval(metrics::lightSwipe::hideMilliseconds);
     connect(&annotationModeHide, &QTimer::timeout, annotationModeNotice, &QWidget::hide);
@@ -1865,7 +2098,7 @@ void Reader::connectLightGestures()
     });
     page->lightStarted = [this](bool warmth) {
         if (annotationMode || !isVisible() || services.suspended() || book->deviceTransition()
-            || this->session->busy() || appearanceEdit.preview() || general->isVisible()
+            || this->session->busy() || appearanceEdit.preview() || settingsVisible()
             || topControls->isVisible() || choices->isVisible() || dictionaryPanel->isVisible()
             || searchPanel->isVisible() || linksActive() || lookupPending || syncDialog
             || kosyncDialog || finishDialog || applyingText || lightPopup->isVisible()
@@ -1983,14 +2216,15 @@ void Reader::connectPageInput()
     page->annotationDragMoved = [this](QPoint point) { moveAnnotationDrag(point); };
     page->annotationDragFinished = [this](bool cancelled) { finishAnnotationDrag(cancelled); };
     page->annotationRequested = [this] {
-        if (!features::enabled(preferences, features::Annotations) || annotationMode || !isEnabled()
-            || !isVisible() || lifecycleHidden || closing || exitPending || exportRunning
-            || services.suspended() || book->deviceTransition() || session->busy()
-            || appearanceEdit.panelOpen() || appearanceEdit.applying() || general->isVisible()
-            || choices->isVisible() || topControls->isVisible() || revealingLinks
-            || dictionaryPanel->isVisible() || searchPanel->isVisible() || linksActive()
-            || lookupPending || acknowledgments->isVisible() || bookmarkList->isVisible()
-            || lightPopup->isVisible() || chapterGraph->isVisible() || !highlights->writable()) {
+        if (!features::enabled(preferences, features::Annotations) || annotationMode
+            || quickAnnotations() || !isEnabled() || !isVisible() || lifecycleHidden || closing
+            || exitPending || exportRunning || services.suspended() || book->deviceTransition()
+            || session->busy() || appearanceEdit.panelOpen() || appearanceEdit.applying()
+            || settingsVisible() || choices->isVisible() || topControls->isVisible()
+            || revealingLinks || dictionaryPanel->isVisible() || searchPanel->isVisible()
+            || linksActive() || lookupPending || acknowledgmentsVisible()
+            || bookmarkList->isVisible() || lightPopup->isVisible() || chapterGraph->isVisible()
+            || !highlights->writable()) {
             return;
         }
         const auto *modal = QApplication::activeModalWidget();
@@ -2015,7 +2249,7 @@ void Reader::connectPageInput()
             clearAnnotationDraft();
         }
         if (revealingLinks || searchPanel->isVisible() || linksActive() || lookupPending
-            || appearanceEdit.preview() || general->isVisible() || choices->isVisible()
+            || appearanceEdit.preview() || settingsVisible() || choices->isVisible()
             || topControls->isVisible())
             return;
         const bool reverse = session->state().value("page_progression_rtl").toBool()

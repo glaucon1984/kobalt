@@ -41,6 +41,10 @@ configure_file("${source}/support/build_info.h.in" build_info.h @ONLY)
 # Like Kobo: the reader without the standalone Library model and view.
 file(GLOB_RECURSE shared CONFIGURE_DEPENDS "${source}/*.cpp" "${source}/*.h")
 list(FILTER shared EXCLUDE REGEX "/(library|app/library)/")
+# As on Kobo: Activity's book covers use the Library's EPUB cover reader and its thumbnail loader.
+list(APPEND shared
+    "${source}/library/book_metadata.cpp" "${source}/library/book_metadata.h"
+    "${source}/library/cover_thumbnails.cpp" "${source}/library/cover_thumbnails.h")
 # The scenario player belongs to Kobo's evaluation packages only.
 list(FILTER shared EXCLUDE REGEX "/src/scenario/")
 # The engine library has its own build (kobalt_local_engine); only its adapter is Kobalt code.

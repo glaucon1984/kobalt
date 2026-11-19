@@ -1,5 +1,6 @@
 #include "kosync.h"
 #include "support/main_thread.h"
+#include "support/qt_compat.h"
 #include <fcntl.h>
 #include <unistd.h>
 #include "storage/reader_storage.h"
@@ -21,6 +22,12 @@
 #include <atomic>
 #include <cmath>
 #include <memory>
+#include <utility>
+#ifdef Q_OS_ANDROID
+#  include <QJniObject>
+#  include <QCoreApplication>
+#  include <QtCore/qnativeinterface.h>
+#endif
 
 namespace kobalt::kosync {
 namespace {
@@ -250,11 +257,17 @@ bool parseProgress(const QJsonObject &object, Progress *progress)
         return true;
     const auto position = object.value("progress"), percent = object.value("percentage");
     const auto timestamp = object.value("timestamp");
+    // Grimmory can have a book-progress row before it has any KOSync state.
+    // A percentage or timestamp means there is remote state we must not replace.
+    if (position.isNull() && percent.isNull() && timestamp.isNull()
+        && hexDigest(object.value("document").toString().toLatin1())
+        && object.value("device").isString() && object.value("device_id").isString())
+        return true;
     if (!position.isString() || position.toString().isEmpty() || position.toString().size() > 4096
         || !percent.isDouble() || !std::isfinite(percent.toDouble()) || percent.toDouble() < 0
         || percent.toDouble() > 1 || !object.value("device").isString()
         || (!object.value("device_id").isUndefined() && !object.value("device_id").isString())
-        || (!timestamp.isUndefined()
+        || (!timestamp.isUndefined() && !timestamp.isNull()
             && (!timestamp.isDouble() || !std::isfinite(timestamp.toDouble())
                 || timestamp.toDouble() < 0 || timestamp.toDouble() > 1e12)))
         return false;
@@ -286,6 +299,52 @@ Reconciler::Action Reconciler::observe(const Progress &remote, const QString &po
     else if (remote.position == position)
         uploaded_ = position;
     return position.isEmpty() || position == uploaded_ ? Action::Current : Action::Upload;
+}
+
+QJsonObject Reconciler::deferredBaseline() const
+{
+    return qt::object({ { "found", observed_.found },
+                        { "position", observed_.position },
+                        { "device_id", observed_.deviceId },
+                        { "timestamp", double(observed_.timestamp) },
+                        { "uploaded", uploaded_ },
+                        { "pending", pending() } });
+}
+
+QDateTime Client::lastSync() const
+{
+#ifdef Q_OS_ANDROID
+    const QString identity =
+            server() + QChar(0) + username_ + QChar(0) + deviceId_ + QChar(0)
+            + QString::fromLatin1(
+                    QCryptographicHash::hash(key_, QCryptographicHash::Sha256).toHex());
+    const auto stamp = QJniObject::callStaticMethod<jlong>(
+            "org/kobalt/android/KosyncWork", "lastSync",
+            "(Landroid/content/Context;Ljava/lang/String;)J",
+            QNativeInterface::QAndroidApplication::context().object(),
+            QJniObject::fromString(identity).object<jstring>());
+    if (stamp > 0 && (!lastSync_.isValid() || stamp > lastSync_.toMSecsSinceEpoch()))
+        return QDateTime::fromMSecsSinceEpoch(stamp).toUTC();
+#endif
+    return lastSync_;
+}
+
+QJsonObject Client::deferredAccount() const
+{
+    // Informational last_sync writes do not revoke queued progress. Account
+    // identity and policy edits do. Never copy the authentication key to jobs.
+    const auto account = qt::object(
+            { { "server", server() },
+              { "username", username_ },
+              { "device_id", deviceId_ },
+              { "device_name", deviceName_ },
+              { "key_sha256",
+                QString::fromLatin1(
+                        QCryptographicHash::hash(key_, QCryptographicHash::Sha256).toHex()) },
+              { "automatic", automatic_ },
+              { "match_method", filenameMatching_ ? "filename" : "binary" },
+              { "send_metadata", sendMetadata_ } });
+    return qt::object({ { "account_path", accountPath_ }, { "account", account } });
 }
 
 Client::Client(QString accountPath, QObject *parent, QNetworkAccessManager *network,
@@ -620,6 +679,26 @@ void Client::request(const QByteArray &method, const QString &path, const QUrl &
         done(0, {}, message("kosync.busy"));
         return;
     }
+#ifdef Q_OS_ANDROID
+    // The worker owns its complete GET/PUT exchange. Never block the GUI
+    // thread behind it. Keep this lease through chained response callbacks.
+    if (!QJniObject::callStaticMethod<jboolean>("org/kobalt/android/KosyncWork", "beginNative")) {
+        done(0, {}, message("kosync.busy"));
+        return;
+    }
+    auto lease = std::shared_ptr<bool>(new bool(true), [](bool *held) {
+        if (*held)
+            QJniObject::callStaticMethod<void>("org/kobalt/android/KosyncWork", "endNative");
+        delete held;
+    });
+    done = [lease, callback = std::move(done)](int status, QJsonObject body, QString error) {
+        callback(status, std::move(body), std::move(error));
+        // A finished reply may await deleteLater while Qt is suspended.
+        // Chained requests have already acquired their own lease.
+        if (std::exchange(*lease, false))
+            QJniObject::callStaticMethod<void>("org/kobalt/android/KosyncWork", "endNative");
+    };
+#endif
     networkUse().activity.start();
     requestElapsed_.start();
     requestAttempt(method, path, server, username, key, body, std::move(done),
@@ -805,8 +884,19 @@ void Client::sendRequest(const QByteArray &method, const QString &path, const QU
                     QJsonParseError error;
                     const auto document = QJsonDocument::fromJson(*bytes, &error);
                     const auto object = document.object();
+                    const bool missing =
+                            object.size() == 1 && object.value("status").toString() == "not found";
+                    // Grimmory distinguishes an existing book without progress
+                    // from a missing book or route. Only the former permits a PUT.
+                    const bool grimmoryMissing = object.size() == 3
+                            && object.value("status").isDouble()
+                            && object.value("status").toDouble() == 404
+                            && object.value("message").toString()
+                                    == "No progress found for user and book"
+                            && object.value("timestamp").isString()
+                            && !object.value("timestamp").toString().isEmpty();
                     if (error.error == QJsonParseError::NoError && document.isObject()
-                        && object.size() == 1 && object.value("status").toString() == "not found") {
+                        && (missing || grimmoryMissing)) {
                         done(status, {}, {});
                         return;
                     }
@@ -860,26 +950,36 @@ void Client::sendRequest(const QByteArray &method, const QString &path, const QU
             });
 }
 
-bool validLogin(const QString &server, const QString &username, const QString &password)
+QString loginError(const QString &server, const QString &username, const QString &password)
 {
-    return !serverUrl(server).isEmpty() && !username.trimmed().isEmpty() && !username.contains('\r')
-            && !username.contains('\n') && !username.contains(QChar::Null) && username.size() <= 256
-            && !password.isEmpty();
+    if (serverUrl(server).isEmpty())
+        return message("kosync.invalid_server");
+    if (username.trimmed().isEmpty() || username.contains('\r') || username.contains('\n')
+        || username.contains(QChar::Null) || username.size() > 256)
+        return message("kosync.invalid_username");
+    if (password.isEmpty())
+        return message("kosync.missing_password");
+    return {};
 }
 
 void Client::login(const QString &server, const QString &username, const QString &password,
                    Done done)
 {
-    if (!validLogin(server, username, password)) {
-        done(message("kosync.invalid_account"));
+    const auto error = loginError(server, username, password);
+    if (!error.isEmpty()) {
+        done(error);
         return;
     }
     const auto url = serverUrl(server);
     const auto key = QCryptographicHash::hash(password.toUtf8(), QCryptographicHash::Md5).toHex();
     request("GET", "/users/auth", url, username, key, {},
             [this, url, username, key, done](int status, QJsonObject object, QString error) {
-                if (error.isEmpty()
-                    && (status != 200 || object.value("authorized").toString() != "OK"))
+                // KOReader accepts HTTP 200 here. Grimmory names the user
+                // instead of returning the reference server's authorized field.
+                const bool authorized = object.value("authorized").toString() == "OK"
+                        || (object.size() == 1 && object.value("username").isString()
+                            && object.value("username").toString() == username);
+                if (error.isEmpty() && (status != 200 || !authorized))
                     error = failure("kosync.invalid_response", "sign-in",
                                     qt::object({ { "stage", "authorization" },
                                                  { "http_status", status } }));
@@ -949,9 +1049,13 @@ void Client::push(const QByteArray &document, const Progress &progress, const Me
     }
     request("PUT", "/syncs/progress", server_, username_, key_, object,
             [done, document](int status, QJsonObject response, QString error) {
-                if (error.isEmpty()
-                    && (status != 200
-                        || response.value("document").toString().toLatin1() != document))
+                // Grimmory confirms the write with a status message. If a
+                // document is present, it must still match the uploaded digest.
+                const bool acknowledged = response.contains("document")
+                        ? response.value("document").toString().toLatin1() == document
+                        : response.size() == 1
+                                && response.value("status").toString() == "progress updated";
+                if (error.isEmpty() && (status != 200 || !acknowledged))
                     error = failure("kosync.invalid_response", "upload-position",
                                     qt::object({ { "stage", "upload-acknowledgement" },
                                                  { "http_status", status } }));

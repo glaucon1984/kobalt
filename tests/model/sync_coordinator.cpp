@@ -355,6 +355,36 @@ void connectingFinalUpload(const QString &path, bool connects)
                     && !owner.needsSync("chapter-one"),
             "The connected final upload did not write the position exactly once");
 }
+
+void finalDuringRead(const QString &path)
+{
+    Http http;
+    kosync::Client client(path, nullptr, &http);
+    auto current = context();
+    const auto radio = std::make_shared<RadioState>();
+    Coordinator owner(
+            client, [radio] { return std::make_unique<Radio>(radio); }, [&] { return current; },
+            {}, true);
+    owner.start(Coordinator::Connection::Background, true);
+    radio->connected = true;
+    radio->answer(true);
+    await([&] { return http.replies.size() == 1; });
+    const auto oldRead = http.replies[0];
+    current.local.position = "last-position";
+    current.readiness = Coordinator::Readiness::Hidden;
+    int done = 0;
+    owner.flush(true, [&] { ++done; });
+
+    require(oldRead->isFinished() && http.replies.size() == 2 && radio->released == 0,
+            "Final sync waited for an older read while the reader was hiding");
+    http.finish(1);
+    require(http.uploads.size() == 1 && http.uploads[0].value("progress") == "last-position"
+                    && done == 0,
+            "Final sync did not upload the handoff position");
+    http.finish(2);
+    require(done == 1 && !owner.busy() && !owner.finalPending() && radio->released == 1,
+            "Final sync did not finish and release its connection");
+}
 } // namespace
 
 int main(int argc, char **argv)
@@ -378,6 +408,7 @@ int main(int argc, char **argv)
     finalUpload(path, true);
     connectingFinalUpload(path, true);
     connectingFinalUpload(path, false);
+    finalDuringRead(path);
     kosync::overrideAccount({});
     std::puts(
             "PASS: book-scoped sync attempts own late replies, readiness and final upload handoffs");

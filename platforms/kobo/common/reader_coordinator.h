@@ -4,11 +4,14 @@
 #include "engine/blaze/adapter/engine_document.h"
 #include "reading/reading_progress.h"
 #include "storage/reading_history.h"
+#include "storage/record_writer.h"
 #include <QObject>
 #include <QPointer>
 #include <QTimer>
 #include <QElapsedTimer>
 #include <QJsonObject>
+#include <QDateTime>
+#include <QSize>
 #include <functional>
 #include <memory>
 
@@ -70,6 +73,11 @@ public:
     bool begin(const RetainOpening &retainOpening);
     bool handleHomeKey(QKeyEvent *event);
     void forgetSleepScreen();
+    // Opens the book that Kobalt showed last in the background, when it is
+    // still a plain EPUB on the device, and keeps it as a closed book is kept.
+    // Tapping it then takes the fast reopening path. Any opening, USB or
+    // other transition cancels a preload that is still running.
+    void preloadLastBook();
 
 private:
 #ifdef KOBALT_SCENARIO_PLAYER
@@ -122,6 +130,8 @@ private:
     unsigned generation = 0;
     bool busy = false;
     bool profilePrepared = false;
+    // The interface fonts are registered; the Home sleep screen reuses them.
+    bool interfaceFontsLoaded = false;
     // Shown by the next reader: a saved-data reset, or a benchmark result that
     // no reader was open to show.
     kobalt::ReaderNotice pendingNotice;
@@ -149,8 +159,62 @@ private:
     void missingAssets(bool assetsReady);
     void load();
 
-    void showReader();
+    // Shows the reader for the current opening: the quiet window when load()
+    // chose it, otherwise a window built now.
+    void showReader(bool fromQuiet = false);
+    kobalt::ReaderWindow *createReader(std::unique_ptr<kobalt::ReaderSession> session,
+                                       std::unique_ptr<kobalt::NativeProgress> progress,
+                                       bool koboCloud, const QString &identity,
+                                       const QString &statePath, const QByteArray &hash,
+                                       const kobalt::ReadingProgress &baseline,
+                                       const kobalt::ReadingProgress &diskBaseline,
+                                       kobalt::ReaderOrientation *orientation,
+                                       const QString &coverPath, bool quiet);
     std::unique_ptr<HomeSleepScreen> homeSleep;
+
+    // The book being preloaded; see preloadLastBook(). When it is ready it
+    // moves into run.session.
+    struct Preload
+    {
+        std::unique_ptr<kobalt::ReaderSession> session;
+        std::shared_ptr<kobalt::SourceLease> lease;
+        QElapsedTimer started;
+    } preload;
+
+    // Writes the last-book record and reads it back for a preload, off the
+    // GUI thread.
+    std::unique_ptr<kobalt::storage::RecordWriter> lastBook;
+    QString lastBookPath() const;
+    void rememberLastBook();
+    void startPreload(const QString &identity, const QString &path, QJsonObject saved,
+                      const QJsonObject &preferences);
+    void cancelPreload();
+
+    // The reader window built quietly for the preloaded book, kept hidden
+    // until the book is tapped; see ReaderWindow::activate(). The tap shows it
+    // only when its own opening would start from the same state.
+    struct Quiet
+    {
+        QPointer<kobalt::ReaderWindow> window;
+        std::unique_ptr<kobalt::ReaderOrientation> orientation;
+        std::shared_ptr<kobalt::SourceLease> lease;
+        QString identity, path;
+        QJsonObject saved, bookDefaults;
+        QSize size;
+        int density = 0;
+        qreal largeText = 0;
+        kobalt::ReadingProgress diskBaseline;
+        QDateTime modified;
+        qint64 bytes = -1;
+    } quiet;
+
+    bool buildQuietReader(std::unique_ptr<kobalt::ReaderSession> &session, const QJsonObject &saved,
+                          const QJsonObject &preferences, QSize size);
+    bool quietMatches(const QJsonObject &saved, const QJsonObject &bookDefaults, QSize size,
+                      const QString &nativeLocation, bool restart, bool koboCloud) const;
+    // Deletes the quiet window. With keepSession, its book stays in memory as
+    // the kept book in run.session.
+    void dropQuietReader(bool keepSession);
 };
 
 } // namespace nickel

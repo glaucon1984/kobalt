@@ -191,7 +191,7 @@ private:
 class Keyboard final : public KeyboardController
 {
 public:
-    Keyboard(QWidget *parent, QLineEdit *editor) : adapter(new NativeKeyboard(parent, editor))
+    Keyboard(QWidget *parent, QWidget *editor) : adapter(new NativeKeyboard(parent, editor))
     {
         adapter->submitted = [this] {
             const auto callback = submitted;
@@ -246,6 +246,8 @@ ReaderHostServices readerHostServices()
         QStringLiteral(KOBALT_CONFIG_DIR "/screensaver"),
         QStringLiteral("/mnt/onboard/.adds/screensaver"),
     };
+    result.sleepWallpaperDirectories =
+            QStringList{ QStringLiteral(KOBALT_CONFIG_DIR "/wallpapers") };
     result.nativeSleepPreview = nativeSleepPreview;
     result.pluginDirectory = [] { return QStringLiteral(KOBALT_CONFIG_DIR "/plugins"); };
     result.pluginDataDirectory = [] { return QStringLiteral(KOBALT_CONFIG_DIR "/plugin-data"); };
@@ -288,7 +290,7 @@ ReaderHostServices readerHostServices()
         return std::make_unique<FolderDictionaries>(
                 QStringLiteral(KOBALT_CONFIG_DIR "/dictionaries"), std::make_unique<Dictionary>());
     };
-    result.keyboard = [](QWidget *parent, QLineEdit *editor) {
+    result.keyboard = [](QWidget *parent, QWidget *editor) {
         return std::make_unique<Keyboard>(parent, editor);
     };
     result.syncNetwork = [] { return std::make_unique<NativeSyncNetwork>(); };

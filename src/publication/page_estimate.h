@@ -242,8 +242,14 @@ struct PageEstimateRecord
     };
 
     QVector<Part> parts;
+    // True when the place and `read` come from a layout of the whole book.
+    // The place is then in the whole spine item: its first character is 0
+    // and its page counts from the start of the item.
+    bool wholeBook = false;
 
     QJsonObject toJson() const;
+    // Writes the place and the page numbers shown there, when they are set.
+    void writePlace(QJsonObject &object) const;
     // False for a missing record or one that is not valid. Invalid parts of
     // the place or of the read spine items are left out.
     static bool fromJson(const QJsonValue &value, PageEstimateRecord *record);
@@ -268,11 +274,16 @@ public:
 
     bool allMeasured() const { return measuredCount_ == items_.size(); }
 
+    int measuredItems() const { return measuredCount_; }
+
     // True when every item is measured or has the real pages of all its
     // parts. Only then is the total more than a guess from the bytes.
     bool complete() const;
 
     void setMeasured(int item, const PageEstimateItem &measurement);
+    // Takes the measurements of `other`, a map of the same book, for the
+    // items that have none. They do not depend on the page.
+    void takeMeasurements(const PageMap &other);
 
     // Sets the page. A new page or slice size forgets the observations,
     // because they were for the old one, and returns true. Slices of zero
@@ -288,11 +299,14 @@ public:
     // the engine's count for the whole item. A new observation replaces the
     // ones of the same item that it overlaps.
     void observe(int item, int first, int last, int characters, int pages);
-    // The real pages of the spine items whose every part has a layout.
+    // The real pages of the spine items whose every part has a layout, or
+    // that kept their restored pages.
     QMap<int, int> completeItems() const;
     // Gives the real pages of whole spine items, from an earlier reading. They
     // count as observations but do not change the weights, which already
-    // contain them.
+    // contain them. A later layout of a part of such an item replaces them
+    // there, and the restored pages stay the item's pages until every part
+    // of the item has a layout.
     void restore(const QMap<int, int> &pages);
     // The parts of the spine items of completeItems() that have several.
     QVector<PageEstimateRecord::Part> completeParts() const;
@@ -307,7 +321,15 @@ public:
     // True when every spine item has the real pages of all its parts.
     bool counted() const { return counted_; }
 
-    void keepFirstEstimate(bool keep) { keep_ = keep; }
+    void keepFirstEstimate(bool keep)
+    {
+        keep_ = keep;
+        ++generation_;
+    }
+
+    // Changes with everything that the saved record holds: the weights,
+    // the real pages and the kept estimate.
+    quint64 generation() const { return generation_; }
 
     // True while the numbers are the kept estimate.
     bool keeping() const { return keep_ && kept_ && !counted_; }
@@ -339,6 +361,8 @@ private:
         bool ready = false;
         // False for restored pages, which the weights already contain.
         bool fit = true;
+        // True for the restored pages of a whole item.
+        bool restored = false;
     };
 
     struct Item
@@ -360,6 +384,11 @@ private:
     double estimate(int index, double fraction) const;
     // The same for an item without a measurement, from its bytes.
     double byteEstimate(int index, double fraction) const;
+    // The items whose observed parts cover them without a gap.
+    QMap<int, int> observedItems() const;
+    // Erases an observation. The restored pages of a whole item stay in
+    // `restoredPages_`.
+    QMap<qint64, Observed>::iterator forget(QMap<qint64, Observed>::iterator it);
     void refit();
     void update();
 
@@ -367,6 +396,9 @@ private:
     QVector<double> starts_;
     // By item and first character, in order.
     QMap<qint64, Observed> observed_;
+    // The restored pages of the items that a layout of a part replaced, by
+    // item. They count for the item until all its parts have a layout.
+    QMap<int, int> restoredPages_;
     PageEstimateLayout layout_;
     PageEstimateModel prior_ = PageEstimateModel::reference(), model_ = prior_;
     int sliceCharacters_ = 0, measuredCount_ = 0;
@@ -374,7 +406,8 @@ private:
     double pagesPerByte_ = 0;
     // The kept estimate: the pages of each item and where each starts.
     QVector<double> keptPages_, keptStarts_;
-    bool keep_ = false, kept_ = false, counted_ = false;
+    bool keep_ = false, kept_ = false, counted_ = false, complete_ = false;
+    quint64 generation_ = 0;
 };
 
 // Keeps a shown page number from moving backward while the user reads

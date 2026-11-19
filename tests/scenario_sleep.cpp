@@ -4,12 +4,22 @@
 #include <QElapsedTimer>
 #include <QJsonArray>
 #include <QTimer>
+#include <QVector>
 #include <cstdio>
 #include <cstdlib>
 
 // This check drives the player's failure paths without a reader or hardware.
 namespace kobalt {
 void setDiagnosticsSync(bool) { }
+
+static bool fileWrites = true;
+bool setDiagnosticFileWrites(bool enabled)
+{
+    const bool previous = fileWrites;
+    fileWrites = enabled;
+    return previous;
+}
+bool diagnosticWriterIdle() { return true; }
 
 static std::function<void(const QJsonObject &)> observer;
 
@@ -44,6 +54,15 @@ void overrideAccount(const QJsonObject &value)
     account = value;
 }
 } // namespace kosync
+
+namespace renderingMode {
+static QVector<int> overrides;
+
+void setOverride(int mode)
+{
+    overrides.append(mode);
+}
+} // namespace renderingMode
 } // namespace kobalt
 
 namespace {
@@ -56,7 +75,7 @@ void require(bool condition, const char *message)
 }
 } // namespace
 
-// Checks the scenario player's sleep benchmark, KOSync account, `native-sync`, `wifi` and event steps, real-time waits and keep-awake, with a controlled host.
+// Checks the scenario player's sleep benchmark, KOSync account, `native-sync`, `wifi` and event steps, real-time waits, keep-awake and resource samples, with a controlled host.
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -363,4 +382,55 @@ int main(int argc, char **argv)
                     && results[0].value("reason").toString().endsWith(
                             "Nickel did not start a sync"),
             "a sync that does not start fails the sample");
+
+    // A resource sample: the system's counters and the counted events from
+    // `mark` to `mark_end`, the limits for the comparison, and a rendering
+    // override that ends with the scenario. The host step writes one profile
+    // transaction; the one after `mark_end` is not counted.
+    const QJsonObject write{ { "sleep_persistence", QJsonObject{ { "action", "write" } } } };
+    const QJsonObject resourceScenario{
+        { "id", "resources.test" },
+        { "opt_in", true },
+        { "repeat", 2 },
+        { "rendering", "hybrid" },
+        { "expect", QJsonObject{ { "writes", 0 } } },
+        { "steps",
+          QJsonArray{ QJsonObject{ { "mark", true } }, write, QJsonObject{ { "mark_end", true } },
+                      write } },
+        { "sample",
+          QJsonObject{ { "timer", true },
+                       { "resources", true },
+                       { "count",
+                         QJsonObject{ { "writes", "operation-start/profile-transaction" },
+                                      { "ends", "operation-end" } } } } }
+    };
+    kobalt::scenario::Host writer;
+    writer.sleepPersistence = [](const QJsonObject &) {
+        require(!kobalt::fileWrites, "Resource samples must keep diagnostic events in memory");
+        kobalt::observer(QJsonObject{ { "event", "operation-start" },
+                                      { "operation", "profile-transaction" } });
+        kobalt::observer(QJsonObject{ { "event", "operation-end" },
+                                      { "operation", "profile-transaction" } });
+        return QJsonObject();
+    };
+    options.filter = "resources";
+    kobalt::renderingMode::overrides.clear();
+    results = kobalt::scenario::run(QJsonObject{ { "scenarios", QJsonArray{ resourceScenario } } },
+                                    writer, options);
+    require(results.size() == 1 && results[0].value("status") == "completed",
+            "the resource scenario completes");
+    require(kobalt::renderingMode::overrides == QVector<int>({ 2, -1 }),
+            "the rendering override is set for the scenario and removed at its end");
+    const auto measured = results[0].value("stages").toObject();
+    require(measured.value("writes").toArray() == QJsonArray({ 1, 1 })
+                    && measured.value("ends").toArray() == QJsonArray({ 1, 1 }),
+            "events are counted from mark to mark_end only");
+    for (const auto *stage : { "cpu_ms", "main_cpu_ms", "background_cpu_ms", "rss_end_kib",
+                               "peak_kib", "block_writes" })
+        require(measured.value(stage).toArray().size() == 2, stage);
+    require(kobalt::fileWrites, "Finishing a resource scenario must restore file logging");
+    require(results[0].value("resources").toBool()
+                    && results[0].value("counts").toArray() == QJsonArray({ "ends", "writes" })
+                    && results[0].value("expect").toObject() == QJsonObject{ { "writes", 0 } },
+            "the result names its counts and limits for the comparison");
 }

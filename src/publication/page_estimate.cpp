@@ -598,6 +598,7 @@ void PageMap::reset(const QVector<qint64> &bytes)
     for (int i = 0; i < bytes.size(); ++i)
         items_[i].bytes = qMax<qint64>(0, bytes[i]);
     observed_.clear();
+    restoredPages_.clear();
     measuredCount_ = 0;
     model_ = prior_;
     kept_ = false;
@@ -630,16 +631,7 @@ bool PageMap::measured(int item) const
 
 bool PageMap::complete() const
 {
-    if (items_.isEmpty())
-        return false;
-    if (allMeasured())
-        return true;
-    const auto counted = completeItems();
-    for (int i = 0; i < items_.size(); ++i) {
-        if (!items_[i].measured && !counted.contains(i))
-            return false;
-    }
-    return true;
+    return complete_;
 }
 
 void PageMap::setMeasured(int item, const PageEstimateItem &measurement)
@@ -658,6 +650,31 @@ void PageMap::setMeasured(int item, const PageEstimateItem &measurement)
     refit();
 }
 
+void PageMap::takeMeasurements(const PageMap &other)
+{
+    if (other.items_.size() != items_.size())
+        return;
+    bool changed = false;
+    for (int i = 0; i < items_.size(); ++i) {
+        const auto &from = other.items_[i];
+        auto &item = items_[i];
+        if (!from.measured || item.measured)
+            continue;
+        item.measurement = from.measurement;
+        item.measured = true;
+        item.features = pageEstimateFeatures(item.measurement, layout_);
+        ++measuredCount_;
+        // Observations of the item before its measurement have no counts yet.
+        const auto key = qint64(i) << 32;
+        for (auto it = observed_.lowerBound(key); it != observed_.end() && it.key() >> 32 == i;
+             ++it)
+            it->ready = false;
+        changed = true;
+    }
+    if (changed)
+        refit();
+}
+
 bool PageMap::setLayout(const PageEstimateLayout &layout, int sliceCharacters)
 {
     sliceCharacters = qMax(0, sliceCharacters);
@@ -666,6 +683,7 @@ bool PageMap::setLayout(const PageEstimateLayout &layout, int sliceCharacters)
     layout_ = layout;
     sliceCharacters_ = sliceCharacters;
     observed_.clear();
+    restoredPages_.clear();
     kept_ = false;
     for (auto &item : items_) {
         if (item.measured)
@@ -704,7 +722,7 @@ void PageMap::observe(int item, int first, int last, int characters, int pages)
         const double otherFrom = double(it->first) / it->characters;
         const double otherTo = double(it->last) / it->characters;
         if (otherFrom < to && from < otherTo)
-            it = observed_.erase(it);
+            it = forget(it);
         else
             ++it;
     }
@@ -713,6 +731,23 @@ void PageMap::observe(int item, int first, int last, int characters, int pages)
 }
 
 QMap<int, int> PageMap::completeItems() const
+{
+    auto result = observedItems();
+    for (auto it = restoredPages_.cbegin(); it != restoredPages_.cend(); ++it) {
+        if (!result.contains(it.key()))
+            result.insert(it.key(), it.value());
+    }
+    return result;
+}
+
+QMap<qint64, PageMap::Observed>::iterator PageMap::forget(QMap<qint64, Observed>::iterator it)
+{
+    if (it->restored)
+        restoredPages_.insert(int(it.key() >> 32), it->pages);
+    return observed_.erase(it);
+}
+
+QMap<int, int> PageMap::observedItems() const
 {
     QMap<int, int> result;
     int item = -1, pages = 0;
@@ -754,6 +789,7 @@ void PageMap::restoreKept(const QVector<double> &pages)
     for (int i = 0; i < pages.size(); ++i)
         keptStarts_[i + 1] = keptStarts_[i] + qMax(0.0, pages[i]);
     kept_ = true;
+    ++generation_;
 }
 
 void PageMap::restore(const QMap<int, int> &pages)
@@ -761,10 +797,16 @@ void PageMap::restore(const QMap<int, int> &pages)
     for (auto it = pages.cbegin(); it != pages.cend(); ++it) {
         if (it.key() < 0 || it.key() >= items_.size() || it.value() < 0)
             continue;
+        // These pages replace what parts of the item showed so far.
+        const qint64 first = qint64(it.key()) << 32;
+        for (auto part = observed_.lowerBound(first);
+             part != observed_.end() && part.key() >> 32 == it.key();)
+            part = observed_.erase(part);
         Observed observed;
         observed.last = observed.characters = 1;
         observed.pages = it.value();
         observed.fit = false;
+        observed.restored = true;
         observed_.insert(qint64(it.key()) << 32, observed);
     }
     refit();
@@ -796,7 +838,7 @@ void PageMap::restoreParts(const QVector<PageEstimateRecord::Part> &parts)
             replaced.insert(part.item);
             for (auto it = observed_.lowerBound(key);
                  it != observed_.end() && it.key() >> 32 == part.item;)
-                it = observed_.erase(it);
+                it = forget(it);
         }
         Observed observed;
         observed.first = part.first;
@@ -925,12 +967,20 @@ void PageMap::refit()
 
 void PageMap::update()
 {
+    ++generation_;
+    // An item that kept its restored pages has them, until all its parts
+    // have a layout.
+    const auto observed = restoredPages_.isEmpty() ? QMap<int, int>() : observedItems();
+    const auto restored = [&](int item) {
+        return observed.contains(item) ? -1 : restoredPages_.value(item, -1);
+    };
     // The items without a measurement take the pages per byte of the
     // measured ones, or else of the observed parts.
     double pages = 0, bytes = 0;
     for (int i = 0; i < items_.size(); ++i) {
         if (items_[i].measured && layout_.valid()) {
-            items_[i].pages = estimate(i, 1);
+            const int kept = restored(i);
+            items_[i].pages = kept >= 0 ? kept : estimate(i, 1);
             pages += items_[i].pages;
             bytes += items_[i].bytes;
         }
@@ -946,12 +996,18 @@ void PageMap::update()
     starts_.resize(items_.size() + 1);
     starts_[0] = 0;
     for (int i = 0; i < items_.size(); ++i) {
-        if (!items_[i].measured || !layout_.valid())
-            items_[i].pages = byteEstimate(i, 1);
+        if (!items_[i].measured || !layout_.valid()) {
+            const int kept = restored(i);
+            items_[i].pages = kept >= 0 ? kept : byteEstimate(i, 1);
+        }
         starts_[i + 1] = starts_[i] + items_[i].pages;
     }
-    counted_ = !items_.isEmpty() && completeItems().size() == items_.size();
-    if (!kept_ && complete() && layout_.valid()) {
+    const auto complete = completeItems();
+    counted_ = !items_.isEmpty() && complete.size() == items_.size();
+    complete_ = !items_.isEmpty();
+    for (int i = 0; i < items_.size() && complete_ && !allMeasured(); ++i)
+        complete_ = items_[i].measured || complete.contains(i);
+    if (!kept_ && complete_ && layout_.valid()) {
         kept_ = true;
         keptStarts_ = starts_;
         keptPages_.resize(items_.size());
@@ -1065,16 +1121,7 @@ QJsonObject PageEstimateRecord::toJson() const
     object["weights"] = weights;
     object["layout"] = layout;
     object["spine_items"] = spineItems;
-    if (item >= 0 && shown > 0 && itemShown > 0) {
-        QJsonArray place;
-        place.append(item);
-        place.append(first);
-        place.append(page);
-        place.append(partPages);
-        object["place"] = place;
-        object["page"] = shown;
-        object["item_page"] = itemShown;
-    }
+    writePlace(object);
     if (!runs.isEmpty())
         object["read"] = runs;
     if (!parts.isEmpty()) {
@@ -1105,7 +1152,23 @@ QJsonObject PageEstimateRecord::toJson() const
             pages.append(std::round(value * 100) / 100);
         object["kept"] = pages;
     }
+    if (wholeBook)
+        object["whole_book"] = true;
     return object;
+}
+
+void PageEstimateRecord::writePlace(QJsonObject &object) const
+{
+    if (item < 0 || shown <= 0 || itemShown <= 0)
+        return;
+    QJsonArray place;
+    place.append(item);
+    place.append(first);
+    place.append(page);
+    place.append(partPages);
+    object["place"] = place;
+    object["page"] = shown;
+    object["item_page"] = itemShown;
 }
 
 bool PageEstimateRecord::fromJson(const QJsonValue &value, PageEstimateRecord *record)
@@ -1186,6 +1249,7 @@ bool PageEstimateRecord::fromJson(const QJsonValue &value, PageEstimateRecord *r
             result.kept.append(pages);
         }
     }
+    result.wholeBook = object.value("whole_book").toBool();
     *record = result;
     return true;
 }

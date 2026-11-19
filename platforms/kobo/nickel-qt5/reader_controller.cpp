@@ -1,4 +1,5 @@
 #include "../common/diagnostics.h"
+#include "../common/sync_exclusion.h"
 #include "platforms/kobo/common/standby_diagnostics.h"
 #include "support/qt_compat.h"
 #include "hooks.h"
@@ -210,6 +211,8 @@ bool uninstall()
     const auto remove = [](const char *path) { return ::unlink(path) == 0 || errno == ENOENT; };
     const bool active = remove(activePath);
     const bool startup = remove(startupPath);
+    // Give Kobalt's folder back to Nickel's library scan.
+    kobalt::nickel::excludeKobaltFolder(false);
     return remove(KOBALT_CONFIG_DIR "/uninstall") && active && startup;
 }
 #endif
@@ -260,6 +263,10 @@ public:
                 if (valid)
                     kobalt::ui::prepareOpeningFonts(environment().assets);
                 attempt(false);
+                // The preload at ready skips while the assets are unchecked,
+                // which on a device often outlasts Nickel's startup.
+                if (valid && controller)
+                    controller->preloadLastBook();
             });
             attempt(false);
         });
@@ -438,6 +445,9 @@ public:
                            kobalt::qt::object({ { "startup_ms", double(elapsed.elapsed()) },
                                                 { "opener", fromOpener } }));
         candidate->finishPreviewMigration();
+        // Nickel has finished its startup. Get the book shown last ready, so
+        // tapping it opens at once.
+        candidate->preloadLastBook();
         nh_log("reader: native controller ready");
     }
 
@@ -476,6 +486,7 @@ int initialize()
     kobalt::setDiagnosticSystem(kobalt::nickel::diagnosticSystem());
     kobalt::initializeDiagnostics(QString::fromLatin1(configDir) + "/diagnostics",
                                   kobalt::diagnosticsRequested(QString::fromLatin1(configDir)));
+    kobalt::setDiagnosticsMarker(QString::fromLatin1(configDir));
     kobalt::initializeStandbyDiagnostics();
     kobalt::diagnostic(
             "startup-hooks",
@@ -523,6 +534,10 @@ int initialize()
     kobalt::diagnostic("installation", kobalt::qt::object({ { "temporary", false } }));
 #  endif
 #endif
+    // Only on supported firmware: keep wallpapers and PNGs in Kobalt's folder
+    // out of My Books.
+    if (!kobalt::nickel::excludeKobaltFolder(true))
+        kobalt::diagnostic("sync-exclusion-failed", {}, kobalt::DiagnosticSeverity::Warning);
     kobalt::initializeNativeTileCoverProbe();
     auto *startup = new Startup(qApp);
     beginOpening = [startup](const void *volume,

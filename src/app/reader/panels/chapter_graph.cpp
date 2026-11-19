@@ -1,4 +1,5 @@
 #include "reading/header_footer.h"
+#include "ui/controls/icons.h"
 #include "ui/controls/text.h"
 #include "ui/controls/paging.h"
 #include "ui/controls/panels.h"
@@ -6,6 +7,7 @@
 #include "support/qt_font.h"
 #include "support/strings.h"
 #include "chapter_graph.h"
+#include "stats_cell.h"
 #include "reading/reading_progress.h"
 #include "ui/style/fonts.h"
 #include "ui/style/private_text.h"
@@ -126,135 +128,112 @@ protected:
     }
 };
 
-// A caption with an optional percentage, a large figure with its unit, and one
-// grey line of detail. A short screen adds the word total as a second line.
-class StatsCell : public QWidget
+// The way into Activity: a clock and "Activity" on the left, today's reading
+// and the streak as a caption on the right, and a chevron, as a list row
+// draws it. The Stats tab already uses the chart icon.
+class ActivityRow final : public ui::Button
 {
 public:
-    StatsCell(QWidget *parent, const QString &prefix, const QString &title) : QWidget(parent)
+    explicit ActivityRow(QWidget *parent) : ui::Button(QString(), parent)
     {
-        setObjectName(prefix + "Cell");
-        caption = new ui::InterfaceLabel(title, this);
-        caption->setObjectName(prefix + "Caption");
-        ui::captionLabel(caption);
-        percent = new ui::InterfaceLabel(this);
-        percent->setObjectName(prefix + "Percent");
-        ui::captionLabel(percent);
-        percent->setAlignment(Qt::AlignRight | Qt::AlignTop);
-        caption->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-        figure = new ui::InterfaceLabel(this);
-        figure->setObjectName(prefix + "Figure");
-        figure->setTextFormat(Qt::PlainText);
-        ui::readerStyle(figure,
-                        ui::styles::brand(chapters::figureText) + "background:transparent;");
-        unit = new ui::InterfaceLabel(this);
-        unit->setObjectName(prefix + "Unit");
-        detail = new ui::InterfaceLabel(this);
-        detail->setObjectName(prefix + "Detail");
-        for (auto *label : { figure, unit, detail })
-            label->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-        for (auto *label : { unit, detail }) {
-            label->setTextFormat(Qt::PlainText);
-            // twoLines() breaks a long unit or detail with '\n'. Only the
-            // wrapped painting turns it into a line; the single-line painting
-            // drew it as a missing glyph.
-            label->setWordWrap(true);
-            ui::readerStyle(label,
-                            ui::styles::font(chapters::unitText)
-                                    + "background:transparent;color:palette(placeholder-text);");
-        }
+        setObjectName("rrGraphActivity");
+        setAccessibleName(strings::get("activity.title"));
     }
 
-    QLabel *caption, *percent, *figure, *unit, *detail;
-
-    // A short detail replaces the full one when only the short one fits on a line.
-    void set(const QString &value, const QString &unitText, const QString &detailText,
-             const QString &percentText = {}, const QString &shortDetail = {},
-             const QString &extraLine = {})
+    void setSummary(const QString &text)
     {
-        figure->setText(value);
-        percent->setText(percentText);
-        unitValue = unitText;
-        detailValue = detailText;
-        shortValue = shortDetail;
-        extraValue = extraLine;
-        arrange();
+        if (summary == text)
+            return;
+        summary = text;
+        setAccessibleDescription(text);
+        update();
     }
 
 protected:
-    void resizeEvent(QResizeEvent *) override { arrange(); }
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        const auto ink = ui::labelInk(this);
+        painter.fillRect(rect(),
+                         isDown() ? ui::themeColors(this).pressedPaper
+                                  : palette().color(QPalette::Window));
+        painter.fillRect(0, 0, width(), ui::metrics::control::border, ui::dividerColor(this));
+        painter.setRenderHint(QPainter::Antialiasing);
+        const int icon = chrome::cellIcon;
+        const int top = (height() - icon) / 2;
+        ui::controlIcon(ui::ControlIcon::Clock, ink)
+                .paint(&painter, QRect(chrome::inset, top, icon, icon));
+        const int chevronLeft = width() - chrome::inset - icon;
+        ui::controlIcon(ui::ControlIcon::Next, ink)
+                .paint(&painter, QRect(chevronLeft, top, icon, icon));
+        const QFont title(ui::interfaceFont(chrome::labelText));
+        const int titleLeft = chrome::inset + icon + chapters::activityIconGap;
+        const auto name = strings::get("activity.title");
+        const int titleWidth = ui::interfaceTextWidth(name, title) + 2;
+        painter.setPen(ink);
+        painter.setFont(title);
+        ui::drawInterfaceText(painter, QRect(titleLeft, 0, titleWidth, height()), name,
+                              Qt::AlignLeft | Qt::AlignVCenter);
+        const QFont caption(ui::captionFont());
+        const int captionRight = chevronLeft - chapters::activityIconGap;
+        const int room = captionRight - titleLeft - titleWidth - chrome::inset;
+        if (room <= 0 || summary.isEmpty())
+            return;
+        const auto text = ui::elideInterfaceText(summary, caption, room);
+        painter.setFont(caption);
+        ui::drawInterfaceText(painter, QRect(captionRight - room, 0, room, height()), text,
+                              Qt::AlignRight | Qt::AlignVCenter);
+    }
 
 private:
-    QString unitValue, detailValue, shortValue, extraValue;
+    QString summary;
+};
 
-    void arrange()
+// On a short screen a fourth column beside the cells opens Activity instead of
+// the row: the clock over a capital label, as a tab draws it.
+class ActivityCell final : public ui::Button
+{
+public:
+    explicit ActivityCell(QWidget *parent) : ui::Button(QString(), parent)
     {
-        const int inner = qMax(1, width() - 2 * chrome::inset);
-        const QFont captionMetrics(ui::captionFont()),
-                figureMetrics(ui::brandFont(chapters::figureText)),
-                unitMetrics(ui::interfaceFont(chapters::unitText));
-        caption->setGeometry(chrome::inset, chapters::cellPadding, inner,
-                             ui::interfaceLineHeight(captionMetrics));
-        percent->setGeometry(chrome::inset, chapters::cellPadding, inner,
-                             ui::interfaceLineHeight(captionMetrics));
-        const int figureWidth =
-                qMin(inner, ui::interfaceTextWidth(figure->text(), figureMetrics) + 2);
-        figure->setGeometry(chrome::inset,
-                            chapters::figureBaseline - ui::interfaceLineAscent(figureMetrics),
-                            figureWidth, ui::interfaceLineHeight(figureMetrics));
-        const int unitLeft = chrome::inset + figureWidth + chapters::unitGap;
-        // A large figure keeps every digit. A unit that does not fit beside it
-        // takes two lines, the last on the figure's baseline, as in a narrow
-        // cell on a phone; only then does it shorten.
-        const int unitWidth = qMax(1, width() - chrome::inset - unitLeft);
-        const auto unitText = twoLines(unitMetrics, unitValue, unitWidth);
-        const int unitLines = unitText.count('\n') + 1;
-        const int lineHeight = ui::interfaceLineHeight(unitMetrics);
-        unit->setGeometry(unitLeft,
-                          chapters::figureBaseline - ui::interfaceLineAscent(unitMetrics)
-                                  - (unitLines - 1) * lineHeight,
-                          unitWidth, unitLines * lineHeight);
-        unit->setText(unitText);
-        detail->setGeometry(chrome::inset, chapters::detailTop, inner,
-                            ui::interfaceLineHeight(unitMetrics)
-                                    + (chapters::detailLines - 1)
-                                            * ui::interfaceLineHeight(unitMetrics));
-        const bool shorten = !shortValue.isEmpty()
-                && ui::interfaceTextWidth(detailValue, unitMetrics) > inner
-                && ui::interfaceTextWidth(shortValue, unitMetrics) <= inner;
-        const auto text = shorten ? shortValue : detailValue;
-        detail->setText(extraValue.isEmpty()
-                                ? twoLines(unitMetrics, text, inner)
-                                : ui::elideInterfaceText(text, unitMetrics, inner) + '\n'
-                                        + ui::elideInterfaceText(extraValue, unitMetrics, inner));
+        setObjectName("rrGraphActivityCell");
+        setAccessibleName(strings::get("activity.title"));
     }
 
-    // A detail that does not fit breaks at the space that gives the most even
-    // lines, so "≈ 12 h 45 min left" never leaves one word alone. Without such
-    // a space, the first line takes what fits and the second line shortens.
-    static QString twoLines(const QFont &metrics, const QString &text, int width)
+protected:
+    void paintEvent(QPaintEvent *) override
     {
-        if (ui::interfaceTextWidth(text, metrics) <= width)
-            return text;
-        int best = -1, bestWidth = width + 1, last = -1;
-        for (int space = text.indexOf(' '); space > 0; space = text.indexOf(' ', space + 1)) {
-            const int first = ui::interfaceTextWidth(text.left(space), metrics);
-            if (first > width)
-                break;
-            last = space;
-            const int longer = qMax(first, ui::interfaceTextWidth(text.mid(space + 1), metrics));
-            if (longer < bestWidth) {
-                best = space;
-                bestWidth = longer;
-            }
-        }
-        if (best < 0)
-            best = last;
-        if (best < 0)
-            return ui::elideInterfaceText(text, metrics, width);
-        return text.left(best) + '\n' + ui::elideInterfaceText(text.mid(best + 1), metrics, width);
+        QPainter painter(this);
+        const auto ink = ui::labelInk(this);
+        painter.fillRect(rect(),
+                         isDown() ? ui::themeColors(this).pressedPaper
+                                  : palette().color(QPalette::Window));
+        ui::paintEdges(painter, rect(), Qt::LeftEdge, palette().color(QPalette::Mid));
+        const QFont label(ui::interfaceFont(chrome::tabText));
+        const int capital = ui::interfaceInkBounds(QStringLiteral("H"), label).height();
+        const int icon = chrome::tabIcon;
+        const int top = (height() - icon - chrome::tabGap - capital) / 2;
+        painter.setRenderHint(QPainter::Antialiasing);
+        ui::controlIcon(ui::ControlIcon::Clock, ink)
+                .paint(&painter, QRect((width() - icon) / 2, top, icon, icon));
+        painter.setPen(ink);
+        painter.setFont(label);
+        ui::drawOpticalText(
+                painter,
+                QRect(ui::px(2), top + icon + chrome::tabGap, width() - ui::px(4), capital),
+                strings::get("activity.title").toUpper(), true);
     }
 };
+
+// The fourth column's width: its usual width, or wider when its label needs
+// it, as at a large text size.
+static int activityColumn()
+{
+    const QFont label(ui::interfaceFont(chrome::tabText));
+    return qMax(int(chapters::activityColumnWidth),
+                ui::interfaceTextWidth(strings::get("activity.title").toUpper(), label)
+                        + ui::px(16));
+}
 
 ChapterGraph::ChapterGraph(QWidget *parent, bool phoneLayout)
     : Panel(parent, Qt::BottomEdge), phoneLayout(phoneLayout)
@@ -324,6 +303,16 @@ ChapterGraph::ChapterGraph(QWidget *parent, bool phoneLayout)
     chapterCell->detail->setObjectName("rrGraphNextChapter");
     bookCell = new StatsCell(this, "rrGraphBook", strings::get("stats.book"));
     sessionCell = new StatsCell(this, "rrGraphSession", strings::get("stats.session"));
+    activityRow = new ActivityRow(this);
+    activityRow->hide();
+    activityCell = new ActivityCell(this);
+    activityCell->hide();
+    for (QPushButton *entry :
+         { static_cast<QPushButton *>(activityRow), static_cast<QPushButton *>(activityCell) })
+        connect(entry, &QPushButton::clicked, this, [this] {
+            if (activityRequested)
+                activityRequested();
+        });
     refreshCells();
     hide();
 }
@@ -453,6 +442,37 @@ void ChapterGraph::refreshCells()
     arrangeWords();
 }
 
+void ChapterGraph::setActivity(const QString &summary)
+{
+    activityRow->setSummary(summary);
+    activityCell->setAccessibleDescription(summary);
+    if (activityAvailable == bool(activityRequested))
+        return;
+    activityAvailable = bool(activityRequested);
+    arrange();
+    redraw();
+}
+
+// The row takes height only while the full chart fits above it and part of
+// the reading page stays exposed, as the chart's own growth keeps it. A
+// shorter screen, such as a landscape one, opens Activity from a fourth column
+// beside the cells instead.
+bool ChapterGraph::activityRowShown() const
+{
+    if (!activityAvailable)
+        return false;
+    if (availableHeight <= 0)
+        return true;
+    const int pager = paged() ? int(chrome::actionHeight) : 0;
+    return availableHeight >= chartTop() + chapters::chartHeight + wordsRowHeight()
+            + chapters::cellHeight + chapters::activityHeight + pager + chapters::exposedPaper;
+}
+
+int ChapterGraph::activityHeight() const
+{
+    return activityRowShown() ? int(chapters::activityHeight) : 0;
+}
+
 void ChapterGraph::setDense(bool value)
 {
     if (dense == value)
@@ -547,8 +567,8 @@ bool ChapterGraph::inlinePager() const
     // A separate pager would push the chapter row under the top toolbar on
     // a landscape phone. Its wide row has room beside the chapter instead.
     return paged() && width() >= ui::px(1200) && availableHeight > 0
-            && availableHeight
-            < chartTop() + minimumChart + chapters::cellHeight + chrome::actionHeight;
+            && availableHeight < chartTop() + minimumChart + chapters::cellHeight + activityHeight()
+                    + chrome::actionHeight;
 }
 
 bool ChapterGraph::wordsInCells() const
@@ -558,8 +578,8 @@ bool ChapterGraph::wordsInCells() const
     // chapter row under the top toolbar. The totals take the free second
     // detail line of the chapter and book cells instead.
     return availableHeight > 0
-            && availableHeight
-            < chartTop() + minimumChart + wordsRowHeight() + chapters::cellHeight + pagerHeight();
+            && availableHeight < chartTop() + minimumChart + wordsRowHeight() + chapters::cellHeight
+                    + activityHeight() + pagerHeight();
 }
 
 int ChapterGraph::wordsRowHeight() const
@@ -585,7 +605,7 @@ int ChapterGraph::chartHeight() const
     if (availableHeight <= 0)
         return base;
     const int room = availableHeight - topPadding - chapters::rowHeight - wordsHeight()
-            - chapters::cellHeight - pagerHeight();
+            - chapters::cellHeight - activityHeight() - pagerHeight();
     // A larger physical short edge earns some extra bar height. Wide phones
     // and six-inch screens in landscape keep their existing chart size.
     const int shortEdge =
@@ -617,8 +637,9 @@ void ChapterGraph::paintEvent(QPaintEvent *event)
     painter.fillRect(0, chartTop() - border, width(), border, ui::dividerColor(this));
     const int cells = chartTop() + chartHeight() + wordsHeight() + pagerHeight();
     painter.fillRect(0, cells - border, width(), border, ui::dividerColor(this));
+    const int cellsWidth = this->cellsWidth();
     for (int column = 1; column < 3; ++column)
-        painter.fillRect(width() * column / 3, cells, border, height() - cells,
+        painter.fillRect(cellsWidth * column / 3, cells, border, chapters::cellHeight,
                          palette().color(QPalette::Mid));
 }
 
@@ -652,7 +673,7 @@ void ChapterGraph::arrange()
     }
     const int chart = chartHeight();
     const int requiredHeight = topPadding + chapters::rowHeight + chart + wordsHeight()
-            + chapters::cellHeight + pagerHeight();
+            + chapters::cellHeight + activityHeight() + pagerHeight();
     if (height() != requiredHeight) {
         const int bottom = geometry().bottom();
         resize(width(), requiredHeight);
@@ -707,11 +728,22 @@ void ChapterGraph::arrange()
                            chrome::actionHeight);
     arrangeWords();
     const int cells = top + chart + wordsHeight() + pagerHeight();
+    const bool row = activityRowShown();
+    activityRow->setVisible(row);
+    activityRow->setGeometry(0, cells + chapters::cellHeight, width(), chapters::activityHeight);
+    activityCell->setVisible(activityAvailable && !row);
+    const int cellsWidth = this->cellsWidth();
     for (int column = 0; column < 3; ++column) {
         auto *cell = QVector<StatsCell *>{ chapterCell, bookCell, sessionCell }[column];
-        const int left = width() * column / 3 + (column ? ui::metrics::control::border : 0);
-        cell->setGeometry(left, cells, width() * (column + 1) / 3 - left, chapters::cellHeight);
+        const int left = cellsWidth * column / 3 + (column ? ui::metrics::control::border : 0);
+        cell->setGeometry(left, cells, cellsWidth * (column + 1) / 3 - left, chapters::cellHeight);
     }
+    activityCell->setGeometry(cellsWidth, cells, width() - cellsWidth, chapters::cellHeight);
+}
+
+int ChapterGraph::cellsWidth() const
+{
+    return activityAvailable && !activityRowShown() ? width() - activityColumn() : width();
 }
 
 void ChapterGraph::redraw(bool paging)

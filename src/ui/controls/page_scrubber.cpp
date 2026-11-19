@@ -356,19 +356,15 @@ void PageScrubber::setBook(int page, int pages, const QVector<QPair<int, QString
         chapters = values;
         zoomLevel = initialZoomLevel();
         overviewExpanded = false;
-        rangeFirst = 0;
-        rangeLast = count - 1;
     }
     current = qBound(0, page, totalPages - 1);
     if (size.isValid()) {
         pageSize = size;
     }
-    if (selecting()) {
+    if (selecting() && !changed)
         return;
-    }
-    if (changed || current < rangeFirst || current > rangeLast) {
+    if (changed || current < rangeFirst || current > rangeLast)
         centerRange(current);
-    }
     syncRange(changed);
     arrange();
 }
@@ -541,13 +537,14 @@ void PageScrubber::setBookmarkedPages(const QVector<int> &pages)
     }
 }
 
-void PageScrubber::setChapterJumps(bool enabled)
+void PageScrubber::setChapterJumps(bool enabled, bool keepNavigation)
 {
     enabled = enabled || chapterBar;
     if (chapterJumps == enabled) {
         return;
     }
-    cancel();
+    if (!keepNavigation)
+        cancel();
     chapterJumps = enabled;
     buttonIcon(previous, enabled ? ControlIcon::PreviousChapter : ControlIcon::Previous);
     buttonIcon(next, enabled ? ControlIcon::NextChapter : ControlIcon::Next);
@@ -557,11 +554,12 @@ void PageScrubber::setChapterJumps(bool enabled)
     updateButtons();
 }
 
-void PageScrubber::setChapterBar(bool enabled)
+void PageScrubber::setChapterBar(bool enabled, bool keepNavigation)
 {
     if (chapterBar == enabled)
         return;
-    cancel();
+    if (!keepNavigation)
+        cancel();
     chapterBar = enabled;
     zoomLevel = 0;
     overviewExpanded = false;

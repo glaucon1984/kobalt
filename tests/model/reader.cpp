@@ -14,12 +14,13 @@
 #include "support/strings.h"
 #include "publication/image_policy.h"
 #include "publication/local_resources.h"
+#include "publication/zip_resource.h"
 #include <lvstream.h>
 #include <lvstring.h>
 #include <lvimg.h>
 #include <lvdrawbuf.h>
 #include <lvfntman.h>
-#include <lvbionic.h>
+#include "engine/blaze/extensions/lvbionic.h"
 #include <QCryptographicHash>
 #include <QColor>
 #include <QBuffer>
@@ -33,6 +34,7 @@
 #include <QtMath>
 #include <zlib.h>
 #include <QGuiApplication>
+#include <QXmlStreamReader>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -95,6 +97,271 @@ static QByteArray storedEpub(const QList<QPair<QByteArray, QByteArray>> &members
     u32(bytes, start);
     u16(bytes, 0);
     return bytes;
+}
+
+// The codec keeps the parsed source of the last chapter. Pages read in
+// order and pages read in another order, by another document of the book,
+// give the same Nickel positions.
+static void checkCachedNativeSources()
+{
+    const auto codec = kobalt::nickel::positionCodec();
+    for (const auto *name : { "/cross-reader-progress-test.kepub.epub",
+                              "/trevelyans-type-tester.kepub.epub", "/figure-caption.epub" }) {
+        QFile file(QStringLiteral(KOBALT_TEST_FIXTURES) + name);
+        require(file.open(QIODevice::ReadOnly), "Cannot open a position fixture");
+        const auto bytes = file.readAll();
+        QString error;
+        kobalt::EngineDocument ordered(kobalt::test::readerFonts()),
+                shuffled(kobalt::test::readerFonts());
+        require(ordered.open(bytes, QSize(1072, 1448), {}, &error)
+                        && shuffled.open(bytes, QSize(1072, 1448), {}, &error),
+                qPrintable(error));
+        QStringList inOrder, positions, errors;
+        for (int page = 0; page < ordered.pages(); ++page) {
+            require(ordered.go(page), "Cannot go to a page in order");
+            inOrder.append(ordered.platformPosition(codec, &error) + '|' + error);
+        }
+        // Every other page from both ends: the file changes at almost every
+        // page.
+        for (int page = 0; page < shuffled.pages(); ++page) {
+            const int target = page % 2 ? shuffled.pages() - 1 - page / 2 : page / 2;
+            require(shuffled.go(target), "Cannot go to a page out of order");
+            const auto encoded = shuffled.platformPosition(codec, &error) + '|' + error;
+            require(encoded == inOrder[target],
+                    qPrintable(QString("A kept source changed page %1: %2 against %3")
+                                       .arg(target)
+                                       .arg(encoded, inOrder[target])));
+        }
+    }
+}
+
+static void checkNativeWhitespace()
+{
+    const auto codec = kobalt::nickel::positionCodec();
+    QString error;
+    {
+        // Exact public reproduction from discussion #185. Keep the original
+        // source whitespace: rewriting the XHTML hides the mapping failure.
+        QFile file(QStringLiteral(KOBALT_TEST_FIXTURES "/cross-reader-progress-test.kepub.epub"));
+        require(file.open(QIODevice::ReadOnly), "Cannot open native whitespace reproduction");
+        const auto bytes = file.readAll();
+        require(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex()
+                        == "1dca19f0a6a31cf547e3785e82516ee7489134f194a1d3c78ab2f2c693a13e88",
+                "Native whitespace reproduction changed");
+        kobalt::EngineDocument model(kobalt::test::readerFonts());
+        require(model.open(bytes, QSize(1072, 1328), {}, &error), qPrintable(error));
+        const QString chapter = "OEBPS/chapter-07.xhtml";
+        const auto location = chapter + "#kobo.10.5";
+        require(model.goToPlatformNearest(codec, location, &error)
+                                == kobalt::Engine::PositionTarget::Exact
+                        && error.isEmpty(),
+                "The reported Nickel bookmark fell back to the chapter start");
+        const QString text =
+                "/body[1]/DocFragment[9]/body[1]/div[1]/div[1]/p[9]/span[4]/text()[1].";
+        require(model.position() == text + '0', "The reported bookmark opened the wrong span");
+        for (const int offset : { 10, 52 }) {
+            require(model.goTo(text + QString::number(offset)), "Cannot select reported span text");
+            const auto anchor = model.position();
+            const auto native = model.platformPosition(codec, &error);
+            require(native == location + ':' + QString::number(offset) && error.isEmpty()
+                            && model.position() == anchor,
+                    "Whitespace export lost the span or changed the local position");
+            require(model.goToPlatform(codec, native, &error) && model.position() == anchor,
+                    "The reported span offset did not round-trip");
+        }
+        QBuffer input;
+        input.setData(bytes);
+        require(input.open(QIODevice::ReadOnly), "Cannot read reproduction archive");
+        kobalt::ZipResource resource;
+        require(resource.open(input, chapter), "Cannot read reproduction chapter");
+        QByteArray xml;
+        while (!resource.finished() && resource.valid())
+            xml += resource.next();
+        require(resource.valid(), "Damaged reproduction chapter");
+        QXmlStreamReader parser(xml);
+        int spans = 0;
+        while (!parser.atEnd()) {
+            parser.readNext();
+            if (!parser.isStartElement() || parser.attributes().value("class") != "koboSpan")
+                continue;
+            const auto span = chapter + '#' + parser.attributes().value("id").toString();
+            require(!codec.decode(model, span, &error).isEmpty() && error.isEmpty(),
+                    qPrintable("Unmapped reproduction span: " + span + ": " + error));
+            ++spans;
+        }
+        require(!parser.hasError() && spans == 162, "Incomplete reproduction span coverage");
+    }
+    const auto book = storedEpub(
+            { { "mimetype", "application/epub+zip" },
+              { "META-INF/container.xml",
+                "<container xmlns='urn:oasis:names:tc:opendocument:xmlns:container' version='1.0'><rootfiles><rootfile full-path='book.opf' media-type='application/oebps-package+xml'/></rootfiles></container>" },
+              { "book.opf",
+                "<package xmlns='http://www.idpf.org/2007/opf' version='2.0'><metadata/><manifest><item id='c' href='c.xhtml' media-type='application/xhtml+xml'/></manifest><spine><itemref idref='c'/></spine></package>" },
+              { "c.xhtml",
+                "<html xmlns='http://www.w3.org/1999/xhtml'><body>"
+                "<p><span id='kobo.1.1'>A  B\t \nC&#x1f600;D  </span></p>"
+                "<p><span id='leading'> \t A  </span></p>"
+                "<p><span id='inline'>A  <em>B\t C</em>  D</span></p>"
+                "<p><span id='nbsp'>A&#160;  B\nC</span></p>"
+                "<pre><span id='pre'>A  B\nC</span></pre>"
+                "<p><span id='cdata'>A<![CDATA[  B\nC]]> D</span></p>"
+                "<p><span id='entity'>A&amp;  B\nC</span></p>"
+                "<p><span id='entity-space'>A&#32; B\nC</span></p>"
+                "<p><span id='cr'>A\r\nB\rC</span></p>"
+                "<p><span id='kobo.9.1'>A\n B</span><span id='kobo.9.1'>A\n B</span></p>"
+                "<section id='blocks'>\n<p>A</p>\n<p>B</p>\n</section>"
+                "</body></html>" } });
+    kobalt::EngineDocument model(kobalt::test::readerFonts());
+    require(model.open(book, QSize(1072, 1328), {}, &error), qPrintable(error));
+
+    struct Offset
+    {
+        int source, engine, canonical;
+    };
+
+    // The inverse chooses the last source boundary in a collapsed run. Check
+    // every valid boundary, including the end and both sides of the emoji.
+    for (const auto point : { Offset{ 0, 0, 0 },
+                              { 1, 1, 1 },
+                              { 2, 2, 3 },
+                              { 3, 2, 3 },
+                              { 4, 3, 4 },
+                              { 5, 4, 7 },
+                              { 6, 4, 7 },
+                              { 7, 4, 7 },
+                              { 8, 5, 8 },
+                              { 10, 6, 10 },
+                              { 11, 7, 11 },
+                              { 12, 8, 13 },
+                              { 13, 8, 13 } }) {
+        require(model.goToPlatform(codec, "c.xhtml#kobo.1.1:" + QString::number(point.source),
+                                   &error),
+                qPrintable(error));
+        const auto anchor = model.position();
+        require(anchor.endsWith("/text()[1]." + QString::number(point.engine)),
+                "Source whitespace offset selected the wrong engine character");
+        const auto native = model.platformPosition(codec, &error);
+        require(native == "c.xhtml#kobo.1.1:" + QString::number(point.canonical) && error.isEmpty()
+                        && model.position() == anchor,
+                "Inverse whitespace mapping changed the passage or source offset");
+        require(model.goToPlatform(codec, native, &error) && model.position() == anchor,
+                "Canonical whitespace offset did not return to the same engine position");
+    }
+    const auto anchor = model.position();
+    for (const auto offset : { "-1", "9", "14", "999999999999999999999" }) {
+        require(!model.goToPlatform(codec, QString("c.xhtml#kobo.1.1:") + offset, &error)
+                        && !error.isEmpty() && model.position() == anchor,
+                "Invalid source offset moved the reader or split a surrogate pair");
+    }
+    require(model.goToPlatform(codec, "c.xhtml#point(/1/1/1/1/1:12)", &error)
+                    && model.position().endsWith("/text()[1].6")
+                    && model.platformPosition(codec, &error) == "c.xhtml#kobo.1.1:10",
+            "Structural UTF-8 offset did not map through normalized UTF-16 text");
+    const auto structural = model.position();
+    require(!model.goToPlatform(codec, "c.xhtml#point(/1/1/1/1/1:9)", &error) && !error.isEmpty()
+                    && model.position() == structural,
+            "Structural whitespace mapping accepted a split UTF-8 character");
+    for (const auto point :
+         { Offset{ 0, 0, 0 }, { 1, 1, 3 }, { 2, 1, 3 }, { 3, 1, 3 }, { 6, 3, 6 } }) {
+        require(model.goToPlatform(codec, "c.xhtml#leading:" + QString::number(point.source),
+                                   &error)
+                        && model.position().endsWith("/text()[1]." + QString::number(point.engine))
+                        && model.platformPosition(codec, &error)
+                                == "c.xhtml#leading:" + QString::number(point.canonical),
+                "Leading whitespace changed the first character or text-end boundary");
+    }
+    for (const auto location : { "c.xhtml#inline:6", "c.xhtml#nbsp:4", "c.xhtml#pre:3",
+                                 "c.xhtml#cdata:5", "c.xhtml#entity:4", "c.xhtml#cr:3" }) {
+        require(model.goToPlatform(codec, location, &error), qPrintable(QString(location) + error));
+        const auto position = model.position();
+        require(model.platformPosition(codec, &error) == location && error.isEmpty()
+                        && model.goToPlatform(codec, location, &error)
+                        && model.position() == position,
+                qPrintable(QString("Whitespace context did not round-trip: ") + location));
+    }
+    const auto before = model.position();
+    // Entities can preserve spaces the parser would otherwise collapse. Do
+    // not guess offsets when our normalized stream is not the engine stream.
+    for (const auto location :
+         { "c.xhtml#entity-space:0", "c.xhtml#kobo.9.1:0", "c.xhtml#blocks:0" }) {
+        require(!model.goToPlatform(codec, location, &error) && !error.isEmpty()
+                        && model.position() == before,
+                "Whitespace mapping accepted an ambiguous or different text stream");
+    }
+}
+
+// Nested elements with ids share their text. Each id maps the same text to
+// the same Nickel position at every depth, and deeper nesting does not keep
+// more text.
+static void checkNestedNativeIds()
+{
+    const auto codec = kobalt::nickel::positionCodec();
+    const auto nested = [](int depth) {
+        QByteArray open, close;
+        for (int level = 1; level <= depth; ++level) {
+            open += "<div id='n" + QByteArray::number(level) + "'>";
+            close += "</div>";
+        }
+        return storedEpub(
+                { { "mimetype", "application/epub+zip" },
+                  { "META-INF/container.xml",
+                    "<container xmlns='urn:oasis:names:tc:opendocument:xmlns:container' version='1.0'><rootfiles><rootfile full-path='book.opf' media-type='application/oebps-package+xml'/></rootfiles></container>" },
+                  { "book.opf",
+                    "<package xmlns='http://www.idpf.org/2007/opf' version='2.0'><metadata/><manifest><item id='c' href='c.xhtml' media-type='application/xhtml+xml'/></manifest><spine><itemref idref='c'/></spine></package>" },
+                  { "c.xhtml",
+                    "<html xmlns='http://www.w3.org/1999/xhtml'><body>" + open
+                            + "<p id='p'>Alpha  <em id='e'>beta</em>\n gamma</p>"
+                              "<p id='q'>Delta</p>"
+                            + close
+                            + "<section id='blocks'>\n<p id='r'>One</p>\n</section>"
+                              "</body></html>" } });
+    };
+    QString error;
+    int kept = -1;
+    for (const int depth : { 1, 6 }) {
+        kobalt::EngineDocument model(kobalt::test::readerFonts());
+        require(model.open(nested(depth), QSize(1072, 1328), {}, &error), qPrintable(error));
+        // "Alpha  beta\n gamma" collapses to "Alpha beta gamma" in the engine.
+        // The canonical Nickel position of each source offset, from the
+        // nearest id.
+        const QStringList canonical{ "p:0",  "p:1",  "p:2",  "p:3",  "p:4", "p:5",  "p:7",
+                                     "p:7",  "e:1",  "e:2",  "e:3",  "e:4", "p:13", "p:13",
+                                     "p:14", "p:15", "p:16", "p:17", "p:18" };
+        for (int offset = 0; offset < canonical.size(); ++offset) {
+            const auto inner = "c.xhtml#p:" + QString::number(offset);
+            const auto anchor = codec.decode(model, inner, &error);
+            require(!anchor.isEmpty() && error.isEmpty(), qPrintable(inner + ": " + error));
+            for (int level = 1; level <= depth; ++level) {
+                const auto outer =
+                        "c.xhtml#n" + QString::number(level) + ':' + QString::number(offset);
+                require(codec.decode(model, outer, &error) == anchor && error.isEmpty(),
+                        qPrintable("A nested id moved the position: " + outer + ' ' + error));
+            }
+            require(model.goTo(anchor), "Cannot select the nested position");
+            const auto native = model.platformPosition(codec, &error);
+            require(native == "c.xhtml#" + canonical[offset] && error.isEmpty()
+                            && model.goToPlatform(codec, native, &error)
+                            && model.position() == anchor,
+                    qPrintable("A nested position did not round-trip: " + native));
+        }
+        // The outer ids continue into the next paragraph.
+        for (const auto &pair : { QPair<QString, QString>{ "e:2", "p:9" },
+                                  { "n1:19", "q:1" },
+                                  { "n" + QString::number(depth) + ":23", "q:5" } }) {
+            const auto anchor = codec.decode(model, "c.xhtml#" + pair.first, &error);
+            require(!anchor.isEmpty() && error.isEmpty()
+                            && codec.decode(model, "c.xhtml#" + pair.second, &error) == anchor,
+                    qPrintable("A nested id moved the position: " + pair.first + ' ' + error));
+        }
+        require(!codec.decode(model, "c.xhtml#r:1", &error).isEmpty() && error.isEmpty(),
+                "A paragraph inside a section lost its id");
+        require(codec.decode(model, "c.xhtml#blocks:0", &error).isEmpty() && !error.isEmpty(),
+                "A section without its block whitespace mapped its text");
+        const int text = kobalt::nickel::keptNativeText(model);
+        require(text > 0 && (kept < 0 || text == kept),
+                qPrintable(QString("Nested ids kept %1 text units, not %2").arg(text).arg(kept)));
+        kept = text;
+    }
 }
 
 static void checkKoboStyleHacks()
@@ -477,6 +744,54 @@ static void checkJpeg(bool progressive)
             "CREngine did not preserve JPEG colors");
 }
 
+static void checkDrawPalette()
+{
+    LVColorDrawBuf color(2, 2, 32);
+    lUInt32 externalPixel = 0;
+    LVColorDrawBuf external(1, 1, reinterpret_cast<lUInt8 *>(&externalPixel), 32);
+    for (const auto *buffer : { &color, &external }) {
+        require(buffer->GetBackgroundColor() == buffer->GetWhiteColor()
+                        && buffer->GetTextColor() == buffer->GetBlackColor(),
+                "Color draw buffer has an incorrect default palette");
+    }
+    for (const int bits : { 2, 8 }) {
+        LVGrayDrawBuf gray(2, 2, bits);
+        require(gray.GetBackgroundColor() == gray.GetWhiteColor()
+                        && gray.GetTextColor() == gray.GetBlackColor(),
+                "Gray draw buffer lost its pixel-format palette");
+    }
+    LVInkMeasurementDrawBuf ink;
+    {
+        const LVDrawStateSaver restore(ink);
+        ink.SetBackgroundColor(0xff0000);
+        ink.SetTextColor(0x0000ff);
+        ink.FillRect(2, 3, 6, 9, ink.GetBackgroundColor());
+    }
+    require(ink.GetBackgroundColor() == 0xffffffU && ink.GetTextColor() == 0,
+            "Ink measurement did not restore the default palette");
+    lvRect bounds;
+    require(ink.getInkArea(bounds) && bounds.left == 2 && bounds.top == 3
+                    && bounds.right == 6 && bounds.bottom == 9,
+            "Palette handling changed the measured ink bounds");
+}
+
+static void checkGif()
+{
+    // A 2x2 GIF with red left pixels and blue right pixels.
+    auto gif = QByteArray::fromHex("47494638396102000200800000ff00000000ff"
+                                   "2c000000000200020000020404433005003b");
+    auto image = LVCreateStreamImageSource(
+            LVCreateMemoryStream(gif.data(), gif.size(), false, LVOM_READ));
+    require(!image.isNull() && image->GetWidth() == 2 && image->GetHeight() == 2,
+            "CREngine rejected GIF dimensions");
+    LVColorDrawBuf pixels(2, 2, 32);
+    pixels.Clear(0xffffff);
+    pixels.Draw(image, 0, 0, 2, 2, false);
+    require((pixels.GetPixel(0, 0) & 0xffffffU) == 0xff0000U
+                    && (pixels.GetPixel(1, 1) & 0xffffffU) == 0x0000ffU,
+            "CREngine did not preserve the first and last GIF pixels");
+}
+
 static void checkSvg()
 {
     QByteArray svg =
@@ -725,6 +1040,27 @@ static void checkObfuscatedFonts()
         kobalt::EngineDocument preview(kobalt::test::readerFonts());
         require(preview.openPreview(plain, QSize(800, 1000), &error), qPrintable(error));
         expectedPreview = hash(preview.image(0));
+    }
+
+    // Two books can store different fonts at the same path with the same size.
+    {
+        QFile otherFont(
+                kobalt::test::readerAssets().file("fonts/ebook-core/NV_Bitter-Regular.ttf"));
+        require(otherFont.open(QIODevice::ReadOnly), "open second publisher font");
+        const auto other = otherFont.readAll();
+        const auto size = qMax(original.size(), other.size());
+        const auto render = [&](const QByteArray &bytes) {
+            kobalt::EngineDocument reader(kobalt::test::readerFonts());
+            require(reader.open(book(bytes.leftJustified(size, '\0'), {}, "test-identifier"),
+                                QSize(800, 1000), {}, &error),
+                    qPrintable(error));
+            require(reader.embeddedFontCount() == 1 && reader.style(32, 120, "", 36),
+                    "register the current book's publisher font");
+            return hash(reader.image(0));
+        };
+        require(render(original) == expected, "padding the font changed the reference page");
+        require(render(other) != expected, "the second book used the first book's font");
+        require(render(original) == expected, "reopening the first book used the second font");
     }
 
     struct FontCase
@@ -1053,9 +1389,75 @@ static void checkChapterArtPositions()
             "Chapter-art fallback did not round trip");
 }
 
+static void checkDeferredCjkFont()
+{
+    auto inputs = kobalt::test::readerFonts();
+    QString collection;
+    for (const auto &file : inputs.fallbackFiles)
+        if (QFileInfo(file).fileName() == "NotoSerifCJK-Regular.ttc")
+            collection = file;
+    require(!collection.isEmpty(), "Missing CJK collection fixture");
+
+    // Keep the declared metadata tied to the pinned collection. A replacement
+    // collection must not silently change face order, weights or cache hashes.
+    require(InitFontManager(lString8()), "Cannot initialize eager font metadata check");
+    require(fontMan->RegisterFont(lString8(collection.toUtf8().constData())),
+            "Cannot inspect the pinned CJK collection");
+    const auto eagerHash = fontMan->GetFontListHash(-1);
+    lString32Collection eagerFaces;
+    fontMan->getFaceList(eagerFaces);
+    ShutdownFontManager();
+    require(InitFontManager(lString8()), "Cannot initialize deferred font metadata check");
+    for (size_t index = 0; index < kobalt::cjkFallbackFontFaces.size(); ++index)
+        require(fontMan->RegisterStaticFontFace(
+                        lString8(collection.toUtf8().constData()), int(index),
+                        lString8(kobalt::cjkFallbackFontFaces[index]), 400, false),
+                "Cannot register deferred CJK metadata");
+    lString32Collection deferredFaces;
+    fontMan->getFaceList(deferredFaces);
+    require(eagerHash == fontMan->GetFontListHash(-1)
+                    && eagerFaces.length() == deferredFaces.length(),
+            "Deferred CJK metadata differs from the pinned collection");
+    for (int index = 0; index < eagerFaces.length(); ++index)
+        require(eagerFaces[index] == deferredFaces[index],
+                "Deferred CJK family names differ from the pinned collection");
+    ShutdownFontManager();
+
+    QTemporaryDir directory;
+    require(directory.isValid(), "Cannot create deferred-font fixture directory");
+    const auto delayed = directory.filePath("NotoSerifCJK-Regular.ttc");
+    inputs.fallbackFiles.replaceInStrings(collection, delayed);
+    {
+        kobalt::EngineDocument reader(inputs);
+        QString error;
+        QList<QPair<QByteArray, QByteArray>> members;
+        const auto book = kobalt::test::engineBook();
+        for (auto at = book.cbegin(); at != book.cend(); ++at)
+            members.append({ at.key().toUtf8(), at.value() });
+        require(reader.open(storedEpub(members), QSize(600, 800), {}, &error), qPrintable(error));
+        require(reader.pages() > 0 && !reader.image(0).isNull(),
+                "Latin text required the unopened CJK collection");
+        const auto before = fontMan->GetFontListHash(-1);
+        require(QFile::copy(collection, delayed), "Cannot supply the deferred CJK file");
+        for (const auto *family : kobalt::cjkFallbackFontFaces) {
+            auto font = fontMan->GetFont(32, 400, false, css_ff_serif, lString8(family), 0, -1);
+            LVFont::glyph_info_t glyph{};
+            require(!font.isNull() && font->getTypeFace() == lString8(family)
+                            && font->getGlyphInfo(0x65e5, &glyph),
+                    "A deferred CJK face did not load when its glyph was requested");
+        }
+        require(before == fontMan->GetFontListHash(-1),
+                "Loading a deferred CJK face changed parsed-book compatibility");
+    }
+}
+
 int main(int argc, char **argv)
 {
     QGuiApplication app(argc, argv);
+    checkDeferredCjkFont();
+    checkNativeWhitespace();
+    checkNestedNativeIds();
+    checkCachedNativeSources();
     checkChapterArtPositions();
     checkPageFormat();
     checkDeferredPublisherStyles();
@@ -1216,8 +1618,10 @@ int main(int argc, char **argv)
         require(kobalt::fontFamilyKey("KF Libron") == kobalt::fontFamilyKey("Libron"),
                 "Legacy font alias changed");
     }
+    checkDrawPalette();
     checkJpeg(false);
     checkJpeg(true);
+    checkGif();
     checkSvg();
     checkKoboStyleHacks();
     checkDarkModeTextColors();
@@ -1864,8 +2268,7 @@ int main(int argc, char **argv)
         if (name.endsWith("c2.xhtml"))
             chapter2 = name;
     {
-        // CREngine normalizes heading whitespace. Native text-offset mapping
-        // rejects that change even at offset zero, but the EPUB TOC still works.
+        // Native destinations remain usable when heading whitespace collapses.
         for (const auto &heading : { QByteArray("Chapter One"), QByteArray("Chapter\n   One") }) {
             const auto book = storedEpub(
                     { { "mimetype", "application/epub+zip" },
@@ -1888,17 +2291,13 @@ int main(int argc, char **argv)
                  { QString("c.xhtml#heading"), QString("c.xhtml#heading:0") }) {
                 auto resolved = kobalt::resolveChapterTargets(
                         fallback, positions, { { "Native chapter", location } }, {});
-                const bool normalized = heading.contains('\n');
-                require(resolved.contents.size() == 1
-                                && resolved.contents[0].position.isEmpty() == normalized,
-                        "Heading whitespace did not reproduce the native destination failure");
+                require(resolved.contents.size() == 1 && !resolved.contents[0].position.isEmpty(),
+                        "Heading whitespace prevented a native destination");
                 const QVector<kobalt::ChapterLink> graph{ { "Native graph", original[0].position,
                                                             -1, 0, 123 } };
                 fallback.setChapters(std::move(resolved.contents), graph);
                 const auto chapters = fallback.chapters();
-                require(chapters.size() == 1
-                                && chapters[0].title
-                                        == (normalized ? "EPUB chapter" : "Native chapter")
+                require(chapters.size() == 1 && chapters[0].title == "Native chapter"
                                 && !chapters[0].position.isEmpty() && chapters[0].page >= 0
                                 && fallback.position() == anchor,
                         "Unresolved native chapters did not fall back without moving the reader");
@@ -1909,11 +2308,6 @@ int main(int argc, char **argv)
                         "Cannot navigate to the selected chapter destination");
                 require(fallback.goTo(anchor),
                         "Cannot restore the position after chapter navigation");
-            }
-            if (heading.contains('\n')) {
-                require(fallback.platformPosition(positions, &error) == "c.xhtml" && error.isEmpty()
-                                && fallback.position() == anchor,
-                        "Normalized heading prevented chapter-only native progress");
             }
         }
     }
@@ -2780,9 +3174,9 @@ int main(int argc, char **argv)
     require(css.goTo("/body/DocFragment[2]/body/p[4]/text().1"),
             "Cannot select whitespace fixture");
     const auto normalizedAnchor = css.position();
-    require(css.platformPosition(positions, &error) == chapter2 && error.isEmpty()
+    require(css.platformPosition(positions, &error) == chapter2 + "#normalized:1" && error.isEmpty()
                     && css.position() == normalizedAnchor,
-            "Normalized whitespace prevented chapter-only progress or changed the local position");
+            "Normalized whitespace lost its native offset or changed the local position");
     require(css.goTo("/body[1]/DocFragment[2]/body[1]/p[6]/span[1]/span[1]/text()[1].0"),
             "Cannot select the duplicate-ID fixture");
     const auto ambiguousAnchor = css.position();
@@ -3318,5 +3712,5 @@ int main(int argc, char **argv)
     require(!reopened.open(bytes, QSize(1072, 1328), invalid, &error),
             "Invalid stored position silently accepted");
     std::puts(
-            "PASS: JPEG and SVG decoding, publisher CSS, chapter boundaries, EPUB preflight, page bounds, cache, typography and persisted anchors");
+            "PASS: GIF, JPEG and SVG decoding, publisher CSS, chapter boundaries, EPUB preflight, page bounds, cache, typography and persisted anchors");
 }

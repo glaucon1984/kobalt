@@ -81,6 +81,8 @@ ReadingBook::ReadingBook(std::unique_ptr<ReaderSession> session, QString statePa
     // Privacy belongs to the publication, including after Mark as unread.
     hideBookOnSleepScreen_ = saved.value("book").toString() == identity_
             && saved.value("hide_book_on_sleep_screen").toBool(false);
+    if (saved.value("book").toString() == identity_)
+        sleepPositions_ = saved.value("sleep_positions").toObject();
     // The native opener resets its snapshot before the database record is
     // replaced. Apply the same reset before retaining fields or preferences.
     if (this->bridge)
@@ -148,11 +150,11 @@ ReadingBook::~ReadingBook()
 
 bool ReadingBook::savesPending() const
 {
-    return activityPending || appearancePending || checkpointAfterActivity
-            || !closesAfterActivity.isEmpty() || (activityWriter && !activityWriter->idle())
+    return activityPending || appearancePending || deferredCheckpointEpoch
+            || !deferredCloses.isEmpty() || (activityWriter && !activityWriter->idle())
             || (appearanceWriter && !appearanceWriter->idle()) || closeCheckpointPending
-            || (writer && !writer->idle()) || (history && history->saving())
-            || (speedWriter && !speedWriter->idle());
+            || !pendingCheckpoint.isEmpty() || (writer && !writer->idle())
+            || (history && history->saving()) || (speedWriter && !speedWriter->idle());
 }
 
 bool ReadingBook::deviceTransition() const
@@ -219,10 +221,13 @@ bool ReadingBook::readingSavePending() const
     return bridge && bridge->readingSavePending();
 }
 
-void ReadingBook::retryFailedReadingSave()
+void ReadingBook::retryFailedReadingSave(std::function<void(NativeActivityResult)> done,
+                                         ReadingSaveRetry mode)
 {
     if (bridge)
-        bridge->retryFailedReadingSave();
+        bridge->retryFailedReadingSave(std::move(done), mode);
+    else if (done)
+        done(NativeActivityResult::NotRequired);
 }
 
 void ReadingBook::observeReading(bool learnPace)
@@ -329,8 +334,8 @@ void ReadingBook::stopReading(bool background, bool nativeAllowed)
         else
             history->stop(completedReadingMilliseconds, position);
     }
-    // End Nickel's interval before local storage work, so its clock does not
-    // include that I/O and its asynchronous flush can run alongside our save.
+    // Pause the host's interval. Kobo ends it at the boundary, inside the
+    // transaction that saves the host's progress, as Nickel's reader does.
     if (bridge && nativeAllowed)
         bridge->stopReading(readingActivity());
     if (!background)
@@ -356,7 +361,7 @@ struct ReadingBook::ActivitySave
     QJsonObject checkpoint, persisted, speed;
     ReadingHistory::Snapshot history;
     bool durable = false;
-    quint64 generation = 0;
+    quint64 generation = 0, epoch = 0;
 };
 
 bool ReadingBook::activitySaveCoolingDown() const
@@ -372,7 +377,7 @@ bool ReadingBook::activitySaveDue(int intervalMilliseconds) const
 
 void ReadingBook::saveReadingActivity(bool durable)
 {
-    if (activityPending || checkpointAfterActivity || !closesAfterActivity.isEmpty()
+    if (activityPending || deferredCheckpointEpoch || !deferredCloses.isEmpty()
         || closeCheckpointPending || activitySaveCoolingDown())
         return;
     retryAppearanceSave();
@@ -391,7 +396,9 @@ void ReadingBook::saveReadingActivity(bool durable)
         save->history = history->snapshot();
     }
     save->durable = durable;
+    beginCheckpoint();
     save->generation = ++activityGeneration;
+    save->epoch = positionSaveEpoch;
     activityPending = true;
     if (!activityWriter)
         activityWriter = std::make_unique<storage::RecordWriter>();
@@ -440,7 +447,7 @@ void ReadingBook::writeActivity(std::shared_ptr<ActivitySave> save, int attempt)
                             if (ok) {
                                 book->activitySaved.restart();
                                 book->activityFailed.invalidate();
-                                book->savedCheckpoint = save->checkpoint;
+                                book->recordSavedCheckpoint(save->checkpoint, save->epoch);
                                 if (book->speed && book->speed->state() == save->speed)
                                     book->speed->saved();
                             } else {
@@ -449,7 +456,7 @@ void ReadingBook::writeActivity(std::shared_ptr<ActivitySave> save, int attempt)
                                            { { "attempts", attempt + 1 } },
                                            DiagnosticSeverity::Error);
                             }
-                            book->resumeActivityCheckpoints();
+                            book->resumeDeferredCheckpoints();
                             if (!ok && book->checkpointFailed)
                                 book->checkpointFailed();
                         },
@@ -457,9 +464,9 @@ void ReadingBook::writeActivity(std::shared_ptr<ActivitySave> save, int attempt)
             });
 }
 
-void ReadingBook::resumeActivityCheckpoints()
+void ReadingBook::resumeDeferredCheckpoints()
 {
-    if (!checkpointAfterActivity && closesAfterActivity.isEmpty())
+    if (!deferredCheckpointEpoch && deferredCloses.isEmpty())
         return;
     const std::weak_ptr<ReadingBook *> guard = alive;
     const auto generation = activityGeneration;
@@ -468,32 +475,36 @@ void ReadingBook::resumeActivityCheckpoints()
             [guard, generation] {
                 const auto owner = guard.lock();
                 if (!owner || (*owner)->activityGeneration != generation
-                    || (*owner)->activityPending || (*owner)->appearancePending)
+                    || (*owner)->activityPending || (*owner)->appearancePending
+                    || (*owner)->closeCheckpointPending)
                     return;
                 auto *book = *owner;
-                const bool checkpoint = std::exchange(book->checkpointAfterActivity, false);
-                auto closes = std::exchange(book->closesAfterActivity, {});
+                const auto epoch = std::exchange(book->deferredCheckpointEpoch, 0);
+                saves::settled();
+                auto closes = std::exchange(book->deferredCloses, {});
                 if (!closes.isEmpty()) {
                     // Closing captures the latest state and supersedes a waiting
                     // background checkpoint. Keep every close completion.
-                    book->checkpointForClose([guard, closes](bool saved) {
-                        // The close completion holds a locked lifetime guard. Let it
-                        // unwind before a callback can destroy the book, so the next
-                        // callback sees an expired guard.
-                        qt::invoke(
-                                QCoreApplication::instance(),
-                                [guard, closes, saved] {
-                                    for (const auto &done : closes) {
-                                        if (guard.expired())
-                                            break;
-                                        done(saved);
-                                    }
-                                },
-                                Qt::QueuedConnection);
-                    });
-                } else if (checkpoint) {
+                    book->checkpointForClose(
+                            [guard, closes](bool saved) {
+                                // The close completion holds a locked lifetime guard. Let it
+                                // unwind before a callback can destroy the book, so the next
+                                // callback sees an expired guard.
+                                qt::invoke(
+                                        QCoreApplication::instance(),
+                                        [guard, closes, saved] {
+                                            for (const auto &done : closes) {
+                                                if (guard.expired())
+                                                    break;
+                                                done(saved);
+                                            }
+                                        },
+                                        Qt::QueuedConnection);
+                            },
+                            epoch);
+                } else if (epoch) {
                     QJsonObject ignored;
-                    book->checkpoint(&ignored, true);
+                    book->checkpoint(&ignored, true, epoch);
                 }
             },
             Qt::QueuedConnection);
@@ -575,7 +586,7 @@ void ReadingBook::writeAppearance(int attempt)
                                            { { "attempts", attempt + 1 } },
                                            DiagnosticSeverity::Error);
                             }
-                            book->resumeActivityCheckpoints();
+                            book->resumeDeferredCheckpoints();
                         },
                         Qt::QueuedConnection);
             });
@@ -649,6 +660,19 @@ qint64 ReadingBook::readingDayMilliseconds()
     if (activeReading.isValid())
         history->update(readingMilliseconds(), session_->state().value("position").toString());
     return history->dayMilliseconds(readingDay());
+}
+
+QMap<QDate, qint64> ReadingBook::readingDays()
+{
+    QMap<QDate, qint64> result;
+    if (!history)
+        return result;
+    if (activeReading.isValid())
+        history->update(readingMilliseconds(), session_->state().value("position").toString());
+    const auto &days = history->dayTotals();
+    for (auto it = days.cbegin(); it != days.cend(); ++it)
+        result.insert(QDate::fromString(it.key(), Qt::ISODate), it.value());
+    return result;
 }
 
 qint64 ReadingBook::readingMilliseconds() const
@@ -784,12 +808,17 @@ NativeSaveResult ReadingBook::writeNative(const QString &location, const QString
             const double percent = session_->progressPercent();
             const bool preserveFinished = finishedHere();
             diagnostic("native-save-start");
+            const auto activity = readingActivity();
+            const auto epoch = positionSaveEpoch;
             nativeWriteback = bridge->write(current, timeOnly ? QString() : location, percent,
-                                            preserveFinished, readingActivity());
+                                            preserveFinished, activity);
             error = nativeWriteback.message();
             if (nativeWriteback.saved()) {
                 baseline = nativeWriteback.baseline();
                 reconciliation.reset(baseline);
+                if (!timeOnly && nativeWriteback.status() == NativeSaveResult::Status::Saved
+                    && positionSaved)
+                    positionSaved(activity.position, epoch);
             } else {
                 // A commit can lose a race after the earlier read. Ask about
                 // that update before letting the window finish its exit.
@@ -900,6 +929,10 @@ QJsonObject ReadingBook::checkpointState() const
     state["finished_position"] = acceptedFinishedAnchor;
     state["suppress_finish_prompt"] = finishPromptSuppressed;
     state["hide_book_on_sleep_screen"] = hideBookOnSleepScreen_;
+    if (sleepPositions_.isEmpty())
+        state.remove("sleep_positions");
+    else
+        state["sleep_positions"] = sleepPositions_;
     if (!imageViews.isEmpty())
         state["image_views"] = imageViews;
     // For the Android and desktop library, which shows progress without
@@ -977,7 +1010,21 @@ QJsonObject ReadingBook::persistedCheckpoint(const QJsonObject &state) const
     return checkpoint;
 }
 
+quint64 ReadingBook::beginCheckpoint()
+{
+    // An older write can still land even if its GUI completion is superseded.
+    // Only the newest successful completion can establish the stored state again.
+    savedCheckpoint = {};
+    pendingCheckpoint = {};
+    return ++checkpointRequest;
+}
+
 bool ReadingBook::checkpoint(QJsonObject *snapshot, bool background)
+{
+    return checkpoint(snapshot, background, positionSaveEpoch);
+}
+
+bool ReadingBook::checkpoint(QJsonObject *snapshot, bool background, quint64 epoch)
 {
     if (!background) {
         ++activityGeneration;
@@ -990,23 +1037,23 @@ bool ReadingBook::checkpoint(QJsonObject *snapshot, bool background)
         appearancePending = false;
         // This synchronous save replaces the waiting background checkpoint.
         // A queued continuation runs any waiting close after this call returns.
-        checkpointAfterActivity = false;
-        resumeActivityCheckpoints();
+        if (deferredCloses.isEmpty())
+            deferredCheckpointEpoch = 0;
+        resumeDeferredCheckpoints();
     }
     const auto state = checkpointState();
     *snapshot = state;
     // A second writer must not replace its queued checkpoint with a newer
     // position ahead of an older activity snapshot. Wait asynchronously for
     // that snapshot, then capture the current explicit choice.
-    if (background && activityPending) {
-        checkpointAfterActivity = true;
+    if (background && (activityPending || closeCheckpointPending)) {
+        deferredCheckpointEpoch = epoch;
         return true;
     }
     const auto checkpoint = persistedCheckpoint(state);
-    if (closeCheckpointPending)
-        return false;
-    if (background && (checkpoint == savedCheckpoint || checkpoint == pendingCheckpoint))
+    if (background && (checkpoint == pendingCheckpoint || checkpoint == savedCheckpoint))
         return true;
+    const auto request = beginCheckpoint();
     auto persisted = checkpoint;
     for (const auto *key : appearance::layoutKeys)
         persisted.remove(key);
@@ -1027,12 +1074,12 @@ bool ReadingBook::checkpoint(QJsonObject *snapshot, bool background)
                     storage::RoutineWrites routine;
                     return storage::writeBookState(paths, identity, persisted, path);
                 },
-                [guard, checkpoint](bool saved) {
+                [guard, request, epoch](bool saved) {
                     kobalt::qt::invoke(
                             QCoreApplication::instance(),
-                            [guard, checkpoint, saved] {
+                            [guard, request, epoch, saved] {
                                 if (const auto book = guard.lock())
-                                    (*book)->finishBackgroundCheckpoint(checkpoint, saved);
+                                    (*book)->finishBackgroundCheckpoint(request, epoch, saved);
                             },
                             Qt::QueuedConnection);
                 });
@@ -1042,12 +1089,10 @@ bool ReadingBook::checkpoint(QJsonObject *snapshot, bool background)
     // replaces a queued one there and waits for its result.
     if (!writer)
         writer = std::make_unique<storage::RecordWriter>();
-    pendingCheckpoint = {};
-    // The layout memory changes preferences.json, which settings changes
-    // and appearance changes also write. Once a book is open, the reader
-    // runs every such write on the writer thread, one at a time, so none of
-    // them loses another's change. The Android and desktop library still
-    // writes the file on the main thread.
+    // writeNow replaces pending work on this writer. A close owns a completion
+    // that must still be delivered, even if sleep needs a newer durable save.
+    if (closeCheckpointPending)
+        writer->flush();
     bool layoutSaved = true;
     if (history && activeReading.isValid())
         history->update(readingMilliseconds(), state.value("position").toString());
@@ -1091,7 +1136,7 @@ bool ReadingBook::checkpoint(QJsonObject *snapshot, bool background)
     if (storage::profileHasUnsyncedWrites())
         return false;
     appearanceCheckpointSaved(state);
-    savedCheckpoint = checkpoint;
+    recordSavedCheckpoint(checkpoint, epoch);
     activitySaved.restart();
     activityFailed.invalidate();
     if (speed && speed->state() == speedState)
@@ -1099,17 +1144,29 @@ bool ReadingBook::checkpoint(QJsonObject *snapshot, bool background)
     return true;
 }
 
+struct ReadingBook::CloseCheckpoint
+{
+    QJsonObject state, speed, rememberedAppearance;
+    quint64 request, epoch;
+};
+
 void ReadingBook::checkpointForClose(std::function<void(bool)> done)
 {
-    if (activityPending || appearancePending || !closesAfterActivity.isEmpty()) {
-        closesAfterActivity.append(std::move(done));
+    checkpointForClose(std::move(done), positionSaveEpoch);
+}
+
+void ReadingBook::checkpointForClose(std::function<void(bool)> done, quint64 epoch)
+{
+    if (activityPending || appearancePending || closeCheckpointPending
+        || !deferredCloses.isEmpty()) {
+        deferredCheckpointEpoch = epoch;
+        deferredCloses.append(std::move(done));
         return;
     }
     if (sleepingReading) {
         sleepingReading = false;
         stopReading(true);
     }
-    Q_ASSERT(!closeCheckpointPending);
     closeCheckpointPending = true;
     const auto state = checkpointState();
     const auto checkpoint = persistedCheckpoint(state);
@@ -1124,7 +1181,8 @@ void ReadingBook::checkpointForClose(std::function<void(bool)> done)
     if (history && activeReading.isValid())
         history->update(readingMilliseconds(), state.value("position").toString());
     const auto historySnapshot = history ? history->snapshot() : ReadingHistory::Snapshot();
-    pendingCheckpoint = {};
+    const CloseCheckpoint save{ checkpoint, speedState, rememberedAppearance, beginCheckpoint(),
+                                epoch };
     if (!writer)
         writer = std::make_unique<storage::RecordWriter>();
     const std::weak_ptr<ReadingBook *> guard = alive;
@@ -1154,53 +1212,62 @@ void ReadingBook::checkpointForClose(std::function<void(bool)> done)
                     storage::checkpointProfile();
                 return ok && !storage::profileHasUnsyncedWrites();
             },
-            [guard, checkpoint, done = std::move(done)](bool saved) {
+            [guard, save, done = std::move(done)](bool saved) {
                 kobalt::qt::invoke(
                         QCoreApplication::instance(),
-                        [guard, checkpoint, saved, done] {
+                        [guard, save, saved, done] {
                             if (const auto book = guard.lock())
-                                (*book)->finishCloseCheckpoint(checkpoint, saved, done);
+                                (*book)->finishCloseCheckpoint(save, saved, done);
                         },
                         Qt::QueuedConnection);
             });
 }
 
-void ReadingBook::finishCloseCheckpoint(const QJsonObject &checkpoint, bool saved,
+void ReadingBook::finishCloseCheckpoint(const CloseCheckpoint &save, bool saved,
                                         std::function<void(bool)> done)
 {
     if (history && history->saving()) {
         // The history writer reports when its write ends.
         const std::weak_ptr<ReadingBook *> guard = alive;
-        saveWait.after([guard, checkpoint, saved, done] {
+        saveWait.after([guard, save, saved, done] {
             if (const auto book = guard.lock())
-                (*book)->finishCloseCheckpoint(checkpoint, saved, done);
+                (*book)->finishCloseCheckpoint(save, saved, done);
         });
         return;
     }
     saved = (!history || history->savesSucceeded()) && saved;
     closeCheckpointPending = false;
     saves::settled();
-    if (saved) {
-        savedCheckpoint = checkpoint;
-        appearanceCheckpointSaved(checkpoint);
+    if (saved && save.request == checkpointRequest) {
+        recordSavedCheckpoint(save.state, save.epoch);
+        if (rememberedAppearance == save.rememberedAppearance)
+            appearanceCheckpointSaved(save.state);
         activitySaved.restart();
         activityFailed.invalidate();
-        if (speed)
+        if (speed && speed->state() == save.speed)
             speed->saved();
-    } else {
+    } else if (!saved) {
         diagnostic("local-close-save-failed", {}, DiagnosticSeverity::Error);
     }
+    resumeDeferredCheckpoints();
     done(saved);
 }
 
-void ReadingBook::finishBackgroundCheckpoint(const QJsonObject &checkpoint, bool saved)
+void ReadingBook::recordSavedCheckpoint(const QJsonObject &checkpoint, quint64 epoch)
 {
-    // A synchronous checkpoint replaced this one while it ran.
-    if (checkpoint != pendingCheckpoint)
+    savedCheckpoint = checkpoint;
+    if (positionSaved)
+        positionSaved(checkpoint.value("position").toString(), epoch);
+}
+
+void ReadingBook::finishBackgroundCheckpoint(quint64 request, quint64 epoch, bool saved)
+{
+    if (request != checkpointRequest)
         return;
-    pendingCheckpoint = {};
+    const auto checkpoint = std::exchange(pendingCheckpoint, QJsonObject());
+    saves::settled();
     if (saved) {
-        savedCheckpoint = checkpoint;
+        recordSavedCheckpoint(checkpoint, epoch);
         return;
     }
     // A background save is transient: the next save, sleep or close writes

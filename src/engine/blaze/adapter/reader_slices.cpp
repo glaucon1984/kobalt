@@ -53,6 +53,29 @@ bool hasFloatFootprint(ldomNode *block)
     rect.getNextFloatMinYs(minLeft, minRight);
     return topLeft > 0 || topRight > 0 || minLeft > 0 || minRight > 0;
 }
+
+// The part of a position after the DocFragment of its spine item.
+QString pathInSpineItem(const QString &position)
+{
+    static const QRegularExpression fragment(QStringLiteral("^/body(?:\\[1\\])?/DocFragment[^/]*"));
+    auto path = position;
+    path.remove(fragment);
+    return path;
+}
+
+// Keeps the read spine items nearest to `item`, at most as many as a
+// record holds.
+void keepNearestRead(QMap<int, int> &read, int item)
+{
+    while (read.size() > PageEstimateRecord::maxRead) {
+        const int first = read.firstKey(), last = read.lastKey();
+        if (item - first > last - item)
+            read.remove(first);
+        else
+            read.remove(last);
+    }
+}
+
 } // namespace
 
 int EngineDocument::sliceSize() const
@@ -190,22 +213,7 @@ void EngineDocument::observeLayout()
         return;
     }
     // Each spine item of the window as a whole.
-    const auto items = spineItems();
-    QStringList starts;
-    for (int i = windowFirst_; i <= windowLast_ && i < items.size(); ++i) {
-        Location start;
-        start.href = items[i];
-        starts.append(positionOf(start));
-    }
-    auto first = pagesOf(starts);
-    if (first.size() != starts.size())
-        return;
-    // A spine item without a page, such as an empty one, starts where the
-    // next one starts. It is complete with no pages.
-    for (int i = first.size() - 1; i >= 0; --i) {
-        if (first[i] < 0 && !starts[i].isEmpty())
-            first[i] = i + 1 < first.size() ? first[i + 1] : pages();
-    }
+    const auto first = spineItemStarts(windowFirst_, windowLast_);
     for (int i = 0; i < first.size(); ++i) {
         const int end = i + 1 < first.size() ? first[i + 1] : pages();
         if (first[i] >= 0 && end >= first[i])
@@ -213,7 +221,67 @@ void EngineDocument::observeLayout()
     }
 }
 
+QVector<int> EngineDocument::spineItemStarts(int first, int last,
+                                             const std::function<bool()> &current) const
+{
+    // A large book has hundreds of spine items. Each group takes a moment,
+    // and `current` can park the work between groups.
+    static constexpr int group = 32;
+    const auto items = spineItems();
+    last = qMin(last, int(items.size()) - 1);
+    if (!engine_)
+        return {};
+    // The fragment of each spine item, from one walk over the fragments.
+    // positionOf() would walk them again for every spine item.
+    QHash<QString, ldomNode *> fragments;
+    if (auto *root = engine_->getDocument()->nodeFromXPath(U"/body")) {
+        for (int i = 0; i < root->getChildCount(); ++i) {
+            auto *node = root->getChildNode(i);
+            if (!node->isElement() || !node->isNodeName("DocFragment"))
+                continue;
+            const auto href =
+                    QString::fromUtf8(UnicodeToUtf8(node->getAttributeValue("Source")).c_str());
+            if (!fragments.contains(href))
+                fragments.insert(href, node);
+        }
+    }
+    // The start of a spine item, as positionOf() gives it for a location
+    // without a path.
+    QStringList starts;
+    for (int i = first; i <= last; ++i) {
+        if ((i - first) % group == 0 && current && !current())
+            return {};
+        auto *fragment = items[i].isEmpty() ? nullptr : fragments.value(items[i]);
+        starts.append(fragment && enginelocation::body(fragment)
+                              ? QString::fromUtf8(
+                                        UnicodeToUtf8(ldomXPointer(fragment, 0).toString()).c_str())
+                              : QString());
+    }
+    QVector<int> pages;
+    for (int from = 0; from < starts.size(); from += group) {
+        if (current && !current())
+            return {};
+        const auto part = starts.mid(from, group);
+        const auto found = pagesOf(part);
+        if (found.size() != part.size())
+            return {};
+        pages += found;
+    }
+    // A spine item without a page, such as an empty one, starts where the
+    // next one starts. It is complete with no pages.
+    for (int i = pages.size() - 1; i >= 0; --i) {
+        if (pages[i] < 0 && !starts[i].isEmpty())
+            pages[i] = i + 1 < pages.size() ? pages[i + 1] : this->pages();
+    }
+    return pages;
+}
+
 QString EngineDocument::estimateKey(const QJsonObject &settings) const
+{
+    return estimateKey(settings, slicePages_);
+}
+
+QString EngineDocument::estimateKey(const QJsonObject &settings, int slicePages) const
 {
     auto key = settings;
     // These do not change the pages. The outline thickness and the text
@@ -222,9 +290,11 @@ QString EngineDocument::estimateKey(const QJsonObject &settings) const
                               "weight_steps", "normalize_text_colors" })
         key.remove(name);
     key["viewport"] = QString("%1x%2").arg(size_.width()).arg(size_.height());
-    key["slice_pages"] = slicePages_;
-    if (slicePages_ > 0)
+    key["slice_pages"] = slicePages;
+    if (slicePages > 0)
         key["slice_offsets"] = 1;
+    key["registered_fonts"] = layoutFontDigest();
+    key["rendering_policy"] = QString::fromLatin1(KOBALT_RENDERING_POLICY);
     key["policy"] = QString::fromUtf8(documentCachePolicy());
     return QString::fromLatin1(
             QCryptographicHash::hash(QJsonDocument(key).toJson(QJsonDocument::Compact),
@@ -244,55 +314,136 @@ QString EngineDocument::fullDocumentKey(const QJsonObject &settings) const
 
 QJsonObject EngineDocument::pageEstimateRecord(const QJsonObject &settings) const
 {
-    if (windowFirst_ < 0 || spineItemCount_ <= 0 || !source_ || source_->parent || !engine_)
+    if (windowFirst_ < 0)
+        return wholeBookEstimateRecord(settings);
+    if (spineItemCount_ <= 0 || !source_ || source_->parent || !engine_)
         return {};
     // Places the page first, so that the record holds the page on screen.
     const auto rough = roughPages();
     const auto &map = pageMap();
     if (map.total() <= 0)
         return {};
-    const auto &estimate = source_->pageEstimate;
-    PageEstimateRecord record;
-    record.model = map.model();
-    record.layout = estimateKey(settings);
-    record.spineItems = spineItemCount_;
-    record.item = estimate.lastItem;
-    record.first = estimate.lastFirst;
-    record.page = estimate.lastPage;
-    record.partPages = estimate.lastPages;
+    auto &estimate = source_->pageEstimate;
+    const auto key = estimateKey(settings);
+    // Everything but the place changes only with the map. A page turn
+    // makes the rest again only in another spine item, which decides what
+    // a full record leaves out.
+    if (estimate.record.isEmpty() || estimate.recordGeneration != map.generation()
+        || estimate.recordKey != key || estimate.recordItem != estimate.lastItem) {
+        PageEstimateRecord record;
+        record.model = map.model();
+        record.layout = key;
+        record.spineItems = spineItemCount_;
+        record.read = map.completeItems();
+        if (map.keeping())
+            record.kept = map.keptPages();
+        // The parts of the spine items that stay in the record, the nearest
+        // to the reading position first.
+        auto parts = map.completeParts();
+        std::stable_sort(parts.begin(), parts.end(),
+                         [&](const PageEstimateRecord::Part &a, const PageEstimateRecord::Part &b) {
+                             return qAbs(a.item - estimate.lastItem)
+                                     < qAbs(b.item - estimate.lastItem);
+                         });
+        for (const auto &part : parts) {
+            if (record.parts.size() >= PageEstimateRecord::maxParts)
+                break;
+            if (record.read.contains(part.item))
+                record.parts.append(part);
+        }
+        std::stable_sort(record.parts.begin(), record.parts.end(),
+                         [](const PageEstimateRecord::Part &a, const PageEstimateRecord::Part &b) {
+                             return a.item != b.item ? a.item < b.item : a.first < b.first;
+                         });
+        keepNearestRead(record.read, estimate.lastItem);
+        estimate.record = record.toJson();
+        estimate.recordGeneration = map.generation();
+        estimate.recordKey = key;
+        estimate.recordItem = estimate.lastItem;
+    }
+    PageEstimateRecord place;
+    place.item = estimate.lastItem;
+    place.first = estimate.lastFirst;
+    place.page = estimate.lastPage;
+    place.partPages = estimate.lastPages;
     // While the reader shows percentages, the number held for the page, such
     // as one restored at the open. None after a turn.
-    record.shown = estimate.book.shown();
-    record.itemShown = rough.itemPage;
-    record.read = map.completeItems();
-    if (map.keeping())
-        record.kept = map.keptPages();
-    // The parts of the spine items that stay in the record, the nearest to
-    // the reading position first.
-    auto parts = map.completeParts();
-    std::stable_sort(parts.begin(), parts.end(),
-                     [&](const PageEstimateRecord::Part &a, const PageEstimateRecord::Part &b) {
-                         return qAbs(a.item - estimate.lastItem) < qAbs(b.item - estimate.lastItem);
-                     });
-    for (const auto &part : parts) {
-        if (record.parts.size() >= PageEstimateRecord::maxParts)
-            break;
-        if (record.read.contains(part.item))
-            record.parts.append(part);
+    place.shown = estimate.book.shown();
+    place.itemShown = rough.itemPage;
+    auto result = estimate.record;
+    place.writePlace(result);
+    return result;
+}
+
+void EngineDocument::findWholeBookStarts(const std::function<bool()> &current) const
+{
+    const int slicePages = chapterSlicePages();
+    if (slicePages <= 0 || slicePages_ > 0 || spineItemCount_ <= 0 || !source_ || source_->parent
+        || !engine_ || pages() <= 0)
+        return;
+    auto &estimate = source_->pageEstimate;
+    const auto key = estimateKey(settingsState(), slicePages);
+    if (estimate.wholeKey == key)
+        return;
+    auto starts = spineItemStarts(0, spineItemCount_ - 1, current);
+    if (starts.size() != spineItemCount_)
+        return;
+    estimate.wholeStarts = std::move(starts);
+    estimate.wholeRecord = {};
+    estimate.wholeKey = key;
+}
+
+QJsonObject EngineDocument::wholeBookEstimateRecord(const QJsonObject &settings) const
+{
+    // A layout of the whole book has the real pages of every spine item.
+    // The record holds them for chapter mode, so that the book opens there
+    // with its counted pages. The key is the one of chapter mode.
+    const int slicePages = chapterSlicePages();
+    if (slicePages <= 0 || slicePages_ > 0 || spineItemCount_ <= 0 || !source_ || source_->parent
+        || !engine_ || pages() <= 0)
+        return {};
+    auto &estimate = source_->pageEstimate;
+    const auto key = estimateKey(settings, slicePages);
+    // Hybrid finds the starts while it builds the whole book. More
+    // accurate finds them here, once.
+    if (estimate.wholeKey != key)
+        findWholeBookStarts({});
+    const auto &starts = estimate.wholeStarts;
+    if (estimate.wholeKey != key || starts.size() != spineItemCount_)
+        return {};
+    PageEstimateRecord record;
+    const int item = qBound(0, spineItemOf(position()), spineItemCount_ - 1);
+    // The part that does not change with the page is made once. A book
+    // with more spine items than the record holds keeps those nearest to
+    // the page.
+    const bool nearest = spineItemCount_ > PageEstimateRecord::maxRead;
+    if (estimate.wholeRecord.isEmpty() || (nearest && estimate.wholeRecordItem != item)) {
+        record.model = pageMap().model();
+        record.layout = key;
+        record.spineItems = spineItemCount_;
+        record.wholeBook = true;
+        for (int i = 0; i < starts.size(); ++i) {
+            const int end = i + 1 < starts.size() ? starts[i + 1] : pages();
+            if (starts[i] >= 0 && end >= starts[i])
+                record.read.insert(i, end - starts[i]);
+        }
+        keepNearestRead(record.read, item);
+        estimate.wholeRecord = record.toJson();
+        estimate.wholeRecordItem = item;
     }
-    std::stable_sort(record.parts.begin(), record.parts.end(),
-                     [](const PageEstimateRecord::Part &a, const PageEstimateRecord::Part &b) {
-                         return a.item != b.item ? a.item < b.item : a.first < b.first;
-                     });
-    // Keep the spine items nearest to the reading position.
-    while (record.read.size() > PageEstimateRecord::maxRead) {
-        const int firstItem = record.read.firstKey(), lastItem = record.read.lastKey();
-        if (estimate.lastItem - firstItem > lastItem - estimate.lastItem)
-            record.read.remove(firstItem);
-        else
-            record.read.remove(lastItem);
+    auto result = estimate.wholeRecord;
+    const int pageInItem = page() - starts[item];
+    const int end = item + 1 < starts.size() ? starts[item + 1] : pages();
+    const int itemPages = starts[item] >= 0 ? end - starts[item] : -1;
+    if (pageInItem >= 0 && pageInItem < itemPages) {
+        record.item = item;
+        record.page = pageInItem;
+        record.partPages = itemPages;
+        record.shown = page() + 1;
+        record.itemShown = pageInItem + 1;
+        record.writePlace(result);
     }
-    return record.toJson();
+    return result;
 }
 
 void EngineDocument::restorePageEstimate(const QJsonValue &saved)
@@ -321,6 +472,7 @@ void EngineDocument::restorePageEstimate(const QJsonValue &saved)
     estimate.lastLast = INT_MAX;
     estimate.lastPage = record.page;
     estimate.lastPages = record.partPages;
+    estimate.lastWhole = record.wholeBook;
 }
 
 bool EngineDocument::refinePageEstimate(const std::function<bool()> &current)
@@ -331,6 +483,8 @@ bool EngineDocument::refinePageEstimate(const std::function<bool()> &current)
         return false;
     auto &map = pageMap();
     auto &estimate = source_->pageEstimate;
+    // A book opened again can have every item measured already.
+    progress->setEstimateProgress(map.measuredItems(), map.items());
     if (!estimate.measurer) {
         // The spine item on the screen goes first: its slices place the
         // observations.
@@ -463,6 +617,10 @@ Engine::RoughPages EngineDocument::roughPages() const
                  there = order(estimate.lastItem, estimate.lastFirst);
     if (estimate.lastItem < 0) {
         step = Step::Jump;
+    } else if (estimate.lastWhole) {
+        // The book opens where a layout of the whole book saved its page.
+        // That page counts in the whole spine item, not in a slice.
+        step = place.item == estimate.lastItem ? Step::Same : Step::Jump;
     } else if (here == there) {
         step = place.page == estimate.lastPage        ? Step::Same
                 : place.page == estimate.lastPage + 1 ? Step::Forward
@@ -521,6 +679,16 @@ Engine::RoughPages EngineDocument::roughPages() const
         // page number after that comes from the map.
         estimate.book.reset();
     }
+    if (fullDocumentReady()) {
+        const auto anchor = engine_->getPageBookmark(page()).toString();
+        auto exact = full_->engine_->getDocument()->createXPointer(anchor);
+        if (!exact.isNull()) {
+            rough.page = full_->engine_->getBookmarkPage(exact) + 1;
+            rough.pages = full_->pages();
+            rough.pagesEstimated = false;
+        }
+    }
+    estimate.lastWhole = false;
     estimate.lastItem = place.item;
     estimate.lastFirst = place.first;
     estimate.lastLast = place.last;
@@ -749,6 +917,15 @@ bool EngineDocument::earlierContentOnPage(ldomNode *block, int page) const
         auto previousBlock = previous;
         if (previousBlock.ensureFinal() && hasFloatFootprint(previousBlock.getNode()))
             return true;
+        // A table can consume the following block's margin on the preceding
+        // page. Starting a new layout here would add that margin a second time.
+        if (first.top <= top) {
+            for (auto *node = previous.getNode(); node && !node->isNodeName("DocFragment");
+                 node = node->getParentNode()) {
+                if (node->getRendMethod() == erm_table)
+                    return true;
+            }
+        }
         previous.setOffset(qMax(0, int(previous.getNode()->getText().length()) - 1));
         lvRect rect;
         if (previous.getRect(rect) && rect.bottom > top)
@@ -870,6 +1047,12 @@ bool EngineDocument::enterNextSlice(const std::function<bool()> &current)
     const auto history = sliceHistory_;
     const qint64 loadMs = windowLoadMs_;
     if (current && engine_->koblazeSaveLayout()) {
+        // What is known about the pages of this slice comes back with it:
+        // the turn that stopped the layout need not draw them again.
+        const auto images = cache_;
+        const auto damage = damage_;
+        const auto sourceIndex = sourceIndex_;
+        const auto searchText = searchText_;
         sliceHistory_.append({ sliceFirst_, sliceForcedEnd_ });
         bool done = false;
         {
@@ -894,6 +1077,10 @@ bool EngineDocument::enterNextSlice(const std::function<bool()> &current)
         if (engine_->koblazeRestoreLayout()) {
             engine_->groupColumns(hideNonlinearFragments_);
             visiblePages_ = visible;
+            cache_ = images;
+            damage_ = damage;
+            sourceIndex_ = sourceIndex;
+            searchText_ = searchText;
             layoutInterrupted_ = false;
             return go(shown) && false;
         }
@@ -988,6 +1175,13 @@ double EngineDocument::textFraction(int item, const QString &position, bool prev
     const auto known = source_->textFractions.constFind(key);
     if (known != source_->textFractions.cend())
         return known.value();
+    // The contents of a spine item without a layout point to its start, a
+    // path without elements. That place needs no read of its XHTML.
+    if (!previous && pathInSpineItem(position).section('.', 0, 0).isEmpty()) {
+        source_->textFractions.insert(key, 0);
+        source_->textWordPrefixes.insert(position, 0);
+        return 0;
+    }
     if (source_->textFractions.size() > 4096) {
         source_->textFractions.clear();
         source_->textWordPrefixes.clear();
@@ -1024,12 +1218,9 @@ double EngineDocument::readTextFraction(int item, const QString &position, bool 
         offset += int(read);
     }
     xhtml.resize(offset);
-    // The position goes on after the DocFragment of its spine item.
-    static const QRegularExpression fragment(QStringLiteral("^/body(?:\\[1\\])?/DocFragment[^/]*"));
-    auto path = position;
-    path.remove(fragment);
     qint64 words = -1;
-    const double fraction = pageEstimateTextFraction(xhtml, path, previous, &words, current);
+    const double fraction =
+            pageEstimateTextFraction(xhtml, pathInSpineItem(position), previous, &words, current);
     if (!previous && words >= 0)
         source_->textWordPrefixes.insert(position, words);
     return fraction;
@@ -1097,10 +1288,19 @@ QVector<int> EngineDocument::bookPages(const QStringList &positions,
             const int page = pagesOf({ position }).value(0, -1);
             if (slices()) {
                 const int before = textBefore(position);
-                if (page >= 0 && before >= sliceFirst_ && before < sliceEnd_)
+                const int characters = qMax(1, spineItemText());
+                if (exclusive && before == 0 && item > 0)
+                    pages = qRound(map.pagesBefore(item)) - 1;
+                else if (page >= 0 && before >= sliceFirst_ && before < sliceEnd_)
                     pages = qRound(map.pagesBefore(item)
-                                   + map.pagesBefore(item, sliceFirst_, qMax(1, spineItemText())))
+                                   + map.pagesBefore(item, sliceFirst_, characters))
                             + page;
+                else if (before >= 0)
+                    // Outside the slice the spine item has its text but no
+                    // layout. Its characters place the text without a read
+                    // of the XHTML, in the unit of the page map.
+                    pages = std::floor(map.pagesBefore(item)
+                                       + map.pagesBefore(item, before, characters));
             } else if (page >= 0 && itemStarts.size() > item - windowFirst_ + 1) {
                 const int start = qMax(0, itemStarts[item - windowFirst_]);
                 pages = qRound(map.pagesBefore(item)) + qMax(0, page - start);

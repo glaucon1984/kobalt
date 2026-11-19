@@ -1,9 +1,10 @@
 #pragma once
 #include <QString>
+#include <functional>
 #include <memory>
 #include "reading_estimates.h"
 #include "reading_pace_cache.h"
-#include "native_reading_save.h"
+#include "reading/native_activity_result.h"
 
 namespace kobalt {
 // Construct only after firmwareSupported() accepts Nickel, on the GUI thread.
@@ -19,16 +20,33 @@ public:
 
     bool estimates(ReadingEstimates *result) { return estimates(activity_.current(), result); }
 
+    // Pauses the session. Nickel's session stays open until a boundary ends it.
     void stop();
-    void finish(std::function<void(bool)> done);
+    // Ends a paused session inside the transaction that saves Nickel's
+    // progress, as Nickel's reader does when it leaves a book or the device
+    // sleeps, and adds the session's reading time to `volume`, the record
+    // that transaction saves. Call saved() with the outcome.
+    void endIn(void *volume);
+    // Ends a paused session in Nickel without saving its time, which stays
+    // in pendingSeconds for the next save.
+    void endSession();
+    void saved(bool committed);
+    // Ends the session and saves its reading time in a short transaction of
+    // its own, for a boundary where no progress write carried it. On the GUI
+    // thread, at a boundary where no input can arrive.
+    bool endNow();
 
-    void retryFailedSave() { saves.retryFailed(); }
+    void finish(std::function<void(bool)> done) { done(endNow()); }
 
-    bool savePending() const
+    // An explicit retry saves now, at a boundary where no input can arrive.
+    // A background retry, such as on wake, writes nothing: the user can read
+    // then, and the next progress write carries the time.
+    void retryFailedSave(std::function<void(bool)> done, bool explicitRetry)
     {
-        // `ending` can retain a failed synchronous stop. It is not a worker
-        // using storage and must not keep a terminal handoff pending forever.
-        return startFlushes > 0 || (saves.pending() && !saves.failed());
+        if (explicitRetry)
+            done(endNow());
+        else
+            done(true);
     }
 
     std::function<void()> estimatesChanged;
@@ -62,13 +80,13 @@ private:
     quint64 recordGeneration = 0;
     QString book;
     double percent = 0;
+    void startPace();
+    // `ending`: paused, with Nickel's session still open. `pendingSeconds`:
+    // the time of ended sessions that no transaction has saved yet, or -1.
     bool running = false, ending = false;
-    // Session-start flushes still running on Nickel's event thread.
-    int startFlushes = 0;
-    std::shared_ptr<NativeReadingSession *> alive = std::make_shared<NativeReadingSession *>(this);
+    int pendingSeconds = -1;
     nickel::PageReadingActivity activity_;
     nickel::ReadingPaceCache pace_{ nickel::ReadingPaceCache::refreshInterval,
                                     nickel::ReadingPaceCache::Schedule::Ticked };
-    nickel::NativeReadingSave saves;
 };
 } // namespace kobalt

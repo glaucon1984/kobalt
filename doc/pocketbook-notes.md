@@ -1373,3 +1373,77 @@ connection at 19:57:59, standby sync done after 2891 ms.
 Test: `tests/model/kosync_ui.cpp` checks the two descriptions in the sheet with the field set.
 It compiled in the Qt 6.4 container but could not link there: the interface text needs the
 engine, which the container does not build. Not run.
+
+## Upstream v1.0-beta.9 (2026-11-19): the release tag
+
+The beta 9 release (`be47258`, main = tag) merged into the Blaze build: 158 commits past
+`feature/blaze-engine` `55870b0`. Blaze is now the released engine. What else it brings: notes on
+highlights and a Quick annotation mode, Activity in Stats, the Custom sleep screen with wallpapers
+and a power-off look of its own, a rotation lock, a Debug mode (System > Developer), Settings and
+the Text and Layout controls built on first use, and required and optional assets checked apart.
+`rendering_version` is 12, so books are repaginated once. Relative to beta 8, SQLite schema 4,
+settings schema 1 and book-record format 1 are unchanged (`doc/storage.md`).
+
+Fifteen conflicts. Where both sides had added something, both are kept: the desktop check lists,
+the gallery scenes, the System sections (Plugins, then Developer), `ReaderWindow` (the port's
+sleep-image functions beside `resumeReadingClock`), the position codec's friend declaration in
+`engine_document.h`, the `connect` argument of `Coordinator::flush` and its test. The others:
+
+- **Asset record.** Upstream now records what a full check verified in `assets/.verified.json`
+  and reads again only a file whose size or modification time changed. That is the port's
+  `setVerificationRecord()` done upstream, so the port's version, its test and the host's call are
+  gone. `applications/kobalt/assets-verified.json` is no longer read and can be deleted.
+- **Sleep image.** `captureSleepScreen()` now takes its backdrop from `Reader::sleepBackdrop()`,
+  which also serves wallpapers and the power-off look. The cover cache
+  (`cachedSleepCoverBackground`) moved into it. `composeSleepImage()` takes a second capture for
+  power off only when a Custom screen gives power off its own look; otherwise the one backdrop
+  still serves both images.
+- **Standalone controller.** The opening-bar constants moved to `engine/types.h`; the PocketBook
+  hooks stay as they were.
+- **Engine.** `lvrend.cpp` is upstream's again. The float patch that the develop merge of
+  2026-11-14 applied by hand left one line different from the engine as released.
+- **Plugins.** Upstream builds a reader window ahead of its opening on Kobo and builds Settings on
+  first use. Plugins now load in `Reader::start()` and the Plugins section is wired from either
+  side (`connectPluginSettings`), so a window that is never shown loads no plugin. The PocketBook
+  starts a process per book and has no such window.
+
+New optional `ReaderHostServices` fields, as the Automatic sync entry says to look for:
+
+- `sleepWallpaperDirectories`: set to `applications/kobalt/wallpapers`, so the Custom screen's
+  Wallpaper background works. The installer leaves the folder alone. The help card has its own
+  text (`sleep.wallpaper_help_pocketbook`).
+- `showNativeReaderOptions`: false, as on Android. Settings > System loses the System integration
+  section, whose one option (open books automatically in Kobalt) was never available here.
+- `quiet`, `activityMilliseconds`, `deferKosync`: not used. The first is Kobo's prepared book, the
+  second is for tests, the third is Android's deferred sync.
+
+The close dialog's new "Close without waiting" text names Kobo's reading time; the port has its
+own (`closing.close_now_detail_pocketbook`), since the native progress here is the library's row.
+
+Build: Activity's covers need `library/book_metadata.cpp` and `library/cover_thumbnails.cpp`, which
+the port's source list left out with the rest of the Library; added as Kobo's list does.
+`dependencies/` did not move, so the dependency set was not rebuilt.
+
+`platforms/desktop/CMakeLists.txt` is now the same file as on `kobo-develop`. Since the merge of
+`55870b0` (2026-11-15) the port's copy had the plugin checks after the closing parenthesis of the
+desktop check list, which CMake refuses, so the desktop tests could not be configured from this
+branch. Nothing had run them since.
+
+With that fixed, the native tests ran from this branch for the first time, in the kobuild Linux
+image on the docker host. All pass except five:
+
+- `desktop.lightGestureFeedback`: a warmth swipe ends at 45 where the check expects 50. The check
+  expects upstream's snap to tenths; the port snaps to the host's warmth resolution since
+  `ef202966` (2026-10-29). Not decided: change the check, or keep the port's snap to PocketBook.
+- `build.sourceChecks`: the three `AllowBlocking` reasons of `platforms/pocketbook/host/host.cpp`
+  that are not in the allowlist.
+- `desktop.pluginLateCardAddsChoice`: fails on `kobo-develop` too, since before this merge.
+- `model.annotation-database` and `model.diagnostics`: their 30 s limit on that host's disk; both
+  pass when run by hand.
+
+Not done: the parsed-book cache that upstream now also keeps on Android
+(`OpenRequest::documentCachePath`) is still not set here, so a reopened book is parsed again as
+before.
+
+Device backup before the update, with the previous package:
+`backups/era-lite-before-beta-9-20261119`.

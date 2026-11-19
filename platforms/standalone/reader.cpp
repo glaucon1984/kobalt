@@ -72,9 +72,6 @@ std::unique_ptr<ReadingBridge> platformLibraryBridge(const QString &, const QStr
     return nullptr;
 }
 #endif
-// Match the native host: engine, window, then presentation.
-constexpr int openingBarEngine = 60, openingBarWindow = 80;
-
 QString recentText(QString text)
 {
     // Keep metadata and the optional cover below the 256 KiB record limit.
@@ -151,30 +148,34 @@ bool ReaderController::resetBook(const QString &path)
     QJsonObject reset{ { "book", identity } };
     if (saved.object.value("hide_book_on_sleep_screen").toBool(false))
         reset["hide_book_on_sleep_screen"] = true;
+    // Moved sleep-screen positions belong to the book, like its privacy choice.
+    const auto positions = saved.object.value("sleep_positions").toObject();
+    if (!positions.isEmpty())
+        reset["sleep_positions"] = positions;
     return storage::writeBookState(paths, identity, reset);
 }
 
 void ReaderController::open(const QString &path, QSize pixels, QString sourceKey,
-                            bool restartAtStart)
+                            bool restartAtStart, QString position)
 {
     if (phase == Phase::Reading && path == current)
         return;
+    BookOpen request{ path, std::move(sourceKey), std::move(position), pixels, restartAtStart };
     if (!idle()) {
-        pending = path;
-        pendingSourceKey = std::move(sourceKey);
-        pendingSize = pixels;
-        pendingRestartAtStart = restartAtStart;
+        pending = std::move(request);
         retire();
         return;
     }
-    this->restartAtStart = restartAtStart;
-    currentSourceKey = std::move(sourceKey);
-    openingPosition = std::exchange(startPosition, {});
-    begin(path, pixels);
+    begin(std::move(request));
 }
 
-void ReaderController::begin(const QString &path, QSize pixels)
+void ReaderController::begin(BookOpen book)
 {
+    const auto &path = book.path;
+    const auto pixels = book.pixels;
+    restartAtStart = book.restartAtStart;
+    currentSourceKey = std::move(book.sourceKey);
+    openingPosition = std::move(book.position);
     // Known exception: opening from the library prepares the profile on the
     // main thread, also while another book is still open.
     mainthread::AllowBlocking allow("library opening");
@@ -275,6 +276,11 @@ void ReaderController::begin(const QString &path, QSize pixels)
     request.positions = pocketbook::positionCodec();
 #endif
 #ifdef Q_OS_ANDROID
+    // The parsed book, as on Kobo: Hybrid shows the whole book soon after a
+    // reopening instead of building it again. The app's cache folder holds
+    // it, so the system can reclaim the space and backups leave it out.
+    request.documentCachePath =
+            QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/blaze-documents";
     // Materialize the selected document trees before the engine discovers
     // fonts. This factory runs on the opening worker, after the old reader drains.
     const auto resources = request.resources;
@@ -412,19 +418,21 @@ void ReaderController::begin(const QString &path, QSize pixels)
                         emit guard->opened();
                 });
             },
-            [guard, lastStage = OpeningStage::Content,
+            [guard, lastStage = OpeningStage::Content, lastPercent = -1,
              painted = QElapsedTimer{}](OpeningStage stage, int percent) mutable {
                 if (!guard || guard->phase != Phase::Opening)
                     return;
                 percent = qBound(0, percent, 100);
+                if (stage < lastStage || (stage == lastStage && percent <= lastPercent))
+                    return;
                 // Match Kobo's progress cadence to avoid excessive e-ink redraws.
                 if (stage == lastStage && percent != 100 && painted.isValid()
                     && painted.elapsed() < 200)
                     return;
                 lastStage = stage;
+                lastPercent = percent;
                 painted.start();
-                emit guard->openingProgress((int(stage) * 100 + percent) * openingBarEngine
-                                            / ((int(OpeningStage::Ready) + 1) * 100));
+                emit guard->openingProgress(openingProgressPercent(stage, percent));
             },
             [guard](QImage cover) {
                 if (guard && guard->phase == Phase::Opening)
@@ -438,7 +446,7 @@ void ReaderController::begin(const QString &path, QSize pixels)
 
 void ReaderController::close()
 {
-    pending.clear();
+    pending = {};
     if (idle())
         emit closed();
     else
@@ -473,9 +481,11 @@ void ReaderController::release()
 {
     if (lease)
         lease->cancel();
-    if (window_) {
-        window_->finished = {};
-        delete window_.data();
+    if (auto *window = window_.data()) {
+        window->finished = {};
+        // Removing child widgets sends events through the host's application filter.
+        window_.clear();
+        delete window;
     }
     opening.reset();
     QPointer<ReaderController> guard(this);
@@ -490,11 +500,9 @@ void ReaderController::release()
             guard->current.clear();
             guard->phase = Phase::Idle;
             reportBookClose(std::exchange(guard->closing, {}));
-            if (!guard->pending.isEmpty()) {
-                guard->restartAtStart = std::exchange(guard->pendingRestartAtStart, false);
-                guard->currentSourceKey = std::exchange(guard->pendingSourceKey, {});
-                guard->begin(std::exchange(guard->pending, {}), guard->pendingSize);
-            } else
+            if (!guard->pending.path.isEmpty())
+                guard->begin(std::exchange(guard->pending, {}));
+            else
                 emit guard->closed();
         });
     });

@@ -242,7 +242,8 @@ public:
     void setCover(QImage image)
     {
         // An early cache miss is not proof that the publication has no cover.
-        if (!showCover || image.isNull())
+        // Before prepareControls() only the logo shows.
+        if (!showCover || image.isNull() || !cover)
             return;
         // Compare the source pixels per painted pixel after fitting the cover.
         // A late thumbnail must not replace a sharper image delivered earlier.
@@ -299,6 +300,8 @@ public:
     void setProgress(int percent)
     {
         auto *bar = progress;
+        if (!bar)
+            return;
         const int value = qMax(bar->value(), percent);
         if (bar->value() == value)
             return;
@@ -314,6 +317,9 @@ public:
 
     void showFallback(OpeningFallback state)
     {
+        if (!progress)
+            prepareControls(qt::object({ { "dark_mode", property("reader_dark").toBool() },
+                                         { "show_opening_cover", showCover } }));
         fallback = true;
         automatic = state == OpeningFallback::Protected || state == OpeningFallback::Remembered;
         storageFailure = state == OpeningFallback::Storage;
@@ -356,7 +362,7 @@ public:
 
     void setReopening()
     {
-        if (!fallback && !delayed)
+        if (hint && !fallback && !delayed)
             hint->setText(QLocale().toUpper(strings::get("opening.reopening")));
     }
 
@@ -605,8 +611,10 @@ private:
     bool delayed = false;
     std::shared_ptr<CoverRead> coverRead;
     QProgressBar *progress = nullptr;
-    QLabel *brand, *label, *hint;
-    OpeningRedirect *redirect;
+    QLabel *brand = nullptr;
+    QLabel *label = nullptr;
+    QLabel *hint = nullptr;
+    OpeningRedirect *redirect = nullptr;
     ui::ChoiceModal *failureDialog = nullptr;
     bool storageFailure = false;
     bool fallback = false, automatic = false;
@@ -614,7 +622,7 @@ private:
     const bool embedded;
     bool showCover;
     QTimer hintTimer;
-    ui::Button *cancel;
+    ui::Button *cancel = nullptr;
     bool painted = false;
     std::function<void()> firstPaint;
 };
@@ -727,21 +735,44 @@ std::unique_ptr<ReaderOpeningView> createOpeningSurface(QWidget *parent, bool da
     return std::make_unique<OpeningView>(parent, preferences, std::move(presentation), false, true);
 }
 
-SaveErrorView::SaveErrorView(QWidget *parent, const QString &error, bool retried)
+SaveErrorView::SaveErrorView(QWidget *parent)
+    : ui::ChoiceModal(parent,
+                      { strings::get("sleep.reading_time_failed_detail"),
+                        strings::get("sleep.reading_time_failed"),
+                        {} },
+                      { strings::get("closing.return"), "rrSleepSaveReturn" },
+                      { strings::get("sleep.retry_save"), "rrSleepSaveRetry" })
+{
+    setObjectName("rrSleepSaveError");
+}
+
+SaveErrorView::SaveErrorView(QWidget *parent, const QString &error, bool retried, Cause cause,
+                             bool savedLocally)
     : ui::ChoiceModal(
               parent,
-              { strings::get("closing.failed_detail")
+              { strings::get(cause == Cause::TimedOut ? "closing.timeout_detail"
+                                                      : "closing.failed_detail")
                         + (error.isEmpty() ? QString() : "\n\n" + error)
-                        + (retried ? "\n\n" + strings::get("closing.quit_warning") : QString()),
-                strings::get("closing.failed"),
+                        + (retried ? "\n\n" + strings::get("closing.quit_warning")
+                                   : savedLocally
+#ifdef KOBALT_POCKETBOOK
+                                   // The native progress here is the firmware library's.
+                                   ? "\n\n" + strings::get("closing.close_now_detail_pocketbook")
+#else
+                                   ? "\n\n" + strings::get("closing.close_now_detail")
+#endif
+                                   : QString()),
+                strings::get(cause == Cause::TimedOut ? "closing.timeout" : "closing.failed"),
                 {} },
               { strings::get("closing.return"), "rrCloseSaveReturn" },
               { strings::get("closing.retry"), "rrCloseSaveRetry" })
 {
     setObjectName("rrCloseSaveError");
-    if (retried) {
-        quit = ui::makeModalButton(card(), { strings::get("closing.quit"), "rrCloseSaveQuit" },
-                                   false);
+    if (retried || savedLocally) {
+        quit = ui::makeModalButton(
+                card(),
+                { strings::get(retried ? "closing.quit" : "closing.close_now"), "rrCloseSaveQuit" },
+                false);
         quit->ensurePolished();
         quit->setFixedHeight(ui::metrics::chrome::actionHeight);
         card()->rows()->addWidget(quit);
