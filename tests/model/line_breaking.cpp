@@ -1,6 +1,8 @@
 #include "reader_inputs.h"
 #include "support/qt_compat.h"
 #include "engine/blaze/adapter/engine_document.h"
+#include <lvtinydom.h>
+#include <textlang.h>
 #include <QDir>
 #include <QGuiApplication>
 #include <cstdio>
@@ -12,12 +14,40 @@ struct Layout
     QRect iterationMark;
 };
 
-static Layout render(const QByteArray &mode)
+static void checkParagraphBreaks()
 {
-    const QByteArray content =
-            QByteArray("<html xmlns='http://www.w3.org/1999/xhtml'><head><style>")
-            + "html,body{margin:0;padding:0}p{margin:0;text-indent:0;font-family:'Noto Serif CJK JP';font-size:32px;line-height:1.25;line-break:"
-            + mode + "}</style></head><body><p lang='ja'>日本語々日本語日本語</p></body></html>";
+    ldomDocument document;
+    auto *node = document.getRootNode()->insertChildText(lString32(U"fixture"));
+    auto checkBreak = [&](const lString32 &text, const lChar32 *tag, css_line_break_t lineBreak,
+                          css_word_break_t wordBreak, int position, bool allowed) {
+        auto *language = TextLangMan::getTextLangCfg(lString32(tag), true);
+        for (int visit = 0; visit < 2; ++visit) {
+            const auto reuses = document.paragraphBreakReuses();
+            const auto *breaks = document.paragraphBreaks(node, text.c_str(), text.length(),
+                                                          language, lineBreak, wordBreak);
+            require(breaks && (breaks[position] == LINEBREAK_ALLOWBREAK) == allowed,
+                    "Cached paragraph break does not match its text, language and CSS");
+            // Each case changes one input, so only the second visit reuses decisions.
+            require(document.paragraphBreakReuses() == reuses + (visit == 1 ? 1u : 0u),
+                    "A paragraph break lookup reused the wrong decisions");
+        }
+    };
+    // Every request uses the same slot. Change one input at a time.
+    checkBreak(U"字々字", U"ja", css_lb_loose, css_wb_normal, 1, true);
+    checkBreak(U"字々字", U"ja", css_lb_strict, css_wb_normal, 1, false);
+    checkBreak(U"字字字", U"ja", css_lb_strict, css_wb_normal, 1, true);
+    checkBreak(U"abc", U"en", css_lb_auto, css_wb_normal, 1, false);
+    checkBreak(U"abc", U"en", css_lb_auto, css_wb_break_all, 1, true);
+    checkBreak(U"x a t", U"en", css_lb_auto, css_wb_normal, 4, true);
+    checkBreak(U"x a t", U"pl", css_lb_auto, css_wb_normal, 4, false);
+    checkBreak(U"x  y", U"en", css_lb_auto, css_wb_normal, 3, true);
+    checkBreak(U"x\u00a0y", U"en", css_lb_auto, css_wb_normal, 2, false);
+    checkBreak(U"x\u00a0y", U"en", css_lb_cr_loose, css_wb_normal, 2, true);
+    checkBreak(U"x \u2060y", U"en", css_lb_auto, css_wb_normal, 3, false);
+}
+
+static void open(kobalt::EngineDocument &model, const QByteArray &content, QSize size)
+{
     const QMap<QString, QByteArray> data{
         { "mimetype", "application/epub+zip" },
         { "META-INF/container.xml",
@@ -36,12 +66,118 @@ static Layout render(const QByteArray &mode)
                 return sink(bytes.constData(), bytes.size());
             },
             std::make_shared<std::atomic_bool>(false));
-    kobalt::EngineDocument model(kobalt::test::readerFonts());
     QString error;
     require(model.openResources(
-                    resources, sizes, QSize(122, 480),
+                    resources, sizes, size,
                     kobalt::qt::object({ { "margin_pixels", 0 }, { "font_pixels", 32 } }), &error),
             qPrintable(error));
+}
+
+// A reflow reuses the break decisions of the earlier layout. Its lines must
+// match the layout that computed them.
+static void checkReflowReusesBreaks()
+{
+    const QByteArray content =
+            "<html xmlns='http://www.w3.org/1999/xhtml'><head><style>"
+            "html,body{margin:0;padding:0}p{margin:0;text-indent:0;font-size:20px;"
+            "line-height:1.25}</style></head><body>"
+            "<p lang='en'>Breaking lines again after a reflow must give the same result, "
+            "with non\u2011breaking hyphens, an em\u2014dash and a long "
+            "word like incomprehensibilities.</p>"
+            "<p lang='ja'>日本語々日本語日本語、「かな」とカナ。日本語日本語。</p>"
+            "</body></html>";
+    // Pages two lines tall, so the page starts follow the line breaks. The
+    // first layout computes the decisions; the return to its width reuses them.
+    const auto starts = [](const kobalt::EngineDocument &model) {
+        QStringList result;
+        for (int page = 0; page < model.pages(); ++page)
+            result << model.pageStart(page);
+        return result;
+    };
+    for (const int width : { 180, 260 }) {
+        kobalt::EngineDocument model(kobalt::test::readerFonts());
+        open(model, content, QSize(width, 50));
+        const auto computed = starts(model);
+        require(computed.size() > 4, "The paragraphs did not span several pages");
+        // A wider margin narrows the text, then the original margin restores it.
+        const auto margin = [&model](int pixels) {
+            return model.applyAppearance(
+                    kobalt::appearance::Patch(kobalt::qt::object({ { "margin_pixels", pixels } })));
+        };
+        require(margin(37) && starts(model) != computed && margin(0),
+                "Cannot reflow the paragraphs");
+        require(starts(model) == computed,
+                qPrintable(QString("Reused break decisions changed the lines at width %1")
+                                   .arg(width)));
+    }
+}
+
+// One line per page lets the test inspect the source offset of every wrap.
+static void checkThaiWraps()
+{
+    auto fonts = kobalt::test::readerFonts();
+    fonts.sources.bundled = fonts.sources.bundled.filter("NotoSerifThai");
+    require(!fonts.sources.bundled.isEmpty(), "The Thai font fixture is missing");
+
+    for (const bool hinted : { false, true }) {
+        // Preposed vowel plus consonant, consonant pair, and two base-plus-mark pairs.
+        const auto sample = hinted ? QStringLiteral("ไป\u200bพบ\u200bกิ\u200bก้\u200b")
+                                   : QStringLiteral("ไปพบกิก้");
+        const auto content =
+                QStringLiteral("<html xmlns='http://www.w3.org/1999/xhtml'><head><style>"
+                               "html,body,p{margin:0;padding:0}p{font-family:'Noto Serif Thai';"
+                               "font-size:32px;text-indent:0;text-align:left;line-height:1.25}"
+                               "</style></head><body><p lang='th'>%1</p></body></html>")
+                        .arg(sample.repeated(36))
+                        .toUtf8();
+        for (const int width : { 110, 128, 140 }) {
+            kobalt::EngineDocument model(fonts);
+            open(model, content, QSize(width, 50));
+            require(model.pages() > 10, "The Thai passage did not wrap across enough pages");
+            for (int page = 1; page < model.pages(); ++page) {
+                bool parsed = false;
+                const int offset = model.pageStart(page).section('.', -1).toInt(&parsed);
+                require(parsed && offset > 0, "The Thai page start has no source offset");
+                const int boundary = offset % sample.size();
+                const bool valid = hinted ? boundary % 3 == 0
+                                          : boundary != 1 && boundary != 5 && boundary != 7;
+                require(valid,
+                        qPrintable(QStringLiteral("Thai wrap at offset %1 at width %2")
+                                           .arg(offset)
+                                           .arg(width)));
+            }
+        }
+    }
+
+    // The first vowel alone is wider than the line. Every page still consumes
+    // one complete group, including the final group at the paragraph end.
+    const QByteArray oversized = "<html xmlns='http://www.w3.org/1999/xhtml'><head><style>"
+                                 "html,body,p{margin:0;padding:0}p{font-family:'Noto Serif Thai';"
+                                 "font-size:280px;text-indent:0;text-align:left;line-height:1.25}"
+                                 "</style></head><body><p lang='th'>ไปไปไปไป</p></body></html>";
+    kobalt::EngineDocument narrow(fonts);
+    open(narrow, oversized, QSize(80, 440));
+    require(narrow.pages() == 4, "An oversized Thai group must advance exactly one line");
+    for (int page = 1; page < narrow.pages(); ++page) {
+        bool parsed = false;
+        const int offset = narrow.pageStart(page).section('.', -1).toInt(&parsed);
+        require(parsed && offset == page * 2,
+                "A narrow page must begin with a complete Thai group");
+    }
+}
+
+static Layout render(const QByteArray &mode)
+{
+    const QByteArray content =
+            QByteArray("<html xmlns='http://www.w3.org/1999/xhtml'><head><style>")
+            + "html,body{margin:0;padding:0}p{margin:0;text-indent:0;font-family:'Noto Serif CJK JP';font-size:32px;line-height:1.25;line-break:"
+            + mode + "}</style></head><body><p lang='ja'>日本語々日本語日本語</p></body></html>";
+    kobalt::EngineDocument model(kobalt::test::readerFonts());
+    open(model, content, QSize(122, 480));
+    if (mode == "strict") {
+        checkReflowReusesBreaks();
+        checkParagraphBreaks();
+    }
     QVector<kobalt::SearchHit> hits;
     for (int page = 0; page < model.pages(); ++page)
         hits += model.searchPage("々", page).hits;
@@ -59,6 +195,7 @@ int main(int argc, char **argv)
     // Keep the narrow CSS-pixel viewport used to distinguish these two
     // line-break modes. Device-density CSS sizing has its own reader check.
     const int previousPpi = kobalt::readingPpi.exchange(96);
+    checkThaiWraps();
     const auto strict = render("strict");
     const auto loose = render("loose");
     kobalt::readingPpi.store(previousPpi);

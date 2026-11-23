@@ -39,6 +39,7 @@
 #include <hb.h>
 
 // The formatter uses HarfBuzz's default Unicode functions.
+// Blaze: ASCII gets Latin or Common without calling hb_unicode_script().
 static inline hb_script_t koblazeUnicodeScript( hb_unicode_funcs_t * funcs, lChar32 c ) {
     if ( c < 0x80 )
         return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ? HB_SCRIPT_LATIN : HB_SCRIPT_COMMON;
@@ -48,6 +49,59 @@ static inline hb_script_t koblazeUnicodeScript( hb_unicode_funcs_t * funcs, lCha
 
 #if (USE_FRIBIDI==1)
 #include <fribidi.h>
+#endif
+
+#if USE_LIBUNIBREAK == 1
+// Blaze: one libunibreak step, shared by the break loop and paragraphBreaks().
+// Upstream has this code inline in the loop.
+static int nextLineBreak(LineBreakContext *ctx, TextLangCfg *language, const lChar32 *text,
+                         int pos, int remaining, css_line_break_t lineBreak,
+                         css_word_break_t wordBreak, bool cssTweaks)
+{
+    lChar32 ch = text[pos];
+    if (language->hasLBCharSubFunc())
+        ch = language->getLBCharSubFunc()(ctx, text, pos, remaining);
+    if (cssTweaks)
+        ch = language->getCssLbCharSub(lineBreak, wordBreak, ctx, text, pos, remaining, ch);
+    return lb_process_next_char(ctx, (utf32_t)ch);
+}
+
+// Blaze: keeps the libunibreak decisions of a paragraph so that reflow does not run libunibreak again.
+const lUInt8 *ldomDocument::paragraphBreaks(ldomNode *node, const lChar32 *text, int length,
+                                            TextLangCfg *language, css_line_break_t lineBreak,
+                                            css_word_break_t wordBreak)
+{
+    // Use a prime slot count because a node index also carries type bits.
+    // A collision replaces a slot. Each document retains at most 127 x 2048 characters.
+    if (length <= 0 || length > 2048 || !node->isText())
+        return NULL;
+    if (_paragraphBreaks.empty())
+        _paragraphBreaks.resize(127);
+    auto &entry = _paragraphBreaks[(lUInt32)node->getDataIndex() % _paragraphBreaks.size()];
+    // TextLangCfg builds its line-break table, CJK classification and substitution
+    // function once from this tag. Hyphenation and quote nesting are independent.
+    const lString32 tag = language->getLangTag();
+    if (entry.text.size() == (size_t)length && entry.language == tag &&
+        entry.lineBreak == lineBreak && entry.wordBreak == wordBreak &&
+        memcmp(entry.text.data(), text, length * sizeof(lChar32)) == 0) {
+        ++_paragraphBreakReuses;
+        return entry.decisions.data();
+    }
+
+    entry.decisions.resize(length);
+    entry.text.assign(text, text + length);
+    entry.language = tag;
+    entry.lineBreak = lineBreak;
+    entry.wordBreak = wordBreak;
+    LineBreakContext ctx;
+    lb_init_break_context(&ctx, 0x200D, NULL);
+    ctx.lbpLang = language->getLBProps();
+    const bool cssTweaks = lineBreak > css_lb_auto || wordBreak > css_wb_break_word;
+    for (int i = 0; i < length; ++i)
+        entry.decisions[i] = nextLineBreak(&ctx, language, text, i, length - 1 - i,
+                                          lineBreak, wordBreak, cssTweaks);
+    return entry.decisions.data();
+}
 #endif
 
 #define SPACE_WIDTH_SCALE_PERCENT 100
@@ -380,6 +434,7 @@ int getLTextExtraProperty( src_text_fragment_t * srcline, ltext_extra_t extra_pr
     if ( extra_property == LTEXT_EXTRA_CSS_WORD_BREAK ) {
         return style->word_break; // more than 1 possibly interesting value
     }
+    // Blaze: the two extra properties below are new.
     if ( extra_property == LTEXT_EXTRA_CSS_TEXT_EMPHASIS ) {
         return (int)style->text_emphasis_style; // css_text_emphasis_style_t value
     }
@@ -1255,6 +1310,7 @@ public:
         m_para_dir_is_rtl = false;
         #if (USE_FRIBIDI==1)
         bool has_rtl = false; // if no RTL char, no need for expensive bidi processing
+        // Blaze: used by the U+FEFF check on has_rtl below.
         const bool joiner_is_plain = koblazePlainJoiner();
         // todo: according to https://www.w3.org/TR/css-text-3/#bidi-linebox
         // the bidi direction, if determined from the text itself (no dir= from
@@ -1311,7 +1367,7 @@ public:
                     if ( prev_node && this_node ) {
                         ldomXRange r = ldomXRange( ldomXPointer(prev_node,0), ldomXPointer(this_node,0) );
                         ldomNode * parent = r.getNearestCommonParent();
-                        // Prefix runs can share one text node. Its containing
+                        // Blaze: prefix runs can share one text node. Its containing
                         // element owns the white-space style, not the text.
                         if ( parent && parent->isText() )
                             parent = parent->getParentNode();
@@ -1491,6 +1547,20 @@ public:
 
                 int len = src->t.len - src->t.offset;
                 lStr_ncpy( m_text+pos, src->t.text + src->t.offset, len );
+                #if USE_LIBUNIBREAK == 1
+                // Blaze: reuse the line break decisions of this paragraph, see paragraphBreaks().
+                // Only a paragraph with one text fragment can use them. That fragment starts at
+                // pos 0 with the initial joiner. The loop below marks controls and collapsed spaces in m_flags but does
+                // not change m_text. Contextual substitutions therefore see the
+                // same preceding and following characters in both paths. A later
+                // fragment would also need the final libunibreak state.
+                const lUInt8 *breaks = NULL;
+                if (end == start + 1 && src->object) {
+                    ldomNode *node = (ldomNode *)src->object;
+                    breaks = node->getDocument()->paragraphBreaks(node, m_text, len, src->lang_cfg,
+                                                                  css_linebreak, css_wordbreak);
+                }
+                #endif
                 if ( i==0 || (src->flags & LTEXT_FLAG_NEWLINE) )
                     m_flags[pos] = LCHAR_MANDATORY_NEWLINE;
 
@@ -1716,20 +1786,9 @@ public:
                             m_flags[pos] |= LCHAR_DEPRECATED_WRAP_AFTER;
                         }
                     }
-                    lChar32 ch = m_text[pos];
-                    if ( src->lang_cfg->hasLBCharSubFunc() ) {
-                        // Lang specific function may want to substitute char (for
-                        // libunibreak only) to tweak line breaking around it
-                        ch = src->lang_cfg->getLBCharSubFunc()(&lbCtx, m_text, pos, len-1 - k);
-                        // We do this before the following, to allow this lang specific function
-                        // to possibly tweak the more generic getCssLbCharSub()
-                    }
-                    if ( has_css_line_breaking_tweaks ) {
-                        // CSS line breaking tweaks by char substitution (we need to provide our 'ch'
-                        // as it may have been tweaked and differ from m_text[pos]...)
-                        ch = src->lang_cfg->getCssLbCharSub(css_linebreak, css_wordbreak, &lbCtx, m_text, pos, len-1 - k, ch);
-                    }
-                    int brk = lb_process_next_char(&lbCtx, (utf32_t)ch);
+                    int brk = breaks ? breaks[k] :
+                            nextLineBreak(&lbCtx, src->lang_cfg, m_text, pos, len - 1 - k,
+                                          css_linebreak, css_wordbreak, has_css_line_breaking_tweaks);
                     if ( pos > 0 ) {
                         // printf("between <%c%c>: brk %d\n", m_text[pos-1], m_text[pos], brk);
                         // printf("between <%x.%x>: brk %d\n", m_text[pos-1], m_text[pos], brk);
@@ -2155,6 +2214,7 @@ public:
                 if ( usingHarfbuzz && !isObject ) {
                     // While we have the hb_script here, we'll update m_flags[i]
                     // with LCHAR_LOCKED_SPACING if the script is cursive
+                    // Blaze: koblazeUnicodeScript() instead of hb_unicode_script().
                     hb_script_t script = koblazeUnicodeScript(_hb_unicode_funcs, m_text[i]);
                     if ( script != HB_SCRIPT_COMMON && script != HB_SCRIPT_INHERITED && script != HB_SCRIPT_UNKNOWN ) {
                         if ( script != prevScript ) {
@@ -2215,6 +2275,7 @@ public:
                         if ( lastDirection < 0 )
                             hints |= LFNT_HINT_DIRECTION_IS_RTL;
                     }
+                    // Blaze: vertical text measures against the page height, not 0x7FFF.
                     int max_width_for_measure = 0x7FFF; //pbuffer->width,
                     if ( css_wm_is_vertical(m_writing_mode) ) {
                         max_width_for_measure = m_pbuffer->page_height;
@@ -3302,6 +3363,7 @@ void alignLineHorizontal( LVFormatter* fmt, formatted_line_t * frmline, int alig
                 // we will also not apply any added letter spacing to CJK glyphs, as each already
                 // got the extra space added - and if using this option with CJK, we'd rather have
                 // them get less space added, and western/numbers get the expansion).
+                // Blaze: skip vertical TCY words, like CJK words, for letter-spacing.
                 if ( word->distinct_glyphs <= 0
                         || word->flags & (LTEXT_WORD_IS_CJK | LTEXT_WORD_IS_TCY) )
                     continue;
@@ -3321,6 +3383,7 @@ void alignLineHorizontal( LVFormatter* fmt, formatted_line_t * frmline, int alig
                 bool can_try_larger = false;
                 for ( int i=0; i<(int)frmline->word_count; i++ ) {
                     formatted_word_t * word = &frmline->words[i];
+                    // Blaze: skip vertical TCY words, like CJK words, for letter-spacing.
                     if ( word->distinct_glyphs <= 0
                             || word->flags & (LTEXT_WORD_IS_CJK | LTEXT_WORD_IS_TCY) )
                         continue;
@@ -3348,6 +3411,7 @@ void alignLineHorizontal( LVFormatter* fmt, formatted_line_t * frmline, int alig
                     added_spacing = 0;
                     for ( int i=0; i<(int)frmline->word_count; i++ ) {
                         formatted_word_t * word = &frmline->words[i];
+                        // Blaze: skip vertical TCY words, like CJK words, for letter-spacing.
                         if ( word->distinct_glyphs <= 0
                                 || word->flags & (LTEXT_WORD_IS_CJK | LTEXT_WORD_IS_TCY) )
                             continue;
@@ -3368,6 +3432,7 @@ void alignLineHorizontal( LVFormatter* fmt, formatted_line_t * frmline, int alig
                 int shift_x = 0;
                 for ( int i=0; i<(int)frmline->word_count; i++ ) {
                     formatted_word_t * word = &frmline->words[i];
+                    // Blaze: skip vertical TCY words, like CJK words, for letter-spacing.
                     if ( word->distinct_glyphs > 0
                             && !(word->flags & (LTEXT_WORD_IS_CJK | LTEXT_WORD_IS_TCY)) ) {
                         int added_width = word->distinct_glyphs * word->added_letter_spacing;
@@ -3424,10 +3489,10 @@ void alignLineHorizontal( LVFormatter* fmt, formatted_line_t * frmline, int alig
         if ( extra_width < 0 && !is_vert ) {
             // line is too wide
             // reduce spaces to fit line
-            // (skipped for vertical text: the formatter already limits column content
+            // Blaze: skipped for vertical text. The formatter already limits column content
             // via char_count_adv, and space reduction shifts inline-box word->x values
             // without the vstate.vert_min_next_x clamping that protects plain characters,
-            // causing ruby groups to appear shifted upward on screen)
+            // causing ruby groups to appear shifted upward on screen.
             int extraSpace = -extra_width;
             int totalSpace = 0;
             int i;
@@ -4049,6 +4114,7 @@ void addLineHorizontal( LVFormatter* fmt, int start, int end, int x, src_text_fr
                     // To be done only when we met multiple scripts in a same paragraph
                     // while measuring (which we checked only when using Harfbuzz kerning)
                     if ( fmt->m_has_multiple_scripts && !(fmt->m_flags[i] & LCHAR_IS_OBJECT) ) {
+                        // Blaze: koblazeUnicodeScript() instead of hb_unicode_script().
                         hb_script_t script = koblazeUnicodeScript(_hb_unicode_funcs, fmt->m_text[i]);
                         if ( script != HB_SCRIPT_COMMON && script != HB_SCRIPT_INHERITED && script != HB_SCRIPT_UNKNOWN ) {
                             if ( prevScript != HB_SCRIPT_COMMON && script != prevScript ) {
@@ -5370,13 +5436,35 @@ static void tryHyphenBreak(
     }
 }
 
-    /// Split paragraph into lines
+static bool thaiDependentVowelOrMark(lChar32 ch)
+{
+    return (ch >= 0x0e30 && ch <= 0x0e3a) || ch == 0x0e45
+            || (ch >= 0x0e47 && ch <= 0x0e4e);
+}
+
+static bool insideThaiLetterGroup(const LVFormatter* fmt, int boundary)
+{
+    if (boundary <= 0 || boundary >= fmt->m_length)
+        return false;
+    const lChar32 before = fmt->m_text[boundary - 1];
+    const lChar32 after = fmt->m_text[boundary];
+    const bool beforeConsonant = before >= 0x0e01 && before <= 0x0e2e;
+    const bool leadingVowel = before >= 0x0e40 && before <= 0x0e44;
+    const bool joined = (leadingVowel && after >= 0x0e01 && after <= 0x0e2e)
+            || (thaiDependentVowelOrMark(after)
+                && (beforeConsonant || thaiDependentVowelOrMark(before)));
+    // The first-line clone and the start of the original text are separate runs.
+    return joined && !((fmt->m_srcs[boundary - 1]->flags ^ fmt->m_srcs[boundary]->flags)
+                       & LTEXT_IS_FIRST_LINE_CLONE);
+}
+
 // -----------------------------------------------------------------------------
 // processParagraphHorizontal
 // Origin: upstream lvtextfm.cpp `void LVFormatter::processParagraph(...)` (~line
 // 4692 pre-f8b0bbe1).  Member -> free function as above.  The vertical-mode
 // sibling is processParagraphVertical in lvtextfm_vert.cpp.
 // -----------------------------------------------------------------------------
+/// Split paragraph into lines
 void processParagraphHorizontal( LVFormatter* fmt, int start, int end, bool isLastPara )
     {
         TR("processParagraph(%d, %d)", start, end);
@@ -5831,8 +5919,20 @@ void processParagraphHorizontal( LVFormatter* fmt, int start, int end, bool isLa
             else {
                 if ( wrapPos < lastNormalWrap )
                     wrapPos = lastNormalWrap;
-                if ( wrapPos < 0 ) // no wrap opportunity (e.g. very long non-hyphenable word)
-                    wrapPos = i-1;
+                if ( wrapPos < 0 ) {
+                    // An emergency wrap can split Thai text that has no word
+                    // boundaries. Keep attached vowels and marks with their base.
+                    int boundary = i;
+                    while (boundary > pos && insideThaiLetterGroup(fmt, boundary))
+                        --boundary;
+                    if (boundary == pos) {
+                        // Fit at least one complete group even if it is too wide.
+                        boundary = i;
+                        while (insideThaiLetterGroup(fmt, boundary))
+                            ++boundary;
+                    }
+                    wrapPos = boundary - 1;
+                }
                 #if (USE_LIBUNIBREAK!=1)
                 if ( wrapPos <= upSkipPos ) {
                     // Ensure that what, when dealing with previous line, we pushed to
@@ -6136,6 +6236,7 @@ static void freeFrmLines( formatted_text_fragment_t * m_pbuffer )
 }
 
 // experimental formatter
+// Blaze: Format() takes a writing_mode parameter, stored for Draw() and the vertical formatter.
 lUInt32 LFormattedText::Format(lUInt16 width, lUInt16 page_height, int para_direction,
                 int writing_mode, int usable_left_overflow, int usable_right_overflow, bool hanging_punctuation,
                 BlockFloatFootprint * float_footprint)
@@ -6150,7 +6251,7 @@ lUInt32 LFormattedText::Format(lUInt16 width, lUInt16 page_height, int para_dire
     // format text
     LVFormatter formatter( m_pbuffer );
 
-    // text-indent belongs to the paragraph, not to its first text fragment.
+    // Blaze: text-indent belongs to the paragraph, not to its first text fragment.
     // Enhanced rendering sets it explicitly, including the independent CSS
     // `hanging` modifier.  Keep the old source-fragment convention only as a
     // compatibility fallback for legacy rendering and direct formatter users.
@@ -7024,7 +7125,7 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
 #endif
 
             int text_decoration_back_gap;
-            // Hidden leading words can skip the first assignment. Source indices are unsigned.
+            // Blaze: hidden leading words can skip the first assignment. Source indices are unsigned.
             int lastWordSrcIndex = -1;
             ldomNode * last_vertical_decoration_owner = NULL;
             int last_vertical_decoration_end = -1;
@@ -7263,6 +7364,7 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                     // established the decoration below: descendants such as a larger
                     // <span> must not interrupt their ancestor link's rule.
                     text_decoration_back_gap = 0;
+                    // Blaze: vertical text resolves its decoration continuity in its own code below.
                     if (!is_vertical && j > 0 && word->src_text_index == lastWordSrcIndex) {
                         text_decoration_back_gap = word->x - lastWordEnd;
                     }

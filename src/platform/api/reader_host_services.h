@@ -10,6 +10,7 @@
 #include "light_controls.h"
 #include "safe_area.h"
 #include "window_presentation.h"
+#include <QDateTime>
 #include <QFont>
 #include <QJsonObject>
 #include <QSize>
@@ -92,9 +93,6 @@ struct ReaderHostServices
     bool systemRotation = false;
     bool showNativeReaderOptions = true;
     bool downloadableDictionaries = true;
-    // Build the window ahead of its opening. It stays quiet until
-    // ReaderWindow::activate(); see that function.
-    bool quiet = false;
     // Optional host-resolved high-resolution cover. The reader decodes it on
     // its worker and falls back to the publication cover if it is unusable.
     QString coverImagePath;
@@ -131,9 +129,9 @@ struct ReaderHostServices
     // filter window without waiting. Hosts leave it empty: the reader then
     // uses its own monotonic timer.
     std::function<qint64()> inputMilliseconds;
-    // Optional local time of day in milliseconds for the reader's minute tick;
-    // tests replace it.
-    std::function<int()> millisecondsOfDay;
+    // Optional local wall clock for the minute tick and displayed time. Tests
+    // replace it to advance through minute, date and time zone changes.
+    std::function<QDateTime()> localDateTime;
     // Optional UTC milliseconds that decide today's date in Activity; tests
     // replace it so captures keep their dates.
     std::function<qint64()> activityMilliseconds;
@@ -170,6 +168,7 @@ struct ReaderHostServices
     std::function<std::unique_ptr<DictionaryService>()> dictionary;
     KeyboardFactory keyboard;
     // Optional on hosts whose operating system already supplies connectivity.
+    std::function<bool()> nickelSyncing;
     SyncNetworkFactory syncNetwork;
     // Optional durable handoff after a successful local checkpoint on app pause.
     std::function<void(const QJsonObject &)> deferKosync;

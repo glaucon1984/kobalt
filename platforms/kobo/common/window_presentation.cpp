@@ -1,6 +1,8 @@
 #include "window_presentation.h"
 #include "native_dialog_overlay.h"
 #include "native_font_scale.h"
+#include "native_ui.h"
+#include "../display/sleep_refresh.h"
 #include "support/qt_compat.h"
 #include <QApplication>
 #include <QDialog>
@@ -26,8 +28,9 @@ bool nativeDialog(const QWidget *widget)
 class SleepFrame final : public QWidget
 {
 public:
-    SleepFrame(QWidget *parent, QImage image, Qt::ScreenOrientation orientation)
-        : QWidget(parent), image(std::move(image)), orientation(orientation)
+    SleepFrame(QWidget *parent, QImage image, Qt::ScreenOrientation orientation,
+               platform::SleepRefresh &refresh)
+        : QWidget(parent), image(std::move(image)), orientation(orientation), refresh(refresh)
     {
         setObjectName("rrSleepFrame");
         setAttribute(Qt::WA_OpaquePaintEvent);
@@ -40,13 +43,19 @@ public:
     void replaceImage(QImage next, const QRect &damage)
     {
         image = std::move(next);
-        const auto *screen = QGuiApplication::primaryScreen();
-        const int angle = screen ? screen->angleBetween(orientation, screen->orientation()) : 0;
-        if (!angle) {
+        if (!paintAngle()) {
             update(damage.intersected(rect()));
         } else {
             update();
         }
+    }
+
+    void present(QImage next, Qt::ScreenOrientation nextOrientation)
+    {
+        if (next.cacheKey() == image.cacheKey() && orientation == nextOrientation)
+            return;
+        orientation = nextOrientation;
+        replaceImage(std::move(next), rect());
     }
 
 protected:
@@ -61,21 +70,32 @@ protected:
     void paintEvent(QPaintEvent *) override
     {
         QPainter painter(this);
-        const auto *screen = QGuiApplication::primaryScreen();
-        const int angle = screen ? screen->angleBetween(orientation, screen->orientation()) : 0;
+        const int angle = paintAngle();
         const QSize target = angle % 180 ? QSize(height(), width()) : size();
         painter.translate(width() / 2.0, height() / 2.0);
         painter.rotate(angle);
         painter.drawImage(QRectF(-target.width() / 2.0, -target.height() / 2.0, target.width(),
                                  target.height()),
                           image);
+        refresh.painted(this);
     }
 
 private:
+    int paintAngle() const
+    {
+        const auto *screen = QGuiApplication::primaryScreen();
+        const int angle = screen ? screen->angleBetween(orientation, screen->orientation()) : 0;
+        // Nickel's power view can return to portrait after the capture. On
+        // Clara Colour and BW the panel turns the opposite way for landscape.
+        return bezelOnLeft ? -angle : angle;
+    }
+
     // One opaque screen-sized image, released with the native view or on wake,
     // USB, reader closure or destruction. No file reads or timers during sleep.
     QImage image;
     Qt::ScreenOrientation orientation;
+    platform::SleepRefresh &refresh;
+    const bool bezelOnLeft = nativeLandscapeBezelOnLeft();
 };
 
 class Presentation final : public QObject, public WindowPresentation
@@ -103,10 +123,10 @@ public:
 
     bool supportsSleepScreen() const override { return sleepSupported; }
 
-    bool presentSleepScreen(QImage image, Qt::ScreenOrientation orientation) override
+    bool presentSleepScreen(QImage image, Qt::ScreenOrientation orientation, bool clean) override
     {
-        clearSleepScreen();
         if (!sleepSupported || image.isNull()) {
+            clearSleepScreen();
             return false;
         }
         QWidget *powerView = nullptr;
@@ -116,21 +136,37 @@ public:
             if (widget->inherits("AbstractPowerView") && widget->isVisible()
                 && widget->window()->inherits("MainWindowView")) {
                 if (powerView) {
+                    delete sleepFrame.data();
                     return false;
                 }
                 powerView = widget;
             }
         }
         if (!powerView) {
+            delete sleepFrame.data();
             return false;
         }
-        sleepFrame = new SleepFrame(powerView, std::move(image), orientation);
+        if (sleepFrame && sleepFrame->parentWidget() == powerView) {
+            sleepFrame->present(std::move(image), orientation);
+            return true;
+        }
+        delete sleepFrame.data();
+        if (!presented) {
+            sleepRefresh.begin(clean);
+            presented = true;
+        }
+        sleepFrame = new SleepFrame(powerView, std::move(image), orientation, sleepRefresh);
         sleepFrame->show();
         sleepFrame->raise();
         return true;
     }
 
-    void clearSleepScreen() override { delete sleepFrame.data(); }
+    void clearSleepScreen() override
+    {
+        delete sleepFrame.data();
+        sleepRefresh.reset();
+        presented = false;
+    }
 
     bool updateSleepScreen(QImage image, const QRect &damage) override
     {
@@ -284,6 +320,8 @@ private:
     std::vector<std::unique_ptr<NativeDialogOverlay>> dialogs;
     QPointer<QWidget> reader;
     bool sleepSupported;
+    bool presented = false;
+    platform::SleepRefresh sleepRefresh;
     QPointer<SleepFrame> sleepFrame;
     QVector<QPointer<QWidget>> paused;
 };

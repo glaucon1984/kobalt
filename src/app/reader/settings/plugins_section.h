@@ -27,10 +27,15 @@ namespace kobalt::reader {
 class PluginsSection final : public QObject
 {
 public:
+    // Settings makes the controls, so that they look like its other options and list actions.
+    using MakeOption = std::function<ui::DescribedOption *(const char *name, const QString &label,
+                                                           const QString &description)>;
+    using MakeRow =
+            std::function<ui::CaptionButton *(const QString &label, std::function<void()> action)>;
+
     // Adds its rows to `rows` on `page`; dialogs open over `overlayParent`.
-    // `styleRow` gives a plugin row the look of the other Settings list actions.
     PluginsSection(QWidget *page, QVBoxLayout *rows, QWidget *overlayParent,
-                   const QString &folderLabel, std::function<void(ui::CaptionButton *)> styleRow);
+                   const QString &folderLabel, MakeOption makeOption, MakeRow makeRow);
     ~PluginsSection() override;
 
     // The switches that the open book loaded its plugins with.
@@ -44,6 +49,9 @@ public:
     // Removes a plugin's saved data and reports the result on the main thread.
     std::function<void(const QString &id, std::function<void(bool ok, QString error)> done)>
             deleteRequested;
+    // A plugin row or a dialog made after the page was built; Settings gives it the
+    // reader's text and theme.
+    std::function<void(QWidget *)> widgetCreated;
     void dismissDialogs();
 
     ui::DescribedOption *usePluginsOption() const { return useOption; }
@@ -60,7 +68,7 @@ private:
 
     QWidget *page, *overlayParent;
     QString folderLabel;
-    std::function<void(ui::CaptionButton *)> styleRow;
+    MakeRow makeRow;
     QVBoxLayout *rows;
     ui::DescribedOption *useOption, *firstOption;
     QLabel *hint, *blockedLabel;

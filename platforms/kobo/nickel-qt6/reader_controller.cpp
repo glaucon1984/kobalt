@@ -16,7 +16,6 @@
 #include "platforms/kobo/common/native_ui.h"
 #include "platforms/kobo/common/crash_reports.h"
 #include "support/diagnostics.h"
-#include "ui/style/fonts.h"
 #include "platforms/kobo/common/native_startup.h"
 #include "platforms/kobo/common/native_startup_wait.h"
 #include "platforms/kobo/common/reader_environment.h"
@@ -74,7 +73,8 @@ extern "C" __attribute__((visibility("default"))) void
 kobalt_handle_opener(void *mixin, const void *volume, const void *context)
 {
     kobalt::nickel::forgetHomeSleepScreen();
-    if (kobalt::readerChoice(volume, alternativeEnabled()) && beginOpening
+    if (!kobalt::NativeLifecycle::stockStorageBlocked()
+        && kobalt::readerChoice(volume, alternativeEnabled()) && beginOpening
         && beginOpening(volume, context))
         return;
     nativeHandleOpener(mixin, volume, context);
@@ -114,7 +114,8 @@ bool enabled()
 // Asset availability is retained between boot and USB storage boundaries.
 bool readerAvailable()
 {
-    return enabled() && environment().assets.available();
+    return !kobalt::NativeLifecycle::stockStorageBlocked() && enabled()
+            && environment().assetsAvailable();
 }
 
 #if defined(KOBALT_BENCHMARK_API) || defined(KOBALT_SCENARIO_PLAYER)
@@ -283,6 +284,8 @@ public:
         test = readJson("/instance/kobalt-startup-test.json");
 #endif
         connect(&retry, &QTimer::timeout, this, [this] {
+            if (kobalt::NativeLifecycle::stockStorageBlocked())
+                return;
             if (++ticks >= 120 && nativeInitialized)
                 retry.stop();
             attempt(false);
@@ -313,18 +316,7 @@ public:
     void start()
     {
         retry.start();
-        kobalt::qt::later(0, this, [this] {
-            environment().verifyAssets(this, "boot", [this](bool valid) {
-                if (valid)
-                    kobalt::ui::prepareOpeningFonts(environment().assets);
-                attempt(false);
-                // The preload at ready skips while the assets are unchecked,
-                // which on a device often outlasts Nickel's startup.
-                if (valid && controller)
-                    controller->preloadLastBook();
-            });
-            attempt(false);
-        });
+        kobalt::qt::later(0, this, [this] { attempt(false); });
     }
 
     bool open(const void *volume, const void *context)
@@ -349,7 +341,26 @@ public:
 
     void attempt(bool fromOpener)
     {
-        if (controller || rejected || initializing)
+        if (rejected || initializing || kobalt::NativeLifecycle::stockStorageBlocked())
+            return;
+        const auto storage = kobalt::NativeLifecycle::stockStorageGeneration();
+        if (!storage)
+            return;
+        if (!environment().verificationForStorage(storage)) {
+            environment().verifyAssets(
+                    this, "boot",
+                    [this](bool valid) {
+                        if (kobalt::NativeLifecycle::stockStorageBlocked())
+                            return;
+                        attempt(false);
+                        // The preload at ready skips while the assets are unchecked,
+                        // which on a device often outlasts Nickel's startup.
+                        if (valid && controller)
+                            controller->preloadLastBook();
+                    },
+                    kobalt::NativeLifecycle::stockStorageGeneration);
+        }
+        if (controller)
             return;
         if (!nativeInitialized && !nativeFinishing && kobalt::nickel::nativeStartupReady()) {
             nativeInitialized = true;
@@ -479,7 +490,7 @@ public:
         environment().reportSession({ { "status", "ready" } });
         kobalt::diagnostic(
                 "ready", { { "startup_ms", double(elapsed.elapsed()) }, { "opener", fromOpener } });
-        candidate->finishPreviewMigration();
+        candidate->finishStartup();
         // Nickel has finished its startup. Get the book shown last ready, so
         // tapping it opens at once.
         candidate->preloadLastBook();

@@ -10,6 +10,8 @@
 #include <QTimer>
 #include <functional>
 
+class QLineEdit;
+
 namespace kobalt::ui {
 class PagerBar;
 
@@ -37,7 +39,7 @@ public:
     // A card taller than `height`, as on a phone in landscape, keeps its first
     // row and its actions and pages the rows between them. Call after
     // fitToWidth(); a card that fits shows every row again.
-    void fitToHeight(int height);
+    void fitToHeight(int height, int fallbackWidth = 0);
 
 protected:
     // A tap on the card's own padding, title or text stays on the card. It
@@ -90,6 +92,10 @@ public:
     }
 
     void fitCard();
+
+    // Keep list pages at the card width unless a row cannot fit on its own.
+    void preferPagingToWidening() { pageBeforeWidening = true; }
+
     void setDelayedProgress(bool active, qint64 elapsedMilliseconds, int percent,
                             const QString &message = {});
     // Window coordinates for a value-only update of the visible progress bar.
@@ -109,7 +115,7 @@ public:
 
     std::function<void()> dismissed;
     // A choice list can page its own rows to fit the available viewport.
-    std::function<void()> fitChoiceContents;
+    std::function<void(bool keepPage)> fitChoiceContents;
 
 protected:
     bool eventFilter(QObject *object, QEvent *event) override;
@@ -122,7 +128,7 @@ protected:
 
 private:
     void updateInputRegion();
-    bool blocksInput = true, dimmed = false;
+    bool blocksInput = true, dimmed = false, pageBeforeWidening = false;
     PopupCard *content;
     QWidget *pointer;
     QRect anchor, cardArea;
@@ -202,6 +208,7 @@ class ChoiceModal : public ModalOverlay
 public:
     ChoiceModal(QWidget *parent, const ModalContent &content, const ModalAction &secondary,
                 const ModalAction &primary);
+    QLineEdit *addPageKeypad(const QString &prefix, const QString &placeholder = {});
 
     QLabel *titleLabel() const { return title; }
 

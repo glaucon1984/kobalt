@@ -14,6 +14,28 @@ int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
 
+    require(secondaryNumberStyles().first() == "upper_roman" && bookPageLabel(1, 2, 3) == "II"
+                    && bookPageLabel(5, 2, 3, "unknown") == "II",
+            "Secondary numbering should default to uppercase Roman");
+
+    struct NumberStyle
+    {
+        QString style, front, back;
+    };
+
+    for (const NumberStyle &example :
+         { NumberStyle{ "roman", "xxvii", "xxvii" }, NumberStyle{ "arabic", "27", "27" },
+           NumberStyle{ "letters", "aa", "aa" }, NumberStyle{ "prefixed", "F27", "B27" },
+           NumberStyle{ "upper_roman", "XXVII", "XXVII" } }) {
+        require(bookPageLabel(26, 27, 30, example.style) == example.front,
+                "Incorrect front matter label");
+        require(bookPageLabel(57, 27, 30, example.style) == example.back,
+                "Incorrect back matter label");
+        require(bookPageLabel(27, 27, 30, example.style) == "1"
+                        && bookPageLabel(30, 27, 30, example.style) == "4",
+                "Secondary style changed main text numbering");
+    }
+
     struct Display
     {
         int page, pages, percent;
@@ -156,8 +178,10 @@ int main(int argc, char **argv)
     // Mark unread can clear the date instead of supplying a newer timestamp.
     unread.modified = 0;
     auto reset = checkpoint;
-    require(resetNativeUnread(reset, unread) && reset == QJsonObject({ { "book", first.book } }),
-            "Nickel's unread status did not reset book settings and position");
+    // Unread resets the position and keeps the book's settings.
+    require(resetNativeUnread(reset, unread)
+                    && reset == QJsonObject({ { "book", first.book }, { "font_pixels", 42 } }),
+            "Nickel's unread status did not reset the position, or reset book settings");
     reset = {};
     auto unreadWithBookmark = unread;
     unreadWithBookmark.location = first.location;

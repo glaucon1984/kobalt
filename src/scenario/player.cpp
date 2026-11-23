@@ -7,13 +7,16 @@
 #include "support/qt_compat.h"
 #include "support/qt_input.h"
 #include "ui/style/metrics.h"
+#include <QAbstractButton>
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QMap>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QSet>
 #include <QTimer>
 #include <QVector>
 #include <QWidget>
@@ -23,26 +26,40 @@
 
 namespace kobalt::scenario {
 namespace {
-// Polls every millisecond without sleeping, so a wait never adds to a measured
-// time. done() is called until it first holds and never again, because a check
-// that reads events consumes what it reads.
+class WaitLoop : public QEventLoop
+{
+public:
+    void wait(int milliseconds)
+    {
+        QTimer deadline;
+        deadline.setTimerType(Qt::PreciseTimer);
+        deadline.setSingleShot(true);
+        QObject::connect(&deadline, &QTimer::timeout, this, &QEventLoop::quit);
+        deadline.start(qMax(0, milliseconds));
+        exec();
+    }
+
+    bool until(const std::function<bool()> &done, int timeout)
+    {
+        QTimer poll;
+        bool met = false;
+        QObject::connect(&poll, &QTimer::timeout, this, [&] {
+            if (done()) {
+                met = true;
+                quit();
+            }
+        });
+        poll.start(16);
+        wait(timeout);
+        return met || done();
+    }
+};
+
+// Other host predicates have no change notification. Limit how often the
+// player samples them so a slow operation can leave the reader thread asleep.
 bool waitUntil(const std::function<bool()> &done, int timeout)
 {
-    if (done())
-        return true;
-    bool met = false;
-    QEventLoop loop;
-    QTimer poll;
-    QElapsedTimer clock;
-    clock.start();
-    QObject::connect(&poll, &QTimer::timeout, &loop, [&] {
-        met = done();
-        if (met || clock.elapsed() > timeout)
-            loop.quit();
-    });
-    poll.start(1);
-    loop.exec();
-    return met;
+    return done() || WaitLoop().until(done, timeout);
 }
 
 // Diagnostics events from any thread, in the order they were written.
@@ -63,6 +80,8 @@ public:
             ++state->counted[name];
             if (name == QLatin1String("operation-start"))
                 ++state->counted[name + '/' + event.value("operation").toString()];
+            if (state->notify)
+                state->notify(event);
         });
     }
 
@@ -93,6 +112,29 @@ public:
         return state->counted;
     }
 
+    bool waitForClose(const std::function<void()> &request, const std::function<bool()> &done,
+                      int timeout)
+    {
+        WaitLoop loop;
+        {
+            QMutexLocker lock(&state->mutex);
+            // Observe the close before requesting it. Keep the event queued
+            // for an explicit event step and check host state on the GUI thread.
+            state->notify = [&](const QJsonObject &event) {
+                if (event.value("event").toString() == QLatin1String("book-close"))
+                    qt::invoke(&loop, [&] {
+                        if (done())
+                            loop.quit();
+                    }, Qt::QueuedConnection);
+            };
+        }
+        request();
+        const bool completed = done() || loop.until(done, timeout);
+        QMutexLocker lock(&state->mutex);
+        state->notify = {};
+        return completed;
+    }
+
     // Consumes events until one matches, and returns it. `where` lists
     // further fields the event must have, such as an operation name. With
     // `earlier`, the events that this sample's steps skipped or passed over
@@ -108,8 +150,9 @@ public:
             return match;
         };
         QJsonObject found;
+        WaitLoop loop;
+        QMutexLocker lock(&state->mutex);
         if (earlier) {
-            QMutexLocker lock(&state->mutex);
             auto &passed = state->passed;
             for (auto it = passed.begin(); it != passed.end(); ++it) {
                 if (matches(*it)) {
@@ -119,29 +162,41 @@ public:
                 }
             }
         }
-        waitUntil(
-                [&] {
-                    QMutexLocker lock(&state->mutex);
-                    auto &queue = state->queue;
-                    while (!queue.empty()) {
-                        const auto event = queue.front();
-                        queue.pop_front();
-                        if (matches(event)) {
-                            found = event;
-                            return true;
-                        }
-                        state->passed.push_back(event);
-                    }
-                    return false;
-                },
-                timeout);
-        return found;
+        const auto takeMatch = [&] {
+            while (!state->queue.empty()) {
+                auto event = state->queue.front();
+                state->queue.pop_front();
+                if (matches(event))
+                    return event;
+                state->passed.push_back(event);
+            }
+            return QJsonObject{};
+        };
+        found = takeMatch();
+        if (!found.isEmpty())
+            return found;
+
+        // Register before unlocking so an event cannot arrive between checking
+        // the queue and starting the wait. Workers only post to the reader loop.
+        bool posted = false;
+        state->notify = [&](const QJsonObject &event) {
+            if (!posted && matches(event)) {
+                posted = true;
+                QMetaObject::invokeMethod(&loop, "quit", Qt::QueuedConnection);
+            }
+        };
+        lock.unlock();
+        loop.wait(timeout);
+        lock.relock();
+        state->notify = {};
+        return takeMatch();
     }
 
 private:
     struct State
     {
         QMutex mutex;
+        std::function<void(const QJsonObject &)> notify;
         std::deque<QJsonObject> queue;
         // Events that left the queue without a match since the sample started.
         std::deque<QJsonObject> passed;
@@ -221,6 +276,31 @@ bool pointIn(QWidget *target, const QJsonValue &at, QPoint &point)
     return false;
 }
 
+// The value at a dotted path, such as `display_settings.dark_mode`.
+QJsonValue lookup(const QJsonObject &object, const QString &path)
+{
+    QJsonValue value = object;
+    for (const auto &key : path.split('.'))
+        value = value.toObject().value(key);
+    return value;
+}
+
+// A value as a report shows it.
+QString text(const QJsonValue &value)
+{
+    if (value.isString())
+        return '"' + value.toString() + '"';
+    if (value.isBool())
+        return QString::fromLatin1(value.toBool() ? "true" : "false");
+    if (value.isDouble())
+        return QString::number(value.toDouble());
+    if (value.isArray())
+        return QString::fromUtf8(QJsonDocument(value.toArray()).toJson(QJsonDocument::Compact));
+    if (value.isObject())
+        return QString::fromUtf8(QJsonDocument(value.toObject()).toJson(QJsonDocument::Compact));
+    return QString::fromLatin1(value.isNull() ? "null" : "missing");
+}
+
 class Runner
 {
 public:
@@ -232,6 +312,11 @@ public:
     // Runs one step for the given repetition. Returns an empty string or the reason it failed.
     QString step(const QJsonObject &step, int repetition)
     {
+        // Any step runs only `if` a widget shows, or `unless` it shows.
+        if (step.contains("unless") && visible(host, step.value("unless").toString()))
+            return {};
+        if (step.contains("if") && !visible(host, step.value("if").toString()))
+            return {};
         if (step.contains("sleep_persistence")) {
             if (!host.sleepPersistence) {
                 unsupported = true;
@@ -242,24 +327,12 @@ public:
             return result.value("error").toString();
         }
         if (step.contains("press")) {
-            if (step.contains("unless") && visible(host, step.value("unless").toString()))
-                return {};
             const auto name = pick(step.value("press"), repetition).toString();
-            auto *target = find(host, name);
-            if (!target || !target->isVisible() || !target->isEnabled())
-                return name + " is not visible";
-            QPoint point;
-            if (!pointIn(target, pick(step.value("at"), repetition), point))
-                return name + " is covered";
-            // Tap no faster than a person after a close, so the close guard
-            // does not swallow the press. The wait comes before the sample.
-            auto *reader = dynamic_cast<ReaderWindow *>(host.reader ? host.reader() : nullptr);
-            if (reader
-                && !waitUntil([reader] { return !reader->closeGuardActive(); },
-                              2 * ui::metrics::contents::closeGuardMilliseconds))
-                return name + " stayed behind the close guard";
-            events.skip();
-            return click(target, point, 0) ? QString() : name + " has no window";
+            return press(find(host, name), name, pick(step.value("at"), repetition));
+        }
+        if (!host.busy && (step.contains("hold") || step.contains("settle"))) {
+            unsupported = true;
+            return "the host cannot report whether the reader is busy";
         }
         if (step.contains("hold"))
             return hold(step.value("hold").toObject(), step.value("ms").toInt(650), repetition);
@@ -271,7 +344,14 @@ public:
                 unsupported = true;
                 return "the host cannot remove caches";
             }
-            host.forget(step.value("forget").toString());
+            if (!host.reader) {
+                unsupported = true;
+                return "the host cannot report whether a book is open";
+            }
+            if (host.reader())
+                return "close the book before removing caches";
+            if (!host.forget(step.value("forget").toString()))
+                return "could not clear the book caches";
             return {};
         }
         if (step.contains("close")) {
@@ -284,9 +364,7 @@ public:
             if (!reader)
                 return "no book is open";
             events.skip();
-            reader->close();
-            current.clear();
-            return closed() ? QString() : "the book did not close";
+            return close(reader) ? QString() : "the book did not close";
         }
         // Page keys go where every platform's page buttons go.
         if (step.contains("key")) {
@@ -355,18 +433,14 @@ public:
         if (step.contains("wait_ms")) {
             const int wait = qMax(0, step.value("wait_ms").toInt());
             if (!host.realMilliseconds) {
-                QEventLoop loop;
-                QTimer::singleShot(wait, &loop, &QEventLoop::quit);
-                loop.exec();
+                WaitLoop().wait(wait);
                 return {};
             }
             // Count real time. A Kobo in standby stops the process's timers,
             // so check again at least every second of awake time.
             const auto end = host.realMilliseconds() + wait;
             for (qint64 left = wait; left > 0; left = end - host.realMilliseconds()) {
-                QEventLoop loop;
-                QTimer::singleShot(int(qMin<qint64>(left, 1000)), &loop, &QEventLoop::quit);
-                loop.exec();
+                WaitLoop().wait(int(qMin<qint64>(left, 1000)));
             }
             return {};
         }
@@ -377,9 +451,7 @@ public:
         if (step.contains("kosync")) {
             if (auto *reader = host.reader ? host.reader() : nullptr) {
                 events.skip();
-                reader->close();
-                current.clear();
-                if (!closed())
+                if (!close(reader))
                     return "the open book did not close";
             }
             const auto account = step.value("kosync").toObject();
@@ -419,7 +491,239 @@ public:
                 return "Wi-Fi stayed on";
             return {};
         }
+        // Keeps the reader's state, or one widget property, under a name, so
+        // a later `expect` can compare with it.
+        if (step.contains("remember")) {
+            const auto name = step.value("remember").toString();
+            QJsonValue value;
+            QJsonObject state;
+            const auto failure = step.contains("widget") ? property(step, value) : inspect(state);
+            if (!failure.isEmpty())
+                return failure;
+            remembered[name] = step.contains("widget") ? qt::object({ { "value", value } }) : state;
+            if (step.contains("widget"))
+                widgetValues.insert(name);
+            else
+                widgetValues.remove(name);
+            return {};
+        }
+        if (step.contains("expect") || step.contains("widget"))
+            return expect(step);
+        if (step.contains("reveal"))
+            return reveal(step.value("reveal").toString(),
+                          step.value("next").toString("rrSettingsOptionsNext"),
+                          step.value("previous").toString("rrSettingsOptionsPrevious"));
+        // Puts text into a field, as a person types it on the keyboard.
+        if (step.contains("type")) {
+            const auto name = step.value("into").toString();
+            auto *field = find(host, name);
+            if (!field || !field->isVisible())
+                return name + " is not visible";
+            if (field->metaObject()->indexOfProperty("text") < 0)
+                return name + " takes no text";
+            field->setProperty("text", step.value("type").toString());
+            return {};
+        }
+        if (step.contains("choose"))
+            return choose(step);
         return "unknown step";
+    }
+
+    // The reader's state as its state report would hold it now.
+    QString inspect(QJsonObject &state)
+    {
+        auto *reader = dynamic_cast<ReaderWindow *>(host.reader ? host.reader() : nullptr);
+        if (!reader)
+            return "no book is open";
+        state = reader->inspect();
+        return state.isEmpty() ? QStringLiteral("the reader reported no state") : QString();
+    }
+
+    // A widget's property, `checked` unless the step names another.
+    QString property(const QJsonObject &step, QJsonValue &value)
+    {
+        const auto name = step.value("widget").toString();
+        const auto *widget = find(host, name);
+        if (!widget)
+            return name + " does not exist";
+        const auto key = step.value("property").toString("checked");
+        const auto variant = widget->property(key.toLatin1().constData());
+        if (!variant.isValid())
+            return name + " has no property " + key;
+        value = QJsonValue::fromVariant(variant);
+        return {};
+    }
+
+    // Compares a value of the reader's state, or a widget property, with a
+    // literal (`is`, `is_not`) or with a remembered value (`same_as`, `not_as`,
+    // `above`, `below`, optionally `by` an exact amount). It waits until the
+    // comparison holds or the time runs out, and records the outcome as a check.
+    QString expect(const QJsonObject &step)
+    {
+        const bool widget = step.contains("widget");
+        const auto path = step.value("expect").toString();
+        QString relation;
+        for (const auto *name : { "is", "is_not", "same_as", "not_as", "above", "below" })
+            if (relation.isEmpty() && step.contains(QLatin1String(name)))
+                relation = QLatin1String(name);
+        if (relation.isEmpty())
+            return "the check has no comparison";
+        const bool literal = relation.startsWith(QLatin1String("is"));
+        const auto reference = step.value(relation).toString();
+        if (!literal && !remembered.contains(reference))
+            return "nothing was remembered as " + reference;
+        QJsonValue actual, wanted = literal ? step.value(relation) : QJsonValue();
+        QString failure;
+        const auto holds = [&] {
+            QJsonObject state;
+            failure = widget ? property(step, actual) : inspect(state);
+            if (!failure.isEmpty())
+                return false;
+            if (!widget)
+                actual = lookup(state, path);
+            if (!literal) {
+                const auto &snapshot = remembered[reference];
+                wanted = widgetValues.contains(reference)
+                        ? snapshot.value("value")
+                        : lookup(snapshot, step.value("field").toString(path));
+            }
+            if (relation == "is" || relation == "same_as")
+                return actual == wanted;
+            if (relation == "is_not" || relation == "not_as")
+                return actual != wanted;
+            if (!actual.isDouble() || !wanted.isDouble())
+                return false;
+            const double change =
+                    (actual.toDouble() - wanted.toDouble()) * (relation == "above" ? 1 : -1);
+            return step.contains("by") ? qAbs(change - step.value("by").toDouble()) < 1e-9
+                                       : change > 0;
+        };
+        // Reading the state lays nothing out, but polls slower than other waits.
+        QElapsedTimer waited;
+        waited.start();
+        bool passed = holds();
+        while (!passed && waited.elapsed() < step.value("timeout").toInt(5000)) {
+            WaitLoop().wait(100);
+            passed = holds();
+        }
+        const auto subject = widget
+                ? step.value("widget").toString() + '.' + step.value("property").toString("checked")
+                : path;
+        const QString word = relation == "is" || relation == "same_as" ? QString()
+                : relation == "is_not" || relation == "not_as"         ? QStringLiteral("not ")
+                                                                       : relation + ' ';
+        const auto name = step.value("check").toString(
+                subject + " is " + word + (literal ? text(wanted) : "as " + reference));
+        checks.append(qt::object({ { "check", name },
+                                   { "pass", passed },
+                                   { "actual", actual },
+                                   { "expected", wanted } }));
+        if (passed)
+            return {};
+        if (!failure.isEmpty())
+            return name + ": " + failure;
+        return name + ": " + subject + " is " + text(actual) + ", expected " + word + text(wanted)
+                + (step.contains("by") ? " by " + text(step.value("by")) : QString());
+    }
+
+    // Pages a list until `name` can be pressed. Settings options sit on
+    // pages of their own.
+    QString reveal(const QString &name, const QString &next, const QString &previous)
+    {
+        const auto shown = [&] {
+            auto *target = find(host, name);
+            QPoint point;
+            return target && target->isVisible() && pointIn(target, {}, point);
+        };
+        QString failure;
+        if (page(next, previous, [&] { return waitUntil(shown, 500); }, failure))
+            return {};
+        return failure.isEmpty() ? name + " is not on any page" : failure;
+    }
+
+    // Goes back to the first page of a list with `previous`, then forward
+    // with `next` until `found` holds. Returns whether it held; `failure` is
+    // set when a press failed.
+    bool page(const QString &next, const QString &previous, const std::function<bool()> &found,
+              QString &failure)
+    {
+        const auto turn = [&](const QString &name) {
+            auto *button = name.isEmpty() ? nullptr : find(host, name);
+            if (!button || !button->isVisible() || !button->isEnabled())
+                return false;
+            failure = press(button, name, {});
+            WaitLoop().wait(50);
+            return failure.isEmpty();
+        };
+        int back = 0;
+        while (back < 20 && turn(previous))
+            ++back;
+        if (!failure.isEmpty())
+            return false;
+        if (back == 20) {
+            failure = previous + " did not reach the first page";
+            return false;
+        }
+        for (int forward = 0; forward < 20; ++forward) {
+            if (found())
+                return true;
+            if (!turn(next))
+                return false;
+        }
+        return false;
+    }
+
+    // Presses the option labelled `choose` in the list `in`, paging with
+    // `next` and `previous`. With `keep`, it first keeps the label of the
+    // checked option, so a later `choose` of "@<keep>" returns to it.
+    QString choose(const QJsonObject &step)
+    {
+        const auto list = step.value("in").toString(), next = step.value("next").toString(),
+                   previous = step.value("previous").toString();
+        auto label = step.value("choose").toString();
+        if (label.startsWith('@')) {
+            label = labels.value(label.mid(1));
+            if (label.isEmpty())
+                return "no label was kept as " + step.value("choose").toString().mid(1);
+        }
+        const auto options = [&] {
+            QList<QAbstractButton *> shown;
+            if (auto *parent = find(host, list))
+                for (auto *option : parent->findChildren<QAbstractButton *>())
+                    if (option->isVisible())
+                        shown.append(option);
+            return shown;
+        };
+        if (!waitUntil([&] { return !options().isEmpty(); }, 5000))
+            return list + " shows no options";
+        QString failure;
+        if (step.contains("keep")) {
+            QString checked;
+            page(
+                    next, previous,
+                    [&] {
+                        for (auto *option : options())
+                            if (option->isChecked())
+                                checked = option->text();
+                        return !checked.isEmpty();
+                    },
+                    failure);
+            if (checked.isEmpty())
+                return failure.isEmpty() ? list + " has no checked option to keep" : failure;
+            labels[step.value("keep").toString()] = checked;
+        }
+        QAbstractButton *target = nullptr;
+        if (!page(
+                    next, previous,
+                    [&] {
+                        for (auto *option : options())
+                            if (option->text() == label)
+                                target = option;
+                        return target != nullptr;
+                    },
+                    failure))
+            return failure.isEmpty() ? list + " has no option " + label : failure;
+        return press(target, label, {});
     }
 
     QString steps(const QJsonArray &list, int repetition)
@@ -432,10 +736,13 @@ public:
         return {};
     }
 
-    // Opens the scenario's book unless it is the open one.
-    QString book(const QString &key)
+    // An inherited book has no known rendering mode until the player opens it.
+    QString book(const QString &key, const QString &rendering)
     {
-        if (key.isEmpty() || (key == current && host.reader && host.reader()))
+        requestedRendering = rendering;
+        if (key.isEmpty()
+            || (key == current && host.reader && host.reader()
+                && (rendering.isEmpty() || rendering == openedRendering)))
             return {};
         return open(key, false);
     }
@@ -443,20 +750,20 @@ public:
     // Closes an open book first, as a person returns to the library.
     QString open(const QString &key, bool fresh)
     {
-        if (!host.open || (host.opens && !host.opens(key))) {
+        if (!host.open || !host.reader || !host.busy || (host.opens && !host.opens(key))) {
             unsupported = true;
             return "the host cannot open " + key;
         }
-        if (auto *reader = host.reader ? host.reader() : nullptr) {
-            reader->close();
-            current.clear();
-            if (!closed())
-                return "the open book did not close";
+        if (fresh && !host.forget) {
+            unsupported = true;
+            return "the host cannot remove caches";
         }
-        if (fresh && host.forget)
-            host.forget(key);
+        if (auto *reader = host.reader(); reader && !close(reader))
+            return "the open book did not close";
+        if (fresh && !host.forget(key))
+            return "could not clear the book caches";
         events.skip();
-        if (!host.open || !host.open(key)) {
+        if (!host.open(key)) {
             unsupported = true;
             return "the host cannot open " + key;
         }
@@ -469,12 +776,37 @@ public:
         if (!ready)
             return key + " did not open";
         current = key;
+        openedRendering = requestedRendering;
         return {};
     }
 
-    bool closed()
+    bool close(QWidget *reader)
     {
-        return waitUntil([&] { return !host.reader() && (!host.idle || host.idle()); }, 60000);
+        return events.waitForClose(
+                [this, reader] {
+                    reader->close();
+                    current.clear();
+                },
+                [this] { return !host.reader() && (!host.idle || host.idle()); }, 60000);
+    }
+
+    // Presses `target` at `at`, a fraction of its size, or at its centre.
+    QString press(QWidget *target, const QString &name, const QJsonValue &at)
+    {
+        if (!target || !target->isVisible() || !target->isEnabled())
+            return name + " is not visible";
+        QPoint point;
+        if (!pointIn(target, at, point))
+            return name + " is covered";
+        // Tap no faster than a person after a close, so the close guard
+        // does not swallow the press. The wait comes before the sample.
+        auto *reader = dynamic_cast<ReaderWindow *>(host.reader ? host.reader() : nullptr);
+        if (reader
+            && !waitUntil([reader] { return !reader->closeGuardActive(); },
+                          2 * ui::metrics::contents::closeGuardMilliseconds))
+            return name + " stayed behind the close guard";
+        events.skip();
+        return click(target, point, 0) ? QString() : name + " has no window";
     }
 
     // Holds a word or a link, as a lookup or a link selection starts.
@@ -508,7 +840,7 @@ public:
         if (host.press) {
             host.press(widget, point, true);
             if (milliseconds > 0)
-                waitUntil([] { return false; }, milliseconds);
+                WaitLoop().wait(milliseconds);
             host.press(widget, point, false);
             return true;
         }
@@ -517,7 +849,7 @@ public:
             return false;
         qt::sendMouse(input.first, input.second, true);
         if (milliseconds > 0)
-            waitUntil([] { return false; }, milliseconds);
+            WaitLoop().wait(milliseconds);
         qt::sendMouse(input.first, input.second, false);
         return true;
     }
@@ -595,8 +927,24 @@ public:
 
     // Set when a step needed a book the host cannot open.
     bool unsupported = false;
+    // The outcome of each `expect` of the current scenario.
+    QJsonArray checks;
+
+    // Starts a scenario: forgets the values and labels of the one before.
+    void start()
+    {
+        checks = {};
+        remembered.clear();
+        widgetValues.clear();
+        labels.clear();
+    }
 
 private:
+    QMap<QString, QJsonObject> remembered;
+    // Names of values in `remembered` that are one widget property.
+    QSet<QString> widgetValues;
+    // Option labels kept by `choose`.
+    QMap<QString, QString> labels;
     const Host &host;
     Events &events;
     QMap<QString, QJsonObject> matched;
@@ -608,6 +956,7 @@ private:
     QMap<QString, int> markCounts, endCounts;
     // The key of the open book, if the player knows it.
     QString current;
+    QString requestedRendering, openedRendering;
 };
 
 // Qt 5.2's QJsonArray cannot search itself.
@@ -691,20 +1040,24 @@ QVector<QJsonObject> run(const QJsonObject &file, const Host &host, const Option
         // counters and event counts, and which counts must stay at a limit.
         const auto sampleSpec = scenario.value("sample").toObject();
         const bool resources = sampleSpec.value("resources").toBool();
+
         struct RestoreLogging
         {
             bool active;
             bool previous;
+
             ~RestoreLogging()
             {
                 if (active)
                     setDiagnosticFileWrites(previous);
             }
         } logging{ resources, resources && setDiagnosticFileWrites(false) };
+
         if (resources) {
             if (!waitUntil(diagnosticWriterIdle, 30000)) {
                 result["status"] = QStringLiteral("failed");
-                result["reason"] = QStringLiteral("Diagnostic writer did not drain before sampling");
+                result["reason"] =
+                        QStringLiteral("Diagnostic writer did not drain before sampling");
                 results.append(result);
                 continue;
             }
@@ -794,19 +1147,45 @@ QVector<QJsonObject> run(const QJsonObject &file, const Host &host, const Option
             const auto mode = scenario.value("rendering").toString();
             renderingMode::setOverride(mode == "hybrid" ? 2 : mode == "fast" ? 1 : 0);
         }
+        if (needs(scenario, "light") && !(host.light && host.light())) {
+            result["status"] = QStringLiteral("skipped");
+            result["reason"] = QStringLiteral("the device has no front light");
+            result["samples"] = samples;
+            result["stages"] = stages;
+            results.append(result);
+            continue;
+        }
+        if (needs(scenario, "rotation") && !(host.rotation && host.rotation())) {
+            result["status"] = QStringLiteral("skipped");
+            result["reason"] = QStringLiteral("the host cannot turn the screen");
+            result["samples"] = samples;
+            result["stages"] = stages;
+            results.append(result);
+            continue;
+        }
+
+        // A check passes or fails on its `expect` steps and takes no sample.
+        // A wait of the main thread during a check fails it too.
+        const bool check = scenario.value("kind").toString() == QLatin1String("check");
+        const int blocked = events.counts().value("main-thread-blocked");
         runner.unsupported = false;
-        QString failure = runner.book(scenario.value("book").toString());
+        runner.start();
+        QString failure = runner.book(scenario.value("book").toString(),
+                                      scenario.value("rendering").toString());
         if (failure.isEmpty()) {
             runner.reset();
             failure = runner.steps(scenario.value("setup").toArray(), 0);
         }
         const int warmup = scenario.value("warmup").toInt();
-        const int repeat = qMax(1, qRound(scenario.value("repeat").toInt(5) * options.repeatScale));
+        const int repeat = qMax(
+                1, qRound(scenario.value("repeat").toInt(check ? 1 : 5) * options.repeatScale));
         for (int index = 0; failure.isEmpty() && index < warmup + repeat; ++index) {
             runner.reset();
             failure = runner.steps(scenario.value("steps").toArray(), index);
             double sample = 0;
             QJsonObject parts;
+            if (check)
+                continue;
             if (failure.isEmpty()
                 && !runner.sample(scenario.value("sample").toObject(), sample, parts))
                 failure = "no sample";
@@ -833,9 +1212,17 @@ QVector<QJsonObject> run(const QJsonObject &file, const Host &host, const Option
                 stages[it.key()] = list;
             }
         }
-        // Leave the reader as the next scenario expects it.
+        // Leave the reader as the next scenario expects it. A check undoes
+        // its changes also after a failure, so the next check starts clean.
         if (failure.isEmpty())
             failure = runner.steps(scenario.value("teardown").toArray(), 0);
+        else if (check && !runner.unsupported) {
+            const auto cleanup = runner.steps(scenario.value("teardown").toArray(), 0);
+            if (!cleanup.isEmpty())
+                result["cleanup"] = cleanup;
+        }
+        if (check && failure.isEmpty() && events.counts().value("main-thread-blocked") > blocked)
+            failure = QStringLiteral("the main thread was blocked during the check");
         result["status"] = QString(failure.isEmpty()            ? "completed"
                                            : runner.unsupported ? "skipped"
                                                                 : "failed");
@@ -843,6 +1230,8 @@ QVector<QJsonObject> run(const QJsonObject &file, const Host &host, const Option
             result["reason"] = failure;
         result["samples"] = samples;
         result["stages"] = stages;
+        if (check)
+            result["checks"] = runner.checks;
         if (!details.isEmpty())
             result["details"] = details;
         results.append(result);

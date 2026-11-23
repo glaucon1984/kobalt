@@ -4,6 +4,7 @@
 #include <QRectF>
 #include <QString>
 
+class QWidget;
 class QPainter;
 class QPushButton;
 
@@ -146,8 +147,36 @@ enum class ControlIcon {
     DeviceRotate,
     ZoomIn,
     ZoomOut,
-    LockOpen
+    LockOpen,
+    Lotus,
+    TextB,
+    Refresh,
+    HardwareButtons,
+    HandTap,
+    ChapterTree,
+    Gauge,
+    ClockCountdown,
+    Cpu,
+    EyeClosed,
+    MoonStars,
+    Palette,
+    Percent,
+    TextT,
+    TextTSlash,
+    BookStart,
+    BookEnd,
+    Hourglass,
+    Ruler
 };
+enum class IconStyle { Monochrome, Color, Pastel, Rings };
+QString iconStyleId(IconStyle style);
+IconStyle iconStyleFromId(const QString &id);
+IconStyle widgetIconStyle(const QWidget *widget);
+// Paint the tile when needed and return the ink for the glyph or live Aa sample.
+QColor paintIconBackground(QPainter &painter, IconStyle style, ControlIcon icon, const QRect &area,
+                           const QColor &normalInk);
+void paintStyledIcon(QPainter &painter, IconStyle style, ControlIcon icon, const QRect &area,
+                     const QColor &normalInk);
 // Paint vectors at the target resolution without an intermediate icon bitmap.
 void paintOpeningIcon(QPainter &painter, ControlIcon icon, const QRectF &bounds, QColor color);
 // Use 90% of Bluetooth's visible height, centered on its intersection.

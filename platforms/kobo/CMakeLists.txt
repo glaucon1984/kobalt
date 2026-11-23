@@ -128,6 +128,7 @@ endif()
 set(kobalt_libraries ${qt_libraries}
     "${engine}" "${prefix}/lib/libharfbuzz.a" "${prefix}/lib/libxxhash.a" "${prefix}/lib/libutf8proc.a"
     "${prefix}/lib/libjpeg.a" "${prefix}/lib/liblunasvg.a" "${prefix}/lib/libfreetype.a"
+    "${prefix}/lib/libbrotlidec.a" "${prefix}/lib/libbrotlicommon.a" "${prefix}/lib/libwebpdemux.a" "${prefix}/lib/libwebpdecoder.a"
     "${prefix}/lib/libfribidi.a" "${prefix}/lib/libunibreak.a" "${prefix}/lib/liblua.a" "${KOBALT_TEST_PNG}" z dl pthread)
 target_link_libraries(kobalt-code PRIVATE ${qt_libraries})
 target_link_libraries(kobalt PRIVATE kobalt-code ${kobalt_libraries})
@@ -153,7 +154,7 @@ if(KOBALT_EVAL_PACKAGE)
 endif()
 target_link_options(kobalt PRIVATE -Wl,--no-undefined
     "LINKER:--whole-archive,${prefix}/lib/libfreetype.a,--no-whole-archive"
-    "LINKER:--exclude-libs,libharfbuzz.a:libjpeg.a:liblunasvg.a:libutf8proc.a:libfribidi.a:libunibreak.a:libfreetype.a:liblua.a")
+    "LINKER:--exclude-libs,libharfbuzz.a:libjpeg.a:libwebpdecoder.a:libwebpdemux.a:libbrotlidec.a:libbrotlicommon.a:liblunasvg.a:libutf8proc.a:libfribidi.a:libunibreak.a:libfreetype.a:liblua.a")
 
 set(qrc "<RCC><qresource prefix=\"/kobalt\">")
 foreach(path IN LISTS kobalt_notice_resources)
@@ -297,7 +298,7 @@ if(KOBALT_BUILD_TESTS)
         target_link_libraries(kobalt-qt5-refresh-tests PRIVATE Qt5::Widgets ${CMAKE_DL_LIBS} pthread)
         add_test(NAME pewter.qt5-refresh COMMAND kobalt-qt5-refresh-tests)
         set_tests_properties(pewter.qt5-refresh PROPERTIES LABELS "pewter;display;qt5"
-            ENVIRONMENT "${test_environment}" TIMEOUT 120)
+            ENVIRONMENT "${test_environment};QT_QPA_FONTDIR=${KOBALT_ASSETS}/fonts" TIMEOUT 120)
         list(APPEND tests kobalt-qt5-refresh-tests)
     endif()
     add_executable(kobalt-native-keyboard-tests ${kobo_keyboard_test_sources})
@@ -311,6 +312,7 @@ if(KOBALT_BUILD_TESTS)
     list(APPEND tests kobalt-native-keyboard-tests)
     add_executable(kobalt-native-ui-tests ${kobo_native_ui_test_sources})
     set_target_properties(kobalt-native-ui-tests PROPERTIES AUTOMOC OFF ENABLE_EXPORTS ON)
+    target_link_options(kobalt-native-ui-tests PRIVATE "LINKER:--wrap=dlsym")
     target_include_directories(kobalt-native-ui-tests PRIVATE "${KOBALT_ROOT}" "${source}")
     target_link_libraries(kobalt-native-ui-tests PRIVATE pewter kobalt-test-code ${kobalt_libraries})
     add_test(NAME pewter.native-ui COMMAND kobalt-native-ui-tests)

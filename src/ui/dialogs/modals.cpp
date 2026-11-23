@@ -1,9 +1,12 @@
 #include "ui/controls/text.h"
 #include "modals.h"
+#include "platform/api/kobo_refresh.h"
 #include "ui/style/metrics.h"
 #include "ui/style/styles.h"
 #include "ui/style/fonts.h"
 #include "support/strings.h"
+#include <QGridLayout>
+#include <QLineEdit>
 #include <QPainter>
 #include <QResizeEvent>
 #include "ui/controls/buttons.h"
@@ -199,6 +202,17 @@ void PopupCard::updateListDividers()
             if (auto *row = dynamic_cast<ListRow *>(widget)) {
                 row->setTopDivider(top);
                 previousBottom = true;
+            } else if (auto *option = dynamic_cast<DescribedOption *>(widget);
+                       option && (option->presentation().dividers & Qt::BottomEdge)) {
+                auto presentation = option->presentation();
+                if (bool(presentation.dividers & Qt::TopEdge) != top) {
+                    if (top)
+                        presentation.dividers |= Qt::TopEdge;
+                    else
+                        presentation.dividers &= ~Edges(Qt::TopEdge);
+                    option->setPresentation(presentation);
+                }
+                previousBottom = true;
             } else if (auto *list = dynamic_cast<RadioList *>(widget)) {
                 list->setTopDivider(top);
                 previousBottom = !list->options().isEmpty()
@@ -328,7 +342,7 @@ void PopupCard::fitToWidth(int width)
     updateListDividers();
 }
 
-void PopupCard::fitToHeight(int height)
+void PopupCard::fitToHeight(int height, int fallbackWidth)
 {
     const auto &previousRows = pagedRows;
     for (const auto &row : previousRows)
@@ -352,7 +366,11 @@ void PopupCard::fitToHeight(int height)
     if (!rowPager) {
         const auto owner = parentWidget() ? parentWidget()->objectName() : QString();
         rowPager = new PagerBar(this, owner.isEmpty() ? QStringLiteral("rrCard") : owner);
-        rowPager->setFixedHeight(metrics::chrome::actionHeight);
+        // Paging can first become necessary on show or rotation, after the
+        // caller has prepared the dialog's existing widgets for e-ink.
+        platform::textRefresh(rowPager);
+        for (auto *widget : rowPager->findChildren<QWidget *>())
+            platform::textRefresh(widget);
         const auto turn = [this](int direction) {
             showRowPage(rowPager->turnTarget(direction));
             if (auto *overlay = dynamic_cast<ModalOverlay *>(parentWidget()))
@@ -376,21 +394,36 @@ void PopupCard::fitToHeight(int height)
         return row->hasHeightForWidth() ? row->heightForWidth(textWidth) : row->sizeHint().height();
     };
     QVector<QWidget *> rows;
-    int pagedHeight = 0;
+    int pagedHeight = 0, tallest = 0;
     for (int index = 1; index < contentRows->count(); ++index) {
         auto *row = contentRows->itemAt(index)->widget();
         if (!row || row == rowPager || row->isHidden())
             continue;
         rows.append(row);
-        pagedHeight += rowHeight(row) + contentRows->spacing();
+        const int needed = rowHeight(row) + contentRows->spacing();
+        pagedHeight += needed;
+        tallest = qMax(tallest, needed);
     }
     const int room = qMax(1,
                           height - (natural - pagedHeight) - int(metrics::chrome::actionHeight)
                                   - contentRows->spacing());
+    if (fallbackWidth > width() && (rows.isEmpty() || tallest > room)) {
+        rowPager->hide();
+        fitToWidth(fallbackWidth);
+        fitToHeight(height);
+        return;
+    }
     int used = 0;
-    for (auto *row : rows) {
+    for (int index = 0; index < rows.size(); ++index) {
+        auto *row = rows[index];
         const int needed = rowHeight(row) + contentRows->spacing();
-        if (rowPages.isEmpty() || (used && used + needed > room)) {
+        int together = needed;
+        if (row->property("keepWithNext").toBool() && index + 1 < rows.size()) {
+            const int pair = needed + rowHeight(rows[index + 1]) + contentRows->spacing();
+            if (pair <= room)
+                together = pair;
+        }
+        if (rowPages.isEmpty() || (used && used + together > room)) {
             rowPages.append(QVector<QWidget *>());
             used = 0;
         }
@@ -604,14 +637,14 @@ void ModalOverlay::centerCard()
         // Long wrapped descriptions can exceed one page. Use spare landscape
         // width before paging rows, since a single row cannot be split.
         const int availableWidth = width() - 2 * int(metrics::notice::sideClearance);
-        if (!fitChoiceContents && cardArea.isEmpty() && room > 0 && content->height() > room
-            && width() > height()
-            && content->width() < availableWidth)
+        if (!pageBeforeWidening && !fitChoiceContents && cardArea.isEmpty() && room > 0
+            && content->height() > room && width() > height() && content->width() < availableWidth)
             content->fitToWidth(availableWidth);
         if (!fitChoiceContents && cardArea.isEmpty() && room > 0
             && (content->height() > room || content->property("card_paged").toBool())) {
             content->setProperty("card_paged", true);
-            content->fitToHeight(room);
+            content->fitToHeight(room,
+                                 pageBeforeWidening && width() > height() ? availableWidth : 0);
         }
         pointer->hide();
         content->move((cardArea.isEmpty() ? rect() : cardArea).center() - content->rect().center());
@@ -721,12 +754,15 @@ void ModalOverlay::setDelayedProgress(bool active, qint64 elapsedMilliseconds, i
 
 void ModalOverlay::resizeEvent(QResizeEvent *)
 {
-    if (fitChoiceContents)
-        fitChoiceContents();
-    else if (property("reader_standard_modal").toBool())
+    if (fitChoiceContents) {
+        fitChoiceContents(true);
+    } else if (property("reader_standard_modal").toBool()) {
+        // Qt delivers the first resize before showing the dialog, after its
+        // caller has finished adding rows, setting styles and choosing actions.
         fitCard();
-    else
+    } else {
         centerCard();
+    }
 }
 
 void ModalOverlay::keyPressEvent(QKeyEvent *event)
@@ -789,7 +825,6 @@ NoticeModal::NoticeModal(QWidget *parent, const ModalContent &content, const Mod
     primary = makeModalButton(card(), action, true);
     card()->adaptiveActions({ primary });
     setProperty("reader_standard_modal", true);
-    fitCard();
 }
 
 ChoiceModal::ChoiceModal(QWidget *parent, const ModalContent &content,
@@ -804,7 +839,72 @@ ChoiceModal::ChoiceModal(QWidget *parent, const ModalContent &content,
     primary = makeModalButton(card(), primaryAction, true);
     card()->adaptiveActions({ secondary, primary });
     setProperty("reader_standard_modal", true);
-    fitCard();
+}
+
+QLineEdit *ChoiceModal::addPageKeypad(const QString &prefix, const QString &placeholder)
+{
+    namespace chrome = metrics::chrome;
+    auto *content = card();
+    auto *entry = new QWidget(content);
+    auto *layout = new QVBoxLayout(entry);
+    layout->setContentsMargins(chrome::inset, 0, chrome::inset,
+                               metrics::notice::cardMargins.bottom());
+    ui::readerStyle(descriptionLabel(), ui::styles::font(chrome::labelText));
+    layout->setSpacing(metrics::notice::cardGap);
+    auto *number = new QLineEdit(entry);
+    number->setObjectName(prefix + "Number");
+    number->setAccessibleName(titleLabel()->text());
+    number->setAttribute(Qt::WA_InputMethodEnabled, false);
+    number->setAlignment(Qt::AlignCenter);
+    number->setMinimumHeight(chrome::actionHeight);
+    ui::readerStyle(number,
+                    "QLineEdit{border:1px solid palette(mid);background:palette(window);"
+                            + ui::styles::font(chrome::labelText) + "}");
+    number->setPlaceholderText(placeholder);
+    primaryButton()->setEnabled(false);
+    layout->addWidget(number);
+    auto *keys = new QGridLayout;
+    keys->setSpacing(ui::px(12));
+    layout->addLayout(keys);
+    const int columns = parentWidget()->width() > parentWidget()->height() ? 6 : 3;
+    for (int position = 0; position < 12; ++position) {
+        // Landscape keeps digits together and puts Clear after Backspace.
+        const int i =
+                columns == 6 && position >= 9 ? (position == 11 ? 9 : position + 1) : position;
+        const QString value = i < 9 ? QString::number(i + 1) : i == 10 ? "0" : QString();
+        auto *button =
+                ui::makeButton(entry, nullptr, qPrintable(prefix + "Key" + QString::number(i)),
+                               value, [number, value, i] {
+                                   if (i == 9)
+                                       number->clear();
+                                   else if (i == 11)
+                                       number->backspace();
+                                   else
+                                       number->insert(value);
+                               });
+        button->setFocusPolicy(Qt::NoFocus);
+        ui::readerStyle(
+                button,
+                QString("QPushButton{border:%1px solid palette(mid);border-radius:%2px;min-height:%3px;max-height:%3px;"
+                        "background:palette(window);color:palette(window-text);padding:0;")
+                                .arg(int(ui::px(2)))
+                                .arg(int(ui::px(12)))
+                                .arg(columns == 6 ? ui::px(80) : int(chrome::actionHeight))
+                        + ui::styles::font(i == 9 ? int(chrome::descriptionText)
+                                                  : int(chrome::queryText))
+                        + "}QPushButton:pressed{background:palette(midlight);}");
+        if (i == 9) {
+            button->setText(strings::get("search_panel.clear_number"));
+            button->setAccessibleName(strings::get("search_panel.clear_page"));
+        } else if (i == 11) {
+            ui::buttonIcon(button, ui::ControlIcon::KeyboardBackspace);
+            button->setIconSize(QSize(ui::px(48), ui::px(48)));
+            button->setAccessibleName(strings::get("search_panel.erase_digit"));
+        }
+        keys->addWidget(button, position / columns, position % columns);
+    }
+    content->rows()->insertWidget(1, entry);
+    return number;
 }
 
 PopupWindow::PopupWindow(QWidget *source, bool dark)
@@ -814,7 +914,7 @@ PopupWindow::PopupWindow(QWidget *source, bool dark)
         background = source->grab();
     setWindowModality(Qt::ApplicationModal);
     setProperty("reader_dark", dark);
-    const auto colors = readerPalette(palette(), dark);
+    const auto colors = readerPalette(palette(), dark, interfacePalette(this));
     setPalette(colors);
     setFont(interfaceFont());
     readerStyle(this, styles::reader());

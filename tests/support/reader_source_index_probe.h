@@ -1,6 +1,7 @@
 #pragma once
 #include "engine/blaze/adapter/column_view.h"
 #include "engine/blaze/adapter/engine_document.h"
+#include "engine/blaze/adapter/reader_source.h"
 #include <algorithm>
 
 namespace kobalt {
@@ -20,6 +21,36 @@ struct ReaderSourceIndexProbe
     }
 
     static bool cached(const EngineDocument &model) { return bool(model.sourceIndex_); }
+
+    static const void *currentView(const EngineDocument &model) { return model.engine_.get(); }
+
+    static const void *preparedView(const EngineDocument &model)
+    {
+        return model.ahead_ ? currentView(*model.ahead_) : nullptr;
+    }
+
+    static void discardLookup(EngineDocument &model) { model.lookupUnit_ = {}; }
+
+    static bool lookupIncludes(const EngineDocument &model, int item)
+    {
+        const auto &lookup = model.lookupUnit_.document;
+        return lookup && lookup->windowFirst_ <= item && item <= lookup->windowLast_;
+    }
+
+    static bool mayContain(const EngineDocument &model, int item, const QString &pattern)
+    {
+        return model.mayContain(item, pattern);
+    }
+
+    static qint64 retainedSearchBytes(const EngineDocument &model)
+    {
+        qint64 bytes = 0;
+        const auto &texts = model.source_->searchTexts;
+        if (texts)
+            for (int item : texts->keys())
+                bytes += texts->object(item)->capacity() * sizeof(QChar);
+        return bytes;
+    }
 
     static bool positionLookupPreservesNames(const EngineDocument &model, bool normalized)
     {

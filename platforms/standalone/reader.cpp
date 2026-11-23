@@ -210,9 +210,7 @@ void ReaderController::begin(BookOpen book)
     const auto viewport = readerInterface().readingViewport(body, settings);
     opening = std::make_unique<ReaderSession>(fonts, placeholder);
     QPointer<ReaderController> guard(this);
-    OpenRequest request{
-        identity, path, viewport, saved, {}, paths.layoutCache(), lease, source->resources(lease)
-    };
+    OpenRequest request{ identity, path, viewport, saved, {}, lease, source->resources(lease) };
 #ifdef Q_OS_ANDROID
     // The parsed book, as on Kobo: Hybrid shows the whole book soon after a
     // reopening instead of building it again. The app's cache folder holds
@@ -257,6 +255,7 @@ void ReaderController::begin(BookOpen book)
     request.customPinsPath = paths.customPins();
 #endif
     request.appearanceDefaults = appearance::bookDefaults(settings);
+    opening->setPublisherPageNumbers(settings.value("publisher_page_numbers").toBool());
     opening->open(
             std::move(request),
             [guard, identity, statePath, pixels](const OpeningResult &result) {

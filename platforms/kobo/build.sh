@@ -10,6 +10,7 @@ diagnostics=${KOBALT_VERBOSE_DIAGNOSTICS:-ON}
 [[ "$target" != *-diagnostic ]] || diagnostics=ON
 [[ "$diagnostics" == ON || "$diagnostics" == OFF ]] || { echo 'KOBALT_VERBOSE_DIAGNOSTICS must be ON or OFF' >&2; exit 2; }
 root=$(cd "$(dirname "$0")/../.." && pwd)
+source "$root/platforms/build-container.sh"
 # Register the build, so a performance evaluation waits for it; see platforms/load-lock.cmake.
 if [[ -z "${KOBALT_LOAD_LOCK_HELD:-}" ]]; then
     exec 3< <("${CMAKE_COMMAND:-cmake}" "-DROOT=$root" "-DOWNER=$$" -P "$root/platforms/load-lock.cmake")
@@ -21,7 +22,11 @@ if [[ "$mode" == --check && -n "${KOBALT_CHECK_SOURCE_ROOT:-}" ]]; then
 fi
 jobs=${JOBS:-2}
 [[ "$jobs" =~ ^[1-9][0-9]*$ ]] || { echo "JOBS must be positive" >&2; exit 2; }
-[[ "${KOBALT_DOCKER_CPUS:-1}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "KOBALT_DOCKER_CPUS must be a number of CPUs" >&2; exit 2; }
+cpus=${KOBALT_DOCKER_CPUS:-}
+if [[ -n "$cpus" && ( ! "$cpus" =~ ^[0-9]+(\.[0-9]+)?$ || ! "$cpus" =~ [1-9] ) ]]; then
+    echo "KOBALT_DOCKER_CPUS must be a positive number of CPUs" >&2
+    exit 2
+fi
 image=$(sh "$root/platforms/sdk-image.sh" "${target%%-*}")
 engine=${CONTAINER_ENGINE:-docker}
 sdk_id=$("$engine" image inspect "$image" --format '{{.Id}}')
@@ -39,34 +44,17 @@ cache=$("${CMAKE_COMMAND:-cmake}" -P "$root/dependencies/cache.cmake")
 mkdir -p "$cache"
 read -r commit modified KOBALT_RELEASE_VERSION <<< "$info"
 export KOBALT_RELEASE_VERSION
-# Own exactly this container, including when the foreground client is interrupted.
 mkdir -p "$root/build"
-run_dir=$(mktemp -d "$root/build/kobo-run.XXXXXX")
-cleanup() {
-    result=$?
-    trap - EXIT INT TERM
-    if [[ -s "$run_dir/container.cid" ]]; then
-        if ! "$engine" rm -f "$(cat "$run_dir/container.cid")" > /dev/null 2>&1; then
-            echo "Cannot remove the build container; its ID is retained in $run_dir/container.cid" >&2
-            exit 1
-        fi
-    fi
-    rm -rf "$run_dir"
-    exit "$result"
-}
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+own_build_container "$root/build/kobo-run.XXXXXX"
 # Leave CPUs for the rest of the machine: half of the host's, at least two and
 # at most what the engine has.
-cpus=${KOBALT_DOCKER_CPUS:-}
 if [[ -z "$cpus" ]]; then
     host_cpus=$(sysctl -n hw.ncpu 2> /dev/null || getconf _NPROCESSORS_ONLN)
     cpus=$((host_cpus / 2 > 2 ? host_cpus / 2 : 2))
     engine_cpus=$("$engine" info --format '{{.NCPU}}' 2> /dev/null || true)
     [[ ! "$engine_cpus" =~ ^[1-9][0-9]*$ || "$engine_cpus" -ge "$cpus" ]] || cpus=$engine_cpus
 fi
-"$engine" run --cpus "$cpus" --cidfile "$run_dir/container.cid" --pull=never --user "$(id -u):$(id -g)" -e HOME=/tmp -e KOBALT_RELEASE_VERSION \
+"$engine" run --cpus "$cpus" --cidfile "$container_run_dir/container.cid" --pull=never --user "$(id -u):$(id -g)" -e HOME=/tmp -e KOBALT_RELEASE_VERSION \
     --volume "$root:/work" \
     --volume "$cache:/dependency-cache" \
     --workdir /work/platforms/kobo "$image" bash -euc '

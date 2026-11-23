@@ -4,13 +4,17 @@ Label `links`. Build `mac-tests`, then run `ctest --preset mac -L links` from `p
 
 These checks cover link classification, footnote panels, direct link taps, link reveal, links in the bookmark corner, engine search and search results in the reader. The `engine` checks run on CREngine directly, and the `desktop` and `lifecycle` checks drive the production reader. Word selection in the reader is in [Input](input.md).
 
-Website targets preserve encoded path and query separators when the reader prepares the address for the browser.
+Website targets preserve encoded path and query separators when the reader prepares the address for the browser. A link preview for another chapter uses the destination’s title from the book or the host’s table of contents. A numeric link to an EPUB contents entry opens as a passage in both layouts.
 
 `desktop.tappableLinks` checks every direct-tap mode in both themes with Highlight links shown and hidden. It also checks that actual Settings hides the discovery controls. `desktop.settingsFeatures` toggles the feature through the checklist and checks the action after saving and reopening.
 
+`desktop.linkDiscoveryStrip` checks that a linked page and its open toolbar need no overlay. When neither strip fits, the scrubber still exposes the links and an unlinked tap exits. `component.ui` checks that a shown scrubber with no bar, preview or actions lets taps reach the page, including after preview cancellation. After strip sizes change, the revealed bar must use the active header or footer geometry, text size and theme color in both themes.
+
 The native suite launches no external browser. Physical touch accuracy still needs device validation.
 
-`desktop.links` opens short, long and legacy footnotes in the book, then returns to the reference. It checks the exact source position and rendered page pixels. Run it with `KOBALT_CHAPTER_MODE=0`, `1` or `2` to cover Accurate, Fast or Hybrid rendering.
+`component.ui` checks that a short footnote fits on one page on a landscape phone with the Show in book row visible.
+
+`desktop.links` opens short, long and legacy footnotes in the book, then returns to the reference. It checks the exact source position and rendered page pixels. CI runs it in Accurate and Hybrid. Select the Hybrid case with `ctest --preset mac -R "^desktop[.]links[.]hybrid$"`. For a manual comparison, run it with `KOBALT_CHAPTER_MODE=0`, `1` or `2` to cover Accurate, Fast or Hybrid rendering.
 
 `engine.links` also checks explicit EPUB page-note markup, token lists, individual InDesign note bodies, labeled Gutenberg paragraphs and continuations, exclusion of groups, backlinks, hidden bodies, unlinked notes and ordinary numeric destinations. It compares rendered pages to check that Kobalt overrides publisher note boxes and spacing while preserving inline markup. It checks a note reached by a percent-encoded fragment, note continuation fragments and page bounds, popup recognition, note selection rectangles and handles, saved-highlight redraw, source anchors, viewport reflow, restored pixels when disabled and parsed-cache reuse across both choices and themes. `desktop.inpageFootnotes` drives the checkbox, deferred saving, popup access, long-note page turns, reopening and restoring defaults in both themes. The page-note gallery shows the setting, ordinary text, notes, popup and continuation pages at the existing gallery sizes. These cases do not establish compatibility with every publisher’s note markup.
 
@@ -22,10 +26,12 @@ Search checks compare the prepared-text path with page search for Unicode normal
 
 `engine.chapter-parity` searches unopened chapters for accented text, punctuation variants, Arabic words with tatweel, and words split by comments, CDATA or hidden inline text. It compares the source position of each result with whole-book search.
 
-The scoped search check compares Current chapter, Up to this page and After this page with Accurate on the Type Tester. It compares the source ranges and clipped excerpts across chapter and slice boundaries, including after following a result and on the last page.
+The scoped search check compares all four search scopes in a chapter window with an explicitly paginated whole-book reference on the Type Tester. It compares the source ranges and clipped excerpts across chapter and slice boundaries, including after following a result and on the last page.
 
 Worker budgets are checked between logical text blocks. A single unusually large paragraph can exceed the preparation budget; physical Kobo typing latency and memory use still need device validation.
 
-The reader checks verify zero, one and grouped match counts in every scope, localized number grouping, exact result-page totals at completion and partial totals after cancellation. They also check that the single-page counter stays visible and the zero-match counter stays hidden.
+The reader checks verify zero, one and four-digit match counts in every scope, English grouping (1,288) in English and German locales, exact result-page totals at completion and partial totals after cancellation. They also check that the single-page counter stays visible and the zero-match counter stays hidden.
 
 Search uses the existing Settings status strip. The reader checks cover its clock and battery, and the Zen menu check verifies that Search uses the full-width strip.
+
+`component.ui` compares fitted search excerpts with the original character-by-character trim at different row widths and heights. It checks both the Qt and private renderers, including right-to-left text, punctuation next to the match, nonbreaking spaces, supplementary characters and a match too large for the row.

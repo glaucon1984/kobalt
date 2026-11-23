@@ -1,5 +1,7 @@
 # KOSync checks
 
+`desktop.settingsZenPage` opens Automatic sync from Zen before the Sync settings page has been visited. A signed-in account can enable automatic sync and change its schedule. It forces a schedule save to fail, checks that the switch returns to its saved position, and retries. It reads back the stored choices and verifies that the account controls stay unbuilt.
+
 `desktop.fastKosyncChoice` opens a synced passage choice for another chapter while reading in Fast mode. It checks the direction, chapter name and whole-book page graph, and that the current position stays on screen.
 
 Label `kosync`. Build `mac-tests`, then run `ctest --preset mac -L kosync` from `platforms/desktop/`. `ctest --preset mac -N -L kosync` lists its tests.
@@ -25,7 +27,7 @@ These checks cover KOSync accounts, automatic and manual sync, sync moments and 
 | `lifecycle.kosyncSleepSavesSyncTime` | Sleep saves the sync time, also when the sleep sync ends after the reader sleeps |
 | `lifecycle.kosyncMissingProgress` | First uploads after absent progress, with no upload on route, authentication or server errors |
 | `lifecycle.kosyncFailure` | Failed progress reads and uploads retain the specific error, fit its guidance and keep local progress |
-| `lifecycle.kosyncManualToolbar`, `lifecycle.kosyncManualConnection` | Manual sync and its Syncing notice |
+| `lifecycle.kosyncManualToolbar`, `lifecycle.kosyncManualConnection` | Manual sync, its Syncing notice, and cancellation of the active request and deadline |
 | `lifecycle.kosyncDialogResume` | A successful response waits under a native dialog, then resumes without another fetch when the host releases input |
 | `lifecycle.wifiPowerSaver`, `lifecycle.wifiPowerSaverAtSleep` | When the reader asks the host to turn Wi-Fi off |
 | `lifecycle.wifiStatus` | The Wi-Fi indicator in the status strip |
@@ -92,7 +94,7 @@ These checks do not exercise physical radio drivers, real firmware dialogs or Ni
 
 `kosync-network-unavailable` records a fixed `kosync.no_connection` code, guidance and a `preparation`, `periodic` or `final` stage when no connection is available. This event does not imply an HTTP request was sent. A connection preparation deadline uses `kosync.connection_timeout` in `kosync-deadline`. The manual connection, network, moments and background Wi-Fi lifecycle checks cover these messages and the absence of HTTP traffic.
 
-The sync coordinator owns request cancellation, deadlines, waiting responses, connection release and the final-upload handoff for one opened book. The reader supplies progress and readiness values and retains scheduling, lifecycle eligibility and presentation. A final attempt replaces an older progress read and waits for any older upload under the same two-second deadline. Cancelling or destroying the coordinator drops late connection answers. A repeated connection answer cannot restart the read, and a second attempt is refused while one is active. Observer callbacks may cancel or destroy the coordinator; no further request or final callback reaches that owner. Hidden reading state retains a fetched response without polling; resuming uses the settled local position without repeating the fetch.
+The sync coordinator owns request cancellation, deadlines, waiting responses, connection release and the final-upload handoff for one opened book. The reader supplies progress and readiness values and retains scheduling, lifecycle eligibility and presentation. A final attempt replaces an older progress read and waits for any older upload under the same two-second deadline. Cancelling or destroying the coordinator drops late connection answers. A repeated connection answer cannot restart the read, and a second attempt is refused while one is active. Observer callbacks may cancel or destroy the coordinator; no further request or final callback reaches that owner. A reader refresh resumes a waiting response using the settled local position without repeating the fetch. A busy visible reader also has a one-second fallback check. A hidden reader waits for notification.
 
 ## Android pause and retries
 

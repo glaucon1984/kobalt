@@ -161,10 +161,11 @@ public class KobaltActivity extends QtActivity {
                         if (rounded != null) corner = Math.max(corner, rounded.getRadius());
                     }
                 }
-                // systemBars also includes a caption bar, absent on handhelds.
-                // Its invisibility must not keep the Library handoff waiting.
-                if (Build.VERSION.SDK_INT >= 30) hidden = !insets.isVisible(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
-                else {
+                // A combined visibility query is false as soon as either bar hides.
+                if (Build.VERSION.SDK_INT >= 30) {
+                    hidden = !insets.isVisible(WindowInsets.Type.statusBars())
+                        && !insets.isVisible(WindowInsets.Type.navigationBars());
+                } else {
                     android.view.DisplayCutout cutout = insets.getDisplayCutout();
                     hidden = insets.getSystemWindowInsetTop() <= (cutout == null ? 0 : cutout.getSafeInsetTop())
                         && insets.getSystemWindowInsetBottom() <= (cutout == null ? 0 : cutout.getSafeInsetBottom());
@@ -523,7 +524,7 @@ public class KobaltActivity extends QtActivity {
             try {
                 File folder = target.getParentFile();
                 if (folder == null || (!folder.isDirectory() && !folder.mkdirs())) throw new java.io.IOException("Cannot create the book cache");
-                if (!target.isFile() || target.length() != size || target.lastModified() < modified) {
+                if (modified <= 0 || !target.isFile() || target.length() != size || target.lastModified() != modified) {
                     temporary = File.createTempFile("library-", ".part", folder);
                     try (InputStream input = getContentResolver().openInputStream(Uri.parse(uri));
                          FileOutputStream output = new FileOutputStream(temporary)) {
@@ -536,6 +537,8 @@ public class KobaltActivity extends QtActivity {
                         }
                         output.getFD().sync();
                     }
+                    // Publish the provider timestamp with the copy. A replacement can have an older date.
+                    temporary.setLastModified(Math.max(0L, modified));
                     if (!temporary.renameTo(target)) throw new java.io.IOException("Cannot save this book");
                 }
                 rememberSyncFilename(Uri.parse(uri), destination);
@@ -562,7 +565,9 @@ public class KobaltActivity extends QtActivity {
     private void receive(Intent intent) {
         if (intent != null && Intent.ACTION_VIEW.equals(intent.getAction())) importBook(intent.getData());
     }
-    private void toast(String message) { Toast.makeText(this, message, Toast.LENGTH_LONG).show(); }
+    private void toast(String message) {
+        runOnUiThread(() -> Toast.makeText(this, message, Toast.LENGTH_LONG).show());
+    }
     private void importBook(Uri uri) {
         if (uri == null || !"content".equals(uri.getScheme())) {
             toast("Open an EPUB through Android's document picker.");

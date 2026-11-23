@@ -14,6 +14,7 @@ namespace kobalt {
 class SearchPanel : public ui::Panel
 {
 public:
+    bool useScreens = false;
     SearchPanel(QWidget *parent, KeyboardFactory makeKeyboard);
     std::function<void(QString)> requested;
     std::function<void(SearchHit)> selected;
@@ -25,7 +26,8 @@ public:
 
     // `originalPage` is the zero-based page that Return to original position opens.
     // A supplied lookup query replaces the field and runs the normal search.
-    void open(bool canReturn, int originalPage, const QString &initialQuery = {});
+    void open(bool canReturn, int originalPage, const QString &initialQuery = {},
+              const QString &printedPage = {});
     // Excerpts are book text, so they use the family the book is displayed in.
     void setExcerptFont(const QString &family);
     void setChapters(const QVector<ChapterLink> &links);

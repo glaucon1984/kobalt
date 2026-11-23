@@ -1,3 +1,4 @@
+#include "reading/reading_progress.h"
 #include "appearance_settings.h"
 #include "features.h"
 #include "support/qt_compat.h"
@@ -140,6 +141,17 @@ QJsonObject cleanPreferences(QJsonObject preferences)
         preferences[headerfooter::presetKey] = headerfooter::presetValue(layout.preset);
         if (layout.preset == headerfooter::Preset::Custom)
             preferences[headerfooter::customKey] = headerfooter::toJson(layout.layout);
+        else {
+            auto text = preferences.value(headerfooter::textKey).toObject();
+            if (preferences.value("header_text_size") == QStringLiteral("small")
+                && !text.contains("header_size") && !text.contains("header_font_size"))
+                text["header_size"] = QStringLiteral("small");
+            if (preferences.value("footer_text_size") == QStringLiteral("small")
+                && !text.contains("footer_size") && !text.contains("footer_font_size"))
+                text["footer_size"] = QStringLiteral("small");
+            if (!text.isEmpty())
+                preferences[headerfooter::textKey] = text;
+        }
     }
     for (const auto *key : { "show_header", "show_footer", "show_clock", "show_progress_bar",
                              "header_text_size", "footer_text_size" })
@@ -147,10 +159,14 @@ QJsonObject cleanPreferences(QJsonObject preferences)
     for (const auto *key : { "dark_mode",
                              features::debugModeKey,
                              "hide_tab_labels",
+                             "publisher_page_numbers",
+                             "sideloaded_fonts_first",
+                             "playful_theme",
                              "save_looked_up_words",
                              "disable_reader_standby",
                              "inherit_text_layout",
                              "two_columns_landscape",
+                             "chapter_starts_spread",
                              "page_animations",
                              "edge_light_gestures",
                              "show_light_gesture_feedback",
@@ -205,12 +221,15 @@ QJsonObject cleanPreferences(QJsonObject preferences)
         preferences.remove(sleep::greetingKey);
     textpresets::clean(preferences);
     choice("time_remaining_format", { "detailed", "approximate" });
+    choice("stats_word_scope", { "main", "volume" });
+    choice(secondaryNumberKey, secondaryNumberStyles());
     choice(headerfooter::percentageFormatKey, { "whole", "decimal" });
     choice(renderingMode::preferenceKey, { "hybrid", "fast", "accurate" });
     if (preferences.contains(sessionTimeout::preferenceKey)
         && !sessionTimeout::valid(preferences.value(sessionTimeout::preferenceKey)))
         preferences.remove(sessionTimeout::preferenceKey);
     choice("header_footer", { "default", "alternative_a", "alternative_b", "phone", "custom" });
+    choice("ui_palette", { "grayscale", "blue", "sage", "sepia" });
     choice("default_menu_view", { "none", "seek", "stats" });
     choice("navigation_bar_buttons", { "chapters", "pages" });
     choice("chapter_groups", { "current", "all", "off" });
@@ -231,7 +250,8 @@ QJsonObject cleanPreferences(QJsonObject preferences)
     }
     if (preferences.contains("locked_orientation")) {
         const auto value = preferences.value("locked_orientation");
-        if (!value.isDouble() || (value != 0 && value != 1 && value != 2 && value != 4 && value != 8))
+        if (!value.isDouble()
+            || (value != 0 && value != 1 && value != 2 && value != 4 && value != 8))
             preferences.remove("locked_orientation");
     }
     const auto number = [&](const char *key, int minimum, int maximum) {
@@ -281,6 +301,7 @@ QJsonObject bookDefaults(const QJsonObject &preferences)
     defaults["vertical_spacing_scope"] =
             verticalSpacingScope(preferences.value("vertical_spacing_scope"));
     defaults["two_columns_landscape"] = preferences.value("two_columns_landscape").toBool(false);
+    defaults["chapter_starts_spread"] = preferences.value("chapter_starts_spread").toBool(false);
     defaults["column_spacing_percent"] = qBound(
             100, preferences.value("column_spacing_percent").toInt(defaultColumnSpacingPercent),
             300);
@@ -358,6 +379,7 @@ void applyBookDefaults(QJsonObject &saved, const QJsonObject &defaults)
     saved["vertical_spacing_scope"] =
             verticalSpacingScope(defaults.value("vertical_spacing_scope"));
     saved["two_columns_landscape"] = defaults.value("two_columns_landscape").toBool(false);
+    saved["chapter_starts_spread"] = defaults.value("chapter_starts_spread").toBool(false);
     saved["column_spacing_percent"] =
             defaults.value("column_spacing_percent").toInt(defaultColumnSpacingPercent);
     saved["inpage_footnotes"] = defaults.value("inpage_footnotes").toBool(false);

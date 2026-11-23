@@ -59,8 +59,6 @@ int main(int argc, char **argv)
            "annotations directory compatibility");
     expect(paths.database() == paths.directory + "/kobalt.sqlite",
            "database filename and profile location");
-    expect(paths.layoutCache() == paths.directory + "/cache/reopen-layout.json",
-           "layout filename compatibility");
     expect(paths.bookState("store-book-123")
                    == paths.directory
                            + "/b2810aac23895640e06ad1f67e8f46d5fa93a57e9fdc2b2f72e8ffaff93699fd.json",
@@ -342,6 +340,12 @@ int main(int argc, char **argv)
         expect(QDir().mkpath(root + "/fonts/ebook-core"), "optional font directory");
         write(root + "/fonts/ebook-core/Optional.ttf", "damaged optional font");
         AssetBundle assets(root, "asset-test", AssetBundle::Verification::Explicit);
+        // USB can revoke storage during a cold check. The check must stop at
+        // the next file or block, because the main thread waits for it.
+        int checks = 0;
+        expect(!assets.verify([&checks] { return ++checks < 2; }) && checks >= 2 && checks <= 3
+                       && !assets.available() && !QFileInfo(root + "/.verified.json").exists(),
+               "a cancelled check stops at once and records nothing");
         expect(assets.verify() && assets.available()
                        && assets.setAside("fonts/ebook-core/Optional.ttf")
                        && !assets.setAside("fonts/IBMPlexSans-Regular.ttf"),

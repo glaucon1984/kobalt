@@ -34,9 +34,9 @@ void open(kobalt::EngineDocument &model, const QByteArray &body, const QByteArra
           "<container xmlns='urn:oasis:names:tc:opendocument:xmlns:container' version='1.0'><rootfiles><rootfile full-path='book.opf' media-type='application/oebps-package+xml'/></rootfiles></container>" },
         { "book.opf",
           "<package xmlns='http://www.idpf.org/2007/opf' version='2.0'><metadata><title>Page layout</title></metadata><manifest><item id='before' href='before.xhtml' media-type='application/xhtml+xml'/><item id='page' href='page.xhtml' media-type='application/xhtml+xml'/><item id='after' href='after.xhtml' media-type='application/xhtml+xml'/></manifest><spine>"
-                  + QByteArray(!preceding     ? ""
-                               : beforeLinear ? "<itemref idref='before'/>"
-                                              : "<itemref idref='before' linear='no'/>")
+                  + QByteArray(!preceding             ? ""
+                                       : beforeLinear ? "<itemref idref='before'/>"
+                                                      : "<itemref idref='before' linear='no'/>")
                   + "<itemref idref='page'/>"
                   + QByteArray(following ? "<itemref idref='after'/>" : "")
                   + "</spine></package>" },
@@ -64,11 +64,252 @@ void open(kobalt::EngineDocument &model, const QByteArray &body, const QByteArra
     QString error;
     require(model.openResources(resources, sizes, size, saved, &error), qPrintable(error));
 }
+
+QRect wordRect(kobalt::EngineDocument &doc, const QString &word)
+{
+    auto hits = doc.searchText(word, {}, 2).hits;
+    require(hits.size() == 1, "Flex item missing or duplicated");
+    const auto page = doc.pagesOf({ hits.first().start });
+    require(page.size() == 1 && doc.go(page.first()), "Cannot navigate to flex item");
+    const auto rects = doc.rangeRects(hits.first().start, hits.first().end);
+    require(!rects.isEmpty(), "Flex item has no selection bounds");
+    return rects.first();
+}
+
+void flexRows()
+{
+    kobalt::readingPpi.store(96);
+    const QByteArray body = "<div class='row'><span>Alpha</span><span>Bravo</span>"
+                            "<span>Charlie</span></div>";
+    const QByteArray css = ".row{display:flex;flex-wrap:wrap;justify-content:center;gap:6px 10px}"
+                           ".row span{width:110px}";
+    for (int width : { 410, 260, 200 }) {
+        kobalt::EngineDocument doc(kobalt::test::readerFonts());
+        open(doc, body, css, {}, QSize(width, 600));
+        const QRect a = wordRect(doc, "Alpha"), b = wordRect(doc, "Bravo"),
+                    c = wordRect(doc, "Charlie");
+        std::printf("Flex rows at %d: (%d,%d) (%d,%d) (%d,%d)\n", width, a.x(), a.y(), b.x(), b.y(),
+                    c.x(), c.y());
+        require(width >= 260 ? (a.y() == b.y() && b.x() - a.x() == 120) : a.y() < b.y(),
+                "Flex items did not fit or wrap at the expected width");
+        require(width == 410 ? c.y() == a.y() : c.y() > b.y(), "Final flex item on wrong line");
+        const int count = width == 410 ? 3 : width == 260 ? 2 : 1;
+        require(qAbs(a.x() - (width - count * 110 - (count - 1) * 10) / 2) <= 2,
+                "Row is not centered");
+    }
+    const QByteArray labels = "<p class='row'><span>Alpha</span><span>Bravo</span></p>";
+    kobalt::EngineDocument margin(kobalt::test::readerFonts()), gap(kobalt::test::readerFonts());
+    open(margin, labels, ".row{display:flex}.row span:first-child{margin-right:1em}", {},
+         QSize(360, 144));
+    open(gap, labels, ".row{display:flex;gap:1em}", {}, QSize(360, 144));
+    require(margin.image(0) == gap.image(0),
+            "A margin between two text items gives the same pixels as an equal gap");
+    kobalt::EngineDocument grow(kobalt::test::readerFonts());
+    open(grow, body,
+         ".row{display:flex}.row span{flex:1 1 0%;min-width:0}"
+         ".row span:first-child{flex-grow:2}",
+         {}, QSize(400, 600));
+    const auto ga = wordRect(grow, "Alpha"), gb = wordRect(grow, "Bravo"),
+               gc = wordRect(grow, "Charlie");
+    require(ga.y() == gc.y() && gb.x() - ga.x() == 200 && gc.x() - gb.x() == 100,
+            "Flex factors did not distribute row space in a 2:1:1 ratio");
+    kobalt::EngineDocument shrink(kobalt::test::readerFonts());
+    open(shrink, body,
+         ".row{display:flex}.row span{flex:0 1 150px;min-width:0}"
+         ".row span:first-child{flex-shrink:2}",
+         {}, QSize(330, 600));
+    const auto sa = wordRect(shrink, "Alpha"), sb = wordRect(shrink, "Bravo"),
+               sc = wordRect(shrink, "Charlie");
+    require(sa.y() == sc.y() && sb.x() - sa.x() == 90 && sc.x() - sb.x() == 120,
+            "Negative free space was not shared by the scaled shrink factors");
+    kobalt::EngineDocument tall(kobalt::test::readerFonts());
+    open(tall,
+         "<div class='row'><div>First" + QByteArray("<br/>continuation").repeated(40)
+                 + "<br/>Last</div><div>Second</div></div>",
+         ".row{display:flex;flex-wrap:wrap}.row>div{width:150px}", {}, QSize(400, 480));
+    const auto firstPage = tall.pagesOf({ tall.searchText("First", {}, 2).hits.value(0).start });
+    const auto lastPage = tall.pagesOf({ tall.searchText("Last", {}, 2).hits.value(0).start });
+    require(firstPage.size() == 1 && lastPage.size() == 1 && firstPage.first() < lastPage.first(),
+            "A tall flex item lost its page breaks");
+    wordRect(tall, "First");
+    wordRect(tall, "Last");
+    wordRect(tall, "Second");
+    // The fill gives the border box independently of glyph bearings.
+    const auto redItem = [&](QByteArray display, QByteArray container, QByteArray first,
+                             QByteArray second, bool inlineBox = false) {
+        kobalt::EngineDocument page(kobalt::test::readerFonts());
+        const QByteArray group = "<span class='group'><span class='first'>A</span>"
+                                 "<span class='second'>B</span></span>";
+        const auto body = inlineBox ? "<p>X " + group + " Z</p>" : group;
+        open(page, body,
+             ".group{display:" + display + ";" + container
+                     + "}.first,.second{height:32px;font-size:16px;line-height:24px}"
+                       ".first{"
+                     + first + "}.second{background:red;" + second + "}",
+             {}, QSize(400, 240));
+        return ink(page.image(0), true);
+    };
+    require(redItem("flex", "", "width:64px;margin-right:1em", "width:80px")
+                    == QRect(80, 0, 80, 32),
+            "A right margin separates items on the same flex line");
+    require(redItem("flex", "gap:4px", "width:64px;margin:0 8px", "margin-left:12px;flex:1")
+                    == QRect(96, 0, 304, 32),
+            "Subtract item margins and the gap before distributing row space");
+    require(redItem("flex", "width:150px;flex-wrap:wrap", "width:64px;margin-right:16px",
+                    "width:80px")
+                    == QRect(0, 32, 80, 32),
+            "Include the right margin when deciding whether the second item fits");
+    require(redItem("flex", "flex-direction:row-reverse", "width:64px;margin-left:12px",
+                    "width:80px;margin-right:4px")
+                    == QRect(240, 0, 80, 32),
+            "A reversed row preserves physical left and right margins");
+    require(redItem("flex", "justify-content:center", "width:64px",
+                    "width:80px;margin-left:auto")
+                    == QRect(320, 0, 80, 32),
+            "An auto margin absorbs free space before justification");
+    require(redItem("flex", "", "width:64px", "width:80px;margin:0 auto")
+                    == QRect(192, 0, 80, 32),
+            "Two auto margins share the same line's free space equally");
+    require(redItem("flex", "flex-direction:row-reverse", "width:64px",
+                    "width:80px;margin-right:auto")
+                    == QRect(0, 0, 80, 32),
+            "A reversed row preserves the physical side of an auto margin");
+    require(redItem("flex", "", "flex:1;min-width:0", "width:80px;margin-left:auto")
+                    == QRect(320, 0, 80, 32),
+            "Flex growth takes its share before resolving auto margins");
+    require(redItem("flex", "width:140px;flex-wrap:wrap", "width:64px",
+                    "width:80px;margin-left:auto")
+                    == QRect(60, 32, 80, 32),
+            "Resolve auto margins separately on a wrapped line");
+    const auto limited =
+            redItem("flex", "width:320px", "width:40px;min-width:25%", "flex:1;max-width:50%");
+    require(limited == QRect(80, 0, 160, 32),
+            qPrintable(QString("Expected adjacent items constrained by the row, got %1,%2 %3x%4")
+                               .arg(limited.x())
+                               .arg(limited.y())
+                               .arg(limited.width())
+                               .arg(limited.height())));
+    require(redItem("flex", "align-items:center;gap:12px", "width:64px;height:64px", "width:160px")
+                    == QRect(76, 16, 160, 32),
+            "Center a label beside a taller item");
+    require(redItem("flex",
+                    "flex-direction:column;align-items:center;gap:12px;height:140px;"
+                    "justify-content:center",
+                    "width:180px", "width:120px")
+                    == QRect(140, 76, 120, 32),
+            "Center a stack within a definite height");
+    require(redItem("flex", "", "width:25%", "flex:1;min-width:0") == QRect(100, 0, 300, 32),
+            "Resolve percentage flex item width against the row");
+    require(redItem("flex", "", "flex:0 1 600px;min-width:0", "flex:0 1 200px;min-width:0")
+                    == QRect(300, 0, 100, 32),
+            "Shrink in proportion to the original bases");
+    require(redItem("flex", "", "width:240px", "width:240px") == QRect(200, 0, 200, 32),
+            "Short labels can shrink below a specified width");
+    require(redItem("flex", "", "width:25%;min-width:160px", "flex:1;min-width:0")
+                    == QRect(160, 0, 240, 32),
+            "A percentage width respects an explicit minimum");
+    require(redItem("flex",
+                    "flex-direction:column;height:140px;align-items:center;justify-content:center",
+                    "width:80px", "width:50%;padding:0 10px;box-sizing:content-box")
+                    == QRect(90, 70, 220, 32),
+            "Center the padded percentage border box");
+    const QRect padded =
+            redItem("flex", "", "width:400px;padding:0 122px;box-sizing:border-box", "width:400px");
+    require(padded.x() > 244 && padded.right() == 399 && padded.y() == 0,
+            "Keep the word and its padding inside the minimum border-box width");
+    require(redItem("flex", "width:300px", "flex:1 1 100px;min-width:160px",
+                    "flex:1 1 100px;max-width:110px")
+                    == QRect(190, 0, 110, 32),
+            "Redistribute growth after freezing only the limiting maximum");
+    require(redItem("flex", "width:300px", "flex:1 1 100px;min-width:190px",
+                    "flex:1 1 100px;max-width:140px")
+                    == QRect(190, 0, 110, 32),
+            "Redistribute growth after freezing only the limiting minimum");
+    require(redItem("flex", "", "flex:1 1 600px;max-width:100px;min-width:0",
+                    "flex:1 1 0%;min-width:0")
+                    == QRect(100, 0, 300, 32),
+            "Freeze an item already above its maximum before sharing growth");
+    require(redItem("inline-flex", "gap:8px", "flex:0 0 64px", "flex:0 0 80px", true)
+                    == redItem("inline-flex", "gap:8px", "width:64px", "width:80px", true),
+            "Include fixed flex bases in an inline row's natural width");
+    require(redItem("inline-flex", "gap:8px", "flex:0 0 64px",
+                    "flex:0 0 80px;margin-left:auto", true)
+                    == redItem("inline-flex", "gap:8px", "width:64px", "width:80px", true),
+            "Auto margins contribute zero to an inline row's natural width");
+    const auto fixed = redItem("inline-flex", "width:152px;gap:8px;vertical-align:top",
+                               "width:64px", "width:80px", true);
+    const auto natural =
+            redItem("inline-flex", "gap:8px;vertical-align:top", "width:64px", "width:80px", true);
+    require(fixed == natural && fixed.width() == 80 && fixed.x() > 72,
+            "The natural inline flex width must include both items and their gap");
+    kobalt::EngineDocument direct(kobalt::test::readerFonts()),
+            wrapped(kobalt::test::readerFonts());
+    const QByteArray headingCss = "h2{display:flex;justify-content:center;text-align:left}";
+    open(direct, "<h2>Chapter</h2>", headingCss, {}, QSize(400, 240));
+    open(wrapped, "<h2><span>Chapter</span></h2>", headingCss, {}, QSize(400, 240));
+    require(wordRect(direct, "Chapter") == wordRect(wrapped, "Chapter")
+                    && qAbs(wordRect(direct, "Chapter").center().x() - 200) < 4,
+            "Center a text-only flex heading as an anonymous item");
+    QRect firstBox;
+    for (int width : { 300, 400 }) {
+        kobalt::EngineDocument single(kobalt::test::readerFonts());
+        open(single, "<div><span>Alpha</span></div>", "div{display:flex}span{background:red}", {},
+             QSize(width, 240));
+        const auto box = ink(single.image(0), true);
+        require(box.x() == 0 && box.width() > 0 && box.width() < width
+                        && (firstBox.isNull() || box == firstBox),
+                "A start-aligned flex item keeps its content width");
+        firstBox = box;
+    }
+    const QByteArray poem = "<div class='poem'><div><p>Opening</p><p>Verse</p></div></div>";
+    kobalt::EngineDocument doc(kobalt::test::readerFonts());
+    open(doc, poem, ".poem{display:flex;justify-content:center}", {}, QSize(410, 600));
+    const auto opening = wordRect(doc, "Opening"), verse = wordRect(doc, "Verse");
+    require(qAbs(opening.center().x() - 205) <= 3 && opening.x() == verse.x(),
+            "Center the poem while keeping its verse left aligned");
+    kobalt::EngineDocument plain(kobalt::test::readerFonts()), unused(kobalt::test::readerFonts());
+    open(plain, poem);
+    open(unused, poem,
+         ".absent{display:flex;flex-wrap:wrap}.poem{display:flex;display:block;"
+         "justify-content:center}@supports(display:flex){.poem{display:none}}");
+    require(plain.image(0) == unused.image(0), "An unmatched flex rule changed ordinary blocks");
+}
+
+// Checks that page excerpts keep the last line of each page and leave out the next page's first line.
+void pageExcerptsKeepTheirLastLine()
+{
+    QByteArray words;
+    for (int i = 1; i <= 120; ++i) {
+        words += "w" + QByteArray::number(i) + " ";
+    }
+    kobalt::EngineDocument doc(kobalt::test::readerFonts());
+    open(doc, "<p>" + words.trimmed() + "</p>", {}, {}, QSize(400, 300), false, true);
+    require(doc.pages() >= 4, "Excerpt fixture did not span several pages");
+    int expected = 1;
+    for (int page = 0; page + 1 < doc.pages(); ++page) {
+        const auto excerpt = doc.pageExcerpt(page);
+        std::printf("Excerpt %d: %s\n", page, qPrintable(excerpt));
+        require(excerpt.size() < 200, "Page excerpt is too long to compare whole pages");
+        require(!excerpt.contains("Next chapter"), "Page excerpt took the next chapter");
+        for (const auto &word : excerpt.split(' ', Qt::SkipEmptyParts)) {
+            require(word == "w" + QString::number(expected),
+                    qPrintable(QString("Page %1 excerpt has %2 where w%3 belongs")
+                                       .arg(page)
+                                       .arg(word)
+                                       .arg(expected)));
+            ++expected;
+        }
+    }
+    require(expected == 121, "Page excerpts left out the last line of a page");
+}
+
 } // namespace
 
 int main(int argc, char **argv)
 {
     QGuiApplication app(argc, argv);
+    pageExcerptsKeepTheirLastLine();
+    flexRows();
     const QByteArray svg =
             "<svg xmlns='http://www.w3.org/2000/svg' width='100%' height='100%' viewBox='0 0 200 100' preserveAspectRatio='xMidYMid meet'><rect width='200' height='100' fill='red'/></svg>";
     for (int ppi : { 300, 212 }) {

@@ -5,14 +5,13 @@
 #include "ui/controls/panels.h"
 #include "ui/style/theme.h"
 #include "support/qt_font.h"
-#include "support/strings.h"
+#include "support/percentage_text.h"
 #include "chapter_graph.h"
 #include "stats_cell.h"
 #include "reading/reading_progress.h"
 #include "ui/style/fonts.h"
 #include "ui/style/private_text.h"
 #include "ui/style/styles.h"
-#include <QLocale>
 #include <QPainter>
 #include <QResizeEvent>
 #include <algorithm>
@@ -29,6 +28,7 @@ public:
     QVector<ChapterLink> chapters;
     ChapterSelection selection;
     int first = 0, count = 0, gap = chapters::gapWide;
+    qint64 maximum = 1;
     // The tallest bar; a shorter chart shortens it by the same amount.
     int barsHeight = chapters::barsHeight;
 
@@ -42,11 +42,6 @@ protected:
         const int visible = qMin(count, int(chapters.size()) - first);
         if (visible <= 0)
             return;
-        // Use the longest chapter in the whole book on every graph page.
-        // Long chapters must keep their proportions, even beside short ones.
-        qint64 maximum = 1;
-        for (const auto &chapter : chapters)
-            maximum = qMax(maximum, chapter.words);
         const int chart = barsHeight;
         // Reserve a full page's columns even on the last page. A short book
         // still centers its own columns; a paged book keeps their positions.
@@ -271,6 +266,16 @@ ChapterGraph::ChapterGraph(QWidget *parent, bool phoneLayout)
         if (denseChanged)
             denseChanged(dense);
     });
+    wordScope = new ui::CellButton(ui::ControlIcon::Books, this);
+    wordScope->hide();
+    wordScope->setObjectName("rrGraphWordScope");
+    wordScope->setAccessibleName(strings::get("stats.count_words_in"));
+    wordScope->setToolTip(strings::get("stats.count_words_in"));
+    wordScope->setRule(ui::Edges(Qt::LeftEdge) | Qt::BottomEdge);
+    connect(wordScope, &QPushButton::clicked, this, [this] {
+        if (wordScopeRequested)
+            wordScopeRequested();
+    });
     pager = new ui::PagerBar(this, "rrGraph");
     pager->previous->setAccessibleName(strings::get("chapter_contents.previous_chapters"));
     pager->next->setAccessibleName(strings::get("chapter_contents.next_chapters"));
@@ -318,22 +323,22 @@ ChapterGraph::ChapterGraph(QWidget *parent, bool phoneLayout)
 }
 
 void ChapterGraph::setProgress(const QString &title, int chapterPage, int chapterPages,
-                               int nextChapterPages, int page, int pages, double bookFraction,
-                               bool estimated)
+                               int nextChapterPages, int page, int pages, int bookPercent,
+                               bool estimated, bool useScreens)
 {
     if (this->title == title && progress.chapterPage == chapterPage
         && progress.chapterPages == chapterPages && progress.nextChapterPages == nextChapterPages
-        && progress.page == page && progress.pages == pages && progress.bookFraction == bookFraction
-        && progress.estimated == estimated && progressWeight == ui::interfaceWeight())
+        && progress.page == page && progress.pages == pages && progress.bookPercent == bookPercent
+        && progress.estimated == estimated && progress.useScreens == useScreens
+        && progressWeight == ui::interfaceWeight())
         return;
     this->title = title;
     progressWeight = ui::interfaceWeight();
-    progress = {
-        chapterPage, chapterPages, nextChapterPages, page, pages, bookFraction, estimated
-    };
+    progress = { chapterPage, chapterPages, nextChapterPages, page,
+                 pages,       bookPercent,  estimated,        useScreens };
     chapterTitle->setAccessibleName(strings::get("chapter_graph.current_chapter").arg(title));
     this->chapterPage->setText(
-            chapterPages > 0 ? strings::get("stats.page_of")
+            chapterPages > 0 ? strings::get(useScreens ? "stats.screen_of" : "stats.page_of")
                                        .arg(qBound(1, chapterPage, chapterPages))
                                        .arg(headerfooter::pageTotal(chapterPages, estimated))
                              : QString());
@@ -353,13 +358,15 @@ void ChapterGraph::setChapterNumber(int number, int count)
 }
 
 void ChapterGraph::setReading(int minutes, qint64 total, qint64 chapterMilliseconds,
-                              qint64 bookMilliseconds, int pageTurns)
+                              qint64 bookMilliseconds, int pageTurns, bool wholeVolume)
 {
     if (this->minutes == minutes && words == total && chapterTime == chapterMilliseconds
-        && bookTime == bookMilliseconds && this->pageTurns == pageTurns)
+        && bookTime == bookMilliseconds && this->pageTurns == pageTurns
+        && this->wholeVolume == wholeVolume)
         return;
     this->minutes = minutes;
     this->pageTurns = pageTurns;
+    this->wholeVolume = wholeVolume;
     words = total;
     chapterTime = chapterMilliseconds;
     bookTime = bookMilliseconds;
@@ -386,28 +393,25 @@ void ChapterGraph::refreshCells()
 {
     const auto &p = progress;
     const int chapterValue = pageProgressPercent(qMax(1, p.chapterPage) - 1, p.chapterPages);
-    const int bookValue = p.bookFraction >= 0 ? qBound(0, int(p.bookFraction * 100), 100)
-                                              : pageProgressPercent(p.page, p.pages);
+    const int bookValue = p.bookPercent >= 0 ? qBound(0, p.bookPercent, 100)
+                                             : pageProgressPercent(p.page, p.pages);
     const int left = qMax(0, p.chapterPages - p.chapterPage + 1),
               remaining = qMax(0, p.pages - p.page);
-    const auto pagesLeft = [](int count) {
-        return count == 1 ? strings::get("stats.page_left") : strings::get("stats.pages_left");
-    };
+
     // A time at the session's pace replaces the page-count detail when there is one.
     const QString next = chapterTime >= 0 ? duration(chapterTime)
             : p.nextChapterPages > 0
             ? strings::get("chapter_graph.next_chapter")
                       .arg(p.nextChapterPages)
-                      .arg(p.nextChapterPages == 1 ? strings::get("common.page")
-                                                   : strings::get("common.pages"))
+                      .arg(p.nextChapterPages == 1
+                                   ? strings::get(p.useScreens ? "common.screen" : "common.page")
+                                   : strings::get(p.useScreens ? "common.screens" : "common.pages"))
             : p.chapterPages > 0 ? strings::get("stats.last_chapter")
                                  : QString();
-    // The catalog is English, so group digits the English way on every device.
     const auto wordTotal = [](qint64 count) {
-        return count >= 0
-                ? strings::get("stats.words")
-                          .arg(QLocale(QLocale::English, QLocale::UnitedStates).toString(count))
-                : QString();
+        if (count == 1)
+            return strings::get("words.count_one");
+        return count >= 0 ? strings::get("stats.words").arg(strings::count(count)) : QString();
     };
     // A chapter's total waits for the counts, and a failed count never shows
     // the page lengths that the chart falls back to.
@@ -416,21 +420,19 @@ void ChapterGraph::refreshCells()
             ? chapters[selection.current].words
             : -1;
     chapterCell->set(p.chapterPages > 0 ? QString::number(left) : QString(),
-                     p.chapterPages > 0 ? pagesLeft(left) : QString(), next,
-                     p.chapterPages > 0 ? strings::get("common.percent").arg(chapterValue)
-                                        : QString(),
+                     p.chapterPages > 0 ? remainingScreenUnit(left, p.useScreens) : QString(), next,
+                     p.chapterPages > 0 ? strings::percentage(chapterValue) : QString(),
                      chapterTime >= 0 ? duration(chapterTime, true) : QString(),
                      wordsInCells() ? wordTotal(chapterTotal) : QString());
-    chapterCell->percent->setAccessibleName(
-            strings::get("chapter_graph.chapter_progress").arg(chapterValue));
+    chapterCell->percent->setAccessibleName(strings::get("chapter_graph.chapter_progress")
+                                                    .arg(strings::percentArgument(chapterValue)));
     bookCell->set(p.pages > 0 ? QString::number(remaining) : QString(),
-                  p.pages > 0 ? pagesLeft(remaining) : QString(),
-                  bookTime >= 0 ? duration(bookTime) : QString(),
-                  strings::get("common.percent").arg(bookValue),
+                  p.pages > 0 ? remainingScreenUnit(remaining, p.useScreens) : QString(),
+                  bookTime >= 0 ? duration(bookTime) : QString(), strings::percentage(bookValue),
                   bookTime >= 0 ? duration(bookTime, true) : QString(),
                   wordsInCells() ? wordTotal(words) : QString());
     bookCell->percent->setAccessibleName(
-            strings::get("chapter_graph.book_progress").arg(bookValue));
+            strings::get("chapter_graph.book_progress").arg(strings::percentArgument(bookValue)));
     sessionCell->set(QString::number(qMax(0, minutes)), strings::get("stats.minutes"),
                      strings::get(pageTurns == 1 ? "stats.page_turn" : "stats.page_turns")
                              .arg(qMax(0, pageTurns)));
@@ -438,8 +440,16 @@ void ChapterGraph::refreshCells()
             : chapterNumber
             ? strings::get("stats.chapter_words").arg(chapterNumber).arg(wordTotal(chapterTotal))
             : strings::get("stats.this_chapter_words").arg(wordTotal(chapterTotal));
-    bookWordsText = words >= 0 ? strings::get("stats.book_words").arg(wordTotal(words)) : QString();
+    bookWordsText = words >= 0
+            ? strings::get(wholeVolume ? "stats.volume_words" : "stats.main_words")
+                      .arg(wordTotal(words))
+            : QString();
     arrangeWords();
+}
+
+QString ChapterGraph::activitySummary() const
+{
+    return activityCell->accessibleDescription();
 }
 
 void ChapterGraph::setActivity(const QString &summary)
@@ -513,6 +523,21 @@ int ChapterGraph::graphPages() const
     return qMax(1, (int(chapters.size()) + capacity() - 1) / capacity());
 }
 
+void ChapterGraph::updateChartScale()
+{
+    QVector<qint64> lengths;
+    for (const auto &chapter : chapters)
+        if (chapter.words > 0)
+            lengths.append(chapter.words);
+    std::sort(lengths.begin(), lengths.end());
+    // All pages use the same book-wide distribution. Uneven books benefit
+    // most from the extra resolution, without taking all the exposed paper.
+    bars->maximum = lengths.isEmpty() ? 1 : lengths.last();
+    chapterSpread = lengths.isEmpty()
+            ? 1.0
+            : qBound(1.0, double(lengths.last()) / double(lengths[lengths.size() / 2]), 3.0);
+}
+
 void ChapterGraph::setData(QVector<ChapterLink> chapters, ChapterSelection selection, bool ready,
                            const QString &error)
 {
@@ -530,12 +555,13 @@ void ChapterGraph::setData(QVector<ChapterLink> chapters, ChapterSelection selec
     const bool moved = selection.current != this->selection.current
             || chapters.size() != this->chapters.size();
     this->chapters = std::move(chapters);
+    if (!sameChapters)
+        updateChartScale();
     this->selection = selection;
     this->ready = ready;
     this->error = error;
     // The chapter's word total comes with the counts.
     refreshCells();
-    arrange();
     if (moved)
         anchor = qMax(0, selection.current);
     redraw();
@@ -612,18 +638,8 @@ int ChapterGraph::chartHeight() const
             qMin(width(), parentWidget() ? parentWidget()->height() : availableHeight);
     const int growth = qBound(0, (shortEdge - int(chapters::growthShortEdge)) / 2,
                               int(chapters::maximumGrowth));
-    QVector<qint64> lengths;
-    for (const auto &chapter : chapters)
-        if (chapter.words > 0)
-            lengths.append(chapter.words);
-    std::sort(lengths.begin(), lengths.end());
-    // All pages use the same book-wide distribution. Uneven books benefit
-    // most from the extra resolution, without taking all the exposed paper.
-    const double spread = lengths.isEmpty()
-            ? 1.0
-            : qBound(1.0, double(lengths.last()) / double(lengths[lengths.size() / 2]), 3.0);
     const int extra =
-            qMin(int(growth * spread / 3), qMax(0, room - base - int(chapters::exposedPaper)));
+            qMin(int(growth * chapterSpread / 3), qMax(0, room - base - int(chapters::exposedPaper)));
     // Leave the text and cells intact when only a very short chart fits.
     const int least = base - chapters::barsHeight + 2;
     return qBound(least, room, base + extra);
@@ -662,10 +678,18 @@ void ChapterGraph::arrangeWords()
     bookWords->setText(ui::elideInterfaceText(bookWordsText, metrics, bookWidth));
 }
 
+void ChapterGraph::setWordScopeAvailable(bool available)
+{
+    if (available == !wordScope->isHidden())
+        return;
+    wordScope->setVisible(available);
+    arrange();
+}
+
 void ChapterGraph::arrange()
 {
     const int inner = qMax(1, width() - 2 * chrome::inset);
-    const int rowInner = qMax(1, inner - int(chrome::cellWidth));
+    const int rowInner = qMax(1, inner - (wordScope->isHidden() ? 1 : 2) * int(chrome::cellWidth));
     // A change of height or paging can move the word totals in or out of the cells.
     if (wordsInCells() != cellWords) {
         cellWords = !cellWords;
@@ -689,6 +713,8 @@ void ChapterGraph::arrange()
     const int pagerWidth = inlinePager() ? 3 * int(chrome::cellWidth) : 0;
     const int titleWidth = qMax(
             1, rowInner - int(chrome::inset) - (pagerWidth ? pagerWidth + int(chrome::inset) : 0));
+    wordScope->setGeometry(width() - 2 * chrome::cellWidth, topPadding, chrome::cellWidth,
+                           chapters::rowHeight);
     mode->setGeometry(width() - chrome::cellWidth, topPadding, chrome::cellWidth,
                       chapters::rowHeight);
     // "Contents · 8 of 23 · Page 1 of 65". The page keeps its full text; a

@@ -41,12 +41,27 @@ QJsonObject persistedBook(QJsonObject state)
         state.remove(key);
     for (const auto *key : appearance::marginKeys)
         state.remove(key);
-    for (const auto *key :
-         { "chapter_title", "chapter_page", "chapter_pages", "page", "pages", "next_page",
-           "text_font_face", "embedded_font_count", "cached_pages", "continues_before",
-           "continues_after", "book_fraction", "rough_page", "rough_pages", "rough_item_page",
-           "rough_item_pages", "rough_pages_estimated", "rough_item_pages_estimated",
-           "chapter_load_ms" })
+    for (const auto *key : { "chapter_title",
+                             "chapter_page",
+                             "chapter_pages",
+                             "page",
+                             "pages",
+                             "next_page",
+                             "text_font_face",
+                             "embedded_font_count",
+                             "cached_pages",
+                             "continues_before",
+                             "continues_after",
+                             "book_fraction",
+                             "rough_page",
+                             "rough_pages",
+                             "rough_item_page",
+                             "rough_item_pages",
+                             "rough_pages_estimated",
+                             "rough_item_pages_estimated",
+                             "chapter_load_ms",
+                             "slice_start",
+                             "whole_book_ready" })
         state.remove(key);
     return state;
 }
@@ -90,7 +105,7 @@ struct Calls
     NativeActivityResult openingResult = NativeActivityResult::NotRequired;
 };
 
-class Bridge final : public ReadingBridge
+class Bridge : public ReadingBridge
 {
 public:
     explicit Bridge(Calls &calls) : calls(calls) { }
@@ -227,27 +242,99 @@ int main(int argc, char **argv)
     const auto open = [&](QSize size = QSize(758, 900), const QJsonObject &state = QJsonObject(),
                           const QString &identity = QStringLiteral("test-book"),
                           PositionCodec positions = {}, bool restart = false,
-                          std::unique_ptr<ReaderSession> session = {}) {
+                          std::unique_ptr<ReaderSession> session = {}, bool *reused = nullptr) {
         if (!session)
             session =
                     std::make_unique<ReaderSession>(test::readerFonts(), test::readerPlaceholder());
         bool ready = false;
         auto lease = std::make_shared<SourceLease>();
-        OpenRequest request{ identity, path,
-                             size,     state,
-                             {},       {},
-                             lease,    nativeResourceFactory(path, server.port(), lease) };
+        OpenRequest request{ identity,
+                             path,
+                             size,
+                             state,
+                             {},
+                             lease,
+                             nativeResourceFactory(path, server.port(), lease) };
         request.positions = positions;
         request.restartAtStart = restart;
         if (restart)
             request.platformLocation = "invalid-finished-native-location";
-        session->open(std::move(request), [&](const OpeningResult &result) {
-            require(result.ready(), qPrintable(openingMessage(result)));
-            ready = true;
-        });
+        session->open(
+                std::move(request),
+                [&](const OpeningResult &result) {
+                    require(result.ready(), qPrintable(openingMessage(result)));
+                    ready = true;
+                },
+                {}, {},
+                [reused] {
+                    if (reused)
+                        *reused = true;
+                });
         waitUntil([&] { return ready; });
         return session;
     };
+    // Both opening paths must replace an unresolvable position before any user input.
+    for (bool retained : { false, true }) {
+        enum Source { KnownChapter, UnknownChapter, ReplacedBook };
+
+        for (const auto source : { KnownChapter, UnknownChapter, ReplacedBook }) {
+            const QString identity = QString("lost-position-%1-%2").arg(retained).arg(source);
+            const QSize size(758, 900);
+            auto reference = open(size, {}, identity);
+            if (source == KnownChapter) {
+                require(reference->goToChapter(1), "Cannot reach the reference chapter");
+                waitUntil([&] { return !reference->busy(); });
+            }
+            const auto expected = reference->image();
+            const auto hash = reference->sourceHash();
+            auto saved = reference->state();
+            saved["schema"] = 1;
+            saved["book"] = identity;
+            saved["fingerprint"] =
+                    source == ReplacedBook ? QString(64, 'f') : QString::fromLatin1(hash);
+            saved["position"] = source == UnknownChapter ? "/body/DocFragment[99]/missing/text().0"
+                                                         : "/body/DocFragment[2]/missing/text().0";
+            require(storage::writeBookState(paths, identity, saved), "Cannot seed lost position");
+            reference.reset();
+            // Reopen a fresh retained layout at the first page, independently of
+            // the reference that jumped to the expected chapter.
+            std::unique_ptr<ReaderSession> session;
+            if (retained) {
+                auto first = open(size, {}, identity);
+                session = first->retained();
+                require(bool(session), "Cannot retain the fixture");
+                first.reset();
+                bool drained = false;
+                ReaderSession::drain([&] { drained = true; });
+                waitUntil([&] { return drained; });
+            }
+            bool reused = false;
+            session = open(size, saved, identity, {}, false, std::move(session), &reused);
+            if (source != ReplacedBook)
+                require(reused == retained, "Lost-position test missed its requested opening path");
+            const auto position = session->state().value("position").toString();
+            require(!position.isEmpty() && position != saved.value("position").toString()
+                            && session->image() == expected,
+                    "Lost position did not open at the start of its chapter or book");
+            QTemporaryDir logs;
+            require(logs.isValid(), "Cannot create recovery diagnostics");
+            initializeDiagnostics(logs.path());
+            QJsonObject recovered;
+            setDiagnosticObserver([&](const QJsonObject &event) {
+                if (event.value("event") == QStringLiteral("position-recovered"))
+                    recovered = event;
+            });
+            ReadingBook book(std::move(session), paths.bookState(identity), paths, identity, hash,
+                             nullptr, {}, {});
+            setDiagnosticObserver({});
+            require(recovered.value("previous") == saved.value("position")
+                            && recovered.value("position") == position,
+                    "The recovered position was not logged with the previous one");
+            waitUntil([&] { return !book.savesPending(); });
+            require(storage::readBookState(paths, identity).object.value("position") == position,
+                    "Recovered position was not saved immediately after opening");
+        }
+    }
     {
         Calls calls;
         const PositionCodec positions{
@@ -270,14 +357,17 @@ int main(int argc, char **argv)
         book.stopReading();
         QString mappingError;
         const auto finalPosition = book.session()->savedNativePosition(&mappingError);
-        require(mappingError.isEmpty() && calls.stoppedActivity.page != opening.page
-                        && calls.stoppedActivity.nativePosition != opening.nativePosition
-                        && calls.stoppedActivity.nativePosition == finalPosition
-                        && calls.stoppedActivity.percent
-                                == qMin(99,
-                                        pageProgressPercent(book.session()->page(),
-                                                            book.session()->pages())),
-                "The closing native interval received the preceding page's progress or mapping");
+        const auto &activity = calls.stoppedActivity;
+        require(mappingError.isEmpty() && activity.nativePosition != opening.nativePosition
+                        && activity.nativePosition == finalPosition
+                        && activity.position
+                                == book.session()->state().value("position").toString(),
+                "The closing native interval received the preceding page's position");
+        // Hybrid can turn a page before it has page counts for the whole book.
+        require(activity.page == book.session()->bookPage()
+                        && activity.pages == book.session()->bookPages()
+                        && activity.percent == qMin(99, book.session()->progressPercent()),
+                "The closing native interval lost the displayed frame's whole-book progress");
         require(calls.writes == 0, "Stopping the native interval persisted book progress");
     }
     // Optional book state must survive both supported backends without
@@ -473,8 +563,9 @@ int main(int argc, char **argv)
             // The page estimate is optional and can be rebuilt. Over the byte
             // limit its read spine items go first, then the record, and only
             // then image views.
-            // Without chapter slices the whole book saves no record of its
-            // own over the seeded one.
+            // Use a whole-book layout without slices so the session leaves the seeded estimate alone.
+            const auto mode = qgetenv("KOBALT_CHAPTER_MODE");
+            qputenv("KOBALT_CHAPTER_MODE", "0");
             qputenv("KOBALT_CHAPTER_PAGES", "0");
             const auto views = [](int count) {
                 QVector<QPair<QString, QJsonObject>> result;
@@ -542,6 +633,10 @@ int main(int argc, char **argv)
                             "The page estimate must go before image views are trimmed");
             }
             qunsetenv("KOBALT_CHAPTER_PAGES");
+            if (mode.isNull())
+                qunsetenv("KOBALT_CHAPTER_MODE");
+            else
+                qputenv("KOBALT_CHAPTER_MODE", mode);
         }
 #if __has_include(<koblaze.h>)
         {
@@ -562,7 +657,6 @@ int main(int argc, char **argv)
                 session->open({ identity,
                                 typeTester,
                                 QSize(758, 900),
-                                {},
                                 {},
                                 {},
                                 access,
@@ -679,7 +773,7 @@ int main(int argc, char **argv)
             auto session = open();
             require(session->style(32, 150), "Cannot set finish-book appearance");
             waitUntil([&] { return !session->busy(); });
-            require(session->go(session->pages() - 1), "Cannot reach finish page");
+            require(session->goToFraction(1), "Cannot reach the last page of the book");
             waitUntil([&] { return !session->busy(); });
             const auto hash = session->sourceHash();
             ReadingBook book(std::move(session), finishPaths.bookState(identity), finishPaths,
@@ -860,10 +954,13 @@ int main(int argc, char **argv)
                 std::make_unique<ReaderSession>(test::readerFonts(), test::readerPlaceholder());
         bool ready = false;
         auto lease = std::make_shared<SourceLease>();
-        OpenRequest request{
-            identity, path, QSize(758, 900), original,
-            {},       {},   lease,           nativeResourceFactory(path, server.port(), lease)
-        };
+        OpenRequest request{ identity,
+                             path,
+                             QSize(758, 900),
+                             original,
+                             {},
+                             lease,
+                             nativeResourceFactory(path, server.port(), lease) };
         request.temporaryAppearance = appearance::benchmarkTypography();
         request.originalAppearance = original;
         session->open(std::move(request), [&](const OpeningResult &result) {
@@ -917,7 +1014,6 @@ int main(int argc, char **argv)
                          QSize(758, 900),
                          storage::readBookState(paths, identity, statePath).object,
                          {},
-                         {},
                          lease,
                          nativeResourceFactory(path, server.port(), lease) },
                        [&](const OpeningResult &result) {
@@ -967,7 +1063,12 @@ int main(int argc, char **argv)
                     "Beautifier must default off");
             require(book.session()->setBookBeautifier(true), "Cannot enable beautifier");
             waitUntil([&] { return !book.session()->busy(); });
-            require(book.saveDictionaryChoice({}), "Cannot clear an imported dictionary choice");
+            bool dictionarySaved = false;
+            book.saveDictionaryChoice({}, [&](bool saved) {
+                require(saved, "Cannot clear an imported dictionary choice");
+                dictionarySaved = true;
+            });
+            waitUntil([&] { return dictionarySaved; });
             QJsonObject snapshot;
             require(book.checkpoint(&snapshot), "Cannot save imported checkpoint fields");
             auto saved = storage::readBookState(paths, identity).object;
@@ -991,9 +1092,14 @@ int main(int argc, char **argv)
             const QString title(int(storage::maxJsonBytes) + 1, 'T');
             book.session()->setChapters({ { title, snapshot.value("position").toString() } }, {});
             waitUntil([&] { return book.session()->chapterTitle() == title; });
-            require(book.checkpoint(&snapshot) && snapshot.value("chapter_title") == title
-                            && storage::readBookState(paths, identity).object == saved,
-                    "Display-only chapter change affected the saved checkpoint");
+            require(book.checkpoint(&snapshot), "Cannot checkpoint after changing the title");
+            require(snapshot.value("chapter_title") == title, "Inspection snapshot lost the title");
+            // Hybrid can refine the page estimate between saves. It must match
+            // this checkpoint's snapshot, while the other saved fields stay put.
+            auto expected = saved;
+            expected.insert("page_estimate", snapshot.value("page_estimate"));
+            saved = storage::readBookState(paths, identity).object;
+            require(saved == expected, "Display-only chapter change affected the saved checkpoint");
             for (const auto *key :
                  { "chapter_title", "chapter_page", "chapter_pages", "page", "pages", "next_page",
                    "text_font_face", "embedded_font_count", "cached_pages", "continues_before",
@@ -1056,11 +1162,28 @@ int main(int argc, char **argv)
             previous.status = 1;
             previous.location = "old-position";
         }
-        const auto original = qt::object({ { "schema", 1 },
-                                           { "book", identity },
-                                           { "future_optional", "keep" },
-                                           { "dictionary_id", "old-dictionary" },
-                                           { "nickel_progress", previous.json() } });
+        auto original = qt::object({ { "schema", 1 },
+                                     { "book", identity },
+                                     { "future_optional", "keep" },
+                                     { "dictionary_id", "old-dictionary" },
+                                     { "nickel_progress", previous.json() } });
+        auto prior = open();
+        bool marked = false;
+        prior->chapterBoundaryActions(1, [&](const auto &actions) {
+            for (const auto &action : actions)
+                if (action.start && !action.reset)
+                    marked = action.apply();
+            require(marked, "Cannot mark a main-text start");
+        });
+        waitUntil([&] { return marked && !prior->busy(); });
+        const auto marks = prior->mainTextMarks();
+        original["main_text_marks"] = marks;
+        original["fingerprint"] = QString::fromLatin1(prior->sourceHash());
+        original[textpresets::bookKey] = "classic";
+        prior.reset();
+        require(storage::writePreferences(paths.preferences(),
+                                          qt::object({ { textpresets::newBookKey, "modern" } })),
+                "Cannot choose a new-book preset");
         require(storage::writeBookState(paths, identity, original),
                 "Cannot seed native unread checkpoint");
         // Nickel's coordinator resets the opening snapshot without replacing
@@ -1072,12 +1195,49 @@ int main(int argc, char **argv)
         const auto hash = session->sourceHash();
         ReadingBook book(std::move(session), paths.bookState(identity), paths, identity, hash,
                          std::make_unique<Bridge>(calls), calls.current, calls.current);
+        require(book.session()->savedStateMatched() && book.session()->mainTextMarks() == marks,
+                "A native unread reset lost the matching chapter marks");
+        require(book.textPreset() == "classic",
+                "A native unread reset replaced the book's own text preset");
         QJsonObject snapshot;
         require(book.checkpoint(&snapshot), "Cannot checkpoint native unread state");
         const auto saved = storage::readBookState(paths, identity).object;
-        require(saved.contains("future_optional") == !newlyUnread
-                        && saved.contains("dictionary_id") == !newlyUnread,
-                "Checkpoint ignored or repeated Nickel's explicit unread reset");
+        require(saved.value(textpresets::bookKey).toString() == book.textPreset(),
+                "The first checkpoint lost the selected preset");
+        require(saved.value("future_optional") == "keep"
+                        && saved.value("dictionary_id") == "old-dictionary",
+                "A native unread reset dropped the book's settings");
+    }
+    {
+        // A reset removes reading progress and nothing else.
+        const ReadingProgress unread{ "unread-fields", {}, 0, 0, true };
+        ReadingProgress read = unread;
+        read.status = 1;
+        read.location = "old-position";
+        auto record = qt::object({ { "book", "unread-fields" },
+                                   { "position", "/body/DocFragment[3]/p[2]/text().0" },
+                                   { "percent", 42 },
+                                   { "stats_main_percent", 40 },
+                                   { "finished_position", "/end" },
+                                   { "suppress_finish_prompt", true },
+                                   { "nickel_progress", read.json() },
+                                   { "font_face", "NV Jost" },
+                                   { "font_pixels", 31 },
+                                   { "margin_pixels", 24 },
+                                   { textpresets::bookKey, "classic" },
+                                   { "dictionary_id", "dictionary" },
+                                   { "page_estimate", qt::object({ { "pages", 12 } }) } });
+        require(resetNativeUnread(record, unread), "A read book was not reset");
+        for (const auto *key : { "position", "percent", "stats_main_percent", "finished_position",
+                                 "suppress_finish_prompt", "nickel_progress" })
+            require(!record.contains(QLatin1String(key)),
+                    qPrintable(QStringLiteral("A reset kept %1").arg(key)));
+        require(record.value("font_face") == "NV Jost" && record.value("font_pixels") == 31
+                        && record.value("margin_pixels") == 24
+                        && record.value(textpresets::bookKey) == "classic"
+                        && record.value("dictionary_id") == "dictionary"
+                        && record.contains("page_estimate"),
+                "A reset removed a book setting");
     }
     {
         auto session = open();
@@ -1095,7 +1255,23 @@ int main(int argc, char **argv)
                                   QThread::msleep(10);
                               return QDateTime::currentMSecsSinceEpoch();
                           });
-        require(local.saveDictionaryChoice("test-dictionary"), "Cannot save dictionary choice");
+        bool dictionarySaved = false;
+        local.saveDictionaryChoice("test-dictionary", [&](bool saved) {
+            require(saved, "Cannot save dictionary choice");
+            dictionarySaved = true;
+        });
+        // The choice is saved before the call returns, so the next
+        // checkpoint already carries it.
+        require(dictionarySaved, "The dictionary choice did not save synchronously");
+        QJsonObject dictionarySnapshot;
+        require(local.checkpoint(&dictionarySnapshot, true),
+                "Cannot queue a checkpoint after the dictionary write");
+        require(dictionarySnapshot.value("dictionary_id") == "test-dictionary",
+                "A checkpoint after the dictionary choice left it out");
+        waitUntil([&] { return dictionarySaved && !local.savesPending(); });
+        require(storage::readBookState(paths, "local-id").object.value("dictionary_id")
+                        == "test-dictionary",
+                "A queued checkpoint replaced a later dictionary choice");
         QJsonObject layoutSnapshot;
         require(local.checkpoint(&layoutSnapshot), "Cannot checkpoint book layout");
         const auto savedLayout = storage::readBookState(paths, "local-id").object;
@@ -1123,8 +1299,11 @@ int main(int argc, char **argv)
                 "Standalone opaque identities remain eligible for KOsync");
         require(!local.canWriteNative() && !local.deviceTransition(),
                 "Local book acquired platform services");
+        waitUntil([&] {
+            return local.session()->bookPages() > 0 && local.session()->totalWords() > 0;
+        });
         require(local.estimates().learningPace && local.estimates().bookMilliseconds > 0,
-                "Standalone book did not provide a rough estimate at opening");
+                "Standalone book did not provide a rough estimate after counting pages and words");
         local.pollProgress();
         local.observeProgress();
         require(!local.readProgress().valid && !local.pendingProgress(),
@@ -1212,7 +1391,7 @@ int main(int argc, char **argv)
 
         tick();
         require(local.readingMilliseconds() == active, "Stopped local reading time kept running");
-        require(local.session()->go(local.session()->pages() - 1), "Cannot reach the final page");
+        require(local.session()->goToFraction(1), "Cannot reach the final page");
         waitUntil([&] { return !local.session()->busy(); });
         require(local.offerFinish(), "Local book cannot be marked finished without a bridge");
         local.markFinished();
@@ -1243,10 +1422,11 @@ int main(int argc, char **argv)
         ReadingBook first(std::move(session), paths.bookState("pace-first"), paths, "pace-first",
                           hash, nullptr, {}, {});
         auto *model = first.session();
+        waitUntil([&] { return model->bookPages() > 0 && model->totalWords() > 0; });
         const ReadingActivity activity{ model->state().value("position").toString(),
                                         0,
-                                        model->page(),
-                                        model->pages(),
+                                        model->bookPage(),
+                                        model->bookPages(),
                                         0,
                                         model->totalWords(),
                                         model->chapterGraph(),
@@ -1278,6 +1458,9 @@ int main(int argc, char **argv)
         auto next = open(QSize(400, 600));
         ReadingBook second(std::move(next), paths.bookState("pace-second"), paths, "pace-second",
                            hash, nullptr, {}, {});
+        waitUntil([&] {
+            return second.session()->bookPages() > 0 && second.session()->totalWords() > 0;
+        });
         require(second.estimates().bookMilliseconds == expected.estimates(activity).bookMilliseconds
                         && second.estimates().learningPace,
                 "Another book did not reuse saved partial history");
@@ -1758,6 +1941,43 @@ int main(int argc, char **argv)
                 "An older activity snapshot replaced a newer explicit choice");
     }
     {
+        struct DeferredBridge final : Bridge
+        {
+            using Bridge::Bridge;
+            bool ready = false;
+            int requests = 0;
+
+            bool poll(bool requested, ReadingProgress &result) override
+            {
+                if (requested)
+                    ++requests;
+                if (!std::exchange(ready, false))
+                    return false;
+                result = read(nullptr);
+                return true;
+            }
+        };
+
+        Calls calls;
+        calls.signalled = true;
+        auto session = open();
+        const auto hash = session->sourceHash();
+        auto bridge = std::make_unique<DeferredBridge>(calls);
+        auto *poll = bridge.get();
+        ReadingBook book(std::move(session), paths.bookState("signalled-id"), paths, "signalled-id",
+                         hash, std::move(bridge), calls.current, calls.current);
+        ++calls.current.modified;
+        calls.current.location = "chapter.xhtml#remote";
+        book.pollProgress();
+        require(poll->requests == 1 && !book.pendingProgress(),
+                "A pending poll leaves the current reading position alone");
+        poll->ready = true;
+        book.pollProgress();
+        require(poll->requests == 1 && book.pendingProgress() && book.candidate() == calls.current,
+                "Collect a completed poll without waiting for another sync signal");
+        book.releaseNative(false);
+    }
+    {
         // With the platform's change signals, the reader reads saved progress
         // only after a signal, never on the minute fallback.
         Calls calls;
@@ -1854,7 +2074,7 @@ int main(int argc, char **argv)
         require(book.writeNative("position", {}).saved() && calls.writes == 1
                         && calls.location == "position",
                 "Acknowledged progress was not written");
-        require(calls.observed == 1 && calls.writtenActivity.page == book.session()->page()
+        require(calls.observed == 1 && calls.writtenActivity.page == book.session()->bookPage()
                         && calls.writtenActivity.position
                                 == book.session()->state().value("position").toString(),
                 "Native estimate used the preceding observed page when saving a completed turn");
@@ -2017,6 +2237,12 @@ int main(int argc, char **argv)
                 waitUntil([&] { return done; });
                 return saved;
             };
+            // The unchanged-record case needs a stable page estimate on disk.
+            book.session()->requestMenuPagination();
+            waitUntil([&] {
+                return !book.session()->paginationPending() && !book.session()->busy();
+            });
+            require(book.checkpoint(&snapshot), "Cannot save the settled book before close");
             require(closeCheckpoint() && checkpoints == 0,
                     "Already durable close checkpoint folded WAL again");
             const auto routineRecord = [&](int value) {

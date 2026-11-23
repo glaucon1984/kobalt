@@ -838,10 +838,11 @@ QVector<PageLink> EngineDocument::pageLinks()
     return result;
 }
 
-LinkDetails EngineDocument::linkDetails(const QString &source, bool preview)
+LinkDetails EngineDocument::linkDetails(const QString &source, bool preview,
+                                        const std::function<bool()> &current)
 {
     LinkDetails result;
-    if (!engine_)
+    if (!engine_ || (current && !current()))
         return result;
     auto *doc = engine_->getDocument();
     auto pointer = doc->createXPointer(domText(source));
@@ -868,7 +869,7 @@ LinkDetails EngineDocument::linkDetails(const QString &source, bool preview)
     // A fragment is a URI component. Decode it once before comparing it
     // with the Unicode id from the XHTML.
     const auto id = DecodeHTMLUrlString(href.substr(1));
-    auto *target = doc->getNodeById(doc->getAttrValueIndex(id.c_str()));
+    auto *target = doc->getNodeById(doc->findAttrValueIndex(id.c_str()));
     auto match = noteReference(node);
     // In chapter mode the target can be in a spine item that is not loaded.
     // The engine names a link into spine item n "#_doc_fragment_n_ id".
@@ -898,15 +899,15 @@ LinkDetails EngineDocument::linkDetails(const QString &source, bool preview)
             return result;
         }
         if (slicePages_ > 0) {
-            targetDocument = openAhead(item);
+            targetDocument = openLookupUnit(item, current);
         } else {
-            sideWindow = openSide(windowSettings(item, item), {}, nullptr);
+            sideWindow = openSide(windowSettings(item, item), current, nullptr);
             targetDocument = sideWindow.get();
         }
         if (!targetDocument || !targetDocument->engine_)
             return result;
         auto *other = targetDocument->engine_->getDocument();
-        target = other->getNodeById(other->getAttrValueIndex(id.c_str()));
+        target = other->getNodeById(other->findAttrValueIndex(id.c_str()));
     }
     if (!target)
         return result;
@@ -953,15 +954,18 @@ LinkDetails EngineDocument::linkDetails(const QString &source, bool preview)
     }
     if (navigable) {
         result.target = position;
-        if (preview)
-            result.chapter = chapterTitle(result.target);
+        if (preview) {
+            if (targetDocument != this)
+                targetDocument->setChapters(contents_, graph_);
+            result.chapter = targetDocument->chapterTitle(result.target);
+        }
     }
     if (!result.target.isEmpty()) {
         result.kind = LinkKind::Passage;
         result.error.clear();
     }
-    const bool inferred =
-            match == NoteMatch::Unmarked && inferredNote(node, target, engine_->getToc());
+    const bool inferred = match == NoteMatch::Unmarked
+            && inferredNote(node, target, targetDocument->engine_->getToc());
     if (match != NoteMatch::Explicit && !inferred) {
         return result;
     }

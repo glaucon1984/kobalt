@@ -51,6 +51,7 @@
 #if (USE_FREETYPE==1)
 
 #include "../../extensions/embedded_font_cache.h"
+#include <vector>
 #include <ft2build.h>
 #include <freetype/freetype.h>
 #include <freetype/ftoutln.h>    // for FT_Outline_Embolden()
@@ -78,7 +79,6 @@
 #include "../../extensions/word_cache.h"
 #include <hb-ot.h>
 #include <unordered_map>
-#include <vector>
 #include <cstdlib>
 #include <cstdio>
 #include "lvhashtable.h"
@@ -519,6 +519,7 @@ static lChar32 getReplacementChar(lUInt32 code, bool * can_be_ignored = NULL) {
     case UNICODE_NO_BREAK_SPACE:
         return ' ';
     case UNICODE_WORD_JOINER:
+    // Blaze: ignore U+FEFF like U+2060. Upstream drew the default character for it.
     case UNICODE_ZERO_WIDTH_NO_BREAK_SPACE:
         if (can_be_ignored)
             *can_be_ignored = true;
@@ -1687,6 +1688,7 @@ inline lUInt32 getHash( const struct LVCharTriplet& triplet )
 }
 #endif
 
+// Blaze: keep font implementations checked against their virtual interfaces.
 class LVFreeTypeFace : public LVFont
 {
 protected:
@@ -1788,7 +1790,7 @@ public:
     }
 
 
-    virtual void clearFontRefs( const LVFont *ptr ) {
+    void clearFontRefs( const LVFont *ptr ) override {
         if ( _fallbackFont.get() == ptr ) {
             _fallbackFontIsSet = false;
             _fallbackFont.Clear();
@@ -1803,7 +1805,7 @@ public:
             _BulletListItemFont.Clear();
     }
 
-    virtual void clearFontRefs() {
+    void clearFontRefs() override {
         _fallbackFontIsSet = false;
         _fallbackFont.Clear();
         _nextFallbackFontIsSet = false;
@@ -1814,13 +1816,14 @@ public:
 
     // fallback font support
     /// set fallback font for this font
-    virtual void setFallbackFont( LVFontRef font ) {
+    void setFallbackFont( LVFontRef font ) override {
         _fallbackFont = font;
         _fallbackFontIsSet = !font.isNull();
         clearCache();
     }
 
     /// get fallback font for this font (when it is used as the main font)
+    // Blaze: preserve_size returns the fallback at the nominal size, without x-height matching. Vertical runs use it.
     LVFontRef getFallbackFont(bool preserve_size=false) {
         // x-height matching is useful when mixing Latin fonts horizontally,
         // but a vertical CJK run is laid out in nominal em-sized capsules.
@@ -1828,7 +1831,7 @@ public:
         // while the slot advance stays unchanged, exaggerating and varying
         // the visible gaps between consecutive Japanese glyphs.
         if ( preserve_size )
-            return fontMan->GetFallbackFont(_size, getWeight(), _italic!=0);
+            return fontMan->GetNominalFallbackFont(_size, getWeight(), _italic!=0);
         if ( _fallbackFontIsSet )
             return _fallbackFont;
         _fallbackFont = fontMan->GetFallbackFont(_size, getWeight(), _italic!=0);
@@ -1840,16 +1843,17 @@ public:
     }
 
     /// set next fallback font for this font (for when used as a fallback font)
-    virtual void setNextFallbackFont( LVFontRef font ) {
+    void setNextFallbackFont( LVFontRef font ) override {
         _nextFallbackFont = font;
         _nextFallbackFontIsSet = !font.isNull();
         clearCache();
     }
 
     /// get next fallback font for this font (when it is already used as a fallback font)
+    // Blaze: preserve_size returns the next fallback at the nominal size. See getFallbackFont().
     LVFontRef getNextFallbackFont(bool preserve_size=false) {
         if ( preserve_size )
-            return fontMan->GetFallbackFont(
+            return fontMan->GetNominalFallbackFont(
                 _size, getWeight(), _italic!=0, _faceName);
         if ( _nextFallbackFontIsSet )
             return _nextFallbackFont;
@@ -1919,7 +1923,7 @@ public:
         return cap_height;
     }
 
-    virtual LVFontRef getDecimalListItemFont() {
+    LVFontRef getDecimalListItemFont() override {
         if ( !_DecimalListItemFont.isNull() )
             return _DecimalListItemFont;
         if ( _kerningMode == KERNING_MODE_HARFBUZZ && !(getFeatures() & LFNT_OT_FEATURES_P_TNUM) ) {
@@ -1945,7 +1949,7 @@ public:
         return _DecimalListItemFont;
     }
 
-    virtual LVFontRef getBulletListItemFont() {
+    LVFontRef getBulletListItemFont() override {
         if ( !_BulletListItemFont.isNull() )
             return _BulletListItemFont;
         lString8 preferred_bullet_fonts(PREFERRED_BULLET_FONTS);
@@ -1978,15 +1982,15 @@ public:
     }
 
     /// returns font weight
-    virtual int getWeight() const {
+    int getWeight() const override {
         if (_synth_weight > 0) return _synth_weight;
         if (_variations.wght_set) return (int)_variations.wght;
         return _weight;
     }
     /// returns synthesized (embolden/lighten) weight applied on top of the loaded face, 0 if none
-    virtual int getSynthWeight() const { return _synth_weight; }
+    int getSynthWeight() const override { return _synth_weight; }
     /// returns italic flag
-    virtual int getItalic() const { return _italic; }
+    int getItalic() const override { return _italic; }
     /// sets face name
     virtual void setFaceName( lString8 face ) { _faceName = face; }
     virtual lString8 getFaceName() { return _faceName; }
@@ -2050,7 +2054,7 @@ public:
                               TextLangCfg * lang_cfg, int letter_spacing, lUInt32 hints, lUInt16 & last_fit );
     #endif
 
-    void clearCache() {
+    void clearCache() override {
         _glyph_cache.clear();
         _wcache.clear();
         _lsbcache.clear();
@@ -2065,7 +2069,7 @@ public:
         #endif
     }
 
-    virtual lChar32 getHyphChar() {
+    lChar32 getHyphChar() override {
         // UNICODE_SOFT_HYPHEN U+00AD was a bad choice: it's supposed to be a control code and may not
         // have a glyph (in practice, it is there and correct in many recent fonts, but in others, it
         // may be absent, or have a slot but a blank glyph, or it might be a too large glyph).
@@ -2092,7 +2096,7 @@ public:
         // Note: this has not been updated in LVWin32Font.
     }
 
-    virtual int getHyphenWidth() {
+    int getHyphenWidth() override {
         FONT_GUARD
         if ( !_hyphen_width ) {
             _hyphen_width = getCharWidth( getHyphChar() );
@@ -2260,7 +2264,7 @@ public:
     }
     #endif
 
-    virtual void setFeatures( int features ) {
+    void setFeatures( int features ) override {
         _features = features;
         _hash = 0; // Force lvstyles.cpp calcHash(font_ref_t) to recompute the hash
         #if USE_HARFBUZZ==1
@@ -2269,18 +2273,18 @@ public:
         koblazeClearWords();
         #endif
     }
-    virtual int getFeatures() const {
+    int getFeatures() const override {
         return _features;
     }
     void setVariations( const LVFontVariations& variations ) {
         _variations = variations;
         _hash = 0; // force calcHash(font_ref_t) to recompute
     }
-    virtual lUInt32 getVariationHash() const {
+    lUInt32 getVariationHash() const override {
         return _variations.hash();
     }
 
-    virtual void setKerningMode( kerning_mode_t kerningMode ) {
+    void setKerningMode( kerning_mode_t kerningMode ) override {
         _kerningMode = kerningMode;
         _DecimalListItemFont.Clear(); // depends on kerning mode
         _hash = 0; // Force lvstyles.cpp calcHash(font_ref_t) to recompute the hash
@@ -2292,9 +2296,9 @@ public:
         clearCache();
         #endif
     }
-    virtual kerning_mode_t getKerningMode() const { return _kerningMode; }
+    kerning_mode_t getKerningMode() const override { return _kerningMode; }
 
-    virtual void setHintingMode(hinting_mode_t mode) {
+    void setHintingMode(hinting_mode_t mode) override {
         if (_hintingMode == mode)
             return;
         _hintingMode = mode;
@@ -2327,17 +2331,17 @@ public:
         }
         #endif
     }
-    virtual hinting_mode_t  getHintingMode() const { return _hintingMode; }
+    hinting_mode_t  getHintingMode() const override { return _hintingMode; }
 
     /// get/set bitmap mode (true=bitmap, false=antialiased)
-    virtual void setBitmapMode( bool drawBitmap )
+    void setBitmapMode( bool drawBitmap ) override
     {
         if ( _drawMonochrome == drawBitmap )
             return;
         _drawMonochrome = drawBitmap;
         clearCache();
     }
-    virtual bool getBitmapMode() { return _drawMonochrome; }
+    bool getBitmapMode() override { return _drawMonochrome; }
 
     // Synthetic thin/bold on a font that does not come with a corresponding variant.
     void setSynthWeight(int synth_weight) {
@@ -2618,8 +2622,10 @@ public:
         bool can_be_ignored = false;
         lChar32 res = getReplacementChar(code, &can_be_ignored);
         if (can_be_ignored || res == ' ') {
-            // HarfBuzz hides format controls and supplies missing space widths.
-            // Keep their codepoints even in the last fallback font.
+            // Blaze: HarfBuzz hides format controls and supplies missing space widths.
+            // Keep their codepoints even in the last fallback font. Upstream returns the
+            // replacement character here, for example U+200B for U+2060 and a plain space
+            // for U+00A0.
             return code;
         }
         if (res != 0)
@@ -2701,8 +2707,9 @@ public:
 #endif // USE_HARFBUZZ==1
 
     FT_UInt getCharIndex( lChar32 code, lChar32 def_char ) {
-        // These layout controls must stay invisible. Some fonts supply visible
+        // Blaze: These layout controls must stay invisible. Some fonts supply visible
         // control-picture glyphs, which the direct FreeType path would draw.
+        // Upstream returns the font's glyph for all three when the font has one.
         if (code == UNICODE_ZERO_WIDTH_SPACE || code == UNICODE_WORD_JOINER
                 || code == UNICODE_ZERO_WIDTH_NO_BREAK_SPACE) {
             return 0;
@@ -2735,6 +2742,8 @@ public:
         return ch_glyph_index;
     }
 
+    // Blaze: ask the font for native small caps (smcp or c2sc) for the script and language of this
+    // character. Upstream decided once per face. The result is cached per script and language.
     bool hasNativeCaps(lChar32 ch, TextLangCfg *lang, int feature) {
 #if USE_HARFBUZZ==1
         FONT_GUARD
@@ -2766,6 +2775,8 @@ public:
 #endif
     }
 
+    // Blaze: true when this face, not a fallback font, has the glyph. Small caps use it to keep
+    // missing capitals in the original size.
     bool hasOwnGlyph(lChar32 code) override {
         FONT_GUARD
         return getCharIndex(code, 0) != 0;
@@ -2775,7 +2786,7 @@ public:
         \param glyph is pointer to glyph_info_t struct to place retrieved info
         \return true if glyh was found
     */
-    virtual bool getGlyphInfo( lUInt32 code, glyph_info_t * glyph, lChar32 def_char=0, bool code_is_glyph_index=false, bool is_fallback=false ) {
+    bool getGlyphInfo( lUInt32 code, glyph_info_t * glyph, lChar32 def_char=0, bool code_is_glyph_index=false, bool is_fallback=false ) override {
         //FONT_GUARD
         FT_UInt glyph_index;
         if ( code_is_glyph_index ) {
@@ -2950,7 +2961,7 @@ public:
     }
 #endif
 
-    virtual bool collectGlyphSVGPath(SVGGlyphsCollector * svg_collector, lUInt32 code, bool code_is_glyph_index=false, bool is_fallback=false) {
+    bool collectGlyphSVGPath(SVGGlyphsCollector * svg_collector, lUInt32 code, bool code_is_glyph_index=false, bool is_fallback=false) override {
 
         // All the points/distances/metrics we get with Harfbuzz and Freetype here are in *64 units,
         // so update our scale and current values fed into svg_collector
@@ -3127,7 +3138,7 @@ public:
         return true;
     }
 
-    virtual bool getGlyphExtraMetric( glyph_extra_metric_t metric, lUInt32 code, int & value, bool scaled_to_px, lChar32 def_char=0, bool is_fallback=false ) {
+    bool getGlyphExtraMetric( glyph_extra_metric_t metric, lUInt32 code, int & value, bool scaled_to_px, lChar32 def_char=0, bool is_fallback=false ) override {
         int glyph_index = getCharIndex( code, 0 );
         if ( glyph_index==0 ) {
             LVFontRef fallback = is_fallback ? getNextFallbackFont() : getFallbackFont();
@@ -3189,7 +3200,7 @@ public:
         \param hints: hint flags (direction, begin/end of paragraph, for Harfbuzz - unrelated to font hinting)
         \return number of characters before max_width reached
     */
-    virtual lUInt16 measureText(
+    lUInt16 measureText(
                         const lChar32 * text,
                         int len,
                         lUInt16 * widths,
@@ -3200,7 +3211,7 @@ public:
                         int letter_spacing = 0,
                         bool allow_hyphenation = true,
                         lUInt32 hints=0
-                     )
+                     ) override
     {
         FONT_GUARD
         if ( len <= 0 || _face==NULL )
@@ -3902,7 +3913,7 @@ public:
         \param len is number of characters to measure
         \return width of specified string
     */
-    virtual lUInt32 getTextWidth( const lChar32 * text, int len, TextLangCfg * lang_cfg=NULL) {
+    lUInt32 getTextWidth( const lChar32 * text, int len, TextLangCfg * lang_cfg=NULL) override {
         static lUInt16 widths[MAX_LINE_CHARS+1];
         static lUInt8 flags[MAX_LINE_CHARS+1];
         if ( len>MAX_LINE_CHARS )
@@ -3934,7 +3945,7 @@ public:
         \param code is unicode character
         \return glyph pointer if glyph was found, NULL otherwise
     */
-    virtual LVFontGlyphCacheItem * getGlyph(lUInt32 ch, lChar32 def_char=0, bool is_fallback=false) {
+    LVFontGlyphCacheItem * getGlyph(lUInt32 ch, lChar32 def_char=0, bool is_fallback=false) override {
         //FONT_GUARD
         FT_UInt ch_glyph_index = getCharIndex( ch, 0 );
         if ( ch_glyph_index==0 ) {
@@ -4212,25 +4223,25 @@ public:
 //    }
 
     /// returns font baseline offset
-    virtual int getBaseline()
+    int getBaseline() override
     {
         return _baseline;
     }
 
     /// returns font height
-    virtual int getHeight() const
+    int getHeight() const override
     {
         return _height;
     }
 
     /// returns font character size
-    virtual int getSize() const
+    int getSize() const override
     {
         return _size;
     }
 
     /// returns char glyph advance width
-    virtual int getCharWidth( lChar32 ch, lChar32 def_char='?' )
+    int getCharWidth( lChar32 ch, lChar32 def_char='?' ) override
     {
         int w = _wcache.get(ch);
         if ( w == CACHED_UNSIGNED_METRIC_NOT_SET ) {
@@ -4247,7 +4258,7 @@ public:
     }
 
     /// returns char glyph left side bearing
-    virtual int getLeftSideBearing( lChar32 ch, bool negative_only=false, bool italic_only=false )
+    int getLeftSideBearing( lChar32 ch, bool negative_only=false, bool italic_only=false ) override
     {
         if ( italic_only && !getItalic() )
             return 0;
@@ -4268,7 +4279,7 @@ public:
     }
 
     /// returns char glyph right side bearing
-    virtual int getRightSideBearing( lChar32 ch, bool negative_only=false, bool italic_only=false )
+    int getRightSideBearing( lChar32 ch, bool negative_only=false, bool italic_only=false ) override
     {
         if ( italic_only && !getItalic() )
             return 0;
@@ -4288,7 +4299,7 @@ public:
         return b;
     }
 
-    virtual bool hasOTMathSupport() const
+    bool hasOTMathSupport() const override
     {
         #if USE_HARFBUZZ==1
             return hb_ot_math_has_data(hb_font_get_face(_hb_font));
@@ -4296,10 +4307,10 @@ public:
         return false;
     }
 
-    virtual int getUnderlineOffset() const    { return _underline_offset; }
-    virtual int getUnderlineThickness() const { return _underline_thickness; }
+    int getUnderlineOffset() const override    { return _underline_offset; }
+    int getUnderlineThickness() const override { return _underline_thickness; }
 
-    virtual int getExtraMetric(font_extra_metric_t metric, bool scaled_to_px)
+    int getExtraMetric(font_extra_metric_t metric, bool scaled_to_px) override
     {
         if ( _extra_metric == NULL ) {
             _extra_metric = (int *)malloc(sizeof(int)*FONT_METRIC_MAX);
@@ -4662,24 +4673,24 @@ public:
     }
 
     /// retrieves font handle
-    virtual void * GetHandle()
+    void * GetHandle() override
     {
         return NULL;
     }
 
     /// returns font typeface name
-    virtual lString8 getTypeFace() const
+    lString8 getTypeFace() const override
     {
         return _faceName;
     }
 
     /// returns font family id
-    virtual css_font_family_t getFontFamily() const
+    css_font_family_t getFontFamily() const override
     {
         return _fontFamily;
     }
 
-    virtual bool kerningEnabled() {
+    bool kerningEnabled() override {
         #if (ALLOW_KERNING==1)
             #if USE_HARFBUZZ==1
                 return _kerningMode == KERNING_MODE_HARFBUZZ
@@ -4693,14 +4704,14 @@ public:
     }
 
     /// draws text string (returns x advance)
-    virtual int DrawTextString( LVDrawBuf * buf, int x, int y,
+    int DrawTextString( LVDrawBuf * buf, int x, int y,
                        const lChar32 * text, int len,
                        lChar32 def_char, lUInt32 * palette, bool addHyphen,
                        TextLangCfg * lang_cfg,
                        lUInt32 flags, int letter_spacing, int width,
                        int text_decoration_back_gap,
                        int target_w=-1, int target_h=-1,
-                       SVGGlyphsCollector * svg_collector=NULL)
+                       SVGGlyphsCollector * svg_collector=NULL) override
     {
         FONT_GUARD
         if ( len <= 0 || _face==NULL )
@@ -5920,17 +5931,17 @@ public:
     }
 
     /// returns true if font is empty
-    virtual bool IsNull() const
+    bool IsNull() const override
     {
         return _face == NULL;
     }
 
-    virtual bool operator ! () const
+    bool operator ! () const override
     {
         return _face == NULL;
     }
 
-    virtual void Clear()
+    void Clear() override
     {
         LVLock lock(_mutex);
         clearCache();
@@ -5969,65 +5980,68 @@ public:
     explicit LVFontProxy(LVFontRef f) : _wrappedRef(f), _font(f.get()) {}
 
     bool hasOwnGlyph(lChar32 code) override { return _font->hasOwnGlyph(code); }
-    virtual bool getGlyphInfo(lUInt32 c, glyph_info_t* g, lChar32 d=0, bool gi=false, bool fb=false)
+    bool getGlyphInfo(lUInt32 c, glyph_info_t* g, lChar32 d=0, bool gi=false, bool fb=false) override
         { return _font->getGlyphInfo(c, g, d, gi, fb); }
-    virtual bool getGlyphExtraMetric(glyph_extra_metric_t m, lUInt32 c, int& v,
-                                      bool s=true, lChar32 d=0, bool fb=false)
+    bool getGlyphExtraMetric(glyph_extra_metric_t m, lUInt32 c, int& v,
+                                      bool s=true, lChar32 d=0, bool fb=false) override
         { return _font->getGlyphExtraMetric(m, c, v, s, d, fb); }
-    virtual lUInt16 measureText(const lChar32* t, int len, lUInt16* w, lUInt8* f,
+    lUInt16 measureText(const lChar32* t, int len, lUInt16* w, lUInt8* f,
                                  int mw, lChar32 d, TextLangCfg* lc=NULL,
-                                 int ls=0, bool ah=true, lUInt32 h=0)
+                                 int ls=0, bool ah=true, lUInt32 h=0) override
         { return _font->measureText(t, len, w, f, mw, d, lc, ls, ah, h); }
-    virtual lUInt32 getTextWidth(const lChar32* t, int len, TextLangCfg* lc=NULL)
+    lUInt32 getTextWidth(const lChar32* t, int len, TextLangCfg* lc=NULL) override
         { return _font->getTextWidth(t, len, lc); }
-    virtual LVFontGlyphCacheItem* getGlyph(lUInt32 c, lChar32 d=0, bool fb=false)
+    LVFontGlyphCacheItem* getGlyph(lUInt32 c, lChar32 d=0, bool fb=false) override
         { return _font->getGlyph(c, d, fb); }
-    virtual int  getBaseline()         { return _font->getBaseline(); }
-    virtual int  getHeight()     const { return _font->getHeight(); }
-    virtual int  getSize()       const { return _font->getSize(); }
-    virtual int  getWeight()     const { return _font->getWeight(); }
-    virtual int  getItalic()     const { return _font->getItalic(); }
-    virtual int  getCharWidth(lChar32 c, lChar32 d=0) { return _font->getCharWidth(c, d); }
-    virtual int  getLeftSideBearing(lChar32 c, bool n=false, bool i=false)
+    int  getBaseline() override         { return _font->getBaseline(); }
+    int  getHeight()     const override { return _font->getHeight(); }
+    int  getSize()       const override { return _font->getSize(); }
+    int  getWeight()     const override { return _font->getWeight(); }
+    int  getItalic()     const override { return _font->getItalic(); }
+    int  getCharWidth(lChar32 c, lChar32 d=0) override { return _font->getCharWidth(c, d); }
+    int  getLeftSideBearing(lChar32 c, bool n=false, bool i=false) override
         { return _font->getLeftSideBearing(c, n, i); }
-    virtual int  getRightSideBearing(lChar32 c, bool n=false, bool i=false)
+    int  getRightSideBearing(lChar32 c, bool n=false, bool i=false) override
         { return _font->getRightSideBearing(c, n, i); }
-    virtual int  getExtraMetric(font_extra_metric_t m, bool s=true)
+    int  getExtraMetric(font_extra_metric_t m, bool s=true) override
         { return _font->getExtraMetric(m, s); }
-    virtual lChar32 getHyphChar()      { return _font->getHyphChar(); }
-    virtual int getUnderlineOffset() const    { return _font->getUnderlineOffset(); }
-    virtual int getUnderlineThickness() const { return _font->getUnderlineThickness(); }
-    virtual bool hasOTMathSupport() const { return _font->hasOTMathSupport(); }
-    virtual void* GetHandle()          { return _font->GetHandle(); }
-    virtual lString8 getTypeFace() const { return _font->getTypeFace(); }
-    virtual css_font_family_t getFontFamily() const { return _font->getFontFamily(); }
-    virtual int DrawTextString(LVDrawBuf* buf, int x, int y,
+    lChar32 getHyphChar() override      { return _font->getHyphChar(); }
+    int getUnderlineOffset() const override    { return _font->getUnderlineOffset(); }
+    int getUnderlineThickness() const override { return _font->getUnderlineThickness(); }
+    bool hasOTMathSupport() const override { return _font->hasOTMathSupport(); }
+    void* GetHandle() override          { return _font->GetHandle(); }
+    lString8 getTypeFace() const override { return _font->getTypeFace(); }
+    css_font_family_t getFontFamily() const override { return _font->getFontFamily(); }
+    int DrawTextString(LVDrawBuf* buf, int x, int y,
                                 const lChar32* text, int len,
                                 lChar32 d, lUInt32* pal, bool hyp,
                                 TextLangCfg* lc, lUInt32 fl, int ls, int w,
-                                int tbg, int tw, int th, SVGGlyphsCollector* svg)
+                                int tbg, int tw, int th, SVGGlyphsCollector* svg) override
         { return _font->DrawTextString(buf, x, y, text, len, d, pal, hyp,
                                        lc, fl, ls, w, tbg, tw, th, svg); }
-    virtual bool getBitmapMode()              { return _font->getBitmapMode(); }
-    virtual void setBitmapMode(bool m)        { _font->setBitmapMode(m); }
-    virtual int  getFeatures() const          { return _font->getFeatures(); }
-    virtual void setFeatures(int f)           { _font->setFeatures(f); }
-    virtual lUInt32 getVariationHash() const  { return _font->getVariationHash(); }
-    virtual int getSynthWeight() const        { return _font->getSynthWeight(); }
-    virtual void setKerningMode(kerning_mode_t m)  { _font->setKerningMode(m); }
-    virtual kerning_mode_t getKerningMode() const  { return _font->getKerningMode(); }
-    virtual void setHintingMode(hinting_mode_t m)  { _font->setHintingMode(m); }
-    virtual hinting_mode_t getHintingMode() const  { return _font->getHintingMode(); }
-    virtual void clearCache()      { _font->clearCache(); }
-    virtual bool kerningEnabled()  { return _font->kerningEnabled(); }
-    virtual bool IsNull()  const   { return _font->IsNull(); }
-    virtual bool operator!() const { return !_font; }
-    virtual void Clear()           { _wrappedRef.Clear(); }
+    bool getBitmapMode() override              { return _font->getBitmapMode(); }
+    void setBitmapMode(bool m) override        { _font->setBitmapMode(m); }
+    int  getFeatures() const override          { return _font->getFeatures(); }
+    void setFeatures(int f) override           { _font->setFeatures(f); }
+    lUInt32 getVariationHash() const override  { return _font->getVariationHash(); }
+    int getSynthWeight() const override        { return _font->getSynthWeight(); }
+    void setKerningMode(kerning_mode_t m) override  { _font->setKerningMode(m); }
+    kerning_mode_t getKerningMode() const override  { return _font->getKerningMode(); }
+    void setHintingMode(hinting_mode_t m) override  { _font->setHintingMode(m); }
+    hinting_mode_t getHintingMode() const override  { return _font->getHintingMode(); }
+    void clearCache() override      { _font->clearCache(); }
+    bool kerningEnabled() override  { return _font->kerningEnabled(); }
+    bool IsNull()  const override   { return _font->IsNull(); }
+    bool operator!() const override { return !_font; }
+    void Clear() override           { _wrappedRef.Clear(); }
     virtual ~LVFontProxy() {}
 };
 
 /// Synthesises small-caps by routing lowercase characters to uppercase glyphs
-/// in a smaller font instance (~75% of the normal size).
+/// in a smaller font instance (~75% of the normal size). For all-small-caps in
+/// a font with 'smcp' but no 'c2sc', uppercase characters are routed to their
+/// lowercase counterparts in the same font, whose native 'smcp' then turns them
+/// into small caps.
 class LVFontSmallCapsTransform : public LVFontProxy
 {
     LVFontRef  _smallRef;  // keeps the small font alive
@@ -6037,6 +6051,9 @@ class LVFontSmallCapsTransform : public LVFontProxy
 
     static lChar32 toUppercase(lChar32 ch) {
         lChar32 buf[1] = { ch }; lStr_uppercase(buf, 1); return buf[0];
+    }
+    static lChar32 toLowercase(lChar32 ch) {
+        lChar32 buf[1] = { ch }; lStr_lowercase(buf, 1); return buf[0];
     }
     static bool isLowercase(lChar32 ch) {
         return (lGetCharProps(ch) & CH_PROP_LOWER) != 0;
@@ -6052,8 +6069,19 @@ class LVFontSmallCapsTransform : public LVFontProxy
             if (_nativeCaps && _nativeCaps->hasNativeCaps(ch, lang,
                     lower ? LFNT_OT_FEATURES_P_SMCP : LFNT_OT_FEATURES_P_C2SC))
                 return;
+            // Blaze: the same idea as upstream's FOLD_UPPER mode, checked for each
+            // character's script and language: a capital without 'c2sc' becomes its
+            // lowercase letter when 'smcp' covers that letter.
+            if (!lower && _nativeCaps) {
+                const auto folded = toLowercase(ch);
+                if (folded != ch && _nativeCaps->hasNativeCaps(folded, lang, LFNT_OT_FEATURES_P_SMCP)) {
+                    mapped = folded;
+                    return;
+                }
+            }
             const auto upper = lower ? toUppercase(ch) : ch;
-            // Leave missing characters to normal fallback at their original size and case.
+            // Blaze: Leave missing characters to normal fallback at their original size and case.
+            // Upstream always mapped lowercase to uppercase in the small font.
             if (_smallFont->hasOwnGlyph(upper)) {
                 font = _smallFont;
                 mapped = upper;
@@ -6074,12 +6102,14 @@ class LVFontSmallCapsTransform : public LVFontProxy
               widths(new lUInt16[len]), flags(new lUInt8[len]) {}
         ~MappedRun() { delete[] font; delete[] mapped; delete[] widths; delete[] flags; }
     };
+    // Blaze: returns false when no character uses the small font or a folded
+    // capital. The callers then measure or draw the whole run with the normal font.
     bool fillMappedRun(const lChar32 * text, int len, MappedRun & run, TextLangCfg *lang) const {
         bool synthetic = false;
         for (int i = 0; i < len; i++) {
             mapChar(text[i], run.font[i], run.mapped[i], lang);
 #if USE_HARFBUZZ==1
-            // Keep accents in the shaping run of the reduced capital they follow.
+            // Blaze: Keep accents in the shaping run of the reduced capital they follow.
             if (i && run.font[i - 1] == _smallFont && run.font[i] != _smallFont) {
                 const auto category = hb_unicode_general_category(hb_unicode_funcs_get_default(), text[i]);
                 if (category == HB_UNICODE_GENERAL_CATEGORY_NON_SPACING_MARK
@@ -6090,7 +6120,7 @@ class LVFontSmallCapsTransform : public LVFontProxy
                 }
             }
 #endif
-            synthetic |= run.font[i] == _smallFont;
+            synthetic |= run.font[i] == _smallFont || run.mapped[i] != text[i];
         }
         return synthetic;
     }
@@ -6098,20 +6128,20 @@ public:
     LVFontSmallCapsTransform(LVFontRef normalFont, LVFontRef smallFont, LVFreeTypeFace *nativeCaps, bool allCaps)
         : LVFontProxy(normalFont), _smallRef(smallFont), _smallFont(smallFont.get()), _nativeCaps(nativeCaps), _allCaps(allCaps) {}
 
-    virtual void setBitmapMode(bool m)           { LVFontProxy::setBitmapMode(m); _smallFont->setBitmapMode(m); }
-    virtual void setKerningMode(kerning_mode_t m) { LVFontProxy::setKerningMode(m); _smallFont->setKerningMode(m); }
-    virtual void setHintingMode(hinting_mode_t m) { LVFontProxy::setHintingMode(m); _smallFont->setHintingMode(m); }
-    virtual void clearCache() { LVFontProxy::clearCache(); _smallFont->clearCache(); }
-    virtual void Clear()      { LVFontProxy::Clear();      _smallRef.Clear(); }
-    virtual bool hasOTMathSupport() const { return _nativeCaps && _font->hasOTMathSupport(); }
+    void setBitmapMode(bool m) override           { LVFontProxy::setBitmapMode(m); _smallFont->setBitmapMode(m); }
+    void setKerningMode(kerning_mode_t m) override { LVFontProxy::setKerningMode(m); _smallFont->setKerningMode(m); }
+    void setHintingMode(hinting_mode_t m) override { LVFontProxy::setHintingMode(m); _smallFont->setHintingMode(m); }
+    void clearCache() override { LVFontProxy::clearCache(); _smallFont->clearCache(); }
+    void Clear() override      { LVFontProxy::Clear();      _smallRef.Clear(); }
+    bool hasOTMathSupport() const override { return _nativeCaps && _font->hasOTMathSupport(); }
 
-    virtual int getCharWidth(lChar32 ch, lChar32 d=0)
+    int getCharWidth(lChar32 ch, lChar32 d=0) override
         { LVFont* f; lChar32 m; mapChar(ch, f, m); return f->getCharWidth(m, d); }
-    virtual int getLeftSideBearing(lChar32 ch, bool n=false, bool i=false)
+    int getLeftSideBearing(lChar32 ch, bool n=false, bool i=false) override
         { LVFont* f; lChar32 m; mapChar(ch, f, m); return f->getLeftSideBearing(m, n, i); }
-    virtual int getRightSideBearing(lChar32 ch, bool n=false, bool i=false)
+    int getRightSideBearing(lChar32 ch, bool n=false, bool i=false) override
         { LVFont* f; lChar32 m; mapChar(ch, f, m); return f->getRightSideBearing(m, n, i); }
-    virtual bool getGlyphInfo(lUInt32 c, glyph_info_t* g, lChar32 d=0, bool gi=false, bool fb=false)
+    bool getGlyphInfo(lUInt32 c, glyph_info_t* g, lChar32 d=0, bool gi=false, bool fb=false) override
         {
             if (gi) return _font->getGlyphInfo(c, g, d, true, fb);
             LVFont* f; lChar32 m; mapChar((lChar32)c, f, m); return f->getGlyphInfo((lUInt32)m, g, d, false, fb);
@@ -6120,12 +6150,12 @@ public:
         if (gi) return _font->collectGlyphSVGPath(svg, c, true, fb);
         LVFont* f; lChar32 m; mapChar((lChar32)c, f, m); return f->collectGlyphSVGPath(svg, m, false, fb);
     }
-    virtual bool getGlyphExtraMetric(glyph_extra_metric_t mt, lUInt32 c, int& v,
-                                      bool s=true, lChar32 d=0, bool fb=false)
+    bool getGlyphExtraMetric(glyph_extra_metric_t mt, lUInt32 c, int& v,
+                                      bool s=true, lChar32 d=0, bool fb=false) override
         { LVFont* f; lChar32 m; mapChar((lChar32)c, f, m); return f->getGlyphExtraMetric(mt, (lUInt32)m, v, s, d, fb); }
-    virtual LVFontGlyphCacheItem* getGlyph(lUInt32 c, lChar32 d=0, bool fb=false)
+    LVFontGlyphCacheItem* getGlyph(lUInt32 c, lChar32 d=0, bool fb=false) override
         { LVFont* f; lChar32 m; mapChar((lChar32)c, f, m); return f->getGlyph((lUInt32)m, d, fb); }
-    virtual lUInt32 getTextWidth(const lChar32* text, int len, TextLangCfg* lc=NULL) {
+    lUInt32 getTextWidth(const lChar32* text, int len, TextLangCfg* lc=NULL) override {
         if (len <= 0)
             return 0;
         MappedRun run(len);
@@ -6149,11 +6179,11 @@ public:
     // so that kerning, ligatures and HarfBuzz shaping apply within the run -
     // they can never apply across a run boundary, since that would require
     // shaping glyphs from two distinct font instances together.
-    virtual lUInt16 measureText(const lChar32* text, int len,
+    lUInt16 measureText(const lChar32* text, int len,
                                  lUInt16* widths, lUInt8* flags,
                                  int max_width, lChar32 def_char,
                                  TextLangCfg* lc=NULL, int ls=0,
-                                 bool ah=true, lUInt32 hints=0) {
+                                 bool ah=true, lUInt32 hints=0) override {
         if (len <= 0)
             return 0;
         MappedRun run(len);
@@ -6179,12 +6209,12 @@ public:
         }
         return (lUInt16)len;
     }
-    virtual int DrawTextString(LVDrawBuf* buf, int x, int y,
+    int DrawTextString(LVDrawBuf* buf, int x, int y,
                                 const lChar32* text, int len, lChar32 def_char,
                                 lUInt32* palette, bool addHyphen, TextLangCfg* lc,
                                 lUInt32 flags, int letter_spacing, int width,
                                 int text_decoration_back_gap,
-                                int target_w, int target_h, SVGGlyphsCollector* svg) {
+                                int target_w, int target_h, SVGGlyphsCollector* svg) override {
         int x0 = x;
         // Shift small-font glyphs down so their baseline aligns with the normal font's.
         int y_small = y + (_font->getBaseline() - _smallFont->getBaseline());
@@ -7567,6 +7597,19 @@ private:
     LVFontInstanceCache _instance_cache;   // exact-match instance cache
     lString8 _preferred_family;            // primary reading font - step-2 fallback for any generic family
     lString8 _preferred_by_css_family[9];  // per-css-family overrides; indexed by css_font_family_t (max=8)
+    // One slot per face in the ordered fallback chain. The registry chooses
+    // the instance, including synthetic styles and variable font axes.
+    struct NominalFallback {
+        int size = 0;
+        int weight = 0;
+        bool italic = false;
+        LVFontRef font;
+
+        bool matches(int px, int wght, bool slanted) const {
+            return !font.isNull() && size == px && weight == wght && italic == slanted;
+        }
+    };
+    std::vector<NominalFallback> _nominalFallback;
     FT_Library  _library;
     LVFontGlobalGlyphCache _globalCache;
     lString32 _requiredChars;
@@ -7577,7 +7620,7 @@ private:
 public:
 
     /// get hash of installed fonts and fallback font
-    virtual lUInt32 GetFontListHash(int documentId) {
+    lUInt32 GetFontListHash(int documentId) override {
         FONT_MAN_GUARD
         // Sum per-face hashes rather than folding them in registry order, so the
         // result doesn't depend on registration order (filesystem traversal order,
@@ -7605,7 +7648,7 @@ public:
     }
 
     /// set fallback fonts
-    virtual bool SetFallbackFontFaces( lString8 facesString ) {
+    bool SetFallbackFontFaces( lString8 facesString ) override {
         FONT_MAN_GUARD
         if ( facesString != _fallbackFontFacesString ) {
             // Multiple fallback font names can be provided, separated by '|'
@@ -7653,13 +7696,13 @@ public:
         return !_fallbackFontFacesString.empty();
     }
 
-    virtual void SetPrimaryFont( lString8 face ) {
+    void SetPrimaryFont( lString8 face ) override {
         FONT_MAN_GUARD
         _preferred_family = face;
         for (int i = 0; i < 9; i++) _preferred_by_css_family[i].clear();
     }
 
-    virtual void SetFamilyFallbackFont( lString8 face ) {
+    void SetFamilyFallbackFont( lString8 face ) override {
         FONT_MAN_GUARD
         const LVFontFamily* fam = _registry.findFamily(face);
         if (fam && fam->faceCount() > 0)
@@ -7667,10 +7710,10 @@ public:
     }
 
     /// get fallback font face (returns empty string if no fallback font is set)
-    virtual lString8 GetFallbackFontFaces() { return _fallbackFontFacesString; }
+    lString8 GetFallbackFontFaces() override { return _fallbackFontFacesString; }
 
     /// returns fallback font for specified size
-    virtual LVFontRef GetFallbackFont(int size) {
+    LVFontRef GetFallbackFont(int size) override {
         FONT_MAN_GUARD
         if ( _fallbackFontFaces.length() == 0 )
             return LVFontRef();
@@ -7686,7 +7729,15 @@ public:
     }
 
     /// returns fallback font for specified size, weight and italic
-    virtual LVFontRef GetFallbackFont(int size, int weight=400, bool italic=false, lString8 forFaceName=lString8::empty_str) {
+    LVFontRef GetFallbackFont(int size, int weight=400, bool italic=false, lString8 forFaceName=lString8::empty_str) override {
+        return resolveFallbackFont(size, weight, italic, forFaceName, false);
+    }
+
+    LVFontRef GetNominalFallbackFont(int size, int weight, bool italic, lString8 after) override {
+        return resolveFallbackFont(size, weight, italic, after, true);
+    }
+
+    LVFontRef resolveFallbackFont(int size, int weight, bool italic, const lString8 & forFaceName, bool cache) {
         FONT_MAN_GUARD
         if ( _fallbackFontFaces.length() == 0 )
             return LVFontRef();
@@ -7717,7 +7768,20 @@ public:
         // assuming the fallback font is a standalone regular font
         // without any bold/italic sibling.
         // GetFont() works just as fine when we need specified weigh and italic.
-        return GetFont(size, weight, italic, css_ff_sans_serif, _fallbackFontFaces[idx], 0, -1);
+        if ( !cache )
+            return GetFont(size, weight, italic, css_ff_sans_serif, _fallbackFontFaces[idx], 0, -1);
+
+        // Blaze: cache one result per chain position. Deep fallback runs can
+        // revisit each face at the same nominal size on the next character.
+        if ( (size_t)idx < _nominalFallback.size() && _nominalFallback[idx].matches(size, weight, italic) )
+            return _nominalFallback[idx].font;
+        LVFontRef font = GetFont(size, weight, italic, css_ff_sans_serif, _fallbackFontFaces[idx], 0, -1);
+        if ( !font.isNull() ) {
+            if ( _nominalFallback.size() <= (size_t)idx )
+                _nominalFallback.resize(idx + 1);
+            _nominalFallback[idx] = { size, weight, italic, font };
+        }
+        return font;
     }
 
     bool isBitmapModeForSize( int size )
@@ -7739,7 +7803,7 @@ public:
     }
 
     /// set antialiasing mode
-    virtual void SetAntialiasMode( int mode )
+    void SetAntialiasMode( int mode ) override
     {
         _antialiasMode = mode;
         gc();
@@ -7751,7 +7815,7 @@ public:
     }
 
     /// sets current gamma level
-    virtual void SetHintingMode(hinting_mode_t mode) {
+    void SetHintingMode(hinting_mode_t mode) override {
         if (_hintingMode == mode)
             return;
         FONT_MAN_GUARD
@@ -7765,12 +7829,12 @@ public:
     }
 
     /// sets current gamma level
-    virtual hinting_mode_t  GetHintingMode() {
+    hinting_mode_t  GetHintingMode() override {
         return _hintingMode;
     }
 
     /// set antialiasing mode
-    virtual void SetKerningMode( kerning_mode_t mode )
+    void SetKerningMode( kerning_mode_t mode ) override
     {
         FONT_MAN_GUARD
         _kerningMode = mode;
@@ -7781,11 +7845,11 @@ public:
         });
     }
 
-    virtual int GetFractionalGlyphPositioning() {
+    int GetFractionalGlyphPositioning() override {
         return fractionalGlyphPositioningStrength;
     }
 
-    virtual void SetFractionalGlyphPositioning(int strength) {
+    void SetFractionalGlyphPositioning(int strength) override {
         if (strength < 0 || strength > 3)
             strength = 0;
         if (fractionalGlyphPositioningStrength == strength)
@@ -7798,7 +7862,7 @@ public:
     }
 
     /// set monospace size scale percent
-    virtual void SetMonospaceSizeScale( int scale )
+    void SetMonospaceSizeScale( int scale ) override
     {
         FONT_MAN_GUARD
         _monospaceSizeScale = scale;
@@ -7815,7 +7879,7 @@ public:
         // them again with the adjusted size.
     }
 
-    virtual void SetFallbackFontSizesAdjusted( bool adjusted )
+    void SetFallbackFontSizesAdjusted( bool adjusted ) override
     {
         FONT_MAN_GUARD
         _fallbackFontSizesAdjusted = adjusted;
@@ -7824,7 +7888,7 @@ public:
     }
 
     /// clear glyph cache
-    virtual void clearGlyphCache()
+    void clearGlyphCache() override
     {
         FONT_MAN_GUARD
         _globalCache.clear();
@@ -7836,7 +7900,7 @@ public:
         #endif
     }
 
-    virtual int GetFontCount()
+    int GetFontCount() override
     {
         return _registry.familyCount();
     }
@@ -8067,6 +8131,7 @@ public:
         // hold the first one again. Such a ring keeps itself alive after
         // the cache lets go of it. Take the links apart first.
         _instance_cache.forEachFont([](LVFontRef & font) { font->clearFontRefs(); });
+        _nominalFallback.clear();
         _instance_cache.clearAll();
         _globalCache.clear();
         if ( _library )
@@ -8103,14 +8168,15 @@ public:
         _requiredChars = U" ";
     }
 
-    virtual void gc() // garbage collector
+    void gc() override // garbage collector
     {
         FONT_MAN_GUARD
+        _nominalFallback.clear();
         _instance_cache.gc();
     }
 
     /// returns available typefaces (global fonts only - excludes document-embedded fonts)
-    virtual void getFaceList( lString32Collection & list )
+    void getFaceList( lString32Collection & list ) override
     {
         FONT_MAN_GUARD
         list.clear();
@@ -8134,7 +8200,7 @@ public:
         list.sort();
     }
 
-    virtual void getRegisteredDocumentFontList( int document_id, lString32Collection & list )
+    void getRegisteredDocumentFontList( int document_id, lString32Collection & list ) override
     {
         FONT_MAN_GUARD
         list.clear();
@@ -8152,7 +8218,7 @@ public:
         list.sort();
     }
 
-    virtual void getInstantiatedDocumentFontList( int document_id, lString32Collection & list )
+    void getInstantiatedDocumentFontList( int document_id, lString32Collection & list ) override
     {
         FONT_MAN_GUARD
         list.clear();
@@ -8172,7 +8238,7 @@ public:
         list.sort();
     }
 
-    virtual bool getFontFileNameAndFaceIndex( lString32 name, bool bold, bool italic, lString8 & filename, int & index, int & family_type, bool & has_ot_math, bool & has_emojis )
+    bool getFontFileNameAndFaceIndex( lString32 name, bool bold, bool italic, lString8 & filename, int & index, int & family_type, bool & has_ot_math, bool & has_emojis ) override
     {
         FONT_MAN_GUARD
         const LVFontFamily* fam = _registry.findFamily(UnicodeToUtf8(name));
@@ -8192,9 +8258,10 @@ public:
 
     /// makes sure registered fonts have a proper entry at weight 400 and 700 when possible,
     /// to avoid having synthesized fonts for these normal and bold weights
-    virtual void RegularizeRegisteredFontsWeights(bool print_updates)
+    void RegularizeRegisteredFontsWeights(bool print_updates) override
     {
         FONT_MAN_GUARD
+        _nominalFallback.clear();
         _registry.regularizeWeights(print_updates);
     }
 
@@ -8521,7 +8588,7 @@ public:
 #endif // 0 // removed during font manager refactor
 
     /// returns registered font files
-    virtual void getFontFileNameList( lString32Collection & list )
+    void getFontFileNameList( lString32Collection & list ) override
     {
         FONT_MAN_GUARD
         list.clear();
@@ -8552,7 +8619,9 @@ public:
             hb_face_t* hb_face = hb_ft_face_create(ft_face, NULL);
             if (hb_ot_math_has_data(hb_face))
                 def.has_ot_math = true;
-            // Small caps can be declared under any script, regardless of script order.
+            // Blaze: Small caps can be declared under any script, regardless of script order.
+            // The base revision looked at the first script and default language, for smcp only.
+            // Master 8d29401c checks all GSUB feature tags for smcp and c2sc.
             const hb_tag_t tags[] = { HB_TAG('s','m','c','p'), HB_TAG('c','2','s','c'), HB_TAG_NONE };
             auto *matches = hb_set_create();
             hb_ot_layout_collect_features(hb_face, HB_OT_TAG_GSUB, nullptr, nullptr, tags, matches);
@@ -8616,6 +8685,7 @@ public:
             }
             LVFontFace newDef = def;
             newDef.addDocFragment(docFragmentIdx);
+            _nominalFallback.clear();
             _registry.registerFace(newDef);
             return true;
         }
@@ -8624,6 +8694,7 @@ public:
             CRLog::trace("font definition is duplicate");
             return false;
         }
+        _nominalFallback.clear();
         _registry.registerFace(def);
         return true;
     }
@@ -8634,11 +8705,12 @@ public:
     /// the face-copying loop (which duplicated faces under the alias name with
     /// documentId set, so they appeared in getRegisteredDocumentFontList) is
     /// removed since local() fonts aren't truly embedded in the document.
-    virtual bool RegisterDocumentFontAlias(int documentId, lString8 alias, lString8 localName, int docFragmentIdx = -1)
+    bool RegisterDocumentFontAlias(int documentId, lString8 alias, lString8 localName, int docFragmentIdx = -1) override
     {
         FONT_MAN_GUARD
         if (!_registry.findFamily(localName))
             return false;
+        _nominalFallback.clear();
         _registry.registerAlias(alias, localName, documentId, docFragmentIdx);
         return true;
     }
@@ -8703,6 +8775,9 @@ public:
 
         // Apply small-caps synthesis: wrap with a transform that routes lowercase
         // letters to uppercase glyphs rendered at ~75% of the normal size.
+        // Blaze: always wrap when small caps are requested, even if the font has smcp. The wrapper
+        // decides per character, because native caps depend on script and language. Upstream skipped
+        // the wrapper for a font with smcp.
         bool needsSmallCaps = (features & (LFNT_OT_FEATURES_P_SMCP | LFNT_OT_FEATURES_P_C2SC));
         if (needsSmallCaps) {
             int small_size = (size * 3 + 2) / 4; // ~75%, rounded up
@@ -8714,7 +8789,7 @@ public:
             // of extra weight on the small font to compensate.
             int small_weight = weight + 100;
             if (small_weight > 1000) small_weight = 1000;
-            // Use the selected face. Matching the family again can lose a
+            // Blaze: Use the selected face, with its variations. Matching the family again can lose a
             // chapter-scoped embedded face or choose a different weight face.
             auto smallRef = fontForFace(face, small_size, small_weight, italic,
                     features & ~(LFNT_OT_FEATURES_P_SMCP | LFNT_OT_FEATURES_P_C2SC),
@@ -8728,6 +8803,8 @@ public:
         return ref;
     }
 
+    // Blaze: the instance lookup of GetFont(), split out so small caps can ask for the
+    // face that is already selected.
     LVFontRef fontForFace(const LVFontFace& face, int size, int weight, bool italic,
                           int features, const LVFontVariations& computed_variations)
     {
@@ -8750,9 +8827,9 @@ public:
         return loadAndCache(face, size, face_size, weight, italic, features, computed_variations, key);
     }
 
-    virtual LVFontRef GetFont(int size, int weight, bool italic, css_font_family_t css_family, lString8 typeface,
+    LVFontRef GetFont(int size, int weight, bool italic, css_font_family_t css_family, lString8 typeface,
                                 int features, int documentId, bool useBias=false,
-                                const LVFontVariations* variations=NULL, int docFragmentIdx = -1)
+                                const LVFontVariations* variations=NULL, int docFragmentIdx = -1) override
     {
         FONT_MAN_GUARD
 
@@ -8840,7 +8917,7 @@ public:
     */
 
     // Blaze: Chapter documents share font bytes until the reader switches books.
-    blaze::EmbeddedFontCache _embeddedFontCache;
+    blaze::EmbeddedFontCache _embeddedFontCache{MaxEmbeddedFontBytes};
 
     void koblazeForgetFontData() {
         _embeddedFontCache.clear();
@@ -8850,7 +8927,7 @@ public:
     // Note: publishers can specify font-variant/font-feature-settings/font-variation-settings
     // in the @font-face declaration.
     // todo: parse it and pass it here, and set it on the non-instantiated font (instead of -1)
-    virtual bool RegisterDocumentFont(int documentId, LVContainerRef container, lString32 name, lString8 faceName, int weight, int width, bool italic, int docFragmentIdx = -1) {
+    bool RegisterDocumentFont(int documentId, LVContainerRef container, lString32 name, lString8 faceName, int weight, int width, bool italic, int docFragmentIdx = -1) override {
         FONT_MAN_GUARD
         if (container.isNull()) // no container to resolve src: url() against (e.g. a styletweak)
             return false;
@@ -8862,7 +8939,8 @@ public:
             return true;
         name.trim(); // Remove any " " appended to avoid url override with duplicates
         const auto openFont = [&](const lString32 &path) {
-            // Opening a resource stream can read the entire ZIP member.
+            // Blaze: Opening a resource stream can read the entire ZIP member, so check the size from
+            // the container entry first. Upstream opened the stream before the size check.
             const auto *item = container->GetObjectInfo(path);
             if (item && item->GetSize() > MaxEmbeddedFontBytes) {
                 printf("CRE WARNING: document font '%s' ignored: file too big\n", LCSTR(path));
@@ -8878,6 +8956,7 @@ public:
         }
         if (stream.isNull())
             return false;
+        // Blaze: keep the size as lvsize_t. Upstream cast it to lUInt32 before the size checks.
         const lvsize_t size = stream->GetSize();
         if (size < 100) {
             printf("CRE WARNING: document font '%s' ignored: file too small\n", LCSTR(name));
@@ -8887,7 +8966,7 @@ public:
             printf("CRE WARNING: document font '%s' ignored: file too big\n", LCSTR(name));
             return false;
         }
-        LVByteArrayRef buf = _embeddedFontCache.read(name8, stream, size);
+        LVByteArrayRef buf = _embeddedFontCache.read(_library, name8, stream, size);
         if (!buf)
             return false;
 
@@ -8995,7 +9074,7 @@ public:
     }
 
     /// unregisters all document fonts
-    virtual void UnregisterDocumentFonts(int documentId) {
+    void UnregisterDocumentFonts(int documentId) override {
         LVArray<lUInt32> face_ids;
         for (int i = 0; i < _registry.familyCount(); i++) {
             const LVFontFamily* fam = _registry.familyAt(i);
@@ -9005,11 +9084,12 @@ public:
                     face_ids.add(face.id());
             }
         }
+        _nominalFallback.clear();
         _instance_cache.evictFaces(face_ids);
         _registry.removeFonts(documentId);
     }
 
-    virtual bool RegisterExternalFont(int documentId, lString32 name, lString8 family_name, int weight, int width, bool italic, int docFragmentIdx = -1) {
+    bool RegisterExternalFont(int documentId, lString32 name, lString8 family_name, int weight, int width, bool italic, int docFragmentIdx = -1) override {
         if (name.startsWithNoCase(lString32("res://")))
             name = name.substr(6);
         else if (name.startsWithNoCase(lString32("file://")))
@@ -9120,8 +9200,9 @@ public:
     // Font instances will be created as need from the LVFontDef name or buf.
     // (The similar functions do most of the same work, and some code
     // could be factorized between them.)
-    virtual bool RegisterStaticFontFace(lString8 name, int index, lString8 family,
-                                       int weight, bool italic)
+    // Blaze: register one face of a font file under a given family, weight and style. Upstream has no such call.
+    bool RegisterStaticFontFace(lString8 name, int index, lString8 family,
+                                       int weight, bool italic) override
     {
         FONT_MAN_GUARD
         if (name.empty() || family.empty() || index < 0)
@@ -9138,7 +9219,7 @@ public:
         return tryRegisterFace(face);
     }
 
-    virtual bool RegisterFont( lString8 name )
+    bool RegisterFont( lString8 name ) override
     {
         FONT_MAN_GUARD
         #ifdef LOAD_TTF_FONTS_ONLY
@@ -9277,7 +9358,7 @@ public:
         return res;
     }
 
-    void GetAvailableFontWeights(LVArray<int>& weights, lString8 typeface) {
+    void GetAvailableFontWeights(LVArray<int>& weights, lString8 typeface) override {
         FONT_MAN_GUARD
         weights.clear();
         const LVFontFamily* f = _registry.findFamily(typeface);
@@ -9307,7 +9388,7 @@ public:
             }
     }
 
-    virtual bool Init( lString8 /*path*/ )
+    bool Init( lString8 /*path*/ ) override
     {
         initSystemFonts();
         return (_library != NULL);

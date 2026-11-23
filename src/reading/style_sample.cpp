@@ -77,6 +77,31 @@ constexpr int searchedPages = 10;
 constexpr int sampleVariants = 6;
 constexpr int paragraphSampleCount = 3;
 
+std::shared_ptr<ResourceCache> sampleResources(QByteArray html, QMap<QString, qint64> *sizes)
+{
+    const QMap<QString, QByteArray> files{
+        { "mimetype", "application/epub+zip" },
+        { "META-INF/container.xml",
+          "<container xmlns='urn:oasis:names:tc:opendocument:xmlns:container' version='1.0'><rootfiles>"
+          "<rootfile full-path='book.opf' media-type='application/oebps-package+xml'/></rootfiles></container>" },
+        { "book.opf",
+          "<package xmlns='http://www.idpf.org/2007/opf' version='2.0'><metadata><title>Sample</title>"
+          "<language xmlns='http://purl.org/dc/elements/1.1/'>en</language></metadata><manifest>"
+          "<item id='c' href='c.xhtml' media-type='application/xhtml+xml'/></manifest>"
+          "<spine><itemref idref='c'/></spine></package>" },
+        { "c.xhtml", std::move(html) }
+    };
+    for (auto it = files.cbegin(); it != files.cend(); ++it)
+        (*sizes)[it.key()] = it.value().size();
+    return std::make_shared<ResourceCache>(
+            files.keys(),
+            [files](const QString &name, const ResourceCache::Sink &sink, QString *) {
+                const auto bytes = files.value(name);
+                return sink(bytes.constData(), bytes.size());
+            },
+            std::make_shared<std::atomic_bool>(false));
+}
+
 std::shared_ptr<ResourceCache> sampleBook(const SampleDocument &document, int variant,
                                           QMap<QString, qint64> *sizes, bool paragraphs)
 {
@@ -88,27 +113,7 @@ std::shared_ptr<ResourceCache> sampleBook(const SampleDocument &document, int va
         if (paragraphs && block.paragraph && ++count == paragraphSampleCount)
             break;
     }
-    const QMap<QString, QByteArray> files{
-        { "mimetype", "application/epub+zip" },
-        { "META-INF/container.xml",
-          "<container xmlns='urn:oasis:names:tc:opendocument:xmlns:container' version='1.0'><rootfiles>"
-          "<rootfile full-path='book.opf' media-type='application/oebps-package+xml'/></rootfiles></container>" },
-        { "book.opf",
-          "<package xmlns='http://www.idpf.org/2007/opf' version='2.0'><metadata><title>Sample</title>"
-          "<language xmlns='http://purl.org/dc/elements/1.1/'>en</language></metadata><manifest>"
-          "<item id='c' href='c.xhtml' media-type='application/xhtml+xml'/></manifest>"
-          "<spine><itemref idref='c'/></spine></package>" },
-        { "c.xhtml", document.prefix + body + "</body></html>" }
-    };
-    for (auto it = files.cbegin(); it != files.cend(); ++it)
-        (*sizes)[it.key()] = it.value().size();
-    return std::make_shared<ResourceCache>(
-            files.keys(),
-            [files](const QString &name, const ResourceCache::Sink &sink, QString *) {
-                const auto bytes = files.value(name);
-                return sink(bytes.constData(), bytes.size());
-            },
-            std::make_shared<std::atomic_bool>(false));
+    return sampleResources(document.prefix + body + "</body></html>", sizes);
 }
 
 bool cancelled(const StyleSampleRequest &request)
@@ -448,6 +453,27 @@ StyleSample render(const EngineFontInputs &fonts, const StyleSampleRequest &requ
 }
 } // namespace
 
+QImage drawReadingTextSample(const EngineFontInputs &fonts, QSize page, const QJsonObject &state)
+{
+    const QByteArray passage =
+            "<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor "
+            "incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud "
+            "exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.</p>"
+            "<p>Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu "
+            "fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in "
+            "culpa qui officia deserunt mollit anim id est laborum.</p>";
+    QMap<QString, qint64> sizes;
+    const auto resources = sampleResources(
+            "<html xmlns='http://www.w3.org/1999/xhtml'><head><title></title></head><body>"
+                    + passage + "</body></html>",
+            &sizes);
+    auto engine = createEngine(fonts);
+    QString error;
+    if (!engine->openResources(resources, sizes, page, styleSampleSettings(state), &error))
+        return {};
+    return engine->image(0);
+}
+
 void setTextSampleText(TextSampleRequest &request)
 {
     static const auto text = [] {
@@ -512,10 +538,10 @@ QJsonObject styleSampleSettings(QJsonObject state)
     // part is in the book, its estimated pages and how long it took to
     // load. With them a kept sample would never be found again.
     for (const auto *key :
-         { "book_fraction", "slice_start", "continues_before", "continues_after",
-           "chapter_load_ms", "page_estimate", "rough_page", "rough_pages", "rough_item_page",
-           "rough_item_pages", "rough_pages_estimated", "rough_item_pages_estimated",
-           "koblaze_first_spine_item", "koblaze_last_spine_item" })
+         { "book_fraction", "whole_book_ready", "slice_start", "continues_before",
+           "continues_after", "chapter_load_ms", "page_estimate", "rough_page", "rough_pages",
+           "rough_item_page", "rough_item_pages", "rough_pages_estimated",
+           "rough_item_pages_estimated", "koblaze_first_spine_item", "koblaze_last_spine_item" })
         state.remove(key);
     // The sample shows one column, even when the book uses two in landscape.
     state["columns"] = 1;

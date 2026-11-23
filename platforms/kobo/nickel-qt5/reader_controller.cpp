@@ -17,7 +17,6 @@
 #include "platforms/kobo/common/native_ui.h"
 #include "platforms/kobo/common/crash_reports.h"
 #include "support/diagnostics.h"
-#include "ui/style/fonts.h"
 #include "platforms/kobo/common/native_startup.h"
 #include "platforms/kobo/common/native_startup_wait.h"
 #include "platforms/kobo/common/reader_environment.h"
@@ -87,7 +86,8 @@ kobalt_show_reader(void *mixin, const void *volume, const void *keys, void *libr
     kobalt::nickel::forgetHomeSleepScreen();
     // Firmware 4 passes the accepted opening as separate arguments. They are
     // valid only during this call, so the controller retains its own copies.
-    if (kobalt::readerChoice(volume, alternativeEnabled()) && beginOpening
+    if (!kobalt::NativeLifecycle::stockStorageBlocked()
+        && kobalt::readerChoice(volume, alternativeEnabled()) && beginOpening
         && beginOpening(volume, { keys, library, bookmark }))
         return;
     nativeShowReader(mixin, volume, keys, library, bookmark);
@@ -121,7 +121,8 @@ bool enabled()
 // Asset availability is retained between boot and USB storage boundaries.
 bool readerAvailable()
 {
-    return enabled() && environment().assets.available();
+    return !kobalt::NativeLifecycle::stockStorageBlocked() && enabled()
+            && environment().assetsAvailable();
 }
 
 // A reader preference is independent of the installation and recovery markers.
@@ -228,6 +229,8 @@ public:
         test = readJson("/instance/kobalt-startup-test.json");
 #endif
         connect(&retry, &QTimer::timeout, this, [this] {
+            if (kobalt::NativeLifecycle::stockStorageBlocked())
+                return;
             if (++ticks >= 120 && nativeInitialized)
                 retry.stop();
             attempt(false);
@@ -258,18 +261,7 @@ public:
     void start()
     {
         retry.start();
-        kobalt::qt::later(0, this, [this] {
-            environment().verifyAssets(this, "boot", [this](bool valid) {
-                if (valid)
-                    kobalt::ui::prepareOpeningFonts(environment().assets);
-                attempt(false);
-                // The preload at ready skips while the assets are unchecked,
-                // which on a device often outlasts Nickel's startup.
-                if (valid && controller)
-                    controller->preloadLastBook();
-            });
-            attempt(false);
-        });
+        kobalt::qt::later(0, this, [this] { attempt(false); });
     }
 
     bool open(const void *volume, const kobalt::nickel_qt5::OpeningContext &context)
@@ -294,7 +286,26 @@ public:
 
     void attempt(bool fromOpener)
     {
-        if (controller || rejected || initializing)
+        if (rejected || initializing || kobalt::NativeLifecycle::stockStorageBlocked())
+            return;
+        const auto storage = kobalt::NativeLifecycle::stockStorageGeneration();
+        if (!storage)
+            return;
+        if (!environment().verificationForStorage(storage)) {
+            environment().verifyAssets(
+                    this, "boot",
+                    [this](bool valid) {
+                        if (kobalt::NativeLifecycle::stockStorageBlocked())
+                            return;
+                        attempt(false);
+                        // The preload at ready skips while the assets are unchecked,
+                        // which on a device often outlasts Nickel's startup.
+                        if (valid && controller)
+                            controller->preloadLastBook();
+                    },
+                    kobalt::NativeLifecycle::stockStorageGeneration);
+        }
+        if (controller)
             return;
         if (!nativeInitialized && !nativeFinishing && kobalt::nickel::nativeStartupReady()) {
             nativeInitialized = true;
@@ -444,7 +455,7 @@ public:
         kobalt::diagnostic("ready",
                            kobalt::qt::object({ { "startup_ms", double(elapsed.elapsed()) },
                                                 { "opener", fromOpener } }));
-        candidate->finishPreviewMigration();
+        candidate->finishStartup();
         // Nickel has finished its startup. Get the book shown last ready, so
         // tapping it opens at once.
         candidate->preloadLastBook();

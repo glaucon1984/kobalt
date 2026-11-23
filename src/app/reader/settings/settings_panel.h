@@ -9,13 +9,16 @@
 #include "ui/controls/text.h"
 #include "ui/dialogs/modals.h"
 #include "dictionaries_page.h"
+#include "interface_style.h"
 #include "kosync_page.h"
+#include "kosync_schedule_sheet.h"
 #include "assets/font_catalog.h"
 #include "reading/style_sample.h"
 #include <QHash>
 #include <QStackedWidget>
 #include <QVector>
 #include <QPointer>
+#include <QVariant>
 
 namespace kobalt {
 class AboutPage;
@@ -23,6 +26,7 @@ class AboutPage;
 
 namespace kobalt::reader {
 class PluginsSection;
+QString fontSectionLabel(FontSection section);
 
 // The brand-face title of a full-screen settings page. It sits where the
 // word "Settings" sits, so every page title shares one baseline.
@@ -52,7 +56,8 @@ enum class SettingsPage {
     // Shown only in debug mode, after About.
     Debug,
     // Zen mode's own page. It has no tab: the rail is hidden in Zen mode.
-    Zen
+    Zen,
+    Theming
 };
 
 struct SettingsPanelInputs
@@ -83,6 +88,9 @@ class SettingsPanel final : public ui::Panel
 public:
     SettingsPanel(QWidget *parent, const SettingsPanelInputs &inputs);
     ~SettingsPanel() override;
+    // Called once, before measuring a section, to connect and fill its controls.
+    std::function<void(SettingsPage, QWidget *)> pageBuilt;
+    bool pageIsBuilt(SettingsPage page) const;
     void dismissRestore();
     void dismissStandbyConfirmation();
     void dismissAutomaticOpeningConfirmation();
@@ -91,19 +99,18 @@ public:
     std::function<void(bool)> automaticOpeningChosen;
     // A confirmed restore of the appearance defaults or of the text presets,
     // after its dialog closed.
-    std::function<void()> restoreDefaultsConfirmed, restorePresetsConfirmed;
-    // Each confirmation dialog is made the first time it is needed. The
-    // reader prepares its text as it does for the widgets it built itself.
+    std::function<void()> restoreBookConfirmed, restoreDefaultsConfirmed, restorePresetsConfirmed;
+    // Prepares widgets outside a section, such as a dialog or the Zen heading.
     std::function<void(QWidget *)> widgetCreated;
+    // With `interfaceFonts`, a family too large for the interface shows
+    // disabled, with the reason.
     void showFontChoices(const QString &title, const QVector<ReadingFont> &fonts,
-                         const QString &current, const QString &emptyLabel,
-                         std::function<void(const QString &)> chosen);
+                         const QString &current, const QString &emptyLabel, bool interfaceFonts,
+                         std::function<void(const QString &)> chosen, bool sideloadedFirst = false);
     void dismissSheet();
     // Shows, raises and focuses the open sheet, then reports it through
     // sheetShown().
     void presentSheet();
-    ui::RadioList *openChoiceSheet(const QString &name, const QString &title,
-                                   const QString &hint = {}, const QString &titleName = {});
     void showHeaderFooterWeights(int current, const QFont &sampleFont,
                                  std::function<void(int)> chosen);
     void showDictionaryFontSizes(int current, const QString &family, bool customFont,
@@ -113,10 +120,13 @@ public:
                                   std::function<void(const QString &)> chosen);
     static QString timeRemainingFormatLabel(const QString &format);
     void showPercentageFormats(const QString &current, std::function<void(const QString &)> chosen);
+    void showSecondaryNumbers(const QString &current, std::function<void(const QString &)> chosen);
+    static QString secondaryNumberLabel(const QString &style);
     static QString percentageFormatLabel(const QString &format);
     void showRenderingModes(const QString &current, std::function<void(const QString &)> chosen);
     static QString renderingModeLabel(const QString &mode);
-    void showColumnSpacingChoices(int current, std::function<void(int)> chosen);
+    void showColumns(bool landscape, bool alignChapters, int spacing,
+                     std::function<void(bool, bool, int)> chosen);
     static QString columnSpacingLabel(int percent);
     enum class AdvancedText {
         WordSpacing,
@@ -127,8 +137,7 @@ public:
         ParagraphSpacing
     };
     static QString paragraphSpacingLabel(int percent);
-    void updateButtonControls(const pageButtons::Buttons &buttons, const QJsonObject &preferences,
-                              bool saving);
+    void updateButtonControls(const pageButtons::Buttons &buttons, const QJsonObject &preferences);
     void showButtonControls(const pageButtons::Buttons &buttons, const QJsonObject &current,
                             std::function<void(QJsonObject)> chosen);
     void showBeautifier(const QJsonObject &current, std::function<void(QJsonObject)> chosen);
@@ -176,7 +185,15 @@ public:
                       *debugStorageButton = nullptr;
     void showPowerManagement(bool visible);
     int fitContent(QSize availableSize);
-    ui::DescribedOption *hideTabLabelsOption = nullptr, *saveWordsOption = nullptr;
+    ui::DescribedOption *publisherPageOption = nullptr, *sideloadedFontsFirstOption = nullptr,
+                        *hideTabLabelsOption = nullptr, *saveWordsOption = nullptr;
+    ui::CaptionButton *themingButton = nullptr, *presetButton = nullptr, *iconThemeButton = nullptr,
+                      *paletteButton = nullptr;
+    QString selectedTheme;
+    void selectTheme(const QString &theme, const InterfaceStyle &style);
+    enum class ThemeChoice { Preset, Icons, Palette };
+    void showThemeChoices(ThemeChoice kind, const InterfaceStyle &style,
+                          std::function<void(const QString &)> chosen);
     ui::DescribedOption *wifiPowerSaverOption = nullptr;
     ui::DescribedOption *disableStandbyOption = nullptr;
     ui::DescribedOption *hideBookOnSleepOption = nullptr;
@@ -190,8 +207,7 @@ public:
                         *openingCoverOption = nullptr;
     // Defaults: what new books start with. The reader opens the preset grid.
     ui::CaptionButton *textForNewBooksButton = nullptr;
-    ui::DescribedOption *edgeLightOption = nullptr, *lightGestureFeedbackOption = nullptr,
-                        *denseGraphOption = nullptr;
+    ui::DescribedOption *edgeLightOption = nullptr, *lightGestureFeedbackOption = nullptr;
     ui::DescribedOption *hideNonlinearOption = nullptr;
     ui::DescribedOption *inpageFootnotesOption = nullptr;
     ui::DescribedOption *zenModeOption = nullptr;
@@ -201,7 +217,10 @@ public:
     // off in the draft and shows all settings; closing Settings applies it.
     void setZenLayout(bool zen);
 
-    std::function<void()> zenLightRequested, zenLeft;
+    std::function<void()> zenLightRequested, zenSyncRequested, zenScheduleRequested, zenLeft;
+    ui::DescribedOption *zenDarkOption = nullptr;
+    void setZenLightAvailable(bool available);
+    void setZenSync(bool ready, bool enabled, const QString &last, const QString &automatic);
     ui::DescribedOption *automaticOpeningOption = nullptr, *minimalAnnotationOption = nullptr;
     ui::CaptionButton *defaultFontButton = nullptr, *uiFontButton = nullptr,
                       *uiMonoFontButton = nullptr, *headerFooterFontButton = nullptr,
@@ -209,9 +228,9 @@ public:
     ui::CaptionButton *serifFontButton = nullptr, *sansFontButton = nullptr,
                       *monoFontButton = nullptr;
     ui::CaptionButton *dictionaryFontButton = nullptr, *dictionaryFontSizeButton = nullptr;
-    ui::DescribedOption *landscapeColumnsOption = nullptr;
-    ui::CaptionButton *columnSpacingButton = nullptr, *timeRemainingFormatButton = nullptr,
-                      *percentageFormatButton = nullptr;
+    ui::CaptionButton *columnsButton = nullptr;
+    ui::CaptionButton *timeRemainingFormatButton = nullptr, *percentageFormatButton = nullptr,
+                      *secondaryNumbersButton = nullptr;
     ui::CaptionButton *renderingButton = nullptr;
     ui::CaptionButton *verticalSpacingButton = nullptr;
     ui::CaptionButton *wordSpacingButton = nullptr, *trackingButton = nullptr,
@@ -224,12 +243,14 @@ public:
                       *navigationBarButton = nullptr, *tappableLinksButton = nullptr,
                       *annotationInteractionButton = nullptr, *chapterGroupsButton = nullptr;
     ui::DescribedOption *bionicOption = nullptr;
-    ui::CaptionButton *refreshButton = nullptr, *resetDefaults = nullptr, *resetPresets = nullptr;
+    ui::CaptionButton *refreshButton = nullptr, *resetDefaults = nullptr, *resetPresets = nullptr,
+                      *resetBook = nullptr;
     QPushButton *openAcknowledgments = nullptr, *debugProgress = nullptr;
     DictionariesPage *dictionaries = nullptr;
     KosyncPage *kosync = nullptr;
     // Null when the host has no plugin folder.
     PluginsSection *pluginsSection = nullptr;
+    KosyncScheduleEditor kosyncSchedule;
     QLabel *settingsError = nullptr;
 
 protected:
@@ -238,19 +259,45 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
+    // One small list per built-in chooser. Its inputs describe the rows
+    // that were built, independently of this opening's selection and callback.
+    struct SavedChoiceSheet
+    {
+        QPointer<ui::ModalOverlay> overlay;
+        ui::RadioList *list = nullptr;
+        QVariantList inputs;
+    };
+
+    QHash<QString, SavedChoiceSheet> choiceSheets;
+    QPointer<ui::RadioList> activeChoices;
+    ui::RadioList *openChoiceSheet(const QString &name, const QString &title,
+                                   const QString &hint = {}, const QString &titleName = {},
+                                   QVariantList inputs = {});
+    void presentChoices(int current, std::function<void(int)> chosen);
     void showStylingChoices(AdvancedText feature, int current, std::function<void(int)> chosen,
                             const QString &alignment, int secondary,
                             std::function<void(int, int)> pairChosen);
     QWidget *tabRail = nullptr, *optionsColumn = nullptr;
-    bool zen = false, lightSupported = false;
-    void updateZenPage();
+    QWidget *themingPage = nullptr;
+    const SettingsPanelInputs inputs;
+    void ensurePage(SettingsPage page);
+    void buildDisplay(QWidget *displayPage);
+    void buildControls(QWidget *controlsPage);
+    void buildDefaults(QWidget *defaultsPage);
+    void buildStyling(QWidget *stylingPage);
+    void buildSystem(QWidget *systemPage);
+    void buildTheming();
+    void buildAbout();
+    void buildDebug(QWidget *debugPage);
+    void buildZen();
+    int fitZenLeave(bool shown, bool landscape);
+    bool zen = false;
     QWidget *zenPage = nullptr, *zenMarkBox = nullptr, *zenLeaveBar = nullptr,
             *zenSyncSection = nullptr;
     // The hold button sits in the bar below the page, or in the heading on a
     // landscape screen, where the bar would take too much height.
     QPushButton *zenLeave = nullptr;
     QBoxLayout *headingLayout = nullptr, *leaveLayout = nullptr;
-    ui::DescribedOption *zenDarkOption = nullptr;
     ui::CaptionButton *zenLightButton = nullptr, *zenSyncButton = nullptr,
                       *zenAutomaticButton = nullptr, *zenAboutButton = nullptr;
     QLabel *settingsTitle = nullptr;
@@ -275,15 +322,18 @@ private:
     void showOptionsPage(int page);
     void fitRail(int availableHeight = 0);
     AboutPage *aboutPage = nullptr;
-    QPointer<ui::ChoiceModal> restoreDialog, restorePresetsDialog;
-    static void styleListAction(ui::CaptionButton *button);
+    QPointer<ui::ChoiceModal> restoreDialog, restorePresetsDialog, restoreBookDialog;
+
     QPointer<ui::ChoiceModal> standbyDialog;
     QPointer<ui::ChoiceModal> automaticOpeningDialog;
     ui::ChoiceModal *restoreConfirmation();
     ui::ChoiceModal *restorePresetsConfirmation();
+    ui::ChoiceModal *restoreBookConfirmation();
     ui::ChoiceModal *standbyConfirmation();
     ui::ChoiceModal *automaticOpeningConfirmation();
     void dialogCreated(ui::ChoiceModal *dialog);
+    QPointer<ui::ModalOverlay> fontSheet;
+    void releaseFontChoice();
     QHash<int, StyleSample> stylingSamples;
     // The open styling sheet, if any, and the option its preview shows.
     QPointer<QWidget> stylingPreview;

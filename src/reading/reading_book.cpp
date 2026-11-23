@@ -129,6 +129,15 @@ ReadingBook::ReadingBook(std::unique_ptr<ReaderSession> session, QString statePa
         speed->restore(storage::readRecord(paths_.directory, "reading-speed", paths_.readingSpeed())
                                .object);
     }
+    if (session_->recoveredOpeningPosition()) {
+        // The saved position is replaced for good, so record what it was.
+        diagnostic("position-recovered",
+                   { { "previous", preservedState.value("position").toString() },
+                     { "position", session_->state().value("position").toString() } },
+                   DiagnosticSeverity::Warning);
+        QJsonObject snapshot;
+        checkpoint(&snapshot, true);
+    }
 }
 
 ReadingBook::~ReadingBook()
@@ -146,11 +155,27 @@ ReadingBook::~ReadingBook()
     appearanceWriter.reset();
     writer.reset();
     speedWriter.reset();
+    dictionaryWriter.reset();
+}
+
+bool ReadingBook::discardQueuedWrites()
+{
+    discardSaves = true;
+    deferredCheckpointEpoch = 0;
+    deferredCloses.clear();
+    bool idle = !history || history->discardQueuedWrites();
+    for (const auto *slot : { &writer, &activityWriter, &appearanceWriter, &speedWriter,
+                              &dictionaryWriter }) {
+        if (*slot && !(*slot)->discardQueued())
+            idle = false;
+    }
+    return idle;
 }
 
 bool ReadingBook::savesPending() const
 {
-    return activityPending || appearancePending || deferredCheckpointEpoch
+    return activityPending || appearancePending
+            || deferredCheckpointEpoch
             || !deferredCloses.isEmpty() || (activityWriter && !activityWriter->idle())
             || (appearanceWriter && !appearanceWriter->idle()) || closeCheckpointPending
             || !pendingCheckpoint.isEmpty() || (writer && !writer->idle())
@@ -280,31 +305,37 @@ ReadingActivity ReadingBook::readingActivity() const
     QString error;
     const auto nativePosition = session_->savedNativePosition(&error);
     return { session_->state().value("position").toString(),
-             // Kobalt's page progress, kept below 100 like every native write of
-             // an unfinished book, so the last page never reports a finished read.
+             // Session events use whole-volume progress capped at 99%.
              qMin(99.0, double(session_->progressPercent())), session_->bookPage(),
              session_->bookPages(), session_->turnDirection(), session_->totalWords(),
              session_->chapterGraph(), session_->graphSelection(),
              error.isEmpty() ? nativePosition : QString() };
 }
 
-ReadingEstimates ReadingBook::estimates() const
+ReadingEstimates ReadingBook::estimates(bool wholeVolume) const
 {
-    if (speed) {
-        return speed->estimates(readingActivity());
-    }
+    const int remaining = wholeVolume ? qMax(0, session_->bookPages() - session_->bookPage())
+            : qBound(0, session_->mainPages() - session_->mainPage(), session_->mainPages());
+    const auto mainTime = [&](ReadingEstimates estimate) {
+        if (!wholeVolume && estimate.bookMilliseconds >= 0 && session_->mainPages() != session_->bookPages()) {
+            const int wholeRemaining = qMax(1, session_->bookPages() - session_->bookPage());
+            estimate.bookMilliseconds =
+                    qint64(double(estimate.bookMilliseconds) * remaining / wholeRemaining);
+        }
+        return estimate;
+    };
+    if (speed)
+        return mainTime(speed->estimates(readingActivity()));
     if (bridge && !released && bridge->writable()) {
         ReadingEstimates result;
         if (bridge->estimates(readingActivity(), &result))
-            return result;
+            return mainTime(result);
     }
     const auto reading = readingMilliseconds();
     const int chapterLeft = session_->chapterPages() > 0
             ? session_->chapterPages() - session_->chapterPage() + 1
             : -1;
-    const int bookLeft = session_->bookPages() > 0 && session_->bookPage() >= 0
-            ? session_->bookPages() - session_->bookPage()
-            : -1;
+    const int bookLeft = session_->bookPages() > 0 && session_->bookPage() >= 0 ? remaining : -1;
     return { pace_.estimate(chapterLeft, reading), pace_.estimate(bookLeft, reading),
              pace_.estimate(0, reading) < 0 };
 }
@@ -740,10 +771,11 @@ void ReadingBook::pollProgress()
         progressRetries = 3;
     else
         changed = std::exchange(progressRetry, false);
-    if (!changed
-        && (bridge->signalsChanges() || (progressPoll.isValid() && progressPoll.elapsed() < 55000)))
+    const bool due = !bridge->signalsChanges()
+            && (!progressPoll.isValid() || progressPoll.elapsed() >= 55000);
+    ReadingProgress progress;
+    if (!bridge->poll(changed || due, progress))
         return;
-    const auto progress = bridge->read();
     reconciliation.observe(progress);
     // Nickel can still hold its database right after a sync. A failed read
     // tries again on the next checks, up to three times, so the synced
@@ -784,7 +816,8 @@ void ReadingBook::markNativeReading()
     reconciliation.reset(acknowledged);
 }
 
-NativeSaveResult ReadingBook::writeNative(const QString &location, const QString &mappingError)
+NativeSaveResult ReadingBook::writeNative(const QString &location, const QString &mappingError,
+                                          bool wholeVolume)
 {
     if (!bridge) {
         nativeWriteback = NativeSaveResult::localOnly();
@@ -805,7 +838,7 @@ NativeSaveResult ReadingBook::writeNative(const QString &location, const QString
         if (reconciliation.mayWrite(current)) {
             // The same whole percentage as Kobalt's own views. The firmware 4
             // bridge keeps an unfinished book below 100, as Nickel's reader does.
-            const double percent = session_->progressPercent();
+            const double percent = session_->statsPercent(wholeVolume);
             const bool preserveFinished = finishedHere();
             diagnostic("native-save-start");
             const auto activity = readingActivity();
@@ -860,17 +893,37 @@ NativeSaveResult ReadingBook::nativeSaveResult() const
     return nativeWriteback;
 }
 
-bool ReadingBook::saveDictionaryChoice(const QString &id)
+void ReadingBook::saveDictionaryChoice(const QString &id, std::function<void(bool)> done)
 {
-    // Known exception: like a settings change, the choice waits for its write.
+    if (discardSaves) {
+        done(false);
+        return;
+    }
+    if (id == dictionaryChoice_) {
+        done(true);
+        return;
+    }
+    auto checkpoint = persistedCheckpoint(checkpointState());
+    for (const auto *key : appearance::layoutKeys)
+        checkpoint.remove(key);
+    for (const auto *key : appearance::marginKeys)
+        checkpoint.remove(key);
+    if (id.isEmpty())
+        checkpoint.remove("dictionary_id");
+    else
+        checkpoint["dictionary_id"] = id;
+    if (!dictionaryWriter)
+        dictionaryWriter = std::make_unique<storage::RecordWriter>();
+    // Known exception: like a settings change, the choice waits for its write,
+    // so the dictionary panel never shows a save in progress.
     mainthread::AllowBlocking allow("settings write");
-    const auto previous = dictionaryChoice_;
-    dictionaryChoice_ = id;
-    QJsonObject snapshot;
-    if (checkpoint(&snapshot))
-        return true;
-    dictionaryChoice_ = previous;
-    return false;
+    const bool saved = dictionaryWriter->writeNow(
+            [paths = paths_, identity = identity_, checkpoint, path = statePath] {
+                return storage::writeBookDictionaryChoice(paths, identity, checkpoint, path);
+            });
+    if (saved)
+        dictionaryChoice_ = id;
+    done(saved);
 }
 
 QJsonObject ReadingBook::imageView(const QString &id) const
@@ -916,6 +969,9 @@ bool ReadingBook::rememberImageView(const QString &id, const QJsonObject &view)
 QJsonObject ReadingBook::checkpointState() const
 {
     auto state = session_->state();
+    state.remove("main_text_bounded");
+    state.remove("main_text_first");
+    state.remove("main_text_last");
     state["book"] = identity_;
     state["fingerprint"] = QString::fromLatin1(digest);
     for (auto it = layoutPreferences_.begin(); it != layoutPreferences_.end(); ++it)
@@ -937,8 +993,11 @@ QJsonObject ReadingBook::checkpointState() const
         state["image_views"] = imageViews;
     // For the Android and desktop library, which shows progress without
     // opening the book.
-    if (session_->pages() > 0)
-        state["percent"] = session_->progressPercent();
+    if (session_->pages() > 0) {
+        state["percent"] = session_->mainPercent();
+        state["stats_main_percent"] = session_->statsPercent(false);
+        state["stats_volume_percent"] = session_->statsPercent(true);
+    }
     state["native_writeback"] = QString::fromLatin1(nativeWriteback.diagnosticName());
     state["sync_pending"] = reconciliation.pending();
     state["native_writeback_error"] = nativeWriteback.message();
@@ -975,6 +1034,7 @@ QJsonObject ReadingBook::persistedCheckpoint(const QJsonObject &state) const
                              "continues_before",
                              "continues_after",
                              "book_fraction",
+                             "whole_book_ready",
                              "slice_start",
                              "rough_page",
                              "rough_pages",
@@ -1072,7 +1132,7 @@ bool ReadingBook::checkpoint(QJsonObject *snapshot, bool background, quint64 epo
                     // The next synced commit or lifecycle checkpoint makes this
                     // explicit progress choice durable.
                     storage::RoutineWrites routine;
-                    return storage::writeBookState(paths, identity, persisted, path);
+                    return storage::writeBookCheckpoint(paths, identity, persisted, path);
                 },
                 [guard, request, epoch](bool saved) {
                     kobalt::qt::invoke(

@@ -1,4 +1,5 @@
 #pragma once
+#include "ui/style/theme.h"
 #include <QFile>
 #include <algorithm>
 #include <QFileInfo>
@@ -84,11 +85,13 @@ inline bool screenshotSceneShown(const QString &screen, const QString &device)
 
 // The card title of every gallery scene other than the international books.
 // A capture of a scene without a title fails, so this map declares the scenes.
-inline const QMap<QString, QString> &screenshotTitles()
+inline QMap<QString, QString> makeScreenshotTitles()
 {
-    static const QMap<QString, QString> titles{
+    QMap<QString, QString> titles{
         { "about", "About Kobalt" },
-        { "viewport-transition", "Updating page layout" },
+        { "viewport-transition", "Page layout placeholders" },
+        { "shutdown-notice", "Shutting down" },
+        { "interface-font-limit", "Main typeface: font too large" },
         { "kosync-login-feedback", "Sync sign in: idle" },
         { "kosync-login-feedback-pressed", "Sync sign in: pressed" },
         { "kosync-login-feedback-released", "Sync sign in: released" },
@@ -159,6 +162,12 @@ inline const QMap<QString, QString> &screenshotTitles()
         { "pinned-bookmark-actions", "Bookmark actions" },
         { "pinned-bookmark-limit", "Bookmark shortcut limit" },
         { "chapters", "Chapter list" },
+        { "chapter-navigation-menu", "Chapter navigation menu" },
+        { "printed-page-unavailable", "Chapter menu without printed page numbers" },
+        { "printed-page-input", "Go to printed page" },
+        { "illustrated-chapters", "Illustrated chapter list" },
+        { "chapter-image-preview", "Chapter illustration preview" },
+        { "publisher-landmarks", "Publisher landmarks" },
         { "button-controls-settings", "Controls: button mapping entry" },
         { "button-controls-unavailable", "Controls: no supported buttons" },
         { "button-controls", "Button controls: physical buttons" },
@@ -171,6 +180,7 @@ inline const QMap<QString, QString> &screenshotTitles()
         { "settings-chapter-navigation", "Controls: navigation and links" },
         { "chapter-groups-preference", "Collapsible chapters preference" },
         { "chapters-no-collapse", "Chapters: collapsing disabled" },
+        { "chapters-boundaries", "Chapters: main text boundaries" },
         { "chapters-groups", "Chapter groups: current chapter expanded" },
         { "chapters-groups-collapsed", "Chapter groups: collapsed" },
         { "cover", "Book cover" },
@@ -204,6 +214,7 @@ inline const QMap<QString, QString> &screenshotTitles()
         { "word-other-book", "A saved word from another book" },
         { "embedded-fonts", "Publisher font picker" },
         { "embedded-reading", "Reading with a publisher font" },
+        { "exit-during-sync", "Exit while Kobo is syncing" },
         { "finish-book", "Finish reading confirmation" },
         { "fonts", "Font picker" },
         { "fonts-kf-variants", "Font picker with KF variants" },
@@ -231,6 +242,7 @@ inline const QMap<QString, QString> &screenshotTitles()
         { "footnotes-bottom-continuation", "Page note continuation" },
         { "header-footer-fields", "Choose a header or footer field" },
         { "header-footer", "Headers and footers" },
+        { "header-footer-padding", "Header and footer padding" },
         { "header-footer-large", "Headers and footers: enlarged text" },
         { "header-footer-off", "Headers and footers: disabled" },
         { "layout", "Page layout" },
@@ -307,7 +319,9 @@ inline const QMap<QString, QString> &screenshotTitles()
         { "settings-controls", "Controls settings" },
         { "settings-defaults", "Default settings" },
         { "settings-restore-presets", "Restore default presets" },
+        { "settings-restore-book", "Restore book defaults" },
         { "settings-display", "Display settings" },
+        { "settings-columns", "Column settings" },
         { "settings-animations-supported", "Page animations on MTK" },
         { "settings-animations-uncertain", "Page animations with compatibility warning" },
         { "settings-animations-unsupported", "Page animations unavailable" },
@@ -335,6 +349,13 @@ inline const QMap<QString, QString> &screenshotTitles()
         { "styling-word-spacing", "Word spacing preview" },
         { "styling-hanging-punctuation", "Hanging punctuation: off" },
         { "styling-hanging-punctuation-on", "Hanging punctuation: on" },
+        { "color-only-menu", "Reader menu with color-only icons" },
+        { "theme-icons", "Icon theme picker" },
+        { "custom-theme", "Custom theme typefaces" },
+        { "sage-library", "Library with Sage colors" },
+        { "sepia-library", "Library with Sepia colors" },
+        { "sage-zen", "Zen menu with Sage colors" },
+        { "sepia-zen", "Zen menu with Sepia colors" },
         { "settings-system", "System settings" },
         { "settings-book-privacy", "Privacy for this book" },
         { "sleep-private", "Private book: asleep" },
@@ -372,6 +393,7 @@ inline const QMap<QString, QString> &screenshotTitles()
         { "sleep-private-overlay", "Private PNG over text: asleep" },
         { "power-off-private-overlay", "Private PNG over text: powered off" },
         { "settings-features", "Hide features" },
+        { "settings-features-stats-hidden", "Hide features with Stats hidden" },
         { "settings-standby-confirmation", "Disable reader standby confirmation" },
         { "settings-automatic-opening-confirmation", "Turn off automatic opening confirmation" },
         { "settings-plugins", "System: plugins" },
@@ -386,9 +408,12 @@ inline const QMap<QString, QString> &screenshotTitles()
         { "sleep-greeting", "Night greeting" },
         { "sleep-arrange", "Move a sleep screen's status" },
         { "sleep-custom", "Custom lock screen" },
+        { "sleep-custom-random-status", "Custom lock screen with random status" },
+        { "sleep-gallery-custom-random-status", "Custom gallery preview with random status" },
         { "sleep-wallpaper-help", "Where to add wallpapers" },
         { "sleep-custom-power-off", "Custom lock screen: a different power-off screen" },
         { "settings-progress-percentages", "Progress percentages in Settings" },
+        { "settings-secondary-numbers", "Choose secondary page numbers" },
         { "settings-percentage-format", "Choose progress percentage precision" },
         { "reading-decimal-progress", "Reading with decimal progress" },
         { "header-footer-decimal-fields", "Choose a field with decimal progress" },
@@ -396,6 +421,8 @@ inline const QMap<QString, QString> &screenshotTitles()
         { "settings-time-remaining-format", "Time remaining format" },
         { "settings-rendering", "Rendering" },
         { "stats", "Reading statistics" },
+        { "stats-unmarked-volume", "Stats for a volume without boundaries" },
+        { "stats-word-scope", "Choose the scope of Book stats" },
         { "stats-lengths", "Unequal chapter lengths" },
         { "stats-book-paged-first", "War and Peace: wide bars, first page" },
         { "stats-book-paged-next", "War and Peace: wide bars, second page" },
@@ -403,12 +430,13 @@ inline const QMap<QString, QString> &screenshotTitles()
         { "stats-book-compact", "War and Peace: compact graph" },
         { "stats-dense-graph", "Dense chapter graph" },
         { "stats-dense-reading", "Moby Dick" },
-        { "stats-dense-setting", "Dense graph setting" },
         { "stats-activity", "Stats with the Activity row" },
+        { "stats-activity-hidden-entry", "Stats with Activity hidden" },
         { "stats-activity-welcome", "Activity welcome" },
         { "stats-activity-overview", "Activity overview" },
         { "stats-activity-calendar", "Activity calendar" },
         { "stats-activity-books", "Activity books" },
+        { "stats-activity-copies", "Copies of a book in Activity" },
         { "stats-activity-book", "Activity for another book" },
         { "stats-activity-delete", "Delete a book's activity" },
         { "stats-activity-hidden", "Hidden books" },
@@ -423,6 +451,7 @@ inline const QMap<QString, QString> &screenshotTitles()
         { "links-rectangle-pressed", "Pressed link rectangle" },
         { "tappable-links-settings", "Direct link settings" },
         { "text", "Text controls" },
+        { "text-sample", "Text controls on the cover" },
         { "text-presets", "Text presets" },
         { "text-presets-changed", "Changed text preset" },
         { "text-presets-save", "Save text preset" },
@@ -460,6 +489,21 @@ inline const QMap<QString, QString> &screenshotTitles()
         { "widget-keyboard-qwertz", "German QWERTZ keyboard" },
         { "widget-keyboard-azerty", "French AZERTY keyboard" },
     };
+    if (ui::colorThemes)
+        titles.insert(QMap<QString, QString>{
+                { "theme-presets", "Theme preset picker" },
+                { "notebook-settings", "Notebook theme settings" },
+                { "notebook-menu", "Notebook reader menu" },
+                { "playful-reading", "Playful reading page" },
+                { "playful-settings", "Playful theme setting" },
+                { "playful-menu", "Reader menu with Playful theme" },
+        });
+    return titles;
+}
+
+inline const QMap<QString, QString> &screenshotTitles()
+{
+    static const auto titles = makeScreenshotTitles();
     return titles;
 }
 

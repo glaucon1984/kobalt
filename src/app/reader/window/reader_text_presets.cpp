@@ -7,7 +7,7 @@
 #include "reading/style_sample_cache.h"
 #include "reading/text_presets.h"
 #include "support/qt_compat.h"
-#include "support/strings.h"
+#include "support/percentage_text.h"
 #include "support/diagnostics.h"
 #include "ui/controls/text.h"
 #include "ui/style/styles.h"
@@ -86,7 +86,7 @@ private:
 QString presetDetail(const Preset &preset)
 {
     return textpresets::sizeLabel(preset.halfPoints) + QStringLiteral(" · ")
-            + strings::get("common.percent").arg(preset.lineSpacing);
+            + strings::percentage(preset.lineSpacing);
 }
 
 QString presetSummary(const Preset &preset)
@@ -190,11 +190,17 @@ void Reader::buildTextPresets()
     textPresetSection->toggled = [this] {
         auto next = preferences;
         next[textpresets::rowKey] = !textPresetSection->isOpen();
-        if (!writePreferences(next))
-            return;
-        preferences = next;
-        syncTextPresets();
-        refresh();
+        writePreferences(next, [this](const QJsonObject &applied, bool saved) {
+            if (!saved)
+                return;
+            preferences = applied;
+            syncTextPresets();
+            // While the preview opens, refresh skips the appearance controls and their layout.
+            if (menu->isVisible()
+                && appearanceEdit.previewState() == AppearanceEditSession::PreviewState::Opening)
+                fitAppearance();
+            refresh();
+        });
     };
     textPresetSection->chosen = [this](const QString &id) { applyTextPreset(id); };
     textPresetSection->held = [this](const QString &id) { showTextPresetActions(id); };
@@ -285,23 +291,28 @@ void Reader::applyTextPreset(const QString &id)
     });
 }
 
-bool Reader::saveTextPresets(QJsonObject next, const QVector<Preset> &presets)
+void Reader::saveTextPresets(QJsonObject next, const QVector<Preset> &presets,
+                             std::function<void()> saved)
 {
     textpresets::store(next, presets);
-    if (!writePreferences(next)) {
-        appearanceEdit.setError(strings::get("text_presets.could_not_save"));
+    writePreferences(next, [this, presets, saved = std::move(saved)](const QJsonObject &applied,
+                                                                     bool ok) {
+        if (!ok) {
+            appearanceEdit.setError(strings::get("text_presets.could_not_save"));
+            refresh();
+            return;
+        }
+        preferences = applied;
+        if (saved)
+            saved();
+        drawTextPresetTiles(presets);
+        syncTextPresets();
+        if (general && general->isVisible()) {
+            showTextPresetSettings();
+            fitSettings();
+        }
         refresh();
-        return false;
-    }
-    preferences = next;
-    drawTextPresetTiles(presets);
-    syncTextPresets();
-    if (general && general->isVisible()) {
-        showTextPresetSettings();
-        fitSettings();
-    }
-    refresh();
-    return true;
+    });
 }
 
 void Reader::updateTextPreset(const QString &id)
@@ -314,8 +325,7 @@ void Reader::updateTextPreset(const QString &id)
         captured.id = preset.id;
         captured.name = preset.name;
         preset = captured;
-        book->setTextPreset(id);
-        saveTextPresets(preferences, presets);
+        saveTextPresets(preferences, presets, [this, id] { book->setTextPreset(id); });
         return;
     }
 }
@@ -332,7 +342,6 @@ void Reader::saveNewTextPreset()
                 { strings::get("common.ok"), "rrTextPresetLimitOk" });
         notice->setObjectName("rrTextPresetLimit");
         notice->setDimmed(true);
-        notice->setProperty("reader_standard_modal", true);
         notice->setGeometry(rect());
         const auto close = [notice] {
             notice->hide();
@@ -340,7 +349,6 @@ void Reader::saveNewTextPreset()
         };
         connect(notice->primaryButton(), &QPushButton::clicked, notice, close);
         notice->dismissed = close;
-        notice->fitCard();
         notice->show();
         notice->raise();
         return;
@@ -448,10 +456,10 @@ void Reader::editTextPresetName(const QString &id)
         // Native submission runs inside the controller; close after it returns.
         textPresetEditor->hide();
         qt::later(0, this, close);
-        if (saveTextPresets(preferences, presets) && id.isEmpty()) {
-            book->setTextPreset(saved.id);
-            syncTextPresets();
-        }
+        saveTextPresets(preferences, presets, [this, id, created = saved.id] {
+            if (id.isEmpty())
+                book->setTextPreset(created);
+        });
     };
     connect(dialog->secondaryButton(), &QPushButton::clicked, this, close);
     connect(dialog->primaryButton(), &QPushButton::clicked, this, submit);
@@ -464,8 +472,6 @@ void Reader::editTextPresetName(const QString &id)
     }
     dialog->show();
     dialog->raise();
-    dialog->fitCard();
-    dialog->fitCard();
     editor->setFocus();
     if (textPresetKeyboard)
         textPresetKeyboard->show();
@@ -578,7 +584,6 @@ void Reader::confirmDeleteTextPreset(const QString &id)
             { strings::get("text_presets.delete"), "rrTextPresetDeleteConfirm" });
     dialog->setObjectName("rrTextPresetDeleteDialog");
     dialog->setDimmed(true);
-    dialog->setProperty("reader_standard_modal", true);
     dialog->setGeometry(rect());
     const auto close = [dialog] {
         dialog->hide();
@@ -596,12 +601,12 @@ void Reader::confirmDeleteTextPreset(const QString &id)
         auto next = preferences;
         if (next.value(textpresets::newBookKey).toString() == id)
             next.remove(textpresets::newBookKey);
-        if (book->textPreset() == id)
-            book->setTextPreset({});
-        saveTextPresets(next, list);
+        saveTextPresets(next, list, [this, id] {
+            if (book->textPreset() == id)
+                book->setTextPreset({});
+        });
     });
     dialog->dismissed = close;
-    dialog->fitCard();
     dialog->show();
     dialog->raise();
 }
@@ -735,7 +740,7 @@ void Reader::renderTextPresetGallery()
     auto round = std::make_shared<Round>();
     round->pending = wanted.size();
     const QPointer<TextPresetGallery> gallery(textPresetGallery);
-    const auto colors = ui::themeColors(darkTheme);
+    const auto colors = ui::themeColors(this);
     const auto finished = [gallery, round, cancelled, size, colors](const QString &id,
                                                                     const QImage &sample) {
         // A failed sample still finishes, so a page of previews is not held
@@ -803,6 +808,8 @@ void Reader::closeTextPresetGallery()
 void Reader::showTextPresetSettings()
 {
     auto *panel = static_cast<SettingsPanel *>(general);
+    if (!panel->textForNewBooksButton)
+        return;
     const auto presets = textpresets::load(preferences);
     const auto choice = textpresets::newBookChoice(preferences);
     const auto *chosen = textpresets::find(presets, choice);
@@ -844,11 +851,13 @@ void Reader::openNewBookText()
         next[textpresets::newBookKey] = value;
         // Older builds read only the inheritance switch.
         next[appearance::inheritTextLayoutKey] = value != "book";
-        if (writePreferences(next)) {
-            preferences = next;
-            showTextPresetSettings();
-        }
-        closeTextPresetGallery();
+        writePreferences(next, [this](const QJsonObject &applied, bool saved) {
+            if (saved) {
+                preferences = applied;
+                showTextPresetSettings();
+            }
+            closeTextPresetGallery();
+        });
     };
     textPresetGallery->pageChanged = [this] { renderTextPresetGallery(); };
     for (auto *widget : textPresetGallery->findChildren<QWidget *>())

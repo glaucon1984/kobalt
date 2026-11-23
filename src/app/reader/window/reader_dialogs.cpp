@@ -1,3 +1,4 @@
+#include "reading/header_footer.h"
 #include "app/reader/settings/sleep_editor.h"
 #include "app/reader/settings/sleep_gallery.h"
 #include <QLineEdit>
@@ -13,7 +14,7 @@
 #include "ui/dialogs/choice_sheet.h"
 #include "app/reader/settings/settings_panel.h"
 #include "support/qt_compat.h"
-#include "support/strings.h"
+#include "support/percentage_text.h"
 #include "ui/style/styles.h"
 #include "platform/api/kobo_refresh.h"
 #include "ui/style/metrics.h"
@@ -77,9 +78,6 @@ void Reader::confirmCustomReplace(const std::function<void()> &proceed,
     connect(choice->primaryButton(), &QPushButton::clicked, this, [finish] { finish(true); });
     // A tap outside the card keeps the layout, as Cancel does.
     choice->dismissed = [finish] { finish(false); };
-    choice->card()->fitToWidth(
-            qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance));
-    customReplaceDialog->centerCard();
     for (auto *widget : customReplaceDialog->findChildren<QWidget *>())
         textRefresh(widget);
     textRefresh(customReplaceDialog);
@@ -155,29 +153,33 @@ void Reader::showFontDefaultDialog(const QString &face, bool instructions)
                 diagnostic("font-default-confirm", {}, false);
                 auto next = preferences;
                 next["default_font_face"] = face;
-                if (!writePreferences(next)) {
-                    message->setText(strings::get("reader.could_not_save_reader_settings"));
-                    card->fitToWidth(card->width());
-                    dialog->centerCard();
-                    return;
-                }
-                preferences = next;
-                dismiss();
-                mutateAppearance([face](ReaderSession &preview) {
-                    const auto patch = appearance::Patch(
-                            qt::object({ { "default_font_face",
-                                           face.isEmpty() ? QString(defaultFontFace) : face } }));
-                    preview.requestAppearance(preview.displayedAppearance().settings.edited(patch));
+                const QPointer<ui::ModalOverlay> pending(dialog);
+                writePreferences(next, [this, pending, face, message, card, dismiss](
+                                               const QJsonObject &applied, bool saved) {
+                    if (saved)
+                        preferences = applied;
+                    if (!pending || pending != fontDefaultDialog)
+                        return;
+                    if (!saved) {
+                        message->setText(strings::get("reader.could_not_save_reader_settings"));
+                        card->fitToWidth(card->width());
+                        pending->centerCard();
+                        return;
+                    }
+                    dismiss();
+                    mutateAppearance([face](ReaderSession &preview) {
+                        const auto patch = appearance::Patch(
+                                qt::object({ { "default_font_face",
+                                               face.isEmpty() ? QString(defaultFontFace) : face } }));
+                        preview.requestAppearance(preview.displayedAppearance().settings.edited(patch));
+                    });
+                    showFontPicker();
+                    diagnostic("font-default-applied", {}, false);
                 });
-                showFontPicker();
-                diagnostic("font-default-applied", {}, false);
             });
     for (auto *button : card->findChildren<QPushButton *>()) {
         button->setFocusPolicy(Qt::StrongFocus);
     }
-    card->fitToWidth(
-            qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance));
-    dialog->centerCard();
     dialog->show();
     dialog->raise();
     confirm->setFocus();
@@ -208,9 +210,6 @@ void Reader::showFormattingWarning()
     };
     notice->dismissed = dismiss;
     connect(notice->primaryButton(), &QPushButton::clicked, this, dismiss);
-    notice->card()->fitToWidth(
-            qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance));
-    notice->centerCard();
     notice->show();
     notice->raise();
     notice->primaryButton()->setFocus();
@@ -224,12 +223,58 @@ bool Reader::progressBlocked() const
 {
     // The sync prompt is the choice itself, so positionPromptOpen() does not
     // apply here.
-    return bool(debugDialog) || bool(finishDialog) || bool(kosyncDialog)
-            || bool(annotationErrorDialog) || bool(formattingWarningDialog)
+    return exitProgress != ExitProgress::Normal || bool(debugDialog) || bool(finishDialog)
+            || bool(kosyncDialog) || bool(annotationErrorDialog) || bool(formattingWarningDialog)
             || bool(settingsWriteErrorDialog) || book->deviceTransition() || services.suspended()
             || !isVisible() || session->busy() || sheetOpen() || readingToolOpen()
             || appearanceEdit.applying() || imageViewer->isVisible() || annotationMode
             || bookmarkList->isVisible() || topControls->isVisible();
+}
+
+void Reader::clearExitSyncWait()
+{
+    if (exitProgress == ExitProgress::WaitingForSync) {
+        exitProgress = ExitProgress::Normal;
+        dismissProgressChoice();
+    }
+}
+
+void Reader::showExitSyncWait()
+{
+    if (exitProgress == ExitProgress::WaitingForSync)
+        return;
+    dismissProgressChoice();
+    exitProgress = ExitProgress::WaitingForSync;
+    auto *choice = new ui::ChoiceModal(
+            this, { strings::get("closing.sync_detail"), strings::get("closing.sync_title"), {} },
+            { strings::get("closing.local_only"), "rrExitLocalOnly" },
+            { strings::get("closing.wait_for_sync"), "rrExitWaitForSync" });
+    syncDialog = choice;
+    choice->setGeometry(rect());
+    choice->dismissed = [this] { cancelExit(); };
+    auto *wait = choice->primaryButton();
+    connect(wait, &QPushButton::clicked, choice, [choice, wait] {
+        wait->setText(strings::get("closing.waiting_for_sync"));
+        wait->setEnabled(false);
+        choice->setFocus();
+    });
+    connect(choice->secondaryButton(), &QPushButton::clicked, this, [this] {
+        clearExitSyncWait();
+        exitProgress = ExitProgress::LocalOnly;
+        finishExit();
+    });
+    // Some firmware versions do not signal the end of every sync.
+    auto *poll = new QTimer(choice);
+    connect(poll, &QTimer::timeout, this, [this, choice] {
+        if (syncDialog == choice)
+            finishExit();
+    });
+    poll->start(1000);
+    for (auto *widget : choice->findChildren<QWidget *>())
+        textRefresh(widget);
+    choice->show();
+    choice->raise();
+    choice->primaryButton()->setFocus();
 }
 
 void Reader::dismissProgressChoice()
@@ -343,9 +388,6 @@ void Reader::buildProgressChoice(const kobalt::ReadingProgress &shown, int direc
             save(false, true);
         });
     });
-    card->fitToWidth(
-            qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance));
-    syncDialog->centerCard();
     for (auto *widget : syncDialog->findChildren<QWidget *>())
         textRefresh(widget);
     textRefresh(syncDialog);
@@ -463,15 +505,14 @@ void Reader::showFinishChoice()
         finishDialog.clear();
         finishChoiceResolved = exitPending || finished;
         exitPending = exitPending || finished;
+        if (exitPending)
+            session->pauseHybridTurnPreparation(true);
         updateOrientationBlock();
         save(false, true);
         refresh();
     };
     connect(choice->secondaryButton(), &QPushButton::clicked, this, [choose] { choose(false); });
     connect(choice->primaryButton(), &QPushButton::clicked, this, [choose] { choose(true); });
-    card->fitToWidth(
-            qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance));
-    finishDialog->centerCard();
     for (auto *widget : finishDialog->findChildren<QWidget *>())
         textRefresh(widget);
     textRefresh(finishDialog);
@@ -521,18 +562,17 @@ void Reader::askRemoveBookmark(const QString &position)
     const int number = bookmarks->bookPage(index);
     // One line of the page's first words, cut at a word. The row's excerpt
     // leaves out the chapter title, as in the list.
-    QString excerpt = list[index].excerpt;
-    for (const auto &row : bookmarkRows())
-        if (row.position == position) {
-            excerpt = row.excerpt;
-            break;
-        }
-    if (excerpt.size() > 80) {
-        excerpt = excerpt.left(80);
-        excerpt = excerpt.left(qMax(40, excerpt.lastIndexOf(' '))) + QString::fromUtf8("…");
-    }
-    const auto detail = number >= 0
-            ? strings::get("bookmarks.remove_detail").arg(number + 1).arg(excerpt)
+    BookmarkChapterTitles titles(session->chapters());
+    const auto chapter = titles.title(number, list[index].chapter);
+    const auto excerpt =
+            elideBookmarkExcerpt(excerptAfterChapter(list[index].excerpt, chapter), 40, 80);
+    const auto label = locationPageLabel(
+            number, publisherPagesEnabled() ? bookmarks->printedPage(position) : QString());
+    const auto detail = !label.isEmpty()
+            ? strings::get(publisherPagesEnabled() && bookmarks->printedPage(position).isEmpty()
+                                   ? "bookmarks.remove_screen_detail"
+                                   : "bookmarks.remove_detail")
+                      .arg(label, excerpt)
             : excerpt;
     const bool pinned = list[index].pinned();
     auto description = strings::get(pinned ? "bookmarks.remove_pinned_description"
@@ -550,7 +590,6 @@ void Reader::askRemoveBookmark(const QString &position)
             { strings::get("bookmarks.remove"), "rrConfirmRemoveBookmark" });
     removeDialog = choice;
     removeDialog->setObjectName("rrRemoveBookmark");
-    auto *card = choice->card();
     auto *text = choice->descriptionLabel();
     text->setObjectName("rrRemoveBookmarkDetail");
     auto finish = [this, position](bool remove) {
@@ -569,9 +608,6 @@ void Reader::askRemoveBookmark(const QString &position)
     };
     connect(choice->secondaryButton(), &QPushButton::clicked, this, [finish] { finish(false); });
     connect(choice->primaryButton(), &QPushButton::clicked, this, [finish] { finish(true); });
-    card->fitToWidth(
-            qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance));
-    removeDialog->centerCard();
     for (auto *widget : removeDialog->findChildren<QWidget *>())
         textRefresh(widget);
     textRefresh(removeDialog);
@@ -619,6 +655,7 @@ void Reader::openBookmarks()
         refresh();
         return;
     }
+    bookmarkList->setExcerptFont(bookFace());
     if (annotationsEnabled
         && (!bookmarksEnabled
             || (bookmarks->bookmarks().isEmpty() && !highlights->highlights().isEmpty()))) {
@@ -654,9 +691,6 @@ void Reader::showSettingsWriteError()
     };
     notice->dismissed = dismiss;
     connect(notice->primaryButton(), &QPushButton::clicked, this, dismiss);
-    notice->card()->fitToWidth(
-            qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance));
-    notice->centerCard();
     notice->show();
     notice->raise();
     notice->primaryButton()->setFocus();
@@ -712,9 +746,6 @@ void Reader::showAnnotationError(const QString &message, const QString &title, c
     };
     notice->dismissed = dismiss;
     connect(notice->primaryButton(), &QPushButton::clicked, this, dismiss);
-    notice->card()->fitToWidth(
-            qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance));
-    notice->centerCard();
     notice->show();
     notice->raise();
     notice->primaryButton()->setFocus();
@@ -729,19 +760,17 @@ QVector<kobalt::BookmarkRow> Reader::bookmarkRows() const
     QVector<kobalt::BookmarkRow> rows;
     const auto &list = bookmarks->bookmarks();
     const auto pages = bookmarks->resolvedPages();
-    const auto contents = session->chapters();
+    const auto state = session->state();
+    const bool pagePending =
+            state.contains("book_fraction") && state.value("rough_pages").toInt() <= 0;
     rows.reserve(list.size());
     for (int i = 0; i < list.size(); ++i) {
         kobalt::BookmarkRow row{ list[i].position, list[i].chapter,        list[i].excerpt,
                                  list[i].created,  bookmarks->bookPage(i), false };
+        if (publisherPagesEnabled())
+            row.printedPage = bookmarks->printedPage(row.position);
         row.current = pages.value(i, -1) >= 0 && pages.value(i, -1) == session->page();
-        // Name the chapter the page is in now; the stored title covers a missing contents list.
-        for (const auto &link : contents)
-            if (link.page >= 0 && row.page >= 0 && link.page <= row.page)
-                row.chapter = link.title;
-        row.excerpt = kobalt::excerptAfterChapter(row.excerpt, row.chapter);
-        row.pagePending = session->state().contains("book_fraction")
-                && session->state().value("rough_pages").toInt() <= 0;
+        row.pagePending = pagePending;
         row.pinName = list[i].name;
         row.pinIcon = list[i].icon;
         rows.append(row);
@@ -750,6 +779,12 @@ QVector<kobalt::BookmarkRow> Reader::bookmarkRows() const
                      [](const kobalt::BookmarkRow &a, const kobalt::BookmarkRow &b) {
                          return (a.page < 0 ? INT_MAX : a.page) < (b.page < 0 ? INT_MAX : b.page);
                      });
+    BookmarkChapterTitles titles(session->chapters());
+    for (int i = rows.size() - 1; i >= 0; --i) {
+        auto &row = rows[i];
+        row.chapter = titles.title(row.page, row.chapter);
+        row.excerpt = excerptAfterChapter(row.excerpt, row.chapter);
+    }
     return rows;
 }
 
@@ -757,18 +792,19 @@ void Reader::syncPinnedBookmarks()
 {
     if (!pinnedBookmarks)
         return;
-    QVector<Bookmark> pins;
-    for (const auto &item : bookmarks->bookmarks())
-        if (item.pinned() && pins.size() < BookmarkStore::maxPins)
-            pins.append(item);
-    std::stable_sort(pins.begin(), pins.end(), [this](const Bookmark &a, const Bookmark &b) {
-        const int aPage = bookmarks->pageOf(a.position), bPage = bookmarks->pageOf(b.position);
+    const auto &items = bookmarks->bookmarks();
+    QVector<int> pins;
+    for (int i = 0; i < items.size() && pins.size() < BookmarkStore::maxPins; ++i)
+        if (items[i].pinned())
+            pins.append(i);
+    std::stable_sort(pins.begin(), pins.end(), [this](int a, int b) {
+        const int aPage = bookmarks->bookPage(a), bPage = bookmarks->bookPage(b);
         return (aPage < 0 ? INT_MAX : aPage) < (bPage < 0 ? INT_MAX : bPage);
     });
     const bool visible = features::enabled(preferences, features::Bookmarks) && !pins.isEmpty()
             && topControls->isVisible() && !session->busy() && !lifecycleHidden && !closing
             && !services.suspended() && !annotationMode && !seekOpen && !appearanceEdit.panelOpen()
-            && !settingsVisible() && !menu->isVisible() && !choices->isVisible()
+            && !activityOpen() && !settingsVisible() && !menu->isVisible() && !choices->isVisible()
             && !lightPopup->isVisible() && !bookmarkList->isVisible() && !acknowledgmentsVisible()
             && !searchPanel->isVisible() && !dictionaryPanel->isVisible() && !linksActive()
             && !lookupPending && !syncDialog && !kosyncDialog && !finishDialog
@@ -831,7 +867,7 @@ void Reader::syncPinnedBookmarks()
         button->setVisible(i < count);
         if (i >= count)
             continue;
-        const auto &pin = pins[i];
+        const auto &pin = items[pins[i]];
         const int column = i / columnRows;
         const int rows = qMin(columnRows, count - column * columnRows);
         const int columnTop = (trayHeight - (cell * rows + 2 * padding)) / 2;
@@ -846,7 +882,9 @@ void Reader::syncPinnedBookmarks()
         button->setAccessibleName(name);
         button->setToolTip(name);
         button->setProperty("bookmark_position", pin.position);
-        button->setEnabled(bookmarks->pageOf(pin.position) >= 0);
+        button->setEnabled(bookmarks->bookPage(pins[i]) >= 0
+                           || (session->state().contains("book_fraction")
+                               && session->state().value("rough_pages").toInt() <= 0));
     }
     pinnedBookmarks->update();
     pinnedBookmarks->raise();
@@ -893,21 +931,23 @@ void Reader::showScreenRefresh()
 
 // Writes the preferences. A failed write keeps the old ones and shows the
 // error line in Settings; a write that succeeds clears it.
-bool Reader::savePreferences(const QJsonObject &next)
+void Reader::savePreferences(const QJsonObject &next, storage::RecordWriter::Done done)
 {
-    if (!writePreferences(next)) {
+    writePreferences(next, [this, done = std::move(done)](const QJsonObject &applied, bool saved) {
+        if (saved)
+            preferences = applied;
         if (settingsError) {
-            settingsError->setText(strings::get("reader.could_not_save_reader_settings"));
-            settingsError->show();
+            if (saved) {
+                settingsError->clear();
+                settingsError->hide();
+            } else {
+                settingsError->setText(strings::get("reader.could_not_save_reader_settings"));
+                settingsError->show();
+            }
         }
-        return false;
-    }
-    preferences = next;
-    if (settingsError) {
-        settingsError->clear();
-        settingsError->hide();
-    }
-    return true;
+        if (done)
+            done(saved);
+    });
 }
 
 void Reader::closePopup(QPointer<ui::ModalOverlay> &slot)
@@ -948,6 +988,27 @@ void Reader::openChoicePopup(QPointer<ui::ModalOverlay> &slot, const QString &na
         slot->setFocus();
 }
 
+void Reader::openStatsWordScope()
+{
+    openChoicePopup(wordScopePopup, "rrStatsWordScope", strings::get("stats.count_words_in_title"),
+                    strings::get("stats.scope_hint"),
+                    { { "rrStatsWordMain", strings::get("stats.scope_main"),
+                        strings::get("stats.scope_main_hint") },
+                      { "rrStatsWordVolume", strings::get("stats.scope_volume"),
+                        strings::get("stats.scope_volume_hint") } },
+                    statsUseWholeVolume() ? 1 : 0, [this](int index) {
+                        auto next = preferences;
+                        next["stats_word_scope"] = index ? QStringLiteral("volume") : QStringLiteral("main");
+                        savePreferences(next, [this, popup = wordScopePopup](bool saved) {
+                            if (saved) {
+                                if (popup && popup == wordScopePopup)
+                                    closePopup(wordScopePopup);
+                                updateGraph();
+                            }
+                        });
+                    });
+}
+
 void Reader::openScreenRefresh()
 {
     QVector<ChoiceOption> options;
@@ -980,7 +1041,7 @@ QString sessionTimeoutLabel(int minutes)
 
 void Reader::showSleepScreen()
 {
-    if (!general)
+    if (!sleepScreenButton)
         return;
     sessionTimeoutButton->setCaption(
             sessionTimeoutLabel(sessionTimeout::minutes(preferences)).toUpper());
@@ -1013,23 +1074,29 @@ void Reader::closeSleepScreen()
     closePopup(sleepPopup);
 }
 
-bool Reader::saveSleepPreferences(const QJsonObject &next)
+void Reader::saveSleepPreferences(const QJsonObject &next, storage::RecordWriter::Done done)
 {
-    if (!savePreferences(next))
-        return false;
-    showSleepScreen();
-    return true;
+    savePreferences(next, [this, done = std::move(done)](bool saved) {
+        if (saved)
+            showSleepScreen();
+        if (done)
+            done(saved);
+    });
 }
 
 sleep::Snapshot Reader::sleepPreviewSample()
 {
     sleep::Snapshot sample;
-    const int percent =
-            book && session ? (book->finishedHere() ? 100 : session->progressPercent()) : 0;
+    const int percent = book && session
+            ? (book->finishedHere() ? 100 : session->statsPercent(statsUseWholeVolume()))
+            : 0;
     sample.percent = percent;
-    sample.progress = strings::get("sleep.percent_read").arg(percent);
+    if (book && session && headerfooter::decimalPercentages(preferences))
+        sample.percentTenths =
+                book->finishedHere() ? 1000 : session->statsPercentTenths(statsUseWholeVolume());
+    sample.progress = strings::get("sleep.percent_read").arg(sleepPercentText(sample, true));
     if (book) {
-        sample.remaining = sleepTimeLeft(book->estimates().bookMilliseconds,
+        sample.remaining = sleepTimeLeft(book->estimates(statsUseWholeVolume()).bookMilliseconds,
                                          remainingTime::approximate(preferences));
     }
     sample.dark = darkTheme;
@@ -1054,10 +1121,11 @@ void Reader::openSleepScreen()
                                                                 : sleep::NativePreview{},
                                     sleep::followsReading(preferences));
     sleepGallery->setGeometry(general ? general->geometry() : rect());
-    sleepGallery->followOrientationChanged = [this](bool checked) {
+    sleepGallery->followOrientationChanged = [this](bool checked,
+                                                     storage::RecordWriter::Done done) {
         auto next = preferences;
         next[sleep::followOrientationKey] = checked;
-        return saveSleepPreferences(next);
+        saveSleepPreferences(next, std::move(done));
     };
     sleepGallery->setCustom(sleep::custom(preferences));
     sleepGallery->setPlaces(sleepPlaces());
@@ -1071,9 +1139,12 @@ void Reader::openSleepScreen()
         auto next = preferences;
         sleep::setDesign(next, design);
         next.remove("kobalt_sleep_screen");
-        if (saveSleepPreferences(next))
-            prepareSleepCover();
-        closeSleepScreen();
+        saveSleepPreferences(next, [this, gallery = sleepGallery](bool saved) {
+            if (saved)
+                prepareSleepCover();
+            if (gallery && gallery == sleepGallery)
+                closeSleepScreen();
+        });
     };
     sleepGallery->unavailable = [this](sleep::Design design) {
         if (design == sleep::Design::Overlay)
@@ -1209,30 +1280,33 @@ void Reader::openSleepEditor(sleep::Design design)
             sleep::setDesign(next, sleep::Design::Custom);
             next.remove("kobalt_sleep_screen");
         }
-        if (book && own != ownBefore) {
-            book->setSleepPositions(own);
-            QJsonObject snapshot;
-            book->checkpoint(&snapshot, true);
-        }
-        if (!saveSleepPreferences(next))
-            return;
-        closeSleepEditor();
-        if (custom) {
-            // The gallery stays open and may open the editor again, so keep a
-            // cover that is already decoded; closing the gallery releases it.
-            if (sleepCover.isNull())
-                prepareSleepCover();
-            if (sleep::uses(preferences, sleep::Mode::Overlay))
-                prepareSleepOverlay();
-            prepareSleepWallpapers();
-            // Back to the list of lock screens, with Custom chosen.
-            if (sleepGallery) {
-                sleepGallery->setCustom(sleep::custom(preferences));
-                sleepGallery->setCurrent(sleep::Design::Custom);
+        saveSleepPreferences(next, [this, guard, own, ownBefore, custom](bool saved) {
+            if (!saved)
+                return;
+            if (book && own != ownBefore) {
+                book->setSleepPositions(own);
+                QJsonObject snapshot;
+                book->checkpoint(&snapshot, true);
             }
-        }
-        if (sleepGallery)
-            sleepGallery->setPlaces(sleepPlaces());
+            if (sleepEditor == guard)
+                closeSleepEditor();
+            if (custom) {
+                // The gallery stays open and may open the editor again, so keep a
+                // cover that is already decoded; closing the gallery releases it.
+                if (sleepCover.isNull())
+                    prepareSleepCover();
+                if (sleep::uses(preferences, sleep::Mode::Overlay))
+                    prepareSleepOverlay();
+                prepareSleepWallpapers();
+                // Back to the list of lock screens, with Custom chosen.
+                if (sleepGallery) {
+                    sleepGallery->setCustom(sleep::custom(preferences));
+                    sleepGallery->setCurrent(sleep::Design::Custom);
+                }
+            }
+            if (sleepGallery)
+                sleepGallery->setPlaces(sleepPlaces());
+        });
     };
     for (auto *widget : editor->findChildren<QWidget *>())
         textRefresh(widget);
@@ -1342,8 +1416,10 @@ void Reader::editSleepGreeting()
         // Native submission runs inside the controller; close after it returns.
         greetingEditor->hide();
         qt::later(0, this, close);
-        if (saveSleepPreferences(next) && sleepGallery)
-            sleepGallery->setSample(sleepPreviewSample());
+        saveSleepPreferences(next, [this](bool saved) {
+            if (saved && sleepGallery)
+                sleepGallery->setSample(sleepPreviewSample());
+        });
     };
     connect(dialog->secondaryButton(), &QPushButton::clicked, this, close);
     connect(dialog->primaryButton(), &QPushButton::clicked, this, submit);
@@ -1354,7 +1430,6 @@ void Reader::editSleepGreeting()
     greetingKeyboard->submitted = submit;
     dialog->show();
     dialog->raise();
-    dialog->fitCard();
     editor->setFocus();
     greetingKeyboard->show();
     // Keep the card above the keyboard.
@@ -1402,9 +1477,6 @@ void Reader::showSleepOverlayHelp()
     notice->dismissed = [this] { closePopup(sleepPopup); };
     connect(notice->primaryButton(), &QPushButton::clicked, this,
             [this] { closePopup(sleepPopup); });
-    notice->card()->fitToWidth(
-            qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance));
-    notice->centerCard();
     for (auto *widget : notice->findChildren<QWidget *>())
         textRefresh(widget);
     textRefresh(notice);
@@ -1430,9 +1502,6 @@ void Reader::showSleepWallpaperHelp()
     notice->dismissed = [this] { closePopup(sleepPopup); };
     connect(notice->primaryButton(), &QPushButton::clicked, this,
             [this] { closePopup(sleepPopup); });
-    notice->card()->fitToWidth(
-            qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance));
-    notice->centerCard();
     for (auto *widget : notice->findChildren<QWidget *>())
         textRefresh(widget);
     textRefresh(notice);
@@ -1480,8 +1549,8 @@ void Reader::openSleepChoice(const QString &name, const QString &optionPrefix,
     if (sleepPopup) {
         return;
     }
-    const auto sheet = ui::makeChoiceSheet(this, name, heading, description, name + "Title",
-                                            name + "Hint");
+    const auto sheet =
+            ui::makeChoiceSheet(this, name, heading, description, name + "Title", name + "Hint");
     sleepPopup = sheet.overlay;
     sleepPopup->dismissed = [this] { closeSleepScreen(); };
     auto *choices = sheet.list;
@@ -1600,11 +1669,14 @@ void Reader::openTapZones()
             if (layout == tapZones::Layout::OneHanded)
                 next[pageNavigation::preferenceKey] =
                         pageNavigation::value(pageNavigation::Mode::TapsAndSwipes);
-            if (savePreferences(next)) {
-                showTapZones();
-                showPageNavigation();
-            }
-            closePopup(tapZonesPopup);
+            savePreferences(next, [this, popup = tapZonesPopup](bool saved) {
+                if (saved) {
+                    showTapZones();
+                    showPageNavigation();
+                }
+                if (popup && popup == tapZonesPopup)
+                    closePopup(tapZonesPopup);
+            });
         });
     }
     auto *note =
@@ -1667,9 +1739,12 @@ void Reader::openPageNavigation()
     sheet.list->chosen = [this, modes](int index) {
         auto next = preferences;
         next[pageNavigation::preferenceKey] = pageNavigation::value(modes[index]);
-        if (savePreferences(next))
-            showPageNavigation();
-        closePopup(pageNavigationPopup);
+        savePreferences(next, [this, popup = pageNavigationPopup](bool saved) {
+            if (saved)
+                showPageNavigation();
+            if (popup && popup == pageNavigationPopup)
+                closePopup(pageNavigationPopup);
+        });
     };
     auto *card = pageNavigationPopup->card();
     // Each header pages with its controls on short screens.
@@ -1702,8 +1777,10 @@ void Reader::openPageNavigation()
     connect(reverse, &QCheckBox::clicked, this, [this, reverse](bool checked) {
         auto next = preferences;
         next[pageNavigation::reverseSwipesKey] = checked;
-        if (!savePreferences(next))
-            reverse->setChecked(!checked);
+        savePreferences(next, [guard = QPointer<QCheckBox>(reverse), checked](bool saved) {
+            if (!saved && guard)
+                guard->setChecked(!checked);
+        });
     });
     section(strings::get("settings.swipe_direction"), "rrSwipeDirectionSection", reverse);
     const int width = qMin<int>(metrics::notice::cardWidth,
@@ -1750,9 +1827,12 @@ void Reader::openChapterGroups()
                     [this, modes](int index) {
                         auto next = preferences;
                         next["chapter_groups"] = modes[index];
-                        if (savePreferences(next))
-                            showChapterGroups();
-                        closePopup(chapterGroupsPopup);
+                        savePreferences(next, [this, popup = chapterGroupsPopup](bool saved) {
+                            if (saved)
+                                showChapterGroups();
+                            if (popup && popup == chapterGroupsPopup)
+                                closePopup(chapterGroupsPopup);
+                        });
                     });
 }
 
@@ -1784,9 +1864,12 @@ void Reader::openNavigationBarButtons()
                 auto next = preferences;
                 next[pageNavigation::barButtonsKey] =
                         pageNavigation::value(pageNavigation::barButtonsModes[index]);
-                if (savePreferences(next))
-                    showNavigationBarButtons();
-                closePopup(navigationBarPopup);
+                savePreferences(next, [this, popup = navigationBarPopup](bool saved) {
+                    if (saved)
+                        showNavigationBarButtons();
+                    if (popup && popup == navigationBarPopup)
+                        closePopup(navigationBarPopup);
+                });
             });
 }
 
@@ -1840,11 +1923,14 @@ void Reader::openTappableLinks()
                     [this, modes](int index) {
                         auto next = preferences;
                         next["tappable_links"] = modes[index];
-                        if (savePreferences(next)) {
-                            showTappableLinks();
-                            syncLinkDiscovery();
-                        }
-                        closePopup(tappableLinksPopup);
+                        savePreferences(next, [this, popup = tappableLinksPopup](bool saved) {
+                            if (saved) {
+                                showTappableLinks();
+                                syncLinkDiscovery();
+                            }
+                            if (popup && popup == tappableLinksPopup)
+                                closePopup(tappableLinksPopup);
+                        });
                     });
 }
 
@@ -1880,14 +1966,17 @@ void Reader::openAnnotationInteraction()
                     [this, modes](int index) {
                         auto next = preferences;
                         next["annotation_interaction"] = modes[index];
-                        if (savePreferences(next)) {
-                            showAnnotationInteraction();
-                            // A mode that the toggle opened ends with the toggle.
-                            if (quickAnnotations() && annotationMode)
-                                leaveAnnotations(false);
-                            syncReadingControls();
-                        }
-                        closePopup(annotationInteractionPopup);
+                        savePreferences(next, [this, popup = annotationInteractionPopup](bool saved) {
+                            if (saved) {
+                                showAnnotationInteraction();
+                                // A mode that the toggle opened ends with the toggle.
+                                if (quickAnnotations() && annotationMode)
+                                    leaveAnnotations(false);
+                                syncReadingControls();
+                            }
+                            if (popup && popup == annotationInteractionPopup)
+                                closePopup(annotationInteractionPopup);
+                        });
                     });
 }
 
@@ -1928,9 +2017,12 @@ void Reader::openMenuView()
                         next[pageNavigation::menuViewKey] = pageNavigation::value(modes[index]);
                         next.remove("pin_stats");
                         next.remove(pageNavigation::thumbnailsKey);
-                        if (savePreferences(next))
-                            showMenuView();
-                        closePopup(menuViewPopup);
+                        savePreferences(next, [this, popup = menuViewPopup](bool saved) {
+                            if (saved)
+                                showMenuView();
+                            if (popup && popup == menuViewPopup)
+                                closePopup(menuViewPopup);
+                        });
                     });
 }
 

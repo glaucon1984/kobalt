@@ -295,29 +295,33 @@ inline int textPixels(int size, bool footer)
     return px(size + (footer ? defaultFooterText.design() - defaultHeaderText.design() : 0));
 }
 
-inline int stripHeight(int size)
+inline int stripDesignHeight(int size)
 {
-    return px(48 + 2 * (size - defaultHeaderText.design()));
+    // Small through Medium share the same reading area.
+    if (size <= 26)
+        return 48;
+    return 48 + 2 * (size - defaultHeaderText.design());
 }
 
-// Preserve the old edge alignment through Large; give larger text a taller band.
-inline int textBandHeight(int size)
+inline int stripHeight(int size, int extra = 0)
 {
-    return px(48 + qMax(0, size - 28) * 2);
+    return px(stripDesignHeight(size) + extra);
 }
 
-inline constexpr Px progressHeight{ 24 };
 inline constexpr Px headerSide{ 28 }, headerTextGap{ 24 }, batteryGap{ 8 };
-inline constexpr Px progressBottom{ 14 }, progressFillHeight{ 4 };
+// The rule faces the screen edge and the fill faces the text.
+inline constexpr Px progressEdgeInset{ 8 }, progressRuleHeight{ 3 }, progressFillHeight{ 4 },
+        progressTextGap{ 4 };
+inline constexpr Px progressRuleEdge = progressEdgeInset + progressRuleHeight;
+inline constexpr Px progressHeight = progressRuleEdge + progressFillHeight + progressTextGap;
 } // namespace reading
 
 namespace headerFooter {
 // The slot map is a short page: one-line slot rows, their text at the top
 // and bottom edges as on the page, and a few lines between them.
-inline constexpr Px mapRowHeight{ list::oneLine }, mapLineHeight{ 4 };
-inline constexpr Px mapLineGap{ 12 }, mapLineInset{ list::inset }, mapEdgeInset{ 10 };
+inline constexpr Px mapRowHeight{ list::oneLine }, minimumBodyHeight{ 20 };
 // Each slot is a dashed box around its text, so it reads as something to tap.
-inline constexpr Px slotGap{ 8 }, slotPadding{ 8 }, slotDash{ 4 }, mapSideInset{ 7 };
+inline constexpr Px slotDash{ 4 };
 inline constexpr TextPx valueText{ control::captionValueText }, emptyText{ chrome::captionText };
 // Preset miniatures: a page, then its name in a block as tall as a segment,
 // which grows with large text.
@@ -423,7 +427,7 @@ inline constexpr Px choiceHeight{ 72 };
 
 namespace links {
 inline constexpr Px returnWidth{ 400 }, returnHeight{ 120 }, popupWidth{ 440 }, actionHeight{ 96 };
-// Link discovery above the tabs uses the same row height as the return row.
+// Space between the two labels in the link reveal hint.
 inline constexpr Px hintGap{ 24 };
 // Revealed links: a tint and an outline around each link rectangle. Stacked
 // links keep a gap between their outlines.

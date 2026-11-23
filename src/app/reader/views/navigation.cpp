@@ -1,3 +1,4 @@
+#include "support/percentage_text.h"
 #include "ui/controls/buttons.h"
 #include "ui/controls/icons.h"
 #include "ui/controls/panels.h"
@@ -12,7 +13,6 @@
 #include <QPaintEvent>
 #include <QPainter>
 #include <QFontMetrics>
-#include <QLocale>
 #include <QPainterPath>
 #include <QStackedWidget>
 #include <QtMath>
@@ -475,21 +475,21 @@ protected:
         const int top = labelsHidden ? (height() - chrome::tabIcon) / 2
                                      : (height() - chrome::tabIcon - chrome::tabGap - capital) / 2;
         const QRect icon((width() - chrome::tabIcon) / 2, top, chrome::tabIcon, chrome::tabIcon);
-        painter.setPen(color);
+        const auto style = ui::widgetIconStyle(this);
         if (glyph == ui::ControlIcon::Typography) {
-            painter.setFont(sample);
+            auto face = sample;
+            painter.setPen(ui::paintIconBackground(painter, style, glyph, icon, color));
+            if (style == ui::IconStyle::Pastel || style == ui::IconStyle::Rings)
+                face.setPixelSize(qMax(1, face.pixelSize() * 3 / 4));
+            painter.setFont(face);
             ui::drawOpticalText(painter, QRect(0, icon.top(), width(), icon.height()),
                                 QStringLiteral("Aa"), true, {});
         } else {
-            const auto vector = ui::controlIcon(glyph, color);
-            // Annotate has no QIcon form. The notice painter draws the same glyph.
-            if (vector.isNull())
-                ui::paintOpeningIcon(painter, glyph, icon, color);
-            else
-                vector.paint(&painter, icon);
+            ui::paintStyledIcon(painter, style, glyph, icon, color);
         }
         if (labelsHidden)
             return;
+        painter.setPen(color);
         painter.setFont(label);
         ui::drawOpticalText(
                 painter,
@@ -828,19 +828,7 @@ Navigation::Navigation(QWidget *parent, const ToolbarComposition &controls)
     toolbarRows->setEnabled(false);
     rules = new ToolbarRules(toolbar);
     rules->lower();
-    zenMark = new QLabel(strings::get("navigation.zen"), toolbar);
-    zenMark->setObjectName("rrZenMark");
-    zenMark->setAlignment(Qt::AlignCenter);
-    // The section heading caption, inverted to paper capitals on an ink block.
-    // The reader's label style would otherwise replace the font.
-    ui::readerStyle(zenMark,
-                    QString("QLabel{%1font-weight:bold;background:palette(window-text);"
-                            "color:palette(window);padding:%2px %3px;}")
-                            .arg(ui::styles::caption(), QString::number(ui::px(2)),
-                                 QString::number(ui::px(12))));
-    auto markFont = ui::captionFont();
-    markFont.setBold(true);
-    zenMark->setFont(markFont);
+    zenMark = ui::makeZenMark(toolbar, "rrZenMark");
     zenMark->hide();
     zenStatsButton = new ZenStatsButton(toolbar);
     zenStatsButton->hide();
@@ -1026,7 +1014,7 @@ void Navigation::placeZenToolbar(QSize size, const QVector<QWidget *> &actions,
         using Figure = ZenStatsPanel::Figure;
         QVector<Figure> figures{
             { unit(state.sessionMinutes), strings::get("zen.this_session"), false },
-            { { qMakePair(QLocale().toString(state.pageTurns), QString()) },
+            { { qMakePair(strings::count(state.pageTurns), QString()) },
               strings::get("zen.pages_turned"),
               false },
             { state.chapterMinutes < 0 ? QVector<QPair<QString, QString>>{ qMakePair(
@@ -1053,8 +1041,6 @@ void Navigation::placeZenToolbar(QSize size, const QVector<QWidget *> &actions,
             rowTop + (int(chrome::statusHeight) - int(ui::metrics::control::border)) / 2;
     // The clock centers its digits' ink in its label, so the label centers
     // on the row.
-    if (auto *label = dynamic_cast<ui::InterfaceLabel *>(clock))
-        label->setOpticalCentering(true);
     const int clockTop = rowCenter - line / 2;
     const int clockWidth = qMin(ui::textPx(160), clock->sizeHint().width());
     clock->setGeometry(left + (groupWidth - clockWidth) / 2, clockTop, clockWidth, line);
@@ -1065,13 +1051,11 @@ void Navigation::placeZenToolbar(QSize size, const QVector<QWidget *> &actions,
     zenMark->move(left + margin, markTop);
     clock->setVisible(statusVisible);
     zenMark->setVisible(statusVisible);
-    const int level = battery->level();
-    battery->setVisible(statusVisible && level >= 0 && level <= 20);
+    updateBatteryVisibility();
     // The icon's ink ends before the indicator's right edge.
     const int batteryInk = battery->width() - int(ui::metrics::panel::batteryIconSize) + 1
             + qCeil(ui::batteryWidth(ui::metrics::panel::batteryBodyHeight));
     battery->move(left + groupWidth - margin - batteryInk, clockTop);
-    session->hide();
     if (bluetooth)
         bluetooth->hide();
     if (wifi)
@@ -1093,15 +1077,13 @@ void Navigation::placeZenToolbar(QSize size, const QVector<QWidget *> &actions,
     }
 }
 
-void Navigation::placeToolbar(QSize size, const QVector<QWidget *> &actions, bool zen)
+void Navigation::placeToolbar(QSize size, const QVector<QWidget *> &actions)
 {
     // Undo Zen mode's top group first, so the exit caption counts below.
     if (!toolbar->mask().isEmpty())
         toolbar->clearMask();
     zenMark->hide();
     zenStatsButton->hide();
-    if (auto *label = dynamic_cast<ui::InterfaceLabel *>(clock))
-        label->setOpticalCentering(false);
     zenStatsPanel->hide();
     if (exitAction->property("reader_arrow_only").toBool()) {
         exitAction->setProperty("reader_arrow_only", false);
@@ -1114,9 +1096,7 @@ void Navigation::placeToolbar(QSize size, const QVector<QWidget *> &actions, boo
         rules->update();
     }
     clock->setVisible(statusVisible);
-    battery->setVisible(statusVisible);
-    // Zen mode hides the minutes-open count, also under Chapters and Bookmarks.
-    session->setVisible(statusVisible && !zen && !session->text().isEmpty());
+    updateBatteryVisibility();
     settings->setFixedWidth(chrome::cellWidth);
     int rightActions = 0;
     for (auto *action : actions)
@@ -1206,7 +1186,7 @@ void Navigation::update(QSize size, const NavigationState &state)
     if (zenTop)
         placeZenToolbar(size, actions, state);
     else
-        placeToolbar(size, actions, state.zen);
+        placeToolbar(size, actions);
     for (auto *action : state.topActions)
         action->hide();
     const bool scrubberShown = scrubber
@@ -1217,7 +1197,7 @@ void Navigation::update(QSize size, const NavigationState &state)
             && !state.chaptersOpen && !settingsOpen && !state.appearance->isVisible()
             && !state.stats->isVisible() && !state.light->isVisible();
     bar->setReturnLabel(scrubber ? QString() : state.returnLabel, state.returnNote);
-    bar->setZen(state.zen, state.annotationsEnabled, state.bookmarksEnabled, state.annotating,
+    bar->setZen(state.zen, state.showAnnotate, state.bookmarksEnabled, state.annotating,
                 state.bookmarksOpen, annotate && annotate->isEnabled(),
                 bookmarks && bookmarks->isEnabled(), state.annotationsOnly);
     // Under Chapters and Bookmarks the Zen tabs attach to the view.
@@ -1324,6 +1304,12 @@ void Navigation::update(QSize size, const NavigationState &state)
     } else {
         zenViewBase->hide();
     }
+}
+
+void Navigation::updateBatteryVisibility()
+{
+    const int level = battery->level();
+    battery->setVisible(statusVisible && (!zenTop || (level >= 0 && level <= 20)));
 }
 
 void Navigation::updateSessionGeometry()

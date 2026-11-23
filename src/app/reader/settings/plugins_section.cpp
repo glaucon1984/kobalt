@@ -33,28 +33,24 @@ QLabel *note(QWidget *parent, const char *name)
 } // namespace
 
 PluginsSection::PluginsSection(QWidget *page, QVBoxLayout *rows, QWidget *overlayParent,
-                               const QString &folderLabel,
-                               std::function<void(ui::CaptionButton *)> styleRow)
+                               const QString &folderLabel, MakeOption makeOption, MakeRow makeRow)
     : QObject(page),
       page(page),
       overlayParent(overlayParent),
       folderLabel(folderLabel),
-      styleRow(std::move(styleRow)),
+      makeRow(std::move(makeRow)),
       rows(rows)
 {
-    useOption = new ui::DescribedOption(strings::get("settings.use_plugins"),
-                                        strings::get("settings.use_plugins_description"), page);
-    useOption->setObjectName("rrUsePlugins");
+    useOption = makeOption("rrUsePlugins", strings::get("settings.use_plugins"),
+                           strings::get("settings.use_plugins_description"));
     useOption->setChecked(true);
     rows->addWidget(useOption);
     connect(useOption, &QCheckBox::toggled, this, [this](bool checked) {
         pending.enabled = checked;
         refreshStatuses();
     });
-    firstOption = new ui::DescribedOption(strings::get("settings.plugin_answers_first"),
-                                          strings::get("settings.plugin_answers_first_description"),
-                                          page);
-    firstOption->setObjectName("rrPluginAnswersFirst");
+    firstOption = makeOption("rrPluginAnswersFirst", strings::get("settings.plugin_answers_first"),
+                             strings::get("settings.plugin_answers_first_description"));
     rows->addWidget(firstOption);
     connect(firstOption, &QCheckBox::toggled, this,
             [this](bool checked) { pending.answerFirst = checked; });
@@ -117,18 +113,17 @@ void PluginsSection::rebuild()
     if (!blocked) {
         int index = rows->indexOf(hint) + 1;
         for (const PluginStatus &status : statuses) {
-            auto *row = ui::makeCaptionButton(page, nullptr, "rrPlugin", status.name,
-                                              [this, id = status.id] {
-                                                  for (const auto &item : statuses)
-                                                      if (item.id == id)
-                                                          openDetails(item);
-                                              });
+            auto *row = makeRow(status.name, [this, id = status.id] {
+                for (const auto &item : statuses)
+                    if (item.id == id)
+                        openDetails(item);
+            });
             row->setObjectName(QStringLiteral("rrPlugin_") + status.id);
             row->setChevron(true);
-            if (styleRow)
-                styleRow(row);
             rows->insertWidget(index++, row);
             pluginRows.append(row);
+            if (widgetCreated)
+                widgetCreated(row);
         }
     }
     refreshStatuses();
@@ -223,6 +218,8 @@ void PluginsSection::openDetails(const PluginStatus &status)
     card->adaptiveActions({ remove, done });
     connect(remove, &QPushButton::clicked, this, [this, status] { confirmDelete(status); });
     connect(done, &QPushButton::clicked, this, [this] { dismissDialogs(); });
+    if (widgetCreated)
+        widgetCreated(details);
     card->fitToWidth(cardWidth);
     details->centerCard();
     details->show();
@@ -273,6 +270,8 @@ void PluginsSection::confirmDelete(const PluginStatus &status)
                            : strings::get("settings.plugin_data_not_deleted").arg(error));
         });
     });
+    if (widgetCreated)
+        widgetCreated(confirmation);
     confirmation->fitCard();
     confirmation->show();
     confirmation->raise();

@@ -18,7 +18,6 @@
 #include "engine/types.h"
 #include "engine/word_counts.h"
 #include "reading/reading_density.h"
-#include "reading/appearance_settings.h"
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -101,6 +100,9 @@ public:
     // properties, so reflow and cached reopening do not scan text again.
     DocumentWordCounts wordCounts(std::function<bool()> current = {}) override;
 
+    qint64 wordsInMainText(const QString &first, const QString &after,
+                           const std::function<bool()> &current) override;
+
     qint64 totalWords() const override { return totalWords_; }
 
     QString resourceError() const override;
@@ -111,6 +113,7 @@ public:
     // skip other non-linear sections. Returns `from` at either end.
     int turnTarget(int from, int delta) const override;
     bool goTo(const QString &position) override;
+    OpeningResult restoreSavedPosition(const QString &position) override;
     QString platformPosition(const PositionCodec &codec, QString *error) const override;
     bool goToPlatform(const PositionCodec &codec, const QString &location, QString *error) override;
     // With a codec, an unknown anchor opens its chapter and an unknown chapter
@@ -141,7 +144,7 @@ public:
     QString pageStart(int page) const override;
     QString pageExcerpt(int page) const override;
     WordSelection wordAt(QPoint point) override;
-    QImage imageAt(QPoint point) override;
+    QImage imageAt(QPoint point, const QString &resource = {}) override;
     AnnotationPageEdges annotationPageEdges() override;
     AnnotationToken annotationTokenAt(QPoint point) override;
     AnnotationToken annotationDragTokenAt(QPoint point, const QString &boundary,
@@ -151,9 +154,9 @@ public:
     TextRange textRange(const QString &start, const QString &end,
                         bool withContext = false) override;
     // Indices of source ranges intersecting [start, end), in input order.
-    // Invalid, empty and reversed ranges are ignored. No text or geometry is read.
+    // Invalid, empty and reversed ranges are ignored. Only source endpoints are compared.
     QVector<int> intersectingRanges(const QString &start, const QString &end,
-                                    const QVector<QPair<QString, QString>> &ranges) const override;
+                                    const QVector<QPair<QString, QString>> &ranges) override;
     // Crossed boundary edits retain both complete words using wordAt segmentation.
     TextRange annotationRange(const QString &start, const QString &end) override;
     // Complete token boundaries preserve explicit punctuation choices when reversed.
@@ -163,7 +166,8 @@ public:
                               bool endTokenPolicy = false, bool startTokenPolicy = false,
                               std::function<bool()> current = {}) override;
     QVector<PageLink> pageLinks() override;
-    LinkDetails linkDetails(const QString &source, bool preview = true) override;
+    LinkDetails linkDetails(const QString &source, bool preview = true,
+                            const std::function<bool()> &current = {}) override;
     SearchBatch searchPage(const QString &query, int page) override;
     // Worker-only, incremental preparation. The cache belongs to this layout.
     bool prepareSearch() override;
@@ -175,9 +179,9 @@ public:
 
     // Source-only current-page intersection. Does not resolve remote geometry.
     // Returns input indices in order; at most 2000 saved ranges plus one draft.
-    QVector<int> visibleRanges(const QVector<QPair<QString, QString>> &ranges) const override;
+    QVector<int> visibleRanges(const QVector<QPair<QString, QString>> &ranges) override;
     // Check a changing draft without rebuilding the saved-range index.
-    bool rangeVisible(const QString &start, const QString &end) const override;
+    bool rangeVisible(const QString &start, const QString &end) override;
     // Text selection excludes images. Links also need their image hit regions.
     AnnotationGeometry annotationGeometry(const QString &start, const QString &end) override;
     QVector<QRect> rangeRects(const QString &start, const QString &end,
@@ -198,6 +202,14 @@ public:
     // The paths of the spine items in spine order, and the index of the
     // spine item of a position, or -1.
     QStringList spineItems() const;
+    QStringList spineLocationNames() const;
+    bool validMainTextRange(const QString &first, const QString &after,
+                            bool *deferred = nullptr) const override;
+    QPair<QString, QString> mainTextHints() const override;
+    QString chapterBoundaryPosition(const QVector<ChapterLink> &links, int index,
+                                    bool *deferred = nullptr) const override;
+    QString afterChapter(const QVector<ChapterLink> &links, int index,
+                         bool *deferred = nullptr) const override;
     int spineItemOf(const QString &position) const;
     // Turns `delta` pages. At an edge of the window it loads the next or the
     // previous spine item with its neighbors and continues there. False at
@@ -211,7 +223,19 @@ public:
     }
 
     double bookFraction() const override;
+
+    bool partOfBook() const override { return windowFirst_ >= 0 && spineItemCount_ > 0; }
+
     RoughPages roughPages() const override;
+    QVector<int> wholeBookPages(const QStringList &positions,
+                                const std::function<bool()> &current = {},
+                                bool rangeEndpoints = false) const override;
+    int wholeBookPageCount() const override;
+    QVector<ChapterLink> wholeBookChapters() const override;
+    void prepareWholeBookText(const QString &first, const QString &after,
+                              const std::function<bool()> &current) override;
+    void rememberWholeBookTicks(const QVector<double> &ticks, const QString &range) override;
+    bool savedWholeBookTicks(const QString &range, QVector<double> *ticks) const override;
     QVector<int> bookPages(const QStringList &positions, const std::function<bool()> &current = {},
                            bool rangeEndpoints = false) const override;
     bool goToFraction(double fraction) override;
@@ -223,7 +247,9 @@ public:
     // a build for other settings is dropped by the next prepareFullDocument()
     // and counts as nothing here.
     bool fullDocumentReady() const override;
-    int preparedSpreadTurn(int direction) const override;
+    bool prepareMatchingSpread() override;
+    int preparedSpreadTurn(int direction, bool *continues = nullptr) const override;
+    void prepareFullDocumentTurn(const std::function<bool()> &current = {}) override;
     bool fullDocumentStarted() const override;
 
     bool fullDocumentFailed() const override { return !fullFailed_.isEmpty(); }
@@ -328,6 +354,10 @@ public:
     // requested size and 4 million pixels. Empty means neither is usable.
     QImage coverImage(QSize maximumSize, const QString &preferredPath = {},
                       QString *usedPath = nullptr) const override;
+    QVector<ChapterLink> landmarks() const override;
+    QString printedPageLabel(const QString &position, bool exclusiveEnd = false,
+                             bool *deferred = nullptr) override;
+    QVector<ChapterLink> printedPages() const override;
     QVector<ChapterLink> chapters() const override;
     bool goToChapter(int index, const QString &position) override;
     void setChapters(QVector<ChapterLink> contents, QVector<ChapterLink> graph) override;
@@ -342,6 +372,10 @@ public:
     QJsonObject settingsState() const override;
 
 private:
+    bool resolveTocFragments(int item) const;
+    enum class AppearanceAction { Validate, Apply };
+    bool updateAppearance(const appearance::Patch &patch, QSize size, OpeningProgress progress,
+                          AppearanceAction action);
     // Sets the current and next entries of `links` around `position`.
     ChapterSelection chapterAround(const QVector<ChapterLink> &links,
                                    const QString &position) const;
@@ -400,16 +434,24 @@ private:
     mutable std::shared_ptr<SourceIndex> sourceIndex_;
     std::shared_ptr<SourceIndex> sourceIndex(const QStringList &positions,
                                              const std::function<bool()> &current = {}) const;
+    EngineDocument *textDocument(int item);
+    QVector<int> textOrder(const QString &anchor);
+    bool validSelectionEndpoint(const QString &anchor);
+    QPair<QString, QString> visibleEndpoints(const QString &start, const QString &end,
+                                             bool validate = true);
     std::shared_ptr<SourceIndex> sourceRanges(const QVector<QPair<QString, QString>> &ranges) const;
     QPair<int, qint64> sourceIndexUsage() const;
     int columns_ = 1, columnSpacing_ = readingPixels(60), columnSpacingPercent_ = 0;
-    bool twoColumnsLandscape_ = false;
+    bool twoColumnsLandscape_ = false, chapterStartsSpread_ = false;
     QSize size_;
     QString anchor_;
     std::function<bool()> interrupt_;
     bool layoutInterrupted_ = false;
     // The spine items that have their text, or -1 for the whole book.
-    mutable QStringList spineNames_;
+    mutable QStringList spineNames_, spineLocations_;
+    mutable QVector<ChapterLink> printedPages_, landmarks_;
+    mutable QMap<int, QVector<int>> printedBySpine_;
+    mutable QHash<int, QVector<int>> orderedPrintedMarkers_;
     int windowFirst_ = -1, windowLast_ = -1, spineItemCount_ = 0;
     // Keep traversed group boundaries after their rendered documents are evicted.
     mutable QMap<int, int> visitedUnits_;
@@ -509,6 +551,12 @@ private:
     };
 
     std::vector<KeptUnit> kept_;
+    // Search and link previews can open another chapter while the next turn keeps its layout.
+    KeptUnit lookupUnit_;
+    EngineDocument *openLookupUnit(int item, const std::function<bool()> &current, int last = -1,
+                                   bool borrowAhead = true);
+    std::unique_ptr<EngineDocument> loadUnit(int first, const QJsonObject &settings,
+                                             const std::function<bool()> &current, QString *error);
     void keepUnit(std::unique_ptr<EngineDocument> document, const QJsonObject &settings,
                   QSize size);
     // The kept document of the unit that starts at `first`, when it was
@@ -530,6 +578,7 @@ private:
     // slice.
     void prepareNextItem(const std::function<bool()> &current);
     void preparePreviousItem(const std::function<bool()> &current);
+    const QVector<bool> &nonLinearSpineItems() const;
     int adjacentSpineItem(int direction) const;
     QPair<int, int> neighbouringUnit(int item, int direction) const;
     // Opens the unit that starts at spine item `item` in `ahead_`, or keeps
@@ -598,6 +647,9 @@ private:
     QString estimateKey(const QJsonObject &settings) const;
     // The same for slices of `slicePages` pages.
     QString estimateKey(const QJsonObject &settings, int slicePages) const;
+    // The key of chapter ticks: the one of chapter mode, which the saved
+    // record has, also in a document of the whole book.
+    QString ticksKey() const;
     // The key of a prepared document of the whole book. Unlike estimateKey()
     // it also holds the settings that change pixels only: a document made
     // before dark mode changed must not be shown after it.
@@ -637,6 +689,9 @@ private:
     // The page in its chapter and the pages of the chapter from the
     // estimate of the pages, when only a part of the book has a layout.
     void estimateChapterPages(const QVector<ChapterLink> &links, ChapterSelection &result) const;
+    QVector<int> chapterBookPages(const QStringList &positions,
+                                  const std::function<bool()> &current = {},
+                                  bool rangeEndpoints = false, QVector<int> result = {}) const;
     // True when the document was loaded without the fonts that the book
     // embeds: a reading font replaces them on every element, so they are
     // never drawn. Only for a part of a book, which loads again quickly
@@ -667,7 +722,8 @@ private:
     QVector<ChapterLink> contents_, graph_;
     // Native chapter metadata is separate from a graph derived from the DOM.
     bool externalChapters_ = false;
-    qint64 totalWords_ = -1;
+    qint64 totalWords_ = -1, rangeWords_ = -1;
+    QPair<QString, QString> countedRange_;
     using ChapterPositions = QVector<ldomXPointerEx>;
     QVector<ChapterLink> chapterPages(QVector<ChapterLink> links,
                                       ChapterPositions *positions) const;
@@ -742,6 +798,21 @@ private:
     bool refreshImages();
     // Changed rectangle between two cached page images, by sorted cache keys.
     QMap<QPair<qint64, qint64>, QRect> damage_;
+
+    // In the document of the whole book: the changed rectangle from the
+    // chapter page on screen, `from`, to the page of this document that the
+    // turn that adopts it shows, `to`. prepareFullDocumentTurn() makes it.
+    // trim() keeps it, because the chapter image is not in `cache_`.
+    struct AdoptionDamage
+    {
+        qint64 from = 0, to = 0;
+        QRect rect;
+    } adoptionDamage_;
+
+    // The last input of estimateKey() and its key.
+    mutable QJsonObject estimateKeyInput_;
+    mutable QString estimateKeyValue_;
+
     bool openSource(std::shared_ptr<ReaderSource> source, QSize size, const QJsonObject &saved,
                     QString *error, OpeningProgress progress = {}, OpeningResult *result = nullptr,
                     std::function<void()> coverReady = {}, QSet<QString> skippedFonts = {},

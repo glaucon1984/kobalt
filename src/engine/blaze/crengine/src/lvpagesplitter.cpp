@@ -10,6 +10,7 @@
     See LICENSE file for details.
 */
 
+// Blaze: koblaze.h declares KoblazeRenderCancelled, thrown in updateRenderProgress().
 #include "../include/koblaze.h"
 #include "crsetup.h"
 
@@ -79,6 +80,7 @@ bool LVRendPageContext::updateRenderProgress( int numFinalBlocksRendered )
         // flows' contexts can forward their progress to it
         main_context = this;
     }
+    // Blaze: the host can stop a layout here. Koblaze catches KoblazeRenderCancelled.
     if ( callback->OnRenderCancelRequested() )
         throw KoblazeRenderCancelled();
     renderedFinalBlocks += numFinalBlocksRendered;
@@ -1023,6 +1025,8 @@ public:
             if ( lines_max_bottom - cur_page_bottom <= page_height ) {
                 // If we end current page at the current cur_page_bottom,
                 // these lines will fit in a new empty page
+                // Blaze: when widow or orphan protection ends a page early and some of these text lines
+                // would have fit, flag the page RN_PAGE_PARAGRAPH_PROTECTION_GAP so page spacing can fill the gap.
                 bool protected_boundary = false, text_would_fit = false;
                 for (int j=start; j<=end; ++j) {
                     protected_boundary |= (lines[j]->flags & RN_LINE_PARAGRAPH_PROTECTION) != 0;
@@ -1373,7 +1377,14 @@ public:
             }
             if ( force_new_page || is_last_line ) {
                 flushCurrentPage();
-                if (page_list->length()) page_list->last()->flags |= RN_PAGE_KEEP_VERTICAL_SPACING;
+                // Blaze: a page that ends at a forced break or at the end of the flow is short on
+                // purpose. RN_PAGE_KEEP_VERTICAL_SPACING tells page spacing not to spread its lines.
+                // RN_PAGE_ENDS_AT_FORCED_BREAK, also a Blaze flag, lets the host find chapter starts.
+                if (page_list->length()) {
+                    page_list->last()->flags |= RN_PAGE_KEEP_VERTICAL_SPACING;
+                    if (force_new_page)
+                        page_list->last()->flags |= RN_PAGE_ENDS_AT_FORCED_BREAK;
+                }
             }
         }
     }
@@ -1448,6 +1459,7 @@ void LVRendPageContext::split()
 #endif // USE_LEGACY_PAGESPLITTER
 }
 
+// Blaze: drop the collected lines of a cancelled layout. Upstream has no Abandon().
 void LVRendPageContext::Abandon()
 {
     lines.clear();
@@ -1467,7 +1479,10 @@ void LVRendPageContext::Finalize()
     }
 }
 
-static const char * pagelist_magic = "PageList";
+// Blaze: pagelist_magic is an array, so deserialize() can take the signature size with sizeof.
+static const char pagelist_magic[] = "PageList";
+
+static const int min_page_size = 22; // fixed fields with empty line, gap and footnote lists
 
 bool LVRendPageList::serialize( SerialBuf & buf )
 {
@@ -1486,33 +1501,46 @@ bool LVRendPageList::serialize( SerialBuf & buf )
 
 bool LVRendPageList::deserialize( SerialBuf & buf )
 {
-    if ( buf.error() )
-        return false;
-    if ( !buf.checkMagic( pagelist_magic ) )
-        return false;
+    // Blaze: deserialize() checks the remaining buffer before each read, clears the list on any failure and rebuilds the flags.
+    // Upstream trusts the page count and keeps a partial list after a failure.
     clear();
+    has_nonlinear_flows = false;
+    has_mixed_writing_modes = false;
+    const int magic_size = sizeof(pagelist_magic) - 1;
+    const int trailer_size = magic_size + 4; // closing signature and CRC
+    if ( buf.space() < magic_size + 4 + trailer_size || !buf.checkMagic(pagelist_magic) )
+        return false;
     int pos = buf.pos();
-    lUInt32 len;
+    lUInt32 len = 0;
     buf >> len;
-    clear();
+    if ( len > (lUInt32)((buf.space() - trailer_size) / min_page_size) )
+        return false;
     reserve(len);
-    int first_wm = -1; // Blaze: detect mixed writing modes from per-page modes
+    bool nonlinear = false;
+    bool mixed = false;
+    int first_wm = -1;
     for (lUInt32 i = 0; i < len; i++) {
         LVRendPageInfo * item = new LVRendPageInfo();
-        item->deserialize( buf );
+        if ( !item->deserialize(buf) ) {
+            delete item;
+            clear();
+            return false;
+        }
         item->index = i;
-        add( item );
-        if (item->flow > 0)
-            has_nonlinear_flows = true;
+        add(item);
+        nonlinear = nonlinear || item->flow > 0;
         if ( first_wm < 0 )
             first_wm = item->writing_mode;
         else if ( item->writing_mode != first_wm )
-            has_mixed_writing_modes = true;
+            mixed = true;
     }
-    if ( !buf.checkMagic( pagelist_magic ) )
+    if ( buf.space() < trailer_size || !buf.checkMagic(pagelist_magic) || !buf.checkCRC(buf.pos() - pos) ) {
+        clear();
         return false;
-    buf.checkCRC( buf.pos() - pos );
-    return !buf.error();
+    }
+    has_nonlinear_flows = nonlinear;
+    has_mixed_writing_modes = mixed;
+    return true;
 }
 
 bool LVRendPageInfo::serialize( SerialBuf & buf )
@@ -1542,7 +1570,8 @@ bool LVRendPageInfo::serialize( SerialBuf & buf )
 
 bool LVRendPageInfo::deserialize( SerialBuf & buf )
 {
-    if ( buf.error() )
+    // Blaze: also read the spacing data from serialize() and reject values that do not fit the page. Upstream reads only the fixed fields.
+    if ( buf.error() || buf.space() < min_page_size )
         return false;
     lUInt32 n1;
     lUInt16 n2;
@@ -1559,6 +1588,7 @@ bool LVRendPageInfo::deserialize( SerialBuf & buf )
     writing_mode = n5;
     lUInt16 line_count;
     buf >> line_count;
+    if ( buf.space() < 4 * line_count + 10 ) return false;
     justificationLines.clear();
     for (int i=0; i<line_count && !buf.error(); ++i) {
         lUInt16 top, bottom;
@@ -1571,7 +1601,7 @@ bool LVRendPageInfo::deserialize( SerialBuf & buf )
 
     lUInt16 gap_count, prose_count, prose_height, prefix;
     buf >> gap_count;
-    if (gap_count >= line_count && gap_count) return false;
+    if ((gap_count >= line_count && gap_count) || buf.space() < 2 * gap_count + 8) return false;
     justificationGaps.clear();
     for (int i=0; i<gap_count && !buf.error(); ++i) {
         lUInt16 edge;
@@ -1588,6 +1618,7 @@ bool LVRendPageInfo::deserialize( SerialBuf & buf )
 
     lUInt16 len;
     buf >> len;
+    if ( buf.space() < 8 * len ) return false;
     footnotes.clear();
     if ( len ) {
         footnotes.reserve(len);

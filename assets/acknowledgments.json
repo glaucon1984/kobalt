@@ -119,6 +119,28 @@
   },
   {
     "group": "engine",
+    "name": "libwebp",
+    "version": "1.6.0",
+    "description": "Decodes WebP illustrations.",
+    "license": "BSD 3-Clause",
+    "url": "https://github.com/webmproject/libwebp",
+    "notices": [
+      "libwebp"
+    ]
+  },
+  {
+    "group": "engine",
+    "name": "brotli",
+    "version": "1.2.0",
+    "description": "Decompresses WOFF2 fonts for FreeType.",
+    "license": "MIT",
+    "url": "https://github.com/google/brotli",
+    "notices": [
+      "brotli"
+    ]
+  },
+  {
+    "group": "engine",
     "name": "FreeType",
     "version": "2.15.0",
     "description": "Font rasterization and outline emboldening. Portions of this software are copyright © 2026 The FreeType Project (https://freetype.org). All rights reserved.",
@@ -299,6 +321,28 @@
   },
   {
     "group": "fonts",
+    "name": "Playpen Sans",
+    "version": "Version 2.000",
+    "description": "Interface handwriting by the Playpen Sans Project Authors.",
+    "license": "SIL Open Font License 1.1",
+    "url": "https://github.com/TypeTogether/Playpen-Sans",
+    "notices": [
+      "PlaypenSans-OFL"
+    ]
+  },
+  {
+    "group": "fonts",
+    "name": "Kalam",
+    "version": "2.001",
+    "description": "Handwriting for the Playful theme, by Indian Type Foundry.",
+    "license": "SIL Open Font License 1.1",
+    "url": "https://github.com/google/fonts/tree/main/ofl/kalam",
+    "notices": [
+      "Kalam-OFL"
+    ]
+  },
+  {
+    "group": "fonts",
     "name": "Instrument Serif",
     "version": "0b58fb370093",
     "description": "Loading-screen wordmark and caption, by the Instrument Serif Project Authors.",
@@ -344,7 +388,7 @@
   {
     "group": "author",
     "name": "eBook Fonts",
-    "version": "13834303660d; Libron 0.32",
+    "version": "4c4e3267138a; Libron 0.32",
     "description": "Reading fonts: Libron 0.32, Sourcerer, NV Ancizar Serif, NV Charis, NV Garamond, NV Jost, NV Bitter, NV Legible Next, NV Literata and NV Palatium. The original authors and licenses are listed below.",
     "license": "SIL OFL and AGPLv3 with font exception",
     "url": "https://github.com/nicoverbruggen/ebook-fonts",
@@ -352,6 +396,17 @@
       "eBook-Fonts",
       "Atkinson-Hyperlegible-Next-OFL",
       "Domitian"
+    ]
+  },
+  {
+    "group": "author",
+    "name": "Supplemental eBook Fonts",
+    "version": "4c4e3267138a",
+    "description": "Additional reading and interface typefaces from the eBook Fonts collection. Original authors and font notices are listed below.",
+    "license": "SIL OFL, Bitstream Charter terms, and Adelphe terms",
+    "url": "https://github.com/nicoverbruggen/ebook-fonts",
+    "notices": [
+      "eBook-Supplemental"
     ]
   }
 ]

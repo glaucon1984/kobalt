@@ -42,9 +42,12 @@ class GLDrawBuf; // workaround for no-rtti builds
 class LVDrawBuf : public CacheableObject
 {
 public:
+    // Blaze: DrawDocument() calls this for each visible table that it draws. The host
+    // then knows that the page is not empty, also when no cell has text. Upstream has no such call.
+    virtual void OnTableDrawn() {}
     // Blaze: the host records unsupported formatting when the affected ink reaches the page.
     virtual void SetUnsupportedFormatting(bool unsupported) { (void)unsupported; }
-    // Report alpha-bearing image pixels after scaling and clipping, without a second decode.
+    // Blaze: report alpha-bearing image pixels after scaling and clipping, without a second decode.
     virtual void OnImageDrawn(bool visiblePixels) { (void)visiblePixels; }
 
 #if 0
@@ -331,6 +334,7 @@ public:
     /// Get surface of images drawn on buffer
     int getDrawnImagesSurface() const { return _drawnImagesSurface; }
 
+    // Blaze: start with a white background and black text. Upstream leaves both uninitialized.
     LVBaseDrawBuf() : _dx(0), _dy(0), _rowsize(0), _data(NULL), _drawExtraInfo(NULL),
                         _backgroundColor(0xFFFFFF), _textColor(0), _hidePartialGlyphs(true),
                         _invertImages(false), _invertColors(false), _ditherImages(false), _smoothImages(false),
@@ -628,6 +632,7 @@ private:
     bool has_ink;
     bool measure_hidden_content;
     bool ignore_decorations; // ignore borders and background
+    // Blaze: the clip margin is a constructor argument. The default 1000 is the upstream value.
     int clip_margin;
 public:
     /// get buffer bits per pixel
@@ -666,7 +671,9 @@ public:
         if ( ignore_decorations )
             return;
         // printf("  ink FillRect %d %d %d %d\n", x0, y0, x1, y1);
-        // A fill of any color contributes to the measured geometry.
+        // Don't do this check, as backgroundcolor may not be initialized
+        // (initializing it to white would be a random choice):
+        // if ( color != GetBackgroundColor() )
         updateInkBounds(x0, y0, x1, y1);
     }
 #if 0

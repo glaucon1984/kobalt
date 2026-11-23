@@ -66,7 +66,6 @@ ListRow::ListRow(QWidget *parent) : Button(parent)
         label->setTextFormat(Qt::PlainText);
         label->setAttribute(Qt::WA_TransparentForMouseEvents);
         label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-        label->setStyleSheet("background:transparent;border:none;");
     }
     readerStyle(title,
                 styles::font(metrics::chrome::labelText) + "background:transparent;border:none;");
@@ -813,6 +812,11 @@ SegmentedRow::SegmentedRow(QWidget *parent, QVBoxLayout *rows, const char *name,
 void SegmentedRow::prepend(QWidget *control)
 {
     row->insertWidget(0, control);
+}
+
+void SegmentedRow::append(QWidget *control)
+{
+    row->addWidget(control);
 }
 
 QPushButton *SegmentedRow::add(const QString &name, const QString &text)

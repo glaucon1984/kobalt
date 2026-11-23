@@ -6,6 +6,7 @@
 #include "preview_store.h"
 #include "bookmark_store.h"
 #include "reading/appearance_settings.h"
+#include "reading/reading_progress.h"
 #include "reading/sleep_screen.h"
 #include "support/diagnostics.h"
 #include <QDir>
@@ -21,6 +22,9 @@
 #include <QSaveFile>
 #include <QCryptographicHash>
 #include <cmath>
+#include <cerrno>
+#include <dirent.h>
+#include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -67,11 +71,6 @@ QString Paths::database() const
     return child(directory, "kobalt.sqlite");
 }
 
-QString Paths::layoutCache() const
-{
-    return child(directory, "cache/reopen-layout.json");
-}
-
 QString Paths::sleepScreen() const
 {
     return child(directory, "cache/sleep-screen.png");
@@ -84,7 +83,90 @@ QString Paths::previews() const
 
 QString Paths::documentCache() const
 {
-    return child(directory, ".cache-blaze");
+    return child(directory, ".cache");
+}
+
+namespace {
+// Do not follow links in the retired trees. Keep enumeration and removal
+// relative to an open directory, even if a name is replaced mid-cleanup.
+bool removeCacheEntry(int parent, const char *name, bool cacheRoot,
+                      const std::function<bool()> &cancelled)
+{
+    if (cancelled())
+        return false;
+    struct stat info;
+    if (::fstatat(parent, name, &info, AT_SYMLINK_NOFOLLOW) < 0)
+        return errno == ENOENT;
+    if (!S_ISDIR(info.st_mode))
+        return (!cacheRoot || S_ISLNK(info.st_mode)) && ::unlinkat(parent, name, 0) == 0;
+    const int fd = ::openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    auto *directory = ::fdopendir(fd);
+    if (!directory) {
+        ::close(fd);
+        return false;
+    }
+    bool ok = true;
+    while (ok) {
+        errno = 0;
+        const auto *entry = ::readdir(directory);
+        if (!entry) {
+            ok = errno == 0;
+            break;
+        }
+        if (qstrcmp(entry->d_name, ".") != 0 && qstrcmp(entry->d_name, "..") != 0)
+            ok = removeCacheEntry(fd, entry->d_name, false, cancelled);
+    }
+    ::closedir(directory);
+    return ok && !cancelled() && ::unlinkat(parent, name, AT_REMOVEDIR) == 0;
+}
+} // namespace
+
+bool prepareDocumentCache(const Paths &paths, const std::function<bool()> &cancelled)
+{
+    mainthread::BlockingOperation blockingOperation("document-cache-migration");
+    if (paths.directory.isEmpty() || cancelled())
+        return false;
+    const int profile = ::open(QFile::encodeName(paths.directory).constData(),
+                               O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (profile < 0)
+        return false;
+    struct Close
+    {
+        int fd;
+        ~Close() { ::close(fd); }
+    } close{ profile };
+
+    // Keep the marker outside the parsed cache so eviction cannot reset the
+    // migration. The engine has not been given the new path until this returns.
+    constexpr auto marker = ".blaze-cache-v1";
+    struct stat info;
+    const bool initialized = ::fstatat(profile, marker, &info, AT_SYMLINK_NOFOLLOW) == 0;
+    if (initialized ? !S_ISREG(info.st_mode) || info.st_size != 0 : errno != ENOENT)
+        return false;
+    if (!removeCacheEntry(profile, ".cache-blaze", true, cancelled))
+        return false;
+    if (initialized) {
+        const bool exists = ::fstatat(profile, ".cache", &info, AT_SYMLINK_NOFOLLOW) == 0;
+        const bool usable = exists ? S_ISDIR(info.st_mode) : errno == ENOENT;
+        return usable && !cancelled();
+    }
+    if (!removeCacheEntry(profile, ".cache", true, cancelled) || cancelled()
+        || ::fsync(profile) != 0 || cancelled())
+        return false;
+
+    const int initializedFile = ::openat(profile, marker,
+                                         O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                                         0600);
+    if (initializedFile < 0)
+        return false;
+    const bool committed = ::fsync(initializedFile) == 0;
+    ::close(initializedFile);
+    if (committed && ::fsync(profile) == 0)
+        return !cancelled();
+    ::unlinkat(profile, marker, 0);
+    return false;
 }
 
 QString Paths::bookState(const QString &identity) const
@@ -107,6 +189,18 @@ bool writeJson(const QString &path, const QJsonObject &object)
         return false;
     }
     return file.write(bytes) == bytes.size() && file.commit();
+}
+
+JsonRead parseJsonObject(QByteArray bytes)
+{
+    // Qt can consume a literal FEFF at the start of a JSON string as a UTF-8
+    // header. Its JSON escape denotes the same character and survives decoding.
+    bytes.replace("\"\xef\xbb\xbf", "\"\\ufeff");
+    QJsonParseError parse;
+    const auto document = QJsonDocument::fromJson(bytes, &parse);
+    if (parse.error != QJsonParseError::NoError || !document.isObject())
+        return { {}, ReadStatus::Invalid };
+    return { document.object(), ReadStatus::Ok };
 }
 
 JsonRead readJsonFile(const QString &path, qint64 maxBytes)
@@ -135,11 +229,7 @@ JsonRead readJsonFile(const QString &path, qint64 maxBytes)
     }
     if (file.error() != QFileDevice::NoError)
         return { {}, ReadStatus::Unreadable };
-    QJsonParseError parse;
-    const auto document = QJsonDocument::fromJson(bytes, &parse);
-    if (parse.error != QJsonParseError::NoError || !document.isObject())
-        return { {}, ReadStatus::Invalid };
-    return { document.object(), ReadStatus::Ok };
+    return parseJsonObject(bytes);
 }
 
 const char *readStatusName(ReadStatus status)
@@ -219,9 +309,12 @@ void archiveSource(const QString &directory, const QString &source, const QByteA
     }
 }
 
+enum class BookStateEdit { Replace, KeepDictionary, DictionaryChoice };
+
 bool recordTransaction(const QString &directory, const QString &name, const QString &legacy,
                        qint64 maxBytes, JsonRead *read, const QJsonObject *replacement,
-                       QSqlDatabase *database = nullptr)
+                       QSqlDatabase *database = nullptr,
+                       BookStateEdit edit = BookStateEdit::Replace)
 {
     if (directory.isEmpty() || name.isEmpty() || maxBytes < 0) {
         read->status = ReadStatus::Invalid;
@@ -257,13 +350,12 @@ bool recordTransaction(const QString &directory, const QString &name, const QStr
                 read->status = ReadStatus::TooLarge;
                 return false;
             }
-            QJsonParseError error;
-            const auto document = QJsonDocument::fromJson(query.value(2).toByteArray(), &error);
-            if (error.error != QJsonParseError::NoError || !document.isObject()) {
-                read->status = ReadStatus::Invalid;
+            const auto parsed = parseJsonObject(query.value(2).toByteArray());
+            if (parsed.status != ReadStatus::Ok) {
+                read->status = parsed.status;
                 return false;
             }
-            object = document.object();
+            object = parsed.object;
             if (object.contains("schema") && object.value("schema").toDouble(-1) != 1) {
                 read->status = ReadStatus::Unsupported;
                 return false;
@@ -301,7 +393,10 @@ bool recordTransaction(const QString &directory, const QString &name, const QStr
                 if (!source.open(QIODevice::ReadOnly))
                     return false;
                 const auto bytes = source.read(maxBytes + 1);
-                if (bytes.size() > maxBytes || QJsonDocument::fromJson(bytes).object() != object)
+                if (bytes.size() > maxBytes)
+                    return false;
+                const auto checked = parseJsonObject(bytes);
+                if (checked.status != ReadStatus::Ok || checked.object != object)
                     return false;
                 importedDigest = QCryptographicHash::hash(bytes, QCryptographicHash::Sha256);
                 if (!putDocument(db, name, object, false))
@@ -316,10 +411,32 @@ bool recordTransaction(const QString &directory, const QString &name, const QStr
                     return false;
             }
         }
-        if (replacement && (!exists || *replacement != object)
-            && !putDocument(db, name, *replacement, exists))
-            return false;
-        read->object = replacement ? *replacement : object;
+        if (replacement) {
+            auto reset = object;
+            const bool keepExisting = exists && edit != BookStateEdit::Replace
+                    && !resetNativeUnread(reset, ReadingProgress::fromJson(
+                                                       replacement->value("nickel_progress").toObject()));
+            // An explicit unread reset replaces the old record. A dictionary
+            // selection after that reset can establish the first new checkpoint.
+            auto next = edit == BookStateEdit::DictionaryChoice && keepExisting ? object
+                                                                                 : *replacement;
+            if (keepExisting) {
+                const auto &source = edit == BookStateEdit::KeepDictionary ? object : *replacement;
+                const auto choice = source.value("dictionary_id");
+                if (choice != next.value("dictionary_id")) {
+                    if (choice.isUndefined())
+                        next.remove("dictionary_id");
+                    else
+                        next["dictionary_id"] = choice;
+                    if (QJsonDocument(next).toJson(QJsonDocument::Compact).size() > maxBytes)
+                        return false;
+                }
+            }
+            if ((!exists || next != object) && !putDocument(db, name, next, exists))
+                return false;
+            object = std::move(next);
+        }
+        read->object = std::move(object);
         read->status = exists || replacement || !importedDigest.isEmpty() ? ReadStatus::Ok
                                                                           : ReadStatus::Missing;
         return true;
@@ -390,6 +507,33 @@ bool writeBookState(const Paths &paths, const QString &identity, const QJsonObje
                            legacy.isEmpty() ? paths.bookState(identity) : legacy, value);
 }
 
+namespace {
+bool writeBookEdit(const Paths &paths, const QString &identity, const QJsonObject &book,
+                   const QString &legacy, BookStateEdit edit)
+{
+    if (book.value("book").toString() != identity
+        || (book.contains("schema") && book.value("schema").toDouble(-1) != 1)
+        || QJsonDocument(book).toJson(QJsonDocument::Compact).size() > maxJsonBytes)
+        return false;
+    JsonRead result;
+    return recordTransaction(paths.directory, "book:" + identity,
+                             legacy.isEmpty() ? paths.bookState(identity) : legacy, maxJsonBytes,
+                             &result, &book, nullptr, edit);
+}
+} // namespace
+
+bool writeBookCheckpoint(const Paths &paths, const QString &identity, const QJsonObject &book,
+                         const QString &legacy)
+{
+    return writeBookEdit(paths, identity, book, legacy, BookStateEdit::KeepDictionary);
+}
+
+bool writeBookDictionaryChoice(const Paths &paths, const QString &identity, const QJsonObject &book,
+                               const QString &legacy)
+{
+    return writeBookEdit(paths, identity, book, legacy, BookStateEdit::DictionaryChoice);
+}
+
 bool writeReadingActivity(const Paths &paths, const QString &identity, const QJsonObject &book,
                           const QJsonObject &speed,
                           const std::function<bool(QSqlDatabase &)> &history, const QString &legacy)
@@ -404,7 +548,7 @@ bool writeReadingActivity(const Paths &paths, const QString &identity, const QJs
         JsonRead result;
         if (!recordTransaction(paths.directory, "book:" + identity,
                                legacy.isEmpty() ? paths.bookState(identity) : legacy, maxJsonBytes,
-                               &result, &book, &db))
+                               &result, &book, &db, BookStateEdit::KeepDictionary))
             return false;
         if (!speed.isEmpty()
             && !recordTransaction(paths.directory, "reading-speed", paths.readingSpeed(),
@@ -767,17 +911,6 @@ bool prepareProfile(const Paths &paths, ProfileRecovery *recovery)
         const auto settings = readPreferences(paths.preferences());
         if (settings.status != ReadStatus::Ok)
             ok = false;
-    }
-    const auto oldCache = directory.filePath("reopen-layout.json");
-    if (QFileInfo::exists(oldCache) && !QFileInfo(oldCache).isSymLink()) {
-        const auto read = readJsonFile(oldCache);
-        if (read.status == ReadStatus::Ok && read.object.value("version").toInt() == 1) {
-            QDir().mkpath(QFileInfo(paths.layoutCache()).absolutePath());
-            if (!QFileInfo::exists(paths.layoutCache()))
-                QFile::rename(oldCache, paths.layoutCache());
-            else
-                QFile::remove(oldCache); // Both are disposable inspection results.
-        }
     }
     // Startup can already have created the new diagnostic log. Keep the old
     // reports with the import snapshots so neither copy replaces the other.

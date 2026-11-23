@@ -49,7 +49,7 @@ bool DescribedOption::Presentation::operator==(const Presentation &other) const
             && descriptionPadding == other.descriptionPadding
             && indicatorSize == other.indicatorSize && pressedFill == other.pressedFill
             && leadingIndicator == other.leadingIndicator && opticalLabel == other.opticalLabel
-            && valueBelowLabel == other.valueBelowLabel;
+            && valueBelowLabel == other.valueBelowLabel && wrapLabel == other.wrapLabel;
 }
 
 void DescribedOption::setPresentation(const Presentation &value)
@@ -59,6 +59,7 @@ void DescribedOption::setPresentation(const Presentation &value)
     appearance = value;
     setMinimumHeight(appearance.minimumRowHeight);
     updateGeometry();
+    placeTitleLabel();
     update();
 }
 
@@ -74,6 +75,7 @@ void DescribedOption::setDescription(const QString &text)
     description = text;
     setAccessibleDescription(text);
     updateGeometry();
+    placeTitleLabel();
     update();
 }
 
@@ -83,6 +85,7 @@ void DescribedOption::setValue(const QString &next, const ValueStyle &style)
         return;
     value = next;
     valueStyle = style;
+    placeTitleLabel();
     update();
 }
 
@@ -109,23 +112,41 @@ void DescribedOption::setPreview(QWidget *widget, QSize size)
     preview->setAttribute(Qt::WA_TransparentForMouseEvents);
     preview->show();
     updateGeometry();
+    placeTitleLabel();
     update();
 }
 
-void DescribedOption::setLeadingIcon(ControlIcon icon)
+void DescribedOption::setTitleLabel(QLabel *label)
+{
+    titleLabel = label;
+    label->setAttribute(Qt::WA_TransparentForMouseEvents);
+    label->show();
+    placeTitleLabel();
+    update();
+}
+
+void DescribedOption::setLeadingIcon(ControlIcon icon, IconBranch branch)
 {
     leadingIcon = int(icon);
+    iconBranch = branch;
     updateGeometry();
+    placeTitleLabel();
     update();
 }
 
 int DescribedOption::iconSpace() const
 {
-    return leadingIcon < 0 ? 0 : int(metrics::chrome::cellIcon) + px(20);
+    if (leadingIcon < 0)
+        return 0;
+    const int indent = iconBranch == IconBranch::Child ? int(metrics::chrome::cellIcon) : 0;
+    return int(metrics::chrome::cellIcon) + px(20) + indent;
 }
 
-int DescribedOption::labelHeight() const
+int DescribedOption::labelHeight(int textWidth) const
 {
+    if (appearance.wrapLabel && textWidth > 0
+        && interfaceTextWidth(text(), labelFont()) > textWidth)
+        return wrappedInterfaceTextHeight(text(), labelFont(), textWidth);
     // The line grows only by what large text adds, so standard text keeps
     // the checkbox's line.
     if (textScale() == 1)
@@ -155,9 +176,10 @@ int DescribedOption::labelRaise(const QFont &labelFont) const
     return qMax(0, qRound(capitalsBelowMiddle));
 }
 
-int DescribedOption::descriptionTop() const
+int DescribedOption::descriptionTop(int textWidth) const
 {
-    return metrics::settings::descriptionTop + labelHeight() - metrics::settings::checkboxSize;
+    return metrics::settings::descriptionTop + labelHeight(textWidth)
+            - metrics::settings::checkboxSize;
 }
 
 int DescribedOption::valueHeight() const
@@ -194,7 +216,7 @@ int DescribedOption::heightForWidth(int width) const
                     - appearance.indicatorSize.width() - metrics::settings::toggleGap - iconSpace()
                     - (preview ? previewSize.width() + metrics::settings::toggleGap : 0));
     const int textHeight = description.isEmpty() ? int(metrics::control::stepSize)
-                                                 : descriptionTop() + valueHeight()
+                                                 : descriptionTop(textWidth) + valueHeight()
                     + wrappedInterfaceTextHeight(description, descriptionFont, textWidth)
                     + metrics::settings::descriptionBottom + 2 * appearance.descriptionPadding;
     return qMax(qMax(appearance.minimumRowHeight, textHeight),
@@ -209,6 +231,7 @@ void DescribedOption::resizeEvent(QResizeEvent *event)
         preview->setGeometry(width() - appearance.horizontalInset - previewSize.width(),
                              (height() - previewSize.height()) / 2, previewSize.width(),
                              previewSize.height());
+    placeTitleLabel();
 }
 
 bool DescribedOption::hitButton(const QPoint &position) const
@@ -216,11 +239,8 @@ bool DescribedOption::hitButton(const QPoint &position) const
     return rect().contains(position);
 }
 
-void DescribedOption::paintEvent(QPaintEvent *)
+QRect DescribedOption::labelLine() const
 {
-    QPainter painter(this);
-    const auto ink = palette().color(QPalette::WindowText);
-    const auto paper = palette().color(QPalette::Window);
     QFont descriptionFont = font();
     descriptionFont.setPixelSize(appearance.descriptionPixels);
     descriptionFont.setWeight(QFont::Normal);
@@ -231,26 +251,88 @@ void DescribedOption::paintEvent(QPaintEvent *)
                     - appearance.indicatorSize.width() - metrics::settings::toggleGap - iconSpace()
                     - (preview ? previewSize.width() + metrics::settings::toggleGap : 0));
     const int textBottom = description.isEmpty() ? metrics::settings::checkboxTop + labelHeight()
-                                                 : descriptionTop()
+                                                 : descriptionTop(textWidth)
                     + wrappedInterfaceTextHeight(description, descriptionFont, textWidth);
     const int textOffset =
             (height() - (textBottom + valueHeight() - metrics::settings::checkboxTop)) / 2
             - metrics::settings::checkboxTop;
+    const int textLeft =
+            (appearance.leadingIndicator
+                     ? appearance.horizontalInset + metrics::settings::labelLeft
+                             + appearance.indicatorSize.width() + metrics::settings::toggleGap
+                     : appearance.horizontalInset + metrics::settings::labelLeft)
+            + iconSpace();
+    return QRect(textLeft, metrics::settings::checkboxTop + textOffset, textWidth,
+                 labelHeight(textWidth));
+}
+
+QFont DescribedOption::labelFont() const
+{
+    QFont labelFont = font();
+    labelFont.setPixelSize(appearance.labelPixels);
+    labelFont.setWeight(QFont::Normal);
+    labelFont.setItalic(false);
+    return labelFont;
+}
+
+void DescribedOption::placeTitleLabel()
+{
+    if (!titleLabel)
+        return;
+    // Placed here, never while painting: a move during a paint asks for a
+    // second paint, which is a second screen update on e-ink.
+    const auto line = labelLine().translated(0, -labelRaise(labelFont()));
+    const auto size = titleLabel->sizeHint();
+    const QRect bounds(line.left(), line.top() + (line.height() - size.height()) / 2, size.width(),
+                       size.height());
+    if (titleLabel->geometry() != bounds)
+        titleLabel->setGeometry(bounds);
+}
+
+bool DescribedOption::event(QEvent *event)
+{
+    const bool handled = QCheckBox::event(event);
+    // A font or theme change can resize the title without resizing the row.
+    // The title posts LayoutRequest here when its own size hint changes.
+    switch (event->type()) {
+    case QEvent::LayoutRequest:
+    case QEvent::FontChange:
+    case QEvent::StyleChange:
+    case QEvent::Polish:
+        placeTitleLabel();
+        break;
+    default:
+        break;
+    }
+    return handled;
+}
+
+void DescribedOption::paintEvent(QPaintEvent *)
+{
+    QPainter painter(this);
+    const auto ink = palette().color(QPalette::WindowText);
+    const auto paper = palette().color(QPalette::Window);
+    const QRect labelLine = this->labelLine();
+    const int textWidth = labelLine.width(), textLeft = labelLine.left();
+    const int textOffset = labelLine.top() - metrics::settings::checkboxTop;
     const int boxTop = (height() - appearance.indicatorSize.height()) / 2;
     const int boxLeft = appearance.leadingIndicator
             ? appearance.horizontalInset + metrics::settings::labelLeft
             : width() - appearance.horizontalInset - appearance.indicatorSize.width();
     const QRect box(boxLeft, boxTop, appearance.indicatorSize.width(),
                     appearance.indicatorSize.height());
-    const int textLeft = (appearance.leadingIndicator
-                                  ? box.right() + 1 + metrics::settings::toggleGap
-                                  : appearance.horizontalInset + metrics::settings::labelLeft)
-            + iconSpace();
     const bool held = appearance.pressedFill && isEnabled() && isDown();
     // The pressed gray of list rows such as Chapters.
     painter.fillRect(rect(), held ? themeColors(this).pressedPaper : paper);
     if (appearance.dividers) {
-        paintEdges(painter, rect(), appearance.dividers, dividerColor(this));
+        auto edges = appearance.dividers;
+        if (iconBranch == IconBranch::Parent && (edges & Qt::BottomEdge)) {
+            // Leave the gutter open for the line down to the child.
+            paintEdges(painter, rect().adjusted(textLeft, 0, 0, 0), Qt::BottomEdge,
+                       dividerColor(this));
+            edges &= ~Edges(Qt::BottomEdge);
+        }
+        paintEdges(painter, rect(), edges, dividerColor(this));
     }
     if (!isEnabled())
         painter.setOpacity(.45);
@@ -295,8 +377,21 @@ void DescribedOption::paintEvent(QPaintEvent *)
     if (leadingIcon >= 0) {
         // The same place as a list action row's icon, balancing its bearings.
         const int size = metrics::chrome::cellIcon;
-        const QRect bounds(textLeft - iconSpace() - px(7), (height() - size) / 2 + px(1), size,
+        const QRect bounds(textLeft - size - px(20) - px(7), (height() - size) / 2 + px(1), size,
                            size);
+        if (iconBranch != IconBranch::None) {
+            const int x = bounds.center().x(), y = bounds.center().y();
+            painter.save();
+            painter.setOpacity(1);
+            painter.setPen(QPen(dividerColor(this), metrics::control::border));
+            if (iconBranch == IconBranch::Parent)
+                painter.drawLine(x, bounds.bottom() + px(6), x, height());
+            else {
+                painter.drawLine(x - size, 0, x - size, y);
+                painter.drawLine(x - size, y, bounds.left() - px(6), y);
+            }
+            painter.restore();
+        }
         const auto icon = controlIcon(ControlIcon(leadingIcon), ink);
         // Annotate uses the same custom painter as the navigation tabs.
         if (icon.isNull())
@@ -305,14 +400,9 @@ void DescribedOption::paintEvent(QPaintEvent *)
             icon.paint(&painter, bounds);
     }
     painter.setPen(ink);
-    QFont labelFont = font();
-    labelFont.setPixelSize(appearance.labelPixels);
-    labelFont.setWeight(QFont::Normal);
-    labelFont.setItalic(false);
+    QFont labelFont = this->labelFont();
     painter.setFont(labelFont);
     // Only the label is raised; a value on the same line keeps its place.
-    const QRect labelLine(textLeft, metrics::settings::checkboxTop + textOffset, textWidth,
-                          labelHeight());
     QRect labelBounds = labelLine.translated(0, -labelRaise(labelFont));
     if (!value.isEmpty() || valueStyle.battery) {
         // The value keeps the right of the line; the label keeps at least three fifths.
@@ -341,22 +431,26 @@ void DescribedOption::paintEvent(QPaintEvent *)
         const int room =
                 qMax(0, valueLine.width() - labelWidth - metrics::settings::toggleGap - icon - gap);
         const int textRight = valueLine.right() + 1 - icon - gap;
-        const qreal halfSpaced = valueStyle.halfSpaces ? halfSpacedWidth(painter.font(), value) : 0;
+        const auto digits = valueStyle.digits;
+        const qreal halfSpaced =
+                valueStyle.halfSpaces ? halfSpacedWidth(valueFont, value, digits) : 0;
         if (valueStyle.battery)
             drawOpticalPrivateText(painter,
                                    QRect(textRight - room, valueLine.y(), room, valueLine.height()),
-                                   elideInterfaceText(value, valueFont, room), Qt::AlignRight,
-                                   valueStyle.sampleWeight);
+                                   elideInterfaceText(value, valueFont, room, digits),
+                                   Qt::AlignRight, valueStyle.sampleWeight, {}, digits);
         else if (valueStyle.halfSpaces && halfSpaced <= room)
             drawHalfSpaced(painter, textRight - halfSpaced, valueLine, value,
-                           valueStyle.sampleWeight);
+                           valueStyle.sampleWeight, digits);
         else {
-            const auto shown = qt::textWidth(painter.fontMetrics(), value) > room
+            const auto shown = digits == TextDigits::Tabular
+                    ? elideInterfaceText(value, valueFont, room, digits)
+                    : qt::textWidth(painter.fontMetrics(), value) > room
                     ? painter.fontMetrics().elidedText(value, Qt::ElideRight, room)
                     : value;
-            drawInterfaceText(painter,
-                              QRect(textRight - room, valueLine.y(), room, valueLine.height()),
-                              shown, Qt::AlignRight | Qt::AlignVCenter, valueStyle.sampleWeight);
+            drawInterfaceText(
+                    painter, QRect(textRight - room, valueLine.y(), room, valueLine.height()),
+                    shown, Qt::AlignRight | Qt::AlignVCenter, valueStyle.sampleWeight, {}, digits);
         }
         if (valueStyle.battery) {
             const qreal width = body * int(metrics::panel::batteryBodyWidth)
@@ -369,25 +463,29 @@ void DescribedOption::paintEvent(QPaintEvent *)
         }
         painter.restore();
     }
-    const auto label = interfaceTextWidth(text(), labelFont) > labelBounds.width()
-            ? elideInterfaceText(text(), labelFont, labelBounds.width())
-            : text();
-    if (drawFontPreview(painter, labelBounds, text(), fontPreview,
-                        metrics::choices::sampleInkHeight)) {
-        // The bitmap has already been aligned within the label bounds.
-    } else if (appearance.opticalLabel)
-        drawOpticalText(painter, labelBounds, text());
-    else
-        drawInterfaceText(painter, labelBounds, label, Qt::AlignLeft | Qt::AlignVCenter);
+    if (appearance.wrapLabel && interfaceTextWidth(text(), labelFont) > labelBounds.width())
+        drawWrappedInterfaceText(painter, labelBounds, text());
+    else if (!titleLabel) {
+        const auto label = interfaceTextWidth(text(), labelFont) > labelBounds.width()
+                ? elideInterfaceText(text(), labelFont, labelBounds.width())
+                : text();
+        if (drawFontPreview(painter, labelBounds, text(), fontPreview,
+                            metrics::choices::sampleInkHeight)) {
+            // The bitmap has already been aligned within the label bounds.
+        } else if (appearance.opticalLabel)
+            drawOpticalText(painter, labelBounds, text());
+        else
+            drawInterfaceText(painter, labelBounds, label, Qt::AlignLeft | Qt::AlignVCenter);
+    }
     labelFont.setPixelSize(appearance.descriptionPixels);
     labelFont.setItalic(false);
     painter.setFont(labelFont);
     painter.setPen(themeColors(this).secondaryInk);
-    drawWrappedInterfaceText(painter,
-                             QRect(textLeft, descriptionTop() + valueHeight() + textOffset,
-                                   textWidth,
-                                   height() - descriptionTop() - valueHeight() - textOffset),
-                             description);
+    drawWrappedInterfaceText(
+            painter,
+            QRect(textLeft, descriptionTop(textWidth) + valueHeight() + textOffset, textWidth,
+                  height() - descriptionTop(textWidth) - valueHeight() - textOffset),
+            description);
 }
 
 RadioList::RadioList(QWidget *parent) : QWidget(parent)
@@ -415,8 +513,9 @@ DescribedOption *RadioList::add(const QString &name, const QString &label,
     option->setPresentation(look);
     const int index = rows.size();
     QObject::connect(option, &QCheckBox::clicked, this, [this, index] {
-        if (chosen)
-            chosen(index);
+        // A choice can dismiss or reopen its list and replace the callback.
+        if (const auto callback = chosen)
+            callback(index);
     });
     rows.append(option);
     arrange();
@@ -467,6 +566,15 @@ void RadioList::setUniformRows(bool uniform)
     updateGeometry();
 }
 
+void RadioList::setTwoColumns(bool enabled)
+{
+    if (twoColumns == enabled)
+        return;
+    twoColumns = enabled;
+    arrange();
+    updateGeometry();
+}
+
 int RadioList::rowHeight(int index, int width) const
 {
     if (index >= 0 && index < leftOut.size() && leftOut[index])
@@ -487,6 +595,13 @@ int RadioList::rowHeight(int width) const
 int RadioList::heightForWidth(int width) const
 {
     const int last = count < 0 ? int(rows.size()) : qMin(int(rows.size()), first + count);
+    if (twoColumns) {
+        int visible = 0;
+        for (int index = first; index < last; ++index)
+            if (index >= leftOut.size() || !leftOut[index])
+                ++visible;
+        return ((visible + 1) / 2) * rowHeight(width / 2);
+    }
     int height = 0;
     for (int index = first; index < last; ++index)
         height += rowHeight(index, width);
@@ -526,23 +641,35 @@ void RadioList::resizeEvent(QResizeEvent *)
 void RadioList::arrange()
 {
     const int last = count < 0 ? int(rows.size()) : qMin(int(rows.size()), first + count);
-    int top = 0;
+    const int cellWidth = twoColumns ? width() / 2 : width();
+    const int uniformHeight = uniformRows || twoColumns ? rowHeight(cellWidth) : 0;
+    int top = 0, visible = 0;
+    DescribedOption *lastShown = nullptr;
     for (int index = 0; index < rows.size(); ++index) {
         auto *row = rows[index];
         const bool shown =
                 index >= first && index < last && !(index < leftOut.size() && leftOut[index]);
+        row->setVisible(shown);
+        if (!shown)
+            continue;
+        const bool right = twoColumns && visible % 2 == 1;
         auto look = row->presentation();
         look.dividers = Edges(Qt::BottomEdge)
-                | (topDivider && index == first ? Edges(Qt::TopEdge) : Edges{});
+                | (topDivider && visible < (twoColumns ? 2 : 1) ? Edges(Qt::TopEdge) : Edges{});
+        if (right)
+            look.dividers |= Qt::LeftEdge;
         row->setPresentation(look);
-        row->setVisible(shown);
-        if (shown) {
-            const int height = rowHeight(index, width());
-            // Replace the minimum measured at the old width before Qt constrains the new geometry.
-            row->setMinimumHeight(height);
-            row->setGeometry(0, top, width(), height);
+        const int height = uniformRows || twoColumns ? uniformHeight : rowHeight(index, width());
+        // Replace the minimum measured at the old width before Qt constrains the new geometry.
+        row->setMinimumHeight(height);
+        row->setGeometry(right ? cellWidth : 0, top, right ? width() - cellWidth : cellWidth,
+                         height);
+        if (!twoColumns || right)
             top += height;
-        }
+        lastShown = row;
+        ++visible;
     }
+    if (twoColumns && visible % 2 == 1)
+        lastShown->resize(width(), lastShown->height());
 }
 } // namespace kobalt::ui

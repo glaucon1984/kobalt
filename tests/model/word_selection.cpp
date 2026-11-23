@@ -357,6 +357,26 @@ int main(int argc, char **argv)
                             .text
                     == "remains",
             "Decimal period created a false sentence start");
+    const auto highlight = [&](const QString &phrase) {
+        for (int page = 0; page < model.pages(); ++page) {
+            const auto hits = model.searchPage(phrase, page).hits;
+            if (!hits.isEmpty()) {
+                const auto &hit = hits.first();
+                return model.annotationRange(hit.start, hit.start, hit.end, hit.end, true, true)
+                        .text;
+            }
+        }
+        return QString();
+    };
+    for (const auto *phrase :
+         { "Published in 1984", "Copies sold", "She said no", "Plan B", "Un vrai naïf" }) {
+        const auto words = QString::fromUtf8(phrase);
+        require(highlight(words) == words + '.', qPrintable("Missing sentence period in " + words));
+    }
+    require(highlight("Ask No") == "Ask No" && highlight("Call A") == "Call A",
+            "A numbered reference or an initial gained a sentence ending");
+    require(highlight("Press here") == "Press here",
+            "A list number supplied a false sentence start");
     const auto japaneseStart = tokenFor(QString::fromUtf8("日")),
                japaneseEnd = tokenFor(QString::fromUtf8("葉"));
     require(model.annotationRange(japaneseStart.start, japaneseStart.end, japaneseEnd.start,
@@ -386,10 +406,22 @@ int main(int argc, char **argv)
     const auto crossStart = first.start;
     require(model.wordAt({ 0, 0 }).text.isEmpty(), "Margin selected a word");
     require(model.wordAt({ -1, 100 }).text.isEmpty(), "Outside viewport selected a word");
-    require(model.go(model.pages() - 1), "Cannot navigate to the chapter boundary");
+    require(model.goToFraction(1), "Cannot navigate to the final spine section");
     const auto pageEnd = model.annotationPageEdges();
     require(!pageEnd.continuesBefore && !pageEnd.continuesAfter,
             "A separate short spine section must block selection turns at both ends");
+    // The preceding section and the book's middle pages use whole-book page numbers.
+    // Hybrid must keep the same final passage when it adopts that layout.
+    if (model.partOfBook()) {
+        require(model.prepareFullDocument({}) == kobalt::Engine::FullDocument::Ready
+                        && model.setChapterMode(false, {}, {}),
+                "Cannot adopt the whole book for the cross-section checks");
+        const auto fullEdges = model.annotationPageEdges();
+        require(!fullEdges.continuesBefore && !fullEdges.continuesAfter
+                        && fullEdges.first.start == pageEnd.first.start
+                        && fullEdges.last.end == pageEnd.last.end,
+                "The final section's selection boundaries changed at handoff");
+    }
     const int sectionPage = model.page();
     require(model.go(sectionPage - 1) && !model.annotationPageEdges().continuesAfter,
             "Selection must stop before the next spine section");
@@ -402,7 +434,8 @@ int main(int argc, char **argv)
         // handle on that page can still reach the preceding page.
         kobalt::EngineDocument sliced(kobalt::test::readerFonts());
         auto files = kobalt::test::engineBook(false, 1, 80);
-        files["OEBPS/c1.xhtml"].replace("</h1>", "</h1><p style='display:none'>HiddenMarker.</p>");
+        files["OEBPS/c1.xhtml"].replace(
+                "</h1>", "</h1><p>ກິ កិ မိ</p><p style='display:none'>HiddenMarker.</p>");
         QMap<QString, qint64> sizes;
         for (auto it = files.cbegin(); it != files.cend(); ++it)
             sizes[it.key()] = it.value().size();
@@ -416,6 +449,17 @@ int main(int argc, char **argv)
         require(sliced.openResources(resources, sizes, { 600, 800 }, { { "font_pixels", 28 } },
                                      &error),
                 qPrintable(error));
+        for (const auto *sample : { "ກິ", "កិ", "မိ" }) {
+            const auto text = QString::fromUtf8(sample);
+            const auto hits = sliced.searchPage(text, 0).hits;
+            require(hits.size() == 1, "Missing selection fixture text");
+            const auto rects = sliced.rangeRects(hits.first().start, hits.first().end);
+            require(!rects.isEmpty(), "Missing selection fixture geometry");
+            const auto point = rects.first().center();
+            require(sliced.wordAt(point).text == text, qPrintable("Lookup missed " + text));
+            require(sliced.annotationTokenAt(point).text == text,
+                    qPrintable("Highlight missed " + text));
+        }
         sliced.setChapterSlices(1);
         require(sliced.showSpineItems(0, 0) && sliced.go(0),
                 "Cannot open sliced selection fixture");
@@ -434,8 +478,9 @@ int main(int argc, char **argv)
             const auto place = sliced.position();
             const auto image = sliced.image(sliced.page());
             kobalt::EngineDocument whole(kobalt::test::readerFonts());
-            require(whole.openResources(resources->fresh(), sizes, { 600, 800 },
-                                        { { "font_pixels", 28 } }, &error),
+            require(whole.openResources(
+                            resources->fresh(), sizes, { 600, 800 },
+                            { { "font_pixels", 28 }, { "koblaze_first_spine_item", -1 } }, &error),
                     qPrintable(error));
             const auto selected =
                     sliced.annotationRange(origin.first.start, origin.first.end, next.first.start,

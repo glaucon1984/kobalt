@@ -15,20 +15,22 @@
 #include "assets/assets.h"
 #include "assets/font_catalog.h"
 #include "reader_inputs.h"
+#include "font_fixtures.h"
 #include "app/reader/views/opening.h"
 #include "app/reader/views/appearance_preview.h"
 #include "app/reader/settings/settings_panel.h"
 #include "host_presentation.h"
 #include "support/qt_font.h"
-#include "support/strings.h"
+#include "support/percentage_text.h"
 #include "ui/style/fonts.h"
 #include "app/reader/window/font_registration.h"
 #include <QFileInfo>
 #include <QFontInfo>
 #include <QFontDatabase>
 #include <QJsonObject>
+#include <QJsonArray>
+#include <QCryptographicHash>
 #include <QLabel>
-#include <QLocale>
 #include <QLineEdit>
 #include <QDir>
 #include <QTemporaryDir>
@@ -37,6 +39,7 @@
 #include "ui/style/metrics.h"
 #include "ui/style/styles.h"
 #include "ui/controls/paged_text.h"
+#include "app/reader/panels/bookmark_list.h"
 #include "app/reader/panels/dictionary_panel.h"
 #include "app/reader/settings/dictionaries_page.h"
 #include "app/reader/panels/link_panel.h"
@@ -194,6 +197,7 @@ void dismissedContent()
 
     reader::SettingsPanel settings(&host, {});
     settings.show();
+    settings.settingsTabButtons[int(reader::SettingsPage::Styling)]->click();
     {
         StyleSample sample;
         sample.spreads = { { image, image } };
@@ -261,8 +265,372 @@ void dismissedContent()
     require(note->pages() == notePages, "Footnote failed to reopen the same content");
 }
 
+// The original search row measured the full label again after removing each
+// character. Keep that simple rule as the reference for the faster fitter.
+QString referenceSearchExcerpt(QString before, const QString &match, QString after,
+                               const QFont &font, const QSize &bounds)
+{
+    if (before.trimmed().isEmpty())
+        before.clear();
+    if (after.trimmed().isEmpty())
+        after.clear();
+    const auto html = [&] {
+        const auto left =
+                before.isEmpty() ? QString() : QStringLiteral("…") + before.toHtmlEscaped();
+        const auto right =
+                after.isEmpty() ? QString() : after.toHtmlEscaped() + QStringLiteral("…");
+        return QString("<div style=\"line-height:%1%\">%2</div>")
+                .arg(kobalt::ui::metrics::search::excerptLineHeight)
+                .arg(left + "<b><u>" + match.toHtmlEscaped() + "</u></b>" + right);
+    };
+    while ((!before.isEmpty() || !after.isEmpty())
+           && kobalt::ui::excerptTextHeight(html(), font, bounds.width()) > bounds.height()) {
+        if (before.size() >= after.size())
+            before.remove(0, before.front().isHighSurrogate() ? 2 : 1);
+        else
+            after.chop(after.back().isLowSurrogate() ? 2 : 1);
+    }
+    int start = 0;
+    while (start < before.size() && !before.at(start).isSpace())
+        ++start;
+    while (start < before.size() && before.at(start).isSpace())
+        ++start;
+    before = before.mid(start);
+    int end = after.size();
+    while (end > 0 && !after.at(end - 1).isSpace())
+        --end;
+    while (end > 0 && after.at(end - 1).isSpace())
+        --end;
+    after.truncate(end);
+    return html();
+}
+
+QImage referenceTint(QImage mask, const QColor &ink)
+{
+    QPainter painter(&mask);
+    painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+    painter.fillRect(mask.rect(), ink);
+    painter.end();
+    return mask;
+}
+
+QRect visibleInk(const QImage &image)
+{
+    QRect ink;
+    for (int y = 0; y < image.height(); ++y)
+        for (int x = 0; x < image.width(); ++x)
+            if (qAlpha(image.pixel(x, y)))
+                ink |= QRect(x, y, 1, 1);
+    return ink;
+}
+
+void checkWrappedLineTint()
+{
+    using namespace kobalt::ui;
+    const auto font = interfaceFont(28);
+    const QString text = QStringLiteral("Text size");
+    require(needsPrivateText(text, font), "Wrapped line tint fixture needs the private renderer");
+    const auto line = renderPrivateText(text, font);
+    require(!line.image.isNull(), "Private label produced no coverage mask");
+
+    const QColor darkInk = themeColors(true).secondaryInk;
+    const QColor lightInk = themeColors(false).secondaryInk;
+    const auto first = tintedPrivateText(line.image, darkInk);
+    for (const auto &ink :
+         { darkInk, lightInk, QColor(53, 81, 127, 1), QColor(53, 81, 127, 128) }) {
+        const auto expected = referenceTint(line.image, ink);
+        require(tintedPrivateText(line.image, ink) == expected, "Cached tint changed glyph pixels");
+
+        QImage frame(230, 75, QImage::Format_ARGB32_Premultiplied);
+        frame.fill(Qt::transparent);
+        auto actual = frame;
+        {
+            QPainter painter(&frame);
+            painter.drawImage(line.origin + QPoint(0, line.lineAscent), expected);
+        }
+        {
+            QPainter painter(&actual);
+            painter.setFont(font);
+            painter.setPen(ink);
+            drawWrappedInterfaceText(painter, actual.rect(), text);
+        }
+        require(actual == frame, "Wrapped label changed the tint or placement of its line");
+    }
+    require(first.constBits() == tintedPrivateText(line.image, darkInk).constBits(),
+            "Repainting the label in its original theme allocated another tinted line");
+    auto differentMask = line.image.copy();
+    differentMask.fill(Qt::transparent);
+    differentMask.setPixelColor(0, 0, Qt::black);
+    require(tintedPrivateText(differentMask, darkInk) == referenceTint(differentMask, darkInk),
+            "Another mask of the same size reused the previous line's ink");
+
+    QImage oversized(2049, 256, QImage::Format_ARGB32_Premultiplied);
+    oversized.fill(Qt::black);
+    const auto large = tintedPrivateText(oversized, darkInk);
+    require(large == referenceTint(oversized, darkInk), "Oversized tint changed glyph pixels");
+    require(large.constBits() != tintedPrivateText(oversized, darkInk).constBits(),
+            "Tint larger than the private layout cache was retained");
+    require(first.constBits() == tintedPrivateText(line.image, darkInk).constBits(),
+            "Oversized tint evicted the cached label");
+}
+
+void checkPrivateTextDrawing()
+{
+    using namespace kobalt::ui;
+    const auto font = interfaceFont(32);
+    const QString text = QStringLiteral("Glyphs");
+    const auto line = renderPrivateText(text, font);
+    const auto raw = visibleInk(line.image);
+    const int baseline = -line.origin.y();
+    require(!raw.isEmpty() && raw.bottom() >= baseline + qMax(1, (baseline - raw.top()) / 10),
+            "Optical drawing fixture needs a descender");
+    require(interfaceInkBounds(text, font) == raw.translated(line.origin),
+            "Private ink bounds lost the glyph origin");
+    const QRect area(9, 7, 165, 68);
+    const QRect clip(3, 4, 163, 80);
+    const auto alignment = Qt::AlignRight | Qt::AlignBottom;
+    for (int alpha : { 255, 1, 0, 128, 1 }) {
+        const QColor color(45, 95, 127, alpha);
+        const auto tinted = referenceTint(line.image, color);
+        const QRect ink = visibleInk(tinted);
+        QRect cached;
+        const auto shared = tintedPrivateText(line.image, color);
+        require(tintedPrivateText(line.image, color, &cached).constBits() == shared.constBits()
+                        && cached == ink,
+                "Requesting optical bounds missed the cached tint or measured the raw mask");
+
+        enum Placement { LineBox, Optical, SharedBaseline };
+
+        for (const auto mode : { LineBox, Optical, SharedBaseline }) {
+            QImage expected(190, 86, QImage::Format_ARGB32_Premultiplied);
+            expected.fill(Qt::transparent);
+            QImage actual = expected;
+            int y = area.bottom() + 1 - line.image.height();
+            if (mode != LineBox && !ink.isEmpty()) {
+                int last = ink.bottom();
+                if (mode == SharedBaseline && baseline > ink.top()
+                    && last >= baseline + qMax(1, (baseline - ink.top()) / 10))
+                    last = baseline - 1;
+                y = qRound(area.top() + area.height() / 2.0 - (ink.top() + last + 1) / 2.0);
+            }
+            {
+                QPainter painter(&expected);
+                painter.setClipRect(clip.intersected(area));
+                painter.drawImage(QPoint(area.right() + 1 - line.advance, y), tinted);
+            }
+            {
+                QPainter painter(&actual);
+                painter.setFont(font);
+                painter.setPen(color);
+                painter.setClipRect(clip);
+                if (mode == LineBox)
+                    drawInterfaceText(painter, area, text, alignment);
+                else if (mode == Optical)
+                    drawOpticalPrivateText(painter, area, text, alignment);
+                else
+                    drawSegmentPrivateText(painter, area, text, alignment);
+            }
+            require(actual == expected,
+                    qPrintable(QString("Private label differs at alpha %1, mode %2")
+                                       .arg(alpha)
+                                       .arg(mode)));
+        }
+    }
+
+    // A thin antialiased edge can disappear at low opacity. Whole-mask
+    // bounds cannot stand in for the bounds of the paint-ready image.
+    QImage sparse(6, 5, QImage::Format_ARGB32_Premultiplied);
+    sparse.fill(Qt::transparent);
+    sparse.setPixelColor(0, 0, QColor(0, 0, 0, 1));
+    sparse.setPixelColor(3, 2, Qt::black);
+    QRect bounds;
+    tintedPrivateText(sparse, QColor(25, 50, 75, 1), &bounds);
+    require(bounds == QRect(3, 2, 1, 1), "An invisible edge moved the optical center");
+
+    WholeLineLabel excerpt;
+    const QString rtl = QStringLiteral("עברית");
+    excerpt.setFont(font);
+    excerpt.setText(QStringLiteral("<div><b><u>%1</u></b><br>second</div>").arg(rtl));
+    excerpt.setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    const QVector<QPair<int, int>> emphasis{ { 0, int(rtl.size()) } };
+    const auto metrics = measurePrivateTextLayout(rtl, font, emphasis,
+                                                  PrivateTextEmphasis::FontFace, Qt::RightToLeft);
+    const auto rendered = renderPrivateText(rtl, font, 0, emphasis, emphasis,
+                                            PrivateTextEmphasis::FontFace, Qt::RightToLeft);
+    excerpt.resize(220, metrics.lineHeight + 9);
+    const QColor ink(63, 84, 129, 91);
+    auto palette = excerpt.palette();
+    palette.setColor(QPalette::Window, Qt::white);
+    palette.setColor(QPalette::WindowText, ink);
+    excerpt.setPalette(palette);
+    excerpt.setAutoFillBackground(true);
+    QImage expected(excerpt.size(), QImage::Format_ARGB32_Premultiplied);
+    expected.fill(Qt::white);
+    QImage actual = expected;
+    excerpt.render(&actual);
+    QPainter painter(&expected);
+    painter.translate(0, (excerpt.height() - metrics.lineHeight) / 2.0);
+    painter.drawImage(QPointF(excerpt.width() - metrics.advance + rendered.origin.x(),
+                              metrics.lineAscent + rendered.origin.y()),
+                      referenceTint(rendered.image, ink));
+    painter.end();
+    require(actual == expected,
+            "Whole-line excerpt changed RTL placement, baseline, tint or last complete line");
+}
+
+void checkSearchExcerptFit(bool privateText)
+{
+    QFont font("IBM Plex Sans");
+    font.setPixelSize(24);
+    require(kobalt::ui::needsPrivateText("match", font) == privateText,
+            "Search excerpt fixture selected the wrong renderer");
+
+    struct Hit
+    {
+        QString before, match, after;
+    };
+
+    const Hit hits[] = {
+        { "A partial beginning with a few words ", "match", " and a few words at the end" },
+        { "left ", "  two   words  ", " right" },
+        { QStringLiteral("brûlant <été> & فصل "), "<b> & 50%",
+          QStringLiteral(" τέλος & <fin> maintenant") },
+        { QStringLiteral("Un mot : «"), QStringLiteral("réponse"), QStringLiteral("», dit-elle.") },
+        { QStringLiteral("كلمات تسبق "), QStringLiteral("النص"),
+          QStringLiteral("، ثم كلمات أخرى") },
+        { QStringLiteral("a\tand\u00a0  b "), "M", QStringLiteral(" c\u202f d\nend") },
+        { QStringLiteral(" \u00a0\t"), "alone", QStringLiteral("\u202f\n") },
+        { QStringLiteral("星空🌕夜空"), QStringLiteral("月"), QStringLiteral("光🌙明亮") },
+        { QStringLiteral("🌱 two 🌱 "), "same", QStringLiteral(" 🌱 two 🌱") },
+        { {}, "one side", " all the context is after the match" },
+        { "all the context is before the match ", "one side", {} },
+        { "short ", QStringLiteral("unbroken-long-match").repeated(4), " end" },
+    };
+    for (const auto &hit : hits) {
+        for (const auto &bounds : { QSize(102, 34), QSize(175, 76), QSize(410, 105) }) {
+            const auto expected =
+                    referenceSearchExcerpt(hit.before, hit.match, hit.after, font, bounds);
+            const auto actual =
+                    kobalt::ui::fitSearchExcerpt(hit.before, hit.match, hit.after, font, bounds);
+            require(actual == expected,
+                    qPrintable(QString("%1 search excerpt at %2x%3: expected %4, got %5")
+                                       .arg(privateText ? "Private" : "Qt")
+                                       .arg(bounds.width())
+                                       .arg(bounds.height())
+                                       .arg(expected, actual)));
+        }
+    }
+}
+
+static void checkPreparedOpeningFonts()
+{
+    using namespace kobalt;
+    using namespace kobalt::ui;
+    QTemporaryDir directory;
+    const auto fonts = directory.filePath("fonts");
+    const auto &installed = test::readerAssets();
+    require(directory.isValid(), "Cannot create the opening font fixture");
+    const auto faces = test::copyOpeningFontFixture(installed.root(), directory.path());
+    require(!faces.isEmpty(), "Cannot copy the opening font fixture");
+    const auto manifest = directory.filePath("manifest.json");
+    qint64 faceBytes = 0;
+    for (const auto &name : faces)
+        faceBytes += QFileInfo(fonts + '/' + name).size();
+    AssetBundle bundle(directory.path(), QStringLiteral(KOBALT_VERSION),
+                       AssetBundle::Verification::Explicit);
+    require(bundle.verify(), "Cannot verify the opening font fixture");
+    const auto prepared = readOpeningFonts(bundle);
+    require(bool(prepared), "Cannot prepare the verified opening faces");
+    AssetBundle other(directory.path(), QStringLiteral(KOBALT_VERSION),
+                      AssetBundle::Verification::Explicit);
+    require(other.verify(), "Cannot verify the second owner of the same path");
+    setPreparedOpeningFonts(other, prepared);
+    require(!initializeOpeningFonts(other), "Another bundle accepted prepared faces");
+    setPreparedOpeningFonts(bundle, prepared);
+    for (const auto &name : faces)
+        require(QFile::rename(fonts + '/' + name, fonts + '/' + name + ".away"),
+                "Cannot move a prepared face");
+    require(initializeOpeningFonts(bundle), "Opening reread a prepared face");
+    bool changed = true;
+    require(initializeInterfaceFonts(bundle, &changed) && !changed,
+            "Full init reread or replaced the opening faces");
+    require(privateInterfaceFontBytes() == faceBytes,
+            "Full init did not keep the seven interface faces from the prepared bytes");
+    for (const auto &name : faces) {
+        auto font = name.startsWith("Instrument") ? brandFont(24)
+                : name.contains("Mono")           ? chromeFont(24)
+                                                  : interfaceFont(24);
+        font.setBold(name.contains("Bold"));
+        font.setItalic(name.contains("Italic"));
+        const auto sample = renderPrivateText("Kobalt", font);
+        require(!sample.image.isNull() && !sample.missingGlyphs,
+                "Private text lost its prepared face");
+    }
+    require(privateInterfaceFontBytes() == faceBytes,
+            "Private text did not reuse exactly the seven prepared faces");
+    for (const auto &name : faces)
+        require(QFile::rename(fonts + '/' + name + ".away", fonts + '/' + name),
+                "Cannot restore a prepared face");
+
+    bundle.invalidate();
+    setPreparedOpeningFonts(bundle, prepared);
+    require(!initializeOpeningFonts(bundle) && !initializeInterfaceFonts(bundle),
+            "USB invalidation left fonts ready");
+    const QString relative = "fonts/IBMPlexSans-Regular.ttf";
+    QFile changedFace(directory.filePath(relative));
+    require(changedFace.open(QIODevice::Append) && changedFace.write("x") == 1,
+            "Cannot alter the font fixture");
+    changedFace.close();
+    require(!bundle.verify() && !initializeInterfaceFonts(bundle),
+            "A corrupt required face passed verification or full initialization");
+    auto document = storage::readJsonFile(manifest, 64 * 1024).object;
+    auto entries = document.value("files").toArray();
+    require(changedFace.open(QIODevice::ReadOnly), "Cannot read changed face");
+    const auto bytes = changedFace.readAll();
+    for (int i = 0; i < entries.size(); ++i) {
+        auto entry = entries[i].toObject();
+        if (entry.value("path").toString() == relative) {
+            entry["size"] = bytes.size();
+            entry["sha256"] = QString::fromLatin1(
+                    QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
+            entries[i] = entry;
+            break;
+        }
+    }
+    document["files"] = entries;
+    require(storage::writeJson(manifest, document) && bundle.verify(),
+            "Cannot verify changed manifest");
+    setPreparedOpeningFonts(bundle, prepared);
+    require(!initializeOpeningFonts(bundle),
+            "A later verification accepted a stale prepared result");
+    setPreparedOpeningFonts(bundle, readOpeningFonts(bundle));
+    require(initializeInterfaceFonts(bundle, &changed) && changed,
+            "Full init missed a changed face");
+    require(initializeInterfaceFonts(bundle, &changed) && !changed,
+            "Unchanged full init replaced faces");
+}
+
 int main(int argc, char **argv)
 {
+    {
+        const QString emoji = QString::fromUtf8("📚");
+        const QString ellipsis = QString::fromUtf8("…");
+        for (const int limit : { 36, 40 }) {
+            const int maximum = limit == 36 ? 36 : 80;
+            const QString prefix(limit - 1, 'a');
+            const QString tail(81, 'b');
+            require(kobalt::elideBookmarkExcerpt(prefix + emoji + tail, limit, maximum)
+                            == prefix + ellipsis,
+                    "Truncating a bookmark or annotation excerpt split a surrogate pair");
+            const QString complete = prefix.mid(1) + emoji;
+            require(kobalt::elideBookmarkExcerpt(complete + tail, limit, maximum)
+                            == complete + ellipsis,
+                    "An excerpt dropped a complete supplementary character");
+            require(kobalt::elideBookmarkExcerpt(emoji, limit, maximum) == emoji,
+                    "A short excerpt lost its supplementary character");
+        }
+    }
+
 #ifdef Q_OS_LINUX
     // Noto Sans Math may be installed system-wide. This fixture must begin
     // without it in Qt, then prove the private face is registered on demand.
@@ -290,6 +658,13 @@ int main(int argc, char **argv)
     QTemporaryDir diagnosticDirectory;
     require(diagnosticDirectory.isValid(), "Cannot create font diagnostic directory");
     kobalt::initializeDiagnostics(diagnosticDirectory.path());
+    // Linux runs this process without system fonts. Give Qt a known face
+    // before the opening view initializes the private renderer.
+    const auto qtFont = QFontDatabase::addApplicationFontFromData(
+            kobalt::test::readerAssets().manifestFontData("IBMPlexSans-Regular.ttf"));
+    require(qtFont >= 0, "Cannot register the Qt search excerpt font");
+    checkSearchExcerptFit(false);
+    QFontDatabase::removeApplicationFont(qtFont);
     {
         // The loading view is built before the whole bundle is verified. A
         // font used before then must not stop the faces registering later.
@@ -314,7 +689,13 @@ int main(int argc, char **argv)
                     && QFontInfo(kobalt::ui::chromeFont()).family() == "IBM Plex Mono"
                     && QFontInfo(kobalt::ui::brandFont(32)).family() == "Instrument Serif",
             "Component font substitution");
+    checkPreparedOpeningFonts();
+    require(kobalt::ui::initializeInterfaceFonts(kobalt::test::readerAssets()),
+            "Cannot restore the component fonts");
     dismissedContent();
+    checkSearchExcerptFit(true);
+    checkWrappedLineTint();
+    checkPrivateTextDrawing();
     {
         int loads = 0;
         kobalt::setDiagnosticObserver([&](const QJsonObject &event) {
@@ -576,7 +957,7 @@ int main(int argc, char **argv)
         // not leak into either QSS or custom painting after a theme change.
         for (bool dark : { false, true, false, true }) {
             host.setProperty("reader_dark", dark);
-            const auto &theme = themeColors(dark);
+            const auto theme = themeColors(dark);
             QPalette base;
             for (const auto group : { QPalette::Active, QPalette::Inactive, QPalette::Disabled })
                 for (const auto role :
@@ -1626,6 +2007,13 @@ int main(int argc, char **argv)
         QApplication::processEvents();
         require(!open->isVisible() && text->page() == 0 && text->pages() == 1,
                 "Hidden note retained a target or old pagination");
+        host.resize(1480, 720);
+        details.target = "passage";
+        details.html = "<p>First line.<br/>Second line.</p>";
+        note.open(details, QRect(80, 100, 100, 40), host.rect());
+        QApplication::processEvents();
+        require(text->pages() == 1 && open->isVisible(),
+                "A short footnote must fit beside its controls on a landscape phone");
         QWidget browserHost;
         browserHost.resize(1264, 1680);
         browserHost.show();
@@ -2204,7 +2592,7 @@ int main(int argc, char **argv)
         graph.setData(chapters, { 20, -1, 1, 1 }, true, {});
         require(title->text() == "The Second Voyage", "The chapter title is missing");
         // Nickel's count: chapter page 4 of 10 is 40%, book page 26 of 100 is 26%.
-        require(text("rrGraphChapterPercent") == get("common.percent").arg(40)
+        require(text("rrGraphChapterPercent") == kobalt::strings::percentage(40)
                         && text("rrGraphChapterFigure") == "7"
                         && text("rrGraphChapterUnit") == get("stats.pages_left"),
                 "Chapter progress differs from the shared display rule");
@@ -2213,7 +2601,7 @@ int main(int argc, char **argv)
         require(text("rrGraphNextChapter")
                         == get("chapter_graph.next_chapter").arg(12).arg(get("common.pages")),
                 "Next chapter length is missing");
-        require(text("rrGraphBookPercent") == get("common.percent").arg(26),
+        require(text("rrGraphBookPercent") == kobalt::strings::percentage(26),
                 "Book progress disagrees with the current page");
         require(text("rrGraphBookFigure") == "75", "Book pages remaining omit the displayed page");
         graph.setChapterNumber(13, 24);
@@ -2231,13 +2619,23 @@ int main(int argc, char **argv)
                         && text("rrGraphBookDetail").isEmpty(),
                 "Chapter number or session is missing, or the book cell kept the word count");
         // The word totals label the chart, between the bars and the cells.
-        const auto chapterWords = get("stats.words")
-                                          .arg(QLocale(QLocale::English, QLocale::UnitedStates)
-                                                       .toString(chapters[20].words));
+        // Counts use the interface's English grouping.
+        const auto chapterWords =
+                get("stats.words").arg(kobalt::strings::count(chapters[20].words));
         require(text("rrGraphChapterWords") == get("stats.chapter_words").arg(13).arg(chapterWords)
                         && text("rrGraphBookWords")
-                                == get("stats.book_words").arg(get("stats.words").arg("35,706")),
+                                == get("stats.main_words")
+                                           .arg(get("stats.words").arg(QStringLiteral("35,706"))),
                 "The word totals below the chart are missing");
+        auto singleWord = chapters;
+        singleWord[20].words = 1;
+        graph.setData(singleWord, { 20, -1, 1, 1 }, true, {});
+        graph.setReading(23, 1);
+        require(text("rrGraphChapterWords") == get("stats.chapter_words").arg(13).arg("1 word")
+                        && text("rrGraphBookWords") == get("stats.main_words").arg("1 word"),
+                "Stats must use the singular for a one-word chapter or book");
+        graph.setData(chapters, { 20, -1, 1, 1 }, true, {});
+        graph.setReading(23, 35706);
         graph.setChapterNumber(0, 24);
         require(text("rrGraphChapterWords") == get("stats.this_chapter_words").arg(chapterWords),
                 "A position before the contents named a chapter number");
@@ -2518,7 +2916,7 @@ int main(int argc, char **argv)
         const QVector<Choice> sections{
             { "Libron", "Libron", "recommended", "Recommended Fonts" },
             { "Ancizar Serif", "NV Ancizar Serif", "ancizar", "Recommended Fonts" },
-            { "System", "System", "system", "Built-in Fonts" },
+            { "System", "System", "system", "System Fonts" },
             { "Personal", "Personal", "personal", "Sideloaded Fonts" },
             { "Arabic", "Noto Naskh Arabic", "arabic", "Supplemental Fonts" }
         };
@@ -2860,10 +3258,11 @@ int main(int argc, char **argv)
                     && kobalt::ui::metrics::reading::textPixels(28, true) == 28,
             "Header and footer checkpoint sizes must match");
     require(kobalt::ui::metrics::reading::stripHeight(24) == 48
-                    && kobalt::ui::metrics::reading::stripHeight(26) == 52
+                    && kobalt::ui::metrics::reading::stripHeight(25) == 48
+                    && kobalt::ui::metrics::reading::stripHeight(26) == 48
                     && kobalt::ui::metrics::reading::stripHeight(28) == 56
                     && kobalt::ui::metrics::reading::stripHeight(48) == 96
-                    && kobalt::ui::metrics::reading::textBandHeight(48) == 88,
+                    && kobalt::ui::metrics::reading::stripHeight(26, 12) == 60,
             "Chrome strips do not reserve enough room for large text");
     // Exercise the final styled layout, not only the constructor's size hints.
     {
@@ -3498,14 +3897,18 @@ int main(int argc, char **argv)
             QFont changed(family);
             changed.setPixelSize(36);
             require(registerPrivateInterfaceFont(path, family), "Cannot register refresh fixture");
-            QImage previous;
+            QImage previous, tinted;
             if (loaded) {
                 require(nativeEditorFontData(changed) == regular,
                         "Cannot load original font bytes");
                 previous = renderPrivateText("iiiiWWWW", changed).image;
+                tinted = tintedPrivateText(previous, Qt::gray);
             }
             replace(bold);
             forgetPrivateInterfaceFonts(folder.path());
+            if (loaded)
+                require(tintedPrivateText(previous, Qt::gray).constBits() != tinted.constBits(),
+                        "Forgetting a font retained its tinted line");
             require(nativeEditorFontData(changed).isEmpty(),
                     "Removed font registration survived refresh");
             require(registerPrivateInterfaceFont(path, family)
@@ -3514,6 +3917,31 @@ int main(int argc, char **argv)
             if (loaded)
                 require(renderPrivateText("iiiiWWWW", changed).image != previous,
                         "Font refresh retained cached glyphs or shaped text");
+            forgetPrivateInterfaceFonts(folder.path());
+        }
+        // The imported folder can contain only a damaged font, with no registered faces.
+        {
+            QTemporaryDir folder;
+            require(folder.isValid(), "Cannot create failed font fixture");
+            const auto path = folder.filePath("Repaired.ttf");
+            const auto family = QStringLiteral("Repaired folder font");
+            QFile damaged(path);
+            require(damaged.open(QIODevice::WriteOnly) && damaged.write("bad font", 8) == 8,
+                    "Cannot create damaged font");
+            damaged.close();
+            require(!registerPrivateInterfaceFont(path, family), "Registered a damaged font");
+            require(damaged.remove()
+                            && QFile::copy(kobalt::test::readerAssets().file(
+                                                   "fonts/ebook-core/NV_Bitter-Regular.ttf"),
+                                           path),
+                    "Cannot install the repaired font");
+            forgetPrivateInterfaceFonts(folder.filePath("other"));
+            require(!registerPrivateInterfaceFont(path, family),
+                    "An unrelated folder refresh retried a failed font");
+            forgetPrivateInterfaceFonts(folder.path());
+            require(registerPrivateInterfaceFont(path, family)
+                            && !nativeEditorFontData(QFont(family)).isEmpty(),
+                    "The refreshed folder did not register its repaired font");
             forgetPrivateInterfaceFonts(folder.path());
         }
         const auto alias = QStringLiteral("Dictionary private-only canary");
@@ -3959,7 +4387,7 @@ int main(int argc, char **argv)
         page.cancelRequested = [&] {
             ++stops;
             page.setTransfer({}, 0, 0, false);
-            page.setState({}, false, {});
+            page.setState({}, false, kobalt::DictionaryDownloadResult::Cancelled);
         };
         QPointer<QPushButton> downloadAction = page.findChild<QPushButton *>("rrDictionaryAction0");
         downloadAction->click();
@@ -3988,6 +4416,14 @@ int main(int argc, char **argv)
         downloadAction->click();
         require(stops == 1 && downloadAction && !downloadAction->icon().isNull(),
                 "Cancelling did not restore the download icon and action in place");
+        const auto failureShown = [&] {
+            for (auto *label : page.findChildren<QLabel *>())
+                if (label->isVisible()
+                    && label->text() == kobalt::strings::get("dictionaries.download_failed"))
+                    return true;
+            return false;
+        };
+        require(!failureShown(), "A Stop request marked the download as failed");
         downloadAction->click();
         app.processEvents();
         owner.findChild<QPushButton *>("rrDictionaryDownloadConfirm")->click();
@@ -4021,21 +4457,13 @@ int main(int argc, char **argv)
                         == kobalt::ui::metrics::list::oneLine,
                 "Downloading changed the dictionary row height");
         page.setTransfer({}, 0, 0, false);
-        page.setState({}, false, "Download failed");
+        page.setState({}, false, kobalt::DictionaryDownloadResult::Failed);
         app.processEvents();
-        bool error = false;
-        for (auto *label : page.findChildren<QLabel *>())
-            error |= label->isVisible()
-                    && label->text() == kobalt::strings::get("dictionaries.download_failed");
-        require(error, "Failed transfer lacks its row error");
+        require(failureShown(), "Failed transfer lacks its row error");
         page.installRequested = [](const QString &) { };
         page.findChild<QPushButton *>("rrDictionaryAction0")->click();
         app.processEvents();
-        for (auto *label : page.findChildren<QLabel *>())
-            require(!label->isVisible()
-                            || label->text()
-                                    != kobalt::strings::get("dictionaries.download_failed"),
-                    "Next page action retained transfer failure");
+        require(!failureShown(), "Next page action retained transfer failure");
         owner.findChild<QPushButton *>("rrDictionaryDownloadCancel")->click();
         app.processEvents();
         page.setState({ "en-en" }, false, {});
@@ -5660,6 +6088,54 @@ int main(int argc, char **argv)
             require(row->grab().toImage() == plain,
                     "Clearing a typeface preview left sample pixels behind");
         }
+    }
+    {
+        QWidget host;
+        host.resize(800, 600);
+        QWidget paper(&host);
+        paper.setGeometry(host.rect());
+        kobalt::ui::PageScrubber scrubber(&host);
+        scrubber.setGeometry(host.rect());
+        host.show();
+        scrubber.show();
+        scrubber.setBarVisible(false);
+        require(host.childAt(host.rect().center()) == &paper,
+                "An empty scrubber intercepted a tap on the page");
+        scrubber.setImageAction("Zoom image");
+        auto *button = scrubber.findChild<QPushButton *>("rrScrubberImage");
+        require(button && host.childAt(button->mapTo(&host, button->rect().center())) == button,
+                "Restoring a scrubber action must make it tappable again");
+        scrubber.setImageAction({});
+        require(host.childAt(host.rect().center()) == &paper,
+                "Removing the last scrubber action must expose the page again");
+        scrubber.showCurrentPage();
+        require(host.childAt(host.rect().center()) != &paper,
+                "An active preview must receive the tap even with the bar hidden");
+        scrubber.cancel();
+        require(host.childAt(host.rect().center()) == &paper,
+                "Cancelling the preview must return taps to the page");
+    }
+    {
+        // A chapter beyond the page range previews the last page only once.
+        kobalt::ui::PageScrubber scrubber(nullptr);
+        scrubber.setChapterJumps(true);
+        scrubber.setBook(0, 8, { { 0, "First" }, { 8, "Last" } }, {});
+        scrubber.show();
+        int requests = 0;
+        scrubber.previewRequested = [&](int page, QSize) {
+            ++requests;
+            scrubber.setPreview(page, QImage(1, 1, QImage::Format_RGB32));
+        };
+        auto *next = scrubber.findChild<QPushButton *>("rrNavigationNext");
+        require(next && next->isEnabled(), "Missing next chapter action");
+        next->click();
+        require(scrubber.previewReady() && scrubber.selectedPage() == 7,
+                "Last page preview missing");
+        require(scrubber.property("preview_page").toInt() == 7,
+                "Chapter jump published a page outside the book");
+        const int initialRequests = requests;
+        next->click();
+        require(requests == initialRequests, "Repeated chapter jump discarded prepared previews");
     }
     {
         kobalt::ui::PageScrubber scrubber(nullptr);

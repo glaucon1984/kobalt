@@ -1,6 +1,8 @@
 #pragma once
 #include "metrics.h"
 #include <QFont>
+#include <functional>
+#include <memory>
 
 class QWidget;
 class QLineEdit;
@@ -22,19 +24,27 @@ bool initializeInterfaceFonts(const AssetBundle &assets, bool *changed = nullptr
 // manifest, so the opening view draws in its own fonts before the whole
 // bundle is verified. Later openings reuse the registered faces.
 bool initializeOpeningFonts(const AssetBundle &assets);
-// Reads the interface faces and checks them against the manifest on a worker
-// thread. The next initializeOpeningFonts() takes the result, so the first
-// opening view does no storage reads for them. Call on the GUI thread. The
-// worker keeps its own asset readers, so `assets` need not outlive it.
-void prepareOpeningFonts(const AssetBundle &assets);
+struct OpeningFontData;
+using OpeningFonts = std::shared_ptr<const OpeningFontData>;
+// Read and check the interface faces on the storage worker after bundle verification.
+// A superseded storage operation stops before reading the next face.
+OpeningFonts readOpeningFonts(const AssetBundle &assets, const std::function<bool()> &current = {});
+// On the GUI thread, stage the result for this bundle. An empty result releases it.
+void setPreparedOpeningFonts(const AssetBundle &assets, OpeningFonts fonts);
+// Whether the bundle's current verification has interface faces that need no
+// file read: staged by the worker or already registered.
+bool openingFontsPrepared(const AssetBundle &assets);
 // Register bundled faces; never change Nickel's application font.
 QFont interfaceFont(int pixels = -1);
 // Empty families restore the bundled interface and strip defaults.
 void setInterfaceFontFamily(const QString &family);
 void setInterfaceMonoFontFamily(const QString &family);
 void setHeaderFooterFontFamily(const QString &family);
+QString defaultHeaderFooterFontFamily();
 QFont headerFooterFont(int pixels = -1);
 void setHeaderFooterAddedWeight(int steps);
+bool interfaceFontsMatch(const QString &mainFace, const QString &monoFace, const QString &stripFace,
+                         int stripWeight);
 int headerFooterAddedWeight();
 // Default keeps the native text path. Extra weight uses synthetic FreeType strokes.
 int headerFooterTextWeight();
@@ -65,8 +75,10 @@ inline constexpr int heavierTextSteps = 3;
 // whether the weight changed.
 bool setInterfaceWeight(int steps);
 int interfaceWeight();
-// Draws the widgets under `root` again with the current faces.
-void refreshInterfaceText(QWidget *root);
+// Draws the widgets under `root` again with the current faces. Pass
+// `restyled` when `root` has just been given a changed style sheet, which
+// already repolished every widget under it.
+void refreshInterfaceText(QWidget *root, bool restyled = false);
 // A copy of `font` that loads its faces again. Documents that keep a font
 // renew it when they receive QEvent::FontChange.
 QFont renewedFont(const QFont &font);

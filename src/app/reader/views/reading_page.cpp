@@ -12,7 +12,7 @@
 #include "ui/style/fonts.h"
 #include "ui/style/private_text.h"
 #include "ui/controls/panels.h"
-#include "support/strings.h"
+#include "support/percentage_text.h"
 #include "ui/input/input.h"
 #include "render/image_damage.h"
 #include "render/page_refresh_regions.h"
@@ -85,6 +85,7 @@ QPainterPath footnoteOutline(const QRect &reference, const QVector<QRect> &recta
 
 using headerfooter::Content;
 using headerfooter::Field;
+constexpr auto stripDigits = ui::TextDigits::Tabular;
 
 // The battery sits beside the text at a little below the text height.
 qreal batteryBody(const QFont &font)
@@ -96,8 +97,8 @@ int textWidth(const QFont &font, Field field, const QString &text)
 {
     if (text.isEmpty())
         return 0;
-    return headerfooter::pageCount(field) ? qCeil(ui::halfSpacedWidth(font, text))
-                                          : ui::interfaceTextWidth(text, font);
+    return headerfooter::pageCount(field) ? qCeil(ui::halfSpacedWidth(font, text, stripDigits))
+                                          : ui::interfaceTextWidth(text, font, stripDigits);
 }
 
 int iconWidth(const QFont &font, const Content &content)
@@ -146,7 +147,7 @@ void paintContent(QPainter &painter, const QRect &bounds, Field field, const Con
     int width = textWidth(textFont, field, text);
     if (width > room) {
         text = ui::headerFooterText(content, textFont, room);
-        width = ui::interfaceTextWidth(text, textFont);
+        width = ui::interfaceTextWidth(text, textFont, stripDigits);
         field = Field::Nothing;
     }
     const int total = width + icon;
@@ -159,12 +160,14 @@ void paintContent(QPainter &painter, const QRect &bounds, Field field, const Con
     if (!text.isEmpty()) {
         if (content.batteryIcon)
             ui::drawOpticalPrivateText(painter, QRect(x, bounds.y(), width, bounds.height()), text,
-                                       Qt::AlignLeft, ui::headerFooterTextWeight());
+                                       Qt::AlignLeft, ui::headerFooterTextWeight(), {},
+                                       stripDigits);
         else if (headerfooter::pageCount(field))
-            ui::drawHalfSpaced(painter, x, bounds, text, ui::headerFooterTextWeight());
+            ui::drawHalfSpaced(painter, x, bounds, text, ui::headerFooterTextWeight(), stripDigits);
         else
             ui::drawInterfaceText(painter, QRect(x, bounds.y(), width, bounds.height()), text,
-                                  Qt::AlignLeft | Qt::AlignVCenter, ui::headerFooterTextWeight());
+                                  Qt::AlignLeft | Qt::AlignVCenter, ui::headerFooterTextWeight(),
+                                  {}, stripDigits);
     }
     if (content.batteryIcon) {
         const qreal height = batteryBody(font);
@@ -185,10 +188,9 @@ QString ReadingPage::headerText() const
     QString text;
     for (int slot = 0; slot < 3; ++slot) {
         const auto &content = slotContents[slot];
-        const auto part = !content.text.isEmpty() ? content.text
-                : content.batteryIcon && content.battery >= 0
-                ? strings::get("common.percent").arg(content.battery)
-                : QString();
+        const auto part = !content.text.isEmpty()             ? content.text
+                : content.batteryIcon && content.battery >= 0 ? strings::percentage(content.battery)
+                                                              : QString();
         if (part.isEmpty())
             continue;
         text = text.isEmpty() ? part : strings::get("reader.chapter_position").arg(text, part);
@@ -237,38 +239,32 @@ QRect ReadingPage::bookmarkCorner() const
 
 int ReadingPage::topHeight() const
 {
-    return showHeader() ? metrics::reading::stripHeight(chrome.headerSize) : 0;
+    return (showHeader() ? metrics::reading::stripHeight(chrome.headerSize, chrome.stripPadding)
+                         : 0)
+            + (progressAtTop() ? ui::metrics::reading::progressHeight : 0);
 }
 
 int ReadingPage::bottomHeight() const
 {
-    return (showFooter() ? metrics::reading::stripHeight(chrome.footerSize) : 0)
-            + (showProgress() ? ui::metrics::reading::progressHeight : 0);
+    return (showFooter() ? metrics::reading::stripHeight(chrome.footerSize, chrome.stripPadding)
+                         : 0)
+            + (progressAtBottom() ? ui::metrics::reading::progressHeight : 0);
 }
 
-// Keep the old edge alignment through Large. Larger sizes grow the text
-// band as well as the reserved strip so glyphs are not clipped.
 QRect ReadingPage::headerTextRect() const
 {
     if (!showHeader())
         return {};
-    return { 0, 0, width(), metrics::reading::textBandHeight(chrome.headerSize) };
+    const int top = progressAtTop() ? int(metrics::reading::progressHeight) : 0;
+    return { 0, top, width(), topHeight() - top };
 }
 
 QRect ReadingPage::footerTextRect() const
 {
     if (!showFooter())
         return {};
-    // Keep the same edge gap above the progress fill as below the top
-    // of the header. The progress strip adds space below the text.
-    const int offset = showProgress()
-            ? int(metrics::reading::progressHeight) - int(metrics::reading::progressBottom)
-                    - int(metrics::reading::progressFillHeight)
-            : 0;
-    const int band = metrics::reading::textBandHeight(chrome.footerSize);
-    const int bottom =
-            height() - bottomHeight() + offset + metrics::reading::stripHeight(chrome.footerSize);
-    return { 0, bottom - band, width(), band };
+    const int bar = progressAtBottom() ? int(metrics::reading::progressHeight) : 0;
+    return { 0, height() - bottomHeight(), width(), bottomHeight() - bar };
 }
 
 void ReadingPage::setCornerRadii(int top, int bottom)
@@ -665,15 +661,6 @@ ReadingPage::ReadingPage(QWidget *parent, std::function<void()> cancelAnimation)
     : QWidget(parent), cancelAnimation(std::move(cancelAnimation))
 {
     Q_ASSERT(this->cancelAnimation);
-    viewportNoticeTimer.setParent(this);
-    viewportNoticeTimer.setObjectName("rrViewportNoticeTimer");
-    viewportNoticeTimer.setSingleShot(true);
-    viewportNoticeTimer.setInterval(1000);
-    viewportNoticeTimer.setTimerType(Qt::PreciseTimer);
-    connect(&viewportNoticeTimer, &QTimer::timeout, this, [this] {
-        viewportNoticeVisible = changingViewport;
-        update();
-    });
     pageTurnAnimation.setObjectName("rrPageTurn");
     pageTurnAnimation.setParent(this);
     pageTurnAnimation.setDuration(180);
@@ -775,10 +762,6 @@ void ReadingPage::setViewportTransition(bool active)
         cancelHold();
         multipleTouch = annotationTouch = rightPressed = rightMoved = false;
         touchOrigins.clear();
-        viewportNoticeTimer.start();
-    } else {
-        viewportNoticeTimer.stop();
-        viewportNoticeVisible = false;
     }
     update();
 }
@@ -806,6 +789,72 @@ PageRefreshRegions ReadingPage::refreshRegions(const QImage &source)
     return regionCache[0].regions;
 }
 
+bool ReadingPage::needsImageCleanup(bool colorDisplay)
+{
+    if (renderedBody.isNull())
+        return true;
+    const auto regions = refreshRegions(renderedBody);
+    return colorDisplay ? !regions.colour.isEmpty() || !annotationColorRegion.isEmpty()
+                        : !regions.mono.isEmpty();
+}
+
+QRegion ReadingPage::renderStrips(bool geometryChanged, qint64 paletteKey)
+{
+    const int weight = kobalt::ui::interfaceWeight() + kobalt::ui::headerFooterAddedWeight();
+    // Each strip draws the bar on its own edge, so only that strip follows
+    // the progress.
+    const HeaderState nextHeader{ stripSlots(false),
+                                  stripFields(false),
+                                  showHeader(),
+                                  progressAtTop(),
+                                  progressAtTop() ? progressFraction : 0,
+                                  progressAtTop() ? shownTicks() : QVector<double>{},
+                                  panelBelowHeader,
+                                  width(),
+                                  headerTextPixels(),
+                                  paletteKey,
+                                  weight,
+                                  font().family() };
+    const FooterState nextFooter{ stripSlots(true),
+                                  stripFields(true),
+                                  notice,
+                                  showFooter(),
+                                  progressAtBottom(),
+                                  progressAtBottom() ? progressFraction : 0,
+                                  progressAtBottom() ? shownTicks() : QVector<double>{},
+                                  width(),
+                                  footerTextPixels(),
+                                  paletteKey,
+                                  weight,
+                                  font().family() };
+    QRegion dirty;
+    if (geometryChanged || nextHeader != headerState) {
+        auto next = renderStrip(topHeight(), [this](QPainter &p) { paintHeader(p); });
+        dirty += kobalt::render::imageDamage(headerPixels, next);
+        headerPixels = next;
+        headerState = nextHeader;
+    }
+    if (geometryChanged || nextFooter != footerState) {
+        auto next = renderStrip(bottomHeight(), [this](QPainter &p) { paintFooter(p); });
+        dirty += kobalt::render::imageDamage(footerPixels, next)
+                         .translated(0, height() - bottomHeight());
+        footerPixels = next;
+        footerState = nextFooter;
+    }
+    return dirty;
+}
+
+void ReadingPage::refreshStrips()
+{
+    // Covered strips still need current pixels when the overlay closes.
+    auto dirty = renderStrips(false, palette().cacheKey());
+    if (stripsHidden())
+        return;
+    dirty &= visibleRegion();
+    if (!dirty.isEmpty())
+        update(dirty);
+}
+
 void ReadingPage::refreshContent(bool reading, bool now)
 {
     const auto colors = palette();
@@ -820,15 +869,6 @@ void ReadingPage::refreshContent(bool reading, bool now)
         || (!animatedTurn
             && (renderedBody.cacheKey() != image.cacheKey() || !annotationFrameDamage.isEmpty())))
         stopPageAnimation();
-    const int weight = kobalt::ui::interfaceWeight() + kobalt::ui::headerFooterAddedWeight();
-    const HeaderState nextHeader{
-        stripSlots(false),  stripFields(false), showHeader(), panelBelowHeader, width(),
-        headerTextPixels(), colors.cacheKey(),  weight,       font().family()
-    };
-    const FooterState nextFooter{ stripSlots(true), stripFields(true),  notice,
-                                  showFooter(),     showProgress(),     progressFraction,
-                                  width(),          footerTextPixels(), colors.cacheKey(),
-                                  weight,           font().family() };
     kobalt::platform::pageRefresh(this, false,
                                   reading && !geometryChanged
                                           && renderedPalette == colors.cacheKey()
@@ -855,19 +895,7 @@ void ReadingPage::refreshContent(bool reading, bool now)
     window()->setProperty("reader_colour_regions",
                           !annotationColorRegion.isEmpty() || pageHasColour(image));
     renderedBody = image;
-    if (geometryChanged || nextHeader != headerState) {
-        auto next = renderStrip(topHeight(), [this](QPainter &p) { paintHeader(p); });
-        dirty += kobalt::render::imageDamage(headerPixels, next);
-        headerPixels = next;
-        headerState = nextHeader;
-    }
-    if (geometryChanged || nextFooter != footerState) {
-        auto next = renderStrip(bottomHeight(), [this](QPainter &p) { paintFooter(p); });
-        dirty += kobalt::render::imageDamage(footerPixels, next)
-                         .translated(0, height() - bottomHeight());
-        footerPixels = next;
-        footerState = nextFooter;
-    }
+    dirty += renderStrips(geometryChanged, colors.cacheKey());
     const QRect ribbon = bookmarked ? ribbonRect() : QRect();
     if (ribbon != renderedRibbon) {
         dirty += ribbon;
@@ -927,7 +955,7 @@ void ReadingPage::paintEvent(QPaintEvent *)
     const auto paintCovers = [&] {
         if (!stripsBlank)
             return;
-        const auto paper = palette().color(QPalette::Window);
+        const auto paper = pagePaper();
         painter.fillRect(0, 0, width(), topHeight(), paper);
         painter.fillRect(0, height() - bottomHeight(), width(), bottomHeight(), paper);
     };
@@ -969,53 +997,56 @@ QImage ReadingPage::snapshot(bool sleeping) const
     return frame;
 }
 
+int ReadingPage::ReflowLayout::lineHeight() const
+{
+    return qMax(1, qRound(qMax(1, fontPixels) * qMax(100, lineSpacing) / 100.0));
+}
+
+void ReadingPage::ReflowLayout::paintText(QPainter &painter, const QRect &text,
+                                          const QVector<int> &words, const QColor &ink) const
+{
+    const int count = qBound(1, columns, 2);
+    const int gap = qMax(0, columnSpacing);
+    const int columnWidth = (text.width() - (count - 1) * gap) / count;
+    const int pixels = qMax(1, fontPixels);
+    const int line = lineHeight();
+    const int barHeight = qMax(1, pixels / 2);
+    if (columnWidth > 0) {
+        int word = 0;
+        const int space = qMax(1, qRound(pixels * .33));
+        for (int column = 0; column < count; ++column) {
+            const int left = text.left() + column * (columnWidth + gap);
+            int row = 0;
+            for (int y = text.top(); y + line <= text.bottom() + 1; y += line, ++row) {
+                const int barTop = y + (line - barHeight) / 2;
+                if (words.isEmpty()) {
+                    const int indent = row % 6 == 0 ? qMin(pixels, columnWidth / 4) : 0;
+                    const int length = row % 6 == 5 ? columnWidth * 3 / 4 : columnWidth - indent;
+                    painter.fillRect(QRect(left + indent, barTop, length, barHeight), ink);
+                    continue;
+                }
+                int x = 0;
+                while (x < columnWidth) {
+                    const int length = qBound(1, qRound(words[word] * pixels * .45), columnWidth);
+                    if (x && x + length > columnWidth)
+                        break;
+                    painter.fillRect(QRect(left + x, barTop, length, barHeight), ink);
+                    x += length + space;
+                    word = (word + 1) % words.size();
+                }
+            }
+        }
+    }
+}
+
 void ReadingPage::paintBody(QPainter &painter) const
 {
     if (changingViewport) {
         const QRect body(0, topHeight(), width(), qMax(0, height() - topHeight() - bottomHeight()));
         const auto text = body.marginsRemoved(reflowLayout.margins);
-        const int columns = qBound(1, reflowLayout.columns, 2);
-        const int gap = qMax(0, reflowLayout.columnSpacing);
-        const int columnWidth = (text.width() - (columns - 1) * gap) / columns;
-        const int fontPixels = qMax(1, reflowLayout.fontPixels);
-        const int lineHeight =
-                qMax(1, qRound(fontPixels * qMax(100, reflowLayout.lineSpacing) / 100.0));
-        const int barHeight = qMax(1, fontPixels / 2);
         painter.save();
         painter.setClipRect(body);
-        // Repeat a small sample of the current page's word lengths. The new
-        // page may contain different words; this is only a transition texture.
-        // Publisher fonts and line breaks remain unknown until reflow.
-        const auto ink = ui::themeColors(this).divider;
-        if (columnWidth > 0) {
-            int word = 0;
-            const int space = qMax(1, qRound(fontPixels * .33));
-            for (int column = 0; column < columns; ++column) {
-                const int left = text.left() + column * (columnWidth + gap);
-                int row = 0;
-                for (int y = text.top(); y + lineHeight <= text.bottom() + 1;
-                     y += lineHeight, ++row) {
-                    const int barTop = y + (lineHeight - barHeight) / 2;
-                    if (wordLengths.isEmpty()) {
-                        const int indent = row % 6 == 0 ? qMin(fontPixels, columnWidth / 4) : 0;
-                        const int length =
-                                row % 6 == 5 ? columnWidth * 3 / 4 : columnWidth - indent;
-                        painter.fillRect(QRect(left + indent, barTop, length, barHeight), ink);
-                        continue;
-                    }
-                    int x = 0;
-                    while (x < columnWidth) {
-                        const int length = qBound(1, qRound(wordLengths[word] * fontPixels * .45),
-                                                  columnWidth);
-                        if (x && x + length > columnWidth)
-                            break;
-                        painter.fillRect(QRect(left + x, barTop, length, barHeight), ink);
-                        x += length + space;
-                        word = (word + 1) % wordLengths.size();
-                    }
-                }
-            }
-        }
+        reflowLayout.paintText(painter, text, wordLengths, ui::dividerColor(this));
         painter.restore();
         // Marks and hit targets belong to the old page coordinates.
         return;
@@ -1127,41 +1158,41 @@ void ReadingPage::setStripsHidden(bool hidden)
 
 void ReadingPage::paintContents(QPainter &painter, bool sleeping) const
 {
-    painter.fillRect(rect(), palette().color(QPalette::Window));
+    const int top = topHeight(), bottom = bottomHeight();
+    const auto transform = painter.deviceTransform();
+    const auto format = renderedBody.format();
+    const bool opaqueBody = !changingViewport
+            && (format == QImage::Format_RGB32 || format == QImage::Format_RGBX8888)
+            && renderedBody.size() == QSize(width(), height() - top - bottom)
+            && renderedBody.devicePixelRatio() == 1 && painter.opacity() == 1
+            && painter.compositionMode() == QPainter::CompositionMode_SourceOver
+            && !painter.hasClipping() && transform.type() <= QTransform::TxTranslate
+            && transform.dx() == std::floor(transform.dx())
+            && transform.dy() == std::floor(transform.dy());
+    const auto paper = pagePaper();
+    if (opaqueBody) {
+        // The image supplies every body pixel, including in a fresh sleep snapshot.
+        painter.fillRect(0, 0, width(), top, paper);
+        painter.fillRect(0, height() - bottom, width(), bottom, paper);
+    } else {
+        painter.fillRect(rect(), paper);
+    }
     paintBody(painter);
     if (sleeping) {
         painter.save();
         painter.setFont(font());
         painter.setPen(palette().color(QPalette::WindowText));
         paintHeader(painter, true);
-        painter.translate(0, height() - bottomHeight());
+        painter.translate(0, height() - bottom);
         paintFooter(painter, true);
         painter.restore();
     } else {
         painter.drawImage(0, 0, headerPixels);
-        painter.drawImage(0, height() - bottomHeight(), footerPixels);
+        painter.drawImage(0, height() - bottom, footerPixels);
     }
     if (!changingViewport)
         kobalt::render::paintBookmarkRibbon(painter, renderedRibbon,
                                             palette().color(QPalette::WindowText));
-    if (viewportNoticeVisible && !sleeping) {
-        painter.save();
-        painter.setFont(ui::interfaceFont(metrics::chrome::captionText));
-        const auto text = strings::get("reader.updating_page_layout");
-        const int padding = ui::px(16);
-        const int h = ui::interfaceLineHeight(painter.font()) + 2 * padding;
-        const int w = qMin(width() - 2 * padding,
-                           ui::interfaceTextWidth(text, painter.font()) + 2 * padding);
-        const QRect card((width() - w) / 2, height() - bottomHeight() - h - padding, w, h);
-        painter.fillRect(card, palette().color(QPalette::Window));
-        ui::paintEdges(painter, card,
-                       ui::Edges(Qt::TopEdge) | Qt::BottomEdge | Qt::LeftEdge | Qt::RightEdge,
-                       palette().color(QPalette::WindowText), metrics::control::border);
-        painter.setPen(palette().color(QPalette::WindowText));
-        ui::drawInterfaceText(painter, card.adjusted(padding, 0, -padding, 0), text,
-                              Qt::AlignCenter);
-        painter.restore();
-    }
 }
 
 bool ReadingPage::annotationCenter(QPointF point) const
@@ -1395,12 +1426,17 @@ void ReadingPage::hideEvent(QHideEvent *event)
     QWidget::hideEvent(event);
 }
 
+QColor ReadingPage::pagePaper() const
+{
+    return ui::themeColors(ui::darkTheme(this)).paper;
+}
+
 QImage ReadingPage::renderStrip(int height, const std::function<void(QPainter &)> &draw)
 {
     if (!height)
         return {};
     QImage result(width(), height, QImage::Format_RGB32);
-    result.fill(palette().color(QPalette::Window));
+    result.fill(pagePaper());
     QPainter painter(&result);
     painter.setFont(font());
     painter.setPen(palette().color(QPalette::WindowText));
@@ -1442,8 +1478,7 @@ void ReadingPage::paintSlots(QPainter &painter, const QRect &bounds, bool footer
         leftRoom = shared * widths[0] / (widths[0] + widths[2]);
         rightRoom = shared - leftRoom;
     }
-    const auto ink = palette().color(QPalette::WindowText),
-               paper = palette().color(QPalette::Window);
+    const auto ink = palette().color(QPalette::WindowText), paper = pagePaper();
     paintContent(painter, QRect(side, bounds.y(), qMax(0, leftRoom), bounds.height()),
                  chrome.slotFields[first], slotContents[first], Qt::AlignLeft, ink, paper,
                  sleeping);
@@ -1464,6 +1499,8 @@ void ReadingPage::paintHeader(QPainter &painter, bool sleeping) const
     painter.setFont(font);
     if (showHeader())
         paintSlots(painter, headerTextRect(), false, sleeping);
+    if (progressAtTop())
+        paintBar(painter, metrics::reading::progressRuleEdge, true);
     if (panelBelowHeader)
         painter.fillRect(0, topHeight() - metrics::control::border, width(),
                          metrics::control::border, ui::dividerColor(this));
@@ -1483,18 +1520,39 @@ void ReadingPage::paintFooter(QPainter &painter, bool sleeping) const
         } else
             paintSlots(painter, bounds, true, sleeping);
     }
-    if (showProgress()) {
-        const auto ink = palette().color(QPalette::WindowText);
-        painter.fillRect(QRect(0, bottomHeight() - metrics::reading::progressBottom, width(),
-                               metrics::control::border),
-                         ink);
-        painter.fillRect(QRect(0,
-                               bottomHeight() - metrics::reading::progressBottom
-                                       - metrics::reading::progressFillHeight,
-                               qRound(width() * progressFraction),
-                               metrics::reading::progressFillHeight),
-                         ink);
+    if (progressAtBottom())
+        paintBar(painter, bottomHeight() - metrics::reading::progressRuleEdge, false);
+}
+
+QVector<double> ReadingPage::shownTicks() const
+{
+    return chrome.progressTicks ? progressTicks : QVector<double>{};
+}
+
+void paintProgressBar(QPainter &painter, int left, int span, int edge, bool atTop, qreal fraction,
+                      const QVector<double> &ticks, const ProgressBarColors &colors)
+{
+    const int rule = metrics::reading::progressRuleHeight;
+    const int fill = metrics::reading::progressFillHeight;
+    const int gap = 2 * metrics::control::border;
+    const int filled = qRound(span * fraction);
+    const int ruleTop = atTop ? edge - rule : edge;
+    const int fillTop = atTop ? edge : edge - fill;
+    painter.fillRect(QRect(left + filled, ruleTop, span - filled, rule), colors.rest);
+    painter.fillRect(QRect(left, ruleTop, filled, rule), colors.ink);
+    painter.fillRect(QRect(left, fillTop, filled, fill), colors.ink);
+    const int top = qMin(ruleTop, fillTop);
+    for (const double tick : ticks) {
+        const int x = left + qRound(span * tick) - gap / 2;
+        painter.fillRect(QRect(x, top, gap, rule + fill), colors.paper);
     }
+}
+
+void ReadingPage::paintBar(QPainter &painter, int edge, bool atTop) const
+{
+    paintProgressBar(
+            painter, 0, width(), edge, atTop, progressFraction, shownTicks(),
+            { palette().color(QPalette::WindowText), ui::themeColors(this).outline, pagePaper() });
 }
 
 void ReadingPage::updatePointer()

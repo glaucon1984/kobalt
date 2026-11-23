@@ -26,6 +26,17 @@ lString32 cre(const QString &s)
     return Utf8ToUnicode(s.toUtf8().constData());
 }
 
+bool validTextEndpoint(ldomXPointerEx point)
+{
+    return !point.isNull() && point.isText() && point.getOffset() >= 0
+            && point.getOffset() <= point.getNode()->getText().length() && point.isVisible();
+}
+
+QString fragmentAnchor(int item)
+{
+    return QStringLiteral("/body/DocFragment[%1]").arg(item + 1);
+}
+
 struct PageTextRange
 {
     ldomXPointerEx start, end;
@@ -118,6 +129,10 @@ struct EngineDocument::SourceIndex
         int range, left = -1, right = -1, maximumEnd;
     };
 
+    // A lookup document is temporary. Keep only the source order of verified
+    // text positions, never its nodes. Bound both the path and key storage.
+    QCache<QString, QVector<int>> textOrders{ 512 * 1024 };
+    std::shared_ptr<ReaderSource::SelectionEndpoints> selectionEndpoints;
     quint64 layout = 0;
     qint64 retainedBytes = 0;
     QHash<QString, int> lookup;
@@ -297,7 +312,9 @@ QVector<int> EngineDocument::pagesOf(const QStringList &positions, bool rangeEnd
             if (exclusive && !pointer.isNull())
                 pointer.prevVisibleChar(false);
             bool inSlice = true;
-            if (slices() && !pointer.isNull()) {
+            // An image-only spine item fits in one slice. Its bookmark has
+            // page coordinates but no character offset inside a text range.
+            if (slices() && !pointer.isNull() && spineItemText() > 0) {
                 const int before = textBefore(qstring(pointer.toString()));
                 inSlice = before >= sliceFirst_ && before < sliceEnd_;
             }
@@ -403,25 +420,18 @@ AnnotationToken sourceWord(ColumnView *engine, QSize size, ldomXPointerEx hit,
     auto wordBounds = [&] {
         QTextBoundaryFinder words(QTextBoundaryFinder::Word, text);
         words.setPosition(offset);
-        // Qt reports Han and Thai boundaries without word-item flags. Keep
-        // these boundaries so their text can still be selected. Thai selection
-        // follows these boundaries; it does not use a dictionary segmenter.
-        const auto script = QChar::script(scalar(offset));
-        const bool unflaggedScript = script == QChar::Script_Han || script == QChar::Script_Thai;
-        if (!(words.boundaryReasons() & QTextBoundaryFinder::StartOfItem)
-            && !(unflaggedScript && words.isAtBoundary())) {
-            if (words.toPreviousBoundary() < 0) {
-                return qMakePair(-1, -1);
-            }
-        }
-        if (!(words.boundaryReasons() & QTextBoundaryFinder::StartOfItem) && !unflaggedScript) {
+        if (!words.isAtBoundary() && words.toPreviousBoundary() < 0)
             return qMakePair(-1, -1);
-        }
-        const int begin = words.position(), end = words.toNextBoundary();
+        const int begin = words.position();
+        // Qt can delimit a letter and its marks without classifying it as a word.
+        // Use that segment for lookup and highlighting in unsegmented scripts.
+        const bool letter = QChar::isLetter(scalar(begin));
+        if (!letter && !(words.boundaryReasons() & QTextBoundaryFinder::StartOfItem))
+            return qMakePair(-1, -1);
+        const int end = words.toNextBoundary();
         if (end <= offset || end - begin > 256
-            || (!(words.boundaryReasons() & QTextBoundaryFinder::EndOfItem) && !unflaggedScript)) {
+            || (!letter && !(words.boundaryReasons() & QTextBoundaryFinder::EndOfItem)))
             return qMakePair(-1, -1);
-        }
         return qMakePair(begin, end);
     };
     const auto bounds = wordBounds();
@@ -509,21 +519,33 @@ bool sentenceTerminal(char32_t c)
             || c == 0x061f || c == 0x06d4 || c == 0x0964 || c == 0x0965;
 }
 
-bool ambiguousPeriod(const QString &text, int position)
+bool ambiguousPeriod(const QString &text, int position, bool blockEnd)
 {
     if (position <= 0 || text[position] != '.') {
         return false;
     }
     int begin = position;
-    while (begin > 0 && (text[begin - 1].isLetterOrNumber() || text[begin - 1] == '.')) {
+    while (begin > 0
+           && (text[begin - 1].isLetterOrNumber() || text[begin - 1].isMark()
+               || text[begin - 1] == '.')) {
         --begin;
     }
     const auto word = text.mid(begin, position - begin).toLower();
-    static const QSet<QString> abbreviations = { "mr",  "mrs", "ms",  "dr",  "prof",
-                                                 "st",  "sr",  "jr",  "vs",  "etc",
-                                                 "fig", "no",  "inc", "e.g", "i.e" };
-    return word.size() == 1 || word.contains('.') || abbreviations.contains(word)
-            || (!word.isEmpty() && word.at(word.size() - 1).isDigit());
+    static const QSet<QString> abbreviations = { "mr", "mrs", "ms",  "dr",  "prof", "st",  "sr",
+                                                 "jr", "vs",  "etc", "fig", "inc",  "e.g", "i.e" };
+    if (text[position - 1].isDigit()) {
+        // A decimal point or a leading list number does not finish a sentence.
+        return (position + 1 < text.size() && text[position + 1].isDigit())
+                || text.left(begin).trimmed().isEmpty();
+    }
+    int next = position + 1;
+    while (next < text.size() && text[next].isSpace())
+        ++next;
+    if (word == "no")
+        return next < text.size() ? text[next].isDigit() || text[begin].isUpper() : !blockEnd;
+    if (word.normalized(QString::NormalizationForm_C).size() == 1)
+        return next < text.size() || !blockEnd;
+    return word.contains('.') || abbreviations.contains(word);
 }
 
 QChar openingFor(QChar closing)
@@ -675,7 +697,7 @@ QString sentenceEnding(ColumnView *engine, QSize size, const TextRange &range,
         || suffix.contains("..")) {
         return {};
     }
-    if (ambiguousPeriod(text, wordEnd)) {
+    if (ambiguousPeriod(text, wordEnd, blockEnd)) {
         return {};
     }
     QTextBoundaryFinder sentences(QTextBoundaryFinder::Sentence, text);
@@ -690,7 +712,7 @@ QString sentenceEnding(ColumnView *engine, QSize size, const TextRange &range,
            && (text[preceding].isSpace() || text[preceding] == '"' || text[preceding] == '\'')) {
         --preceding;
     }
-    if (preceding >= 0 && ambiguousPeriod(text, preceding)) {
+    if (preceding >= 0 && ambiguousPeriod(text, preceding, blockEnd)) {
         return {};
     }
     sentences.setPosition(wordEnd);
@@ -1087,7 +1109,10 @@ AnnotationToken EngineDocument::annotationDragTokenAt(QPoint point, const QStrin
             return {};
     }
     auto *doc = engine_->getDocument();
-    ldomXPointerEx current(doc->createXPointer(cre(boundary)));
+    const auto endpoints = visibleEndpoints(start ? token.start : token.end, boundary);
+    if (endpoints.second.isEmpty())
+        return {};
+    ldomXPointerEx current(doc->createXPointer(cre(endpoints.second)));
     ldomXPointerEx candidate(doc->createXPointer(cre(start ? token.start : token.end)));
     if (current.isNull() || candidate.isNull())
         return {};
@@ -1142,21 +1167,63 @@ TextRange EngineDocument::annotationRange(const QString &startTokenStart,
         if (start.isEmpty() || start.size() > 4096) {
             return TextRange();
         }
-        ldomXPointerEx pointer(doc->createXPointer(cre(start)));
-        if (pointer.isNull() || !pointer.isText() || pointer.getOffset() < 0
-            || pointer.getOffset() > pointer.getNode()->getText().length()) {
+        auto *unit = windowFirst_ >= 0 ? textDocument(spineItemIndex(start)) : this;
+        if (!unit)
             return TextRange();
-        }
-        if (exclusiveEnd && !pointer.prevVisibleChar(true)) {
+        auto *tokenDoc = unit->engine_->getDocument();
+        const KoblazeSourceText tokenSource(unit->slices() ? tokenDoc : nullptr);
+        ldomXPointerEx pointer(tokenDoc->createXPointer(cre(start)));
+        if (!validTextEndpoint(pointer) || (exclusiveEnd && !pointer.prevVisibleChar(true)))
             return TextRange();
-        }
-        const auto word = sourceWord(engine_.get(), size_, pointer, true, false);
+        const auto word = sourceWord(unit->engine_.get(), size_, pointer, true, false);
         return TextRange{ word.start, word.end, word.text };
     };
     const auto first = token(startTokenStart, startTokenEnd, false);
     const auto last = token(endTokenStart, endTokenEnd, true);
     if (first.text.isEmpty() || last.text.isEmpty()) {
         return {};
+    }
+    const int firstItem = spineItemIndex(first.start), lastItem = spineItemIndex(last.start);
+    if (windowFirst_ >= 0
+        && (qMin(firstItem, lastItem) < windowFirst_ || qMax(firstItem, lastItem) > windowLast_)) {
+        if (firstItem == lastItem) {
+            auto *unit = textDocument(firstItem);
+            return unit ? unit->annotationRange(first.start, first.end, last.start, last.end,
+                                                endTokenPolicy, startTokenPolicy, current)
+                        : TextRange();
+        }
+        const bool forward = firstItem < lastItem;
+        QString start = forward ? first.start : last.start, end = forward ? last.end : first.end;
+        const QString chosenStart = start, chosenEnd = end;
+        const bool expandStart = forward ? startTokenPolicy : endTokenPolicy;
+        const bool expandEnd = forward ? endTokenPolicy : startTokenPolicy;
+        if (expandStart) {
+            auto *unit = textDocument(qMin(firstItem, lastItem));
+            if (!unit)
+                return {};
+            const KoblazeSourceText source(unit->slices() ? unit->engine_->getDocument() : nullptr);
+            const auto opening =
+                    sentenceOpening(unit->engine_.get(), size_, { start, end, {} }, current);
+            if (!opening.start.isEmpty())
+                start = opening.start;
+        }
+        if (expandEnd) {
+            auto *unit = textDocument(qMax(firstItem, lastItem));
+            if (!unit)
+                return {};
+            const KoblazeSourceText source(unit->slices() ? unit->engine_->getDocument() : nullptr);
+            const auto ending =
+                    sentenceEnding(unit->engine_.get(), size_,
+                                   { fragmentAnchor(qMax(firstItem, lastItem)), end, {} }, current);
+            if (!ending.isEmpty())
+                end = ending;
+        }
+        auto result = textRange(start, end);
+        result.chosenStart = chosenStart;
+        result.chosenEnd = chosenEnd;
+        result.sentenceStartPolicy = expandStart;
+        result.sentenceEndPolicy = expandEnd;
+        return result;
     }
     ldomXPointerEx a(doc->createXPointer(cre(first.start))),
             b(doc->createXPointer(cre(last.start)));
@@ -1210,6 +1277,18 @@ TextRange EngineDocument::annotationRange(const QString &start, const QString &e
 #ifdef KOBLAZE_SOURCE_TEXT
     const KoblazeSourceText sourceText(slices() ? doc : nullptr);
 #endif
+    if (windowFirst_ >= 0) {
+        const int a = spineItemIndex(start), b = spineItemIndex(end);
+        if (qMin(a, b) < windowFirst_ || qMax(a, b) > windowLast_) {
+            if (a == b) {
+                auto *unit = textDocument(a);
+                return unit ? unit->annotationRange(start, end) : TextRange();
+            }
+            if (a < b)
+                return textRange(start, end);
+            return annotationRange(start, start, end, end);
+        }
+    }
     ldomXPointerEx a(doc->createXPointer(cre(start))), b(doc->createXPointer(cre(end)));
     if (a.isNull() || b.isNull() || !a.isText() || !b.isText()) {
         return {};
@@ -1234,10 +1313,121 @@ TextRange EngineDocument::annotationRange(const QString &start, const QString &e
     return textRange(first.start, last.end);
 }
 
+EngineDocument *EngineDocument::textDocument(int item)
+{
+    if (windowFirst_ < 0 || (item >= windowFirst_ && item <= windowLast_))
+        return this;
+    return openLookupUnit(item, {}, item, false);
+}
+
+QVector<int> EngineDocument::textOrder(const QString &anchor)
+{
+    if (anchor.isEmpty() || anchor.size() > 4096)
+        return {};
+    const int item = spineItemIndex(anchor);
+    if (item < 0 || item >= spineItemCount_)
+        return {};
+    const auto index = sourceIndex({});
+    if (auto *known = index->textOrders.object(anchor))
+        return *known;
+    auto *unit = textDocument(item);
+    if (!unit)
+        return {};
+    auto *doc = unit->engine_->getDocument();
+    const KoblazeSourceText sourceText(unit->slices() ? doc : nullptr);
+    ldomXPointerEx point(doc->createXPointer(cre(anchor)));
+    QVector<int> order;
+    if (validTextEndpoint(point)) {
+        order.append(point.getOffset());
+        for (auto *node = point.getNode(); node; node = node->getParentNode())
+            order.append(node->getNodeIndex());
+        std::reverse(order.begin(), order.end());
+        order.prepend(item);
+    }
+    index->textOrders.insert(anchor, new QVector<int>(order),
+                             96 + anchor.size() * sizeof(QChar) + order.size() * sizeof(int));
+    return order;
+}
+
 TextRange EngineDocument::textRange(const QString &start, const QString &end, bool withContext)
 {
     if (!engine_ || start.isEmpty() || end.isEmpty() || start.size() > 4096 || end.size() > 4096) {
         return {};
+    }
+    if (windowFirst_ >= 0) {
+        const int a = spineItemIndex(start), b = spineItemIndex(end);
+        const int first = qMin(a, b), last = qMax(a, b);
+        if (first >= 0 && (first < windowFirst_ || last > windowLast_)) {
+            if (last >= spineItemCount_)
+                return {};
+            if (first == last) {
+                auto *unit = textDocument(first);
+                return unit ? unit->textRange(start, end, withContext) : TextRange();
+            }
+            TextRange result;
+            result.start = a < b ? start : end;
+            result.end = a < b ? end : start;
+            QStringList parts, contexts;
+            int length = 0;
+            for (int item = first; item <= last; ++item) {
+                engineActivity().checkpoint();
+                auto *unit = textDocument(item);
+                if (!unit)
+                    return {};
+                auto *doc = unit->engine_->getDocument();
+                const KoblazeSourceText sourceText(unit->slices() ? doc : nullptr);
+                auto fragment = doc->createXPointer(cre(fragmentAnchor(item)));
+                if (fragment.isNull())
+                    return {};
+                ldomXRange bounds(fragment.getNode(), true);
+                ldomXPointerEx from = bounds.getStart(), to = bounds.getEnd();
+                if (item == first) {
+                    from = ldomXPointerEx(doc->createXPointer(cre(result.start)));
+                    if (!validTextEndpoint(from))
+                        return {};
+                    result.start = qstring(from.toString());
+                }
+                if (item == last) {
+                    to = ldomXPointerEx(doc->createXPointer(cre(result.end)));
+                    if (!validTextEndpoint(to))
+                        return {};
+                    result.end = qstring(to.toString());
+                }
+                const QString part = qstring(ldomXRange(from, to).getRangeText()).simplified();
+                if (!part.isEmpty()) {
+                    length += part.size() + (parts.isEmpty() ? 0 : 1);
+                    if (length > 256 * 1024)
+                        return {};
+                    parts << part;
+                }
+                if (withContext) {
+                    if (item == first)
+                        from.thisSentenceStart();
+                    if (item == last)
+                        to.thisSentenceEnd();
+                    if (item != first && item != last)
+                        contexts << part;
+                    else
+                        contexts << qstring(ldomXRange(from, to).getRangeText()).simplified();
+                }
+            }
+            result.text = parts.join(' ');
+            if (result.text.isEmpty())
+                return {};
+            if (withContext) {
+                result.context = contexts.join(' ').simplified();
+                if (result.context.size() > 600) {
+                    const int center = qMax(0, int(result.context.indexOf(result.text)))
+                            + result.text.size() / 2;
+                    const int from = qBound(0, center - 300, int(result.context.size()) - 600);
+                    result.context = (from ? QStringLiteral("…") : QString())
+                            + result.context.mid(from, 600)
+                            + (from + 600 < result.context.size() ? QStringLiteral("…")
+                                                                  : QString());
+                }
+            }
+            return result;
+        }
     }
     auto *doc = engine_->getDocument();
 #ifdef KOBLAZE_SOURCE_TEXT
@@ -1282,12 +1472,32 @@ TextRange EngineDocument::textRange(const QString &start, const QString &end, bo
     return result;
 }
 
-QVector<int>
-EngineDocument::intersectingRanges(const QString &start, const QString &end,
-                                   const QVector<QPair<QString, QString>> &ranges) const
+QVector<int> EngineDocument::intersectingRanges(const QString &start, const QString &end,
+                                                const QVector<QPair<QString, QString>> &ranges)
 {
     QVector<int> result;
     if (!engine_) {
+        return result;
+    }
+    if (windowFirst_ >= 0) {
+        const auto first = textOrder(start), last = textOrder(end);
+        const auto before = [](const QVector<int> &left, const QVector<int> &right) {
+            return std::lexicographical_compare(left.cbegin(), left.cend(), right.cbegin(),
+                                                right.cend());
+        };
+        if (first.isEmpty() || last.isEmpty() || !before(first, last))
+            return {};
+        for (int i = 0; i < ranges.size(); ++i) {
+            if (i % 64 == 0)
+                engineActivity().checkpoint();
+            const int a = spineItemIndex(ranges[i].first), b = spineItemIndex(ranges[i].second);
+            if (b < first.front() || a > last.front() || a > b)
+                continue;
+            const auto left = textOrder(ranges[i].first), right = textOrder(ranges[i].second);
+            if (!left.isEmpty() && !right.isEmpty() && before(left, right) && before(left, last)
+                && before(first, right))
+                result.append(i);
+        }
         return result;
     }
     auto *doc = engine_->getDocument();
@@ -1394,26 +1604,107 @@ EngineDocument::sourceRanges(const QVector<QPair<QString, QString>> &ranges) con
     return index;
 }
 
-QVector<int> EngineDocument::visibleRanges(const QVector<QPair<QString, QString>> &ranges) const
+bool EngineDocument::validSelectionEndpoint(const QString &anchor)
+{
+    if (anchor.isEmpty() || anchor.size() > 4096)
+        return false;
+    const auto index = sourceIndex({});
+    if (!index->selectionEndpoints) {
+        const auto appearance = estimateKey(settingsState(), 0);
+        if (!source_->selectionEndpoints || source_->selectionEndpoints->appearance != appearance) {
+            source_->selectionEndpoints = std::make_shared<ReaderSource::SelectionEndpoints>();
+            source_->selectionEndpoints->appearance = appearance;
+        }
+        index->selectionEndpoints = source_->selectionEndpoints;
+    }
+    auto &cache = index->selectionEndpoints->valid;
+    if (const auto *valid = cache.object(anchor))
+        return *valid;
+    auto *unit = textDocument(spineItemIndex(anchor));
+    if (!unit)
+        return false; // An interrupted or unavailable lookup can be retried.
+    auto *doc = unit->engine_->getDocument();
+    const KoblazeSourceText sourceText(unit->slices() ? doc : nullptr);
+    const bool valid = validTextEndpoint(ldomXPointerEx(doc->createXPointer(cre(anchor))));
+    cache.insert(QString(anchor.constData(), anchor.size()), new bool(valid));
+    return valid;
+}
+
+// Remote fragments have no text nodes in the displayed document. Once a remote
+// text endpoint is verified, its empty fragment has the same order relative
+// to every visible character. It supplies a clipping boundary, never a caret.
+QPair<QString, QString> EngineDocument::visibleEndpoints(const QString &start, const QString &end,
+                                                         bool validate)
+{
+    if (windowFirst_ < 0)
+        return { start, end };
+    const int a = spineItemIndex(start), b = spineItemIndex(end);
+    if (a < 0 || b < 0)
+        return { start, end };
+    if (qMax(a, b) < windowFirst_ || qMin(a, b) > windowLast_ || qMax(a, b) >= spineItemCount_)
+        return {};
+    const bool crossesWindow = qMin(a, b) < windowFirst_ || qMax(a, b) > windowLast_;
+    auto project = [&](const QString &anchor, int item) {
+        if (validate && crossesWindow && !validSelectionEndpoint(anchor))
+            return QString();
+        return item >= windowFirst_ && item <= windowLast_ ? anchor : fragmentAnchor(item);
+    };
+    return { project(start, a), project(end, b) };
+}
+
+QVector<int> EngineDocument::visibleRanges(const QVector<QPair<QString, QString>> &ranges)
 {
     if (ranges.isEmpty() || ranges.size() > 2001 || !engine_ || pages() <= 0)
         return {};
-    const auto index = sourceRanges(ranges);
+    auto projected = ranges;
+    if (windowFirst_ >= 0)
+        for (auto &range : projected)
+            range = visibleEndpoints(range.first, range.second, false);
+    const auto index = sourceRanges(projected);
     QVector<int> result;
     for (const auto &span : pageTextRanges(*engine_))
         result += index->intersections(span.start, span.end);
     std::sort(result.begin(), result.end());
     result.erase(std::unique(result.begin(), result.end()), result.end());
+    if (windowFirst_ >= 0) {
+        // Filter by the current page before opening any remote chapter. Group
+        // cold endpoints by item, so every needed chapter is opened at most once.
+        QMap<int, QSet<QString>> needed;
+        for (int i : result) {
+            const auto &range = ranges[i];
+            if (range != projected[i]) {
+                needed[spineItemIndex(range.first)].insert(range.first);
+                needed[spineItemIndex(range.second)].insert(range.second);
+            }
+        }
+        QSet<QString> invalid;
+        for (const auto &anchors : needed) {
+            engineActivity().checkpoint();
+            for (const auto &anchor : anchors)
+                if (!validSelectionEndpoint(anchor))
+                    invalid.insert(anchor);
+        }
+        result.erase(std::remove_if(result.begin(), result.end(),
+                                    [&](int i) {
+                                        return invalid.contains(ranges[i].first)
+                                                || invalid.contains(ranges[i].second);
+                                    }),
+                     result.end());
+    }
     return result;
 }
 
-bool EngineDocument::rangeVisible(const QString &start, const QString &end) const
+bool EngineDocument::rangeVisible(const QString &start, const QString &end)
 {
     if (!engine_ || pages() <= 0 || start.isEmpty() || end.isEmpty() || start.size() > 4096
         || end.size() > 4096)
         return false;
     auto *doc = engine_->getDocument();
-    ldomXPointerEx a(doc->createXPointer(cre(start))), b(doc->createXPointer(cre(end)));
+    const auto endpoints = visibleEndpoints(start, end);
+    if (endpoints.first.isEmpty() || endpoints.second.isEmpty())
+        return false;
+    ldomXPointerEx a(doc->createXPointer(cre(endpoints.first))),
+            b(doc->createXPointer(cre(endpoints.second)));
     if (a.isNull() || b.isNull())
         return false;
     if (a.compare(b) > 0)
@@ -1434,7 +1725,11 @@ AnnotationGeometry EngineDocument::annotationGeometry(const QString &start, cons
         return result;
     }
     auto *doc = engine_->getDocument();
-    ldomXPointerEx a(doc->createXPointer(cre(start))), b(doc->createXPointer(cre(end)));
+    const auto endpoints = visibleEndpoints(start, end);
+    if (endpoints.first.isEmpty() || endpoints.second.isEmpty())
+        return result;
+    ldomXPointerEx a(doc->createXPointer(cre(endpoints.first))),
+            b(doc->createXPointer(cre(endpoints.second)));
     if (a.isNull() || b.isNull()) {
         return result;
     }
@@ -1444,7 +1739,7 @@ AnnotationGeometry EngineDocument::annotationGeometry(const QString &start, cons
     if (a.compare(b) == 0) {
         return result;
     }
-    result.rectangles = rangeRects(qstring(a.toString()), qstring(b.toString()));
+    result.rectangles = rangeRects(start, end);
     const int current = page();
     auto *pageList = engine_->getPageList();
     result.vertical = pageList->hasMixedWritingModes()
@@ -1517,23 +1812,9 @@ EngineDocument::pageRangeRects(int target, const QVector<QPair<QString, QString>
     if (!engine_ || target < 0 || target >= pages() || ranges.isEmpty() || ranges.size() > 2000)
         return result;
     result.resize(ranges.size());
-    const int current = engine_->getCurPage();
-
-    struct Restore
-    {
-        LVDocView &view;
-        ldomXPointer bookmark;
-        bool moved;
-
-        ~Restore()
-        {
-            if (moved)
-                view.goToBookmark(bookmark);
-        }
-    } restore{ *engine_, engine_->getBookmark(), target != current };
-
-    if (restore.moved)
-        engine_->goToPage(target);
+    const int column = target == engine_->getCurPage() ? engine_->getCurPage(true)
+                                                       : engine_->firstColumn(target);
+    ColumnView::ScopedColumn restore(*engine_, column);
     int remaining = 65536;
     for (const int index : visibleRanges(ranges)) {
         engineActivity().checkpoint();
@@ -1555,7 +1836,11 @@ QVector<QRect> EngineDocument::rangeRects(const QString &start, const QString &e
     if (!engine_)
         return result;
     auto *doc = engine_->getDocument();
-    ldomXPointerEx a(doc->createXPointer(cre(start))), b(doc->createXPointer(cre(end)));
+    const auto endpoints = includeImages ? qMakePair(start, end) : visibleEndpoints(start, end);
+    if (endpoints.first.isEmpty() || endpoints.second.isEmpty())
+        return result;
+    ldomXPointerEx a(doc->createXPointer(cre(endpoints.first))),
+            b(doc->createXPointer(cre(endpoints.second)));
     if (a.isNull() || b.isNull())
         return result;
     // Resolve geometry only for visible main text and note fragments. Image
@@ -1707,12 +1992,13 @@ EngineDocument::SearchBounds EngineDocument::searchBounds(SearchScope scope, con
     const int item = spineItemIndex(origin);
     auto *document = this;
     if (windowFirst_ >= 0 && slicePages_ > 0 && item >= 0) {
-        document = documentFor(item, current);
+        document =
+                item >= windowFirst_ && item <= windowLast_ ? this : openLookupUnit(item, current);
         if (document && document->slices()) {
             const int before = document->textBefore(origin);
             if (before < document->sliceFirst_ || before >= document->sliceEnd_) {
                 if (document == this)
-                    document = openAhead(item, current);
+                    document = openLookupUnit(item, current);
                 if (document && !document->showSliceOf(origin))
                     document = nullptr;
             }
@@ -1997,41 +2283,34 @@ bool searchKeyMayHold(const QString &key, const QString &pattern)
     return false;
 }
 
-// The spine item of an engine position, counted from zero, or -1.
-int positionItem(const QString &position)
-{
-    static const QRegularExpression fragment(QStringLiteral("/DocFragment(?:\\[(\\d+)\\])?"));
-    const auto match = fragment.match(position);
-    return match.hasMatch() ? qMax(1, match.captured(1).toInt()) - 1 : -1;
-}
 } // namespace
 
 bool EngineDocument::mayContain(int item, const QString &pattern) const
 {
-    auto &texts = source_->searchTexts;
-    if (texts.size() != spineItemCount_)
-        texts = QVector<QString>(spineItemCount_);
-    if (item < 0 || item >= texts.size())
+    if (item < 0 || item >= spineItemCount_)
         return false;
-    if (texts[item].isNull()) {
-        const auto href = spineItems().value(item);
-        auto stream = source_->container->OpenStream(
-                Utf8ToUnicode(href.toUtf8().constData()).c_str(), LVOM_READ);
-        QByteArray bytes;
-        if (!stream.isNull() && stream->GetSize() < 64 * 1024 * 1024) {
-            bytes.resize(int(stream->GetSize()));
-            lvsize_t read = 0;
-            if (stream->Read(bytes.data(), bytes.size(), &read) != LVERR_OK
-                || read != stream->GetSize())
-                bytes.clear();
-        }
-        texts[item] = bytes.isEmpty() ? QStringLiteral("") : chapterSearchKey(bytes);
-    }
-    const auto &text = texts[item];
-    if (text.isEmpty())
-        return true;
+    auto &texts = source_->searchTexts;
+    if (!texts)
+        texts = std::make_shared<QCache<int, QString>>(512 * 1024);
     // CSS can hide intervening text nodes, joining visible parts of a word.
-    return searchKeyMayHold(text, pattern);
+    if (const auto *text = texts->object(item))
+        return text->isEmpty() || searchKeyMayHold(*text, pattern);
+    const auto href = spineItems().value(item);
+    auto stream = source_->container->OpenStream(Utf8ToUnicode(href.toUtf8().constData()).c_str(),
+                                                 LVOM_READ);
+    QByteArray bytes;
+    if (!stream.isNull() && stream->GetSize() < 64 * 1024 * 1024) {
+        bytes.resize(int(stream->GetSize()));
+        lvsize_t read = 0;
+        if (stream->Read(bytes.data(), bytes.size(), &read) != LVERR_OK
+            || read != stream->GetSize())
+            bytes.clear();
+    }
+    const auto text = bytes.isEmpty() ? QString() : chapterSearchKey(bytes);
+    const qint64 cost = sizeof(QString) + qint64(text.capacity()) * sizeof(QChar);
+    if (cost <= texts->maxCost())
+        texts->insert(item, new QString(text), int(cost));
+    return text.isEmpty() || searchKeyMayHold(text, pattern);
 }
 
 EngineDocument *EngineDocument::documentFor(int item, const std::function<bool()> &current)
@@ -2060,8 +2339,8 @@ void EngineDocument::labelChapterHit(SearchHit &hit) const
 }
 
 // In chapter mode a search of the book goes through the spine items in
-// book order. The items that are not loaded are opened ahead one at a
-// time, and only when their plain text can contain the query.
+// book order. Search opens one extra unit at a time and skips chapters
+// whose plain text rules out the query.
 SearchBatch EngineDocument::searchText(const QString &query, SearchCursor cursor, int maximum,
                                        SearchScope scope, const QString &origin, bool details,
                                        std::function<bool()> current)
@@ -2098,13 +2377,15 @@ SearchBatch EngineDocument::searchText(const QString &query, SearchCursor cursor
         return result;
     }
     const int firstItem = spineItemIndex(bounds.lower);
-    const int lastItem = spineItemIndex(bounds.upper);
+    bool atStart = false;
+    const int upperItem = spineItemIndex(bounds.upper, &atStart);
+    const int endItem =
+            upperItem < 0 ? spineItemCount_ : qMin(spineItemCount_, upperItem + (atStart ? 0 : 1));
     const auto pattern = searchKey(query);
     cursor.item = qMax(cursor.item, firstItem);
     QElapsedTimer budget;
     budget.start();
-    while (cursor.item < spineItemCount_ && (lastItem < 0 || cursor.item <= lastItem)
-           && result.hits.size() < maximum && budget.elapsed() < 8) {
+    while (cursor.item < endItem && result.hits.size() < maximum && budget.elapsed() < 8) {
         if (current && !current())
             break;
         const bool loaded = cursor.item >= windowFirst_ && cursor.item <= windowLast_;
@@ -2113,18 +2394,16 @@ SearchBatch EngineDocument::searchText(const QString &query, SearchCursor cursor
             ++cursor.item;
             continue;
         }
-        auto *document =
-                documentFor(cursor.firstItem >= 0 ? cursor.firstItem : cursor.item, current);
-        if (document && cursor.firstItem >= 0
-            && (document->windowFirst_ != cursor.firstItem
-                || document->windowLast_ != cursor.lastItem))
-            document = openAhead(cursor.firstItem, current, cursor.lastItem);
-        // A long spine item has a layout for one part at a time, and only
-        // that part has text to search. Another document goes through the
-        // parts: the one on screen keeps its part.
-        if (document == this && slices())
-            document = openAhead(cursor.firstItem >= 0 ? cursor.firstItem : cursor.item, current,
-                                 cursor.lastItem);
+        const bool sameWindow = cursor.firstItem < 0
+                || (cursor.firstItem == windowFirst_ && cursor.lastItem == windowLast_);
+        // Search may move through the slices. Keep both the displayed slice
+        // and the one prepared for the next turn at their reading positions.
+        auto *document = this;
+        if (!loaded || !sameWindow || slices()) {
+            const int first = cursor.firstItem >= 0 ? cursor.firstItem : cursor.item;
+            const int last = cursor.lastItem >= 0 ? cursor.lastItem : unitFrom(first).second;
+            document = openLookupUnit(first, current, qMin(last, endItem - 1));
+        }
         if (!document) {
             if (current && !current())
                 break;
@@ -2151,8 +2430,8 @@ SearchBatch EngineDocument::searchText(const QString &query, SearchCursor cursor
             if (!shown) {
                 // Stopped for other work: the document may hold half a
                 // layout. The next call opens it again.
-                if (document == ahead_.get())
-                    ahead_.reset();
+                if (document == lookupUnit_.document.get())
+                    lookupUnit_ = {};
                 break;
             }
         }
@@ -2173,7 +2452,7 @@ SearchBatch EngineDocument::searchText(const QString &query, SearchCursor cursor
         else
             batch.done = true;
         for (auto &hit : batch.hits) {
-            const int item = positionItem(hit.start);
+            const int item = spineItemIndex(hit.start);
             if (item < cursor.item || item > last)
                 continue;
             // A part also lays out some text of the next part, which that
@@ -2212,7 +2491,9 @@ SearchBatch EngineDocument::searchText(const QString &query, SearchCursor cursor
         }
     }
     result.cursor = cursor;
-    result.done = cursor.item >= spineItemCount_ || (lastItem >= 0 && cursor.item > lastItem);
+    result.done = cursor.item >= endItem;
+    if (result.done)
+        lookupUnit_ = {};
     result.nextPage = result.done ? pages() : 0;
     return result;
 }
@@ -2232,8 +2513,9 @@ QVector<SearchHit> EngineDocument::searchDetails(QVector<SearchHit> hits, Search
                                        : QVector<SearchHit>();
     QVector<SearchHit> result;
     for (const auto &hit : hits) {
-        const int item = positionItem(hit.start);
-        auto *document = documentFor(item);
+        const int item = spineItemIndex(hit.start);
+        auto *document =
+                item >= windowFirst_ && item <= windowLast_ ? this : openLookupUnit(item, {});
         // A long spine item has a layout for one part at a time, and only
         // that part has the text around a hit. Another document shows the
         // part of the hit: the one on screen keeps its part.
@@ -2241,7 +2523,7 @@ QVector<SearchHit> EngineDocument::searchDetails(QVector<SearchHit> hits, Search
             const int before = document->textBefore(hit.start);
             if (before < document->sliceFirst_ || before >= document->sliceEnd_) {
                 if (document == this)
-                    document = openAhead(item, {});
+                    document = openLookupUnit(item, {});
                 if (document && document->slices() && !document->showSliceAt(before))
                     document = nullptr;
             }

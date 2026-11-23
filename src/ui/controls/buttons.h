@@ -93,7 +93,8 @@ private:
     Qt::Alignment contentAlignment = Qt::AlignHCenter;
     int iconLabelGap = 0;
     bool iconAboveLabel = false;
-    bool hasConfiguredIcon = false, hasIconTheme = false, iconDark = false;
+    bool hasConfiguredIcon = false, hasIconTheme = false;
+    QColor iconInk;
 };
 
 // A selectable diagram of the actual page hit regions, with a label below it.
@@ -173,12 +174,13 @@ public:
     explicit DropdownButton(QWidget *parent);
 
     // A forward button opens another page instead of a list, so it shows a
-    // right chevron in place of the arrow.
-    void setForward(bool value)
+    // right chevron or the supplied action icon in place of the arrow.
+    void setForward(bool value, ControlIcon icon = ControlIcon::Next)
     {
-        if (forward == value)
+        if (forward == value && forwardIcon == icon)
             return;
         forward = value;
+        forwardIcon = icon;
         update();
     }
 
@@ -193,6 +195,7 @@ protected:
 
 private:
     bool forward = false;
+    ControlIcon forwardIcon = ControlIcon::Next;
 };
 
 class FontButton : public DropdownButton
@@ -260,6 +263,17 @@ public:
     // Typeface rows reserve an Aa sample before their chevron.
     void setTypefacePreview(const QString &face);
 
+    void setIconStylePreview(IconStyle style)
+    {
+        previewIcons = true;
+        previewStyle = style;
+        update();
+    }
+
+    void setSample(QWidget *sample);
+
+    QWidget *sample() const { return rowSample; }
+
     QString typefacePreview() const { return previewFace; }
 
     void setRule(Edges edges)
@@ -294,6 +308,9 @@ private:
     Presentation mode;
     ControlIcon glyph = ControlIcon::Link;
     QString note, previewFace, description;
+    QWidget *rowSample = nullptr;
+    bool previewIcons = false;
+    IconStyle previewStyle = IconStyle::Monochrome;
     QFont previewFont;
     int previewDensity = 0;
     Edges rule;

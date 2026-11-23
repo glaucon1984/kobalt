@@ -8,7 +8,7 @@
 #include "dictionaries_page.h"
 #include "ui/style/fonts.h"
 #include "ui/style/styles.h"
-#include "support/strings.h"
+#include "support/percentage_text.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QHideEvent>
@@ -210,21 +210,20 @@ void DictionariesPage::setTransfer(const QString &id, qint64 received, qint64 to
     redraw();
 }
 
-void DictionariesPage::setState(const QSet<QString> &installed, bool busy, const QString &message)
+void DictionariesPage::setState(const QSet<QString> &installed, bool busy,
+                                DictionaryDownloadResult result)
 {
     const bool changed = installedIds != installed || working != busy;
     const auto previousFailure = failedId;
     installedIds = installed;
     working = busy;
     if (!endedId.isEmpty()) {
-        if (!installed.contains(endedId) && !message.isEmpty()
-            && !message.contains("cancel", Qt::CaseInsensitive))
+        if (!installed.contains(endedId) && result == DictionaryDownloadResult::Failed)
             failedId = endedId;
         endedId.clear();
     }
     if (!busy && !requestedId.isEmpty()) {
-        if (!installed.contains(requestedId) && !message.isEmpty()
-            && !message.contains("cancel", Qt::CaseInsensitive))
+        if (!installed.contains(requestedId) && result == DictionaryDownloadResult::Failed)
             failedId = requestedId;
         requestedId.clear();
     }
@@ -453,7 +452,7 @@ void DictionariesPage::redraw()
         const int percent =
                 totalBytes > 0 ? qBound(0, int(100.0 * receivedBytes / totalBytes), 100) : 0;
         row->setAccessory(ui::ListRow::Caption{
-                active ? QString::number(percent) + "%"
+                active ? strings::localizedPercent(percent)
                        : bytes(installed ? installedSizes.value(entry.id) : entry.size),
                 ui::px(180) });
         if (compact)
@@ -465,7 +464,7 @@ void DictionariesPage::redraw()
         line->metadata->setObjectName(QString("rrDictionaryMetadata%1").arg(index));
         line->metadata->setText(
                 entry.id == failedId ? strings::get("dictionaries.download_failed")
-                        : active     ? QString::number(percent) + "%"
+                        : active     ? strings::localizedPercent(percent)
                                  : bytes(installed ? installedSizes.value(entry.id) : entry.size));
         const int nameHeight =
                 ui::wrappedInterfaceTextHeight(entry.name, line->name->font(), nameWidth);

@@ -1,3 +1,4 @@
+#include "app/reader/settings/interface_style.h"
 #include "support/diagnostics.h"
 #include "ui/controls/buttons.h"
 #include "ui/controls/icons.h"
@@ -180,8 +181,10 @@ public:
         const bool dark = preferences.value("dark_mode").toBool(false);
         showCover = preferences.value("show_opening_cover").toBool(true);
         setProperty("reader_dark", dark);
-        QPalette colors = ui::readerPalette(palette(), dark);
-        colors.setColor(QPalette::Midlight, ui::themeColors(dark).openingTrack);
+        const auto paletteId = reader::savedPalette(preferences);
+        setProperty("kobalt_palette", paletteId);
+        QPalette colors = ui::readerPalette(palette(), dark, paletteId);
+        colors.setColor(QPalette::Midlight, ui::themeColors(this).openingTrack);
         setPalette(colors);
         setFont(ui::interfaceFont());
         // The card stylesheet otherwise uses the application font on Qt 6.
@@ -342,7 +345,6 @@ public:
         } else {
             auto *dialog = failure();
             dialog->show();
-            dialog->fitCard();
             dialog->raise();
             dialog->setFocus();
         }
@@ -772,7 +774,6 @@ SaveErrorView::SaveErrorView(QWidget *parent, const QString &error, bool retried
         quit->setFixedHeight(ui::metrics::chrome::actionHeight);
         card()->rows()->addWidget(quit);
     }
-    fitCard();
 }
 
 } // namespace kobalt

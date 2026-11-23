@@ -5,6 +5,8 @@
 "common.save" = "Save";
 "bookmarks.pin" = "Pin bookmark";
 "bookmarks.modify" = "Modify pinned bookmark";
+"bookmarks.pin_title" = "Pin Bookmark";
+"bookmarks.modify_title" = "Modify Pinned Bookmark";
 "bookmarks.unpin" = "Unpin bookmark";
 "bookmarks.actions" = "Bookmark actions";
 "bookmarks.remove_this" = "Remove this bookmark";
@@ -12,13 +14,13 @@
 "bookmarks.pin_name" = "Bookmark name";
 "bookmarks.custom_missing" = "Missing icon: %1";
 "bookmarks.custom_help_action" = "Help";
-"bookmarks.custom_help_title" = "Custom bookmark icons";
+"bookmarks.custom_help_title" = "Custom Bookmark Icons";
 "bookmarks.custom_help_kobo" = "Copy your SVG files to .adds/kobalt/custom-pins/ over USB.";
-"bookmarks.custom_help_android" = "In Library, open More > Resource folders and choose your custom icon folder.";
+"bookmarks.custom_help_android" = "In Library, open More > Resource Folders and choose your custom icon folder.";
 "bookmarks.custom_help_desktop" = "Copy your SVG files to:\n%1";
 "bookmarks.custom_help_reload" = "Close and reopen your book to load them. Your icons appear first.";
 "bookmarks.custom_help_limits" = "You can add 120 icons. Depending on how they are formatted, icons may not load correctly.";
-"bookmarks.custom_errors_title" = "Icons not loaded";
+"bookmarks.custom_errors_title" = "Icons Not Loaded";
 "bookmarks.custom_errors_count" = "Files that could not be loaded: %1";
 "bookmarks.custom_errors_more" = "And %1 more.";
 "bookmarks.custom_errors_limit" = "Some files were not checked. Kobalt loads up to 120 icons and checks up to 256 folder entries.";
@@ -172,7 +174,7 @@
 "kosync.position_error" = "This synced position could not be opened. Your position was kept and automatic sync was disabled.";
 "kosync.resume_title" = "Resume synced reading?";
 /* Arguments: %1 percentage read; %2 device name. */
-"kosync.resume_description" = "Another device saved a position at %1% (%2). Choose which position to keep.";
+"kosync.resume_description" = "Another device saved a position at %1 (%2). Choose which position to keep.";
 "kosync.use_remote" = "Use synced position";
 "kosync.kept_local" = "Your position was kept. It will be sent on the next sync.";
 "kosync.resumed" = "Resumed at the synced position.";
@@ -242,7 +244,7 @@
 "library.mark_finished" = "Mark as finished";
 "library.mark_unread" = "Mark as unread";
 "library.remove_book" = "Remove from library";
-"library.remove_book_title" = "Remove from library?";
+"library.remove_book_title" = "Remove from Library?";
 "library.remove_book_description" = "The book file and reading progress stay on your device. A book in a library folder comes back when the folder is scanned again.";
 "library.remove_copy_description" = "Kobalt's copy of this book is deleted. Reading progress stays on your device.";
 "library.remove" = "Remove";
@@ -256,6 +258,26 @@
 "about.version" = "Version %1 (Qt%2)";
 
 /* chapter_contents */
+"chapter_contents.additional_actions" = "Additional actions";
+"chapter_contents.enter_printed_page" = "Enter a page number from the print edition.";
+"chapter_contents.other_labels" = "Other page labels";
+"chapter_contents.more" = "More navigation options";
+"chapter_contents.go_to_printed_page" = "Go to printed page";
+"chapter_contents.no_printed_pages" = "This book doesn’t include printed page numbers.";
+"chapter_contents.view_landmarks" = "View book landmarks";
+"chapter_contents.landmarks" = "Landmarks";
+"chapter_contents.landmark_count" = "Landmarks · %1";
+"chapter_contents.preview_image" = "View illustration for %1";
+"chapter_contents.illustrated_entry" = "Illustrated entry %1";
+"chapter_contents.printed_pages" = "Printed pages";
+"chapter_contents.printed_count" = "Printed pages · %1";
+"chapter_contents.mark_start" = "Mark as start";
+"chapter_contents.mark_end" = "Mark as end";
+"chapter_contents.reset_start" = "Restore default start";
+"chapter_contents.reset_end" = "Restore default end";
+"chapter_contents.start" = "Start";
+"chapter_contents.end" = "End";
+"chapter_contents.both" = "Start and end";
 "chapter_contents.chapter_destination_unavailable" = "Chapter destination unavailable";
 "chapter_contents.current_chapter" = "Current chapter";
 "chapter_contents.collapse_group" = "Collapse %1";
@@ -268,10 +290,10 @@
 
 /* chapter_graph */
 /* Arguments: %1 */
-"chapter_graph.book_progress" = "Book progress: %1%";
+"chapter_graph.book_progress" = "Book progress: %1";
 "chapter_graph.chapter_lengths_are_unavailable" = "Chapter lengths are unavailable";
 /* Arguments: %1 */
-"chapter_graph.chapter_progress" = "Chapter progress: %1%";
+"chapter_graph.chapter_progress" = "Chapter progress: %1";
 /* Arguments: %1, %2, %3 */
 "chapter_graph.chapters_to_of" = "Chapters %1 to %2 of %3";
 /* Arguments: %1 */
@@ -294,12 +316,14 @@
 "common.off" = "Off";
 "common.on" = "On";
 "common.page" = "page";
+"common.screen" = "screen";
 /* Arguments: %1, %2 */
 "common.page_fraction" = "%1 / %2";
 "common.estimated_total" = "~%1";
 "common.pages" = "pages";
+"common.screens" = "screens";
 /* Arguments: %1 */
-"common.percent" = "%1%";
+"common.percent" = "%1";
 "common.previous_page" = "Previous page";
 "common.size_large" = "Large";
 "common.size_extra_large_short" = "XL";
@@ -436,12 +460,9 @@
 "error.position_has_no_source_path" = "Position has no source path";
 "error.profile_already_in_use" = "This profile is open in another Kobalt app. Close it there and try again.";
 "error.profile_storage_failed" = "Kobalt couldn't read its saved data or move it to a backup. The storage may be failing. Repair the file system or reset the device.";
-"error.publication_declares_vertical_writing" = "This book uses an unsupported writing mode.";
 "error.publication_exceeds_the_memory_limit" = "Publication exceeds the memory limit";
-"error.publication_layout_inspection_is_incomplete" = "Publication layout inspection is incomplete";
 "error.publication_member_name_is_not_utf_8" = "Publication member name is not UTF-8";
 "error.publication_package_xml_is_invalid" = "The EPUB package contains invalid XML.";
-"error.publication_requires_right_to_left_page_navigation" = "Publication requires right-to-left page navigation";
 "error.publication_session_resource_mismatch" = "Publication session resource mismatch";
 "error.publication_transfer_is_incomplete" = "Publication transfer is incomplete";
 "error.reading_session_closed" = "Reading session closed";
@@ -482,7 +503,10 @@
 "header_footer.customize_title" = "Customize Header and Footer";
 /* Arguments: %1 */
 "header_footer.customize_slot" = "Customize slot: %1";
-"header_footer.custom_hint" = "You may customize six slots: tap one to customize it. Keep in mind that these changes are saved in the Custom preset, and are applied to all books that use it!";
+"header_footer.header_off_hint" = "Tap a footer slot to edit it. Turn on Header to edit its slots.";
+"header_footer.footer_off_hint" = "Tap a header slot to edit it. Turn on Footer to edit its slots.";
+"header_footer.both_off_hint" = "Turn on Header or Footer below, then tap a slot to edit it.";
+"header_footer.custom_hint" = "Tap a slot to change it. Changes apply to every book that uses Custom.";
 /* Arguments: %1, %2 */
 "header_footer.slot_value" = "%1: %2";
 "header_footer.close" = "Close header and footer";
@@ -496,6 +520,9 @@
 "header_footer.uppercase" = "Uppercase";
 "header_footer.progress_bar" = "Progress bar";
 "header_footer.progress_bar_detail" = "% of book";
+"header_footer.progress_bar_bottom" = "Bottom";
+"header_footer.progress_bar_top" = "Top";
+"header_footer.progress_ticks" = "Chapter ticks";
 /* Arguments: %1 */
 "header_footer.time_left" = "%1 left";
 "header_footer.learning_pace" = "Learning reading speed";
@@ -533,6 +560,9 @@
 "header_footer.field.book_page" = "Page in book";
 "header_footer.field.chapter_pages_left" = "Pages left in chapter";
 "header_footer.field.chapter_and_page" = "Chapter and page in chapter";
+"header_footer.field.chapter_screen" = "Screen in chapter";
+"header_footer.field.chapter_screens_left" = "Screens remaining in chapter";
+"header_footer.field.chapter_and_screen" = "Chapter and screen in chapter";
 "header_footer.field.title_and_page" = "Title and page in book";
 "header_footer.field.battery_percent" = "Battery, with percentage";
 "header_footer.field.battery_percent_only" = "Battery percentage only";
@@ -547,7 +577,7 @@
 "header_footer.field.chapter_load_time" = "Chapter load time";
 "header_footer.field.book_status" = "Book status";
 /* Arguments: %1 */
-"header_footer.field_description.battery_warning" = "Shows the battery only below %1%.";
+"header_footer.field_description.battery_warning" = "Shows the battery only below %1.";
 "header_footer.field_description.time_left" = "Estimated from your reading pace.";
 "header_footer.field_description.book_status" = "The last turn time and the layout: fast while one chapter is laid out, full once the whole book is. Updates every 5 seconds.";
 "header_footer.status.fast" = "fast";
@@ -622,15 +652,23 @@
 "closing.quit_warning" = "Quitting now may lose unsaved progress or annotations.";
 "closing.close_now" = "Close without waiting";
 "closing.close_now_detail" = "Your place in this book is saved. If you close now, Kobo’s reading time and progress might not be updated.";
+"shutdown.shutting_down" = "Shutting down";
+"shutdown.restarting" = "Restarting";
+"shutdown.saving" = "Saving your progress first...";
+"closing.sync_title" = "Your Kobo is syncing";
+"closing.wait_for_sync" = "Wait for sync to complete";
+"closing.waiting_for_sync" = "Waiting for sync to complete…";
+"closing.sync_detail" = "Kobalt will close when sync finishes. If Kobo has a different reading position, you can choose which one to keep. Tap outside this message to keep reading.";
+"closing.local_only" = "Exit without sending progress";
 "closing.return" = "Keep reading";
 
 /* reader */
 "reader.align_left" = "Align left";
 "reader.alignment" = "Alignment";
 "reader.applying_appearance_changes" = "Applying appearance changes...";
+"reader.applying_theme" = "Applying theme...";
 "reader.enabling_bold_reading" = "Enabling Bold reading...";
 "reader.disabling_bold_reading" = "Disabling Bold reading...";
-"reader.updating_page_layout" = "Updating page layout...";
 "reader.auto_alignment" = "Auto alignment";
 "reader.automatic_rotation" = "Automatic rotation";
 "reader.book_marked_finished" = "Book marked finished";
@@ -645,12 +683,13 @@
 "reader.zoom_scale" = "%1× zoom";
 /* Arguments: %1, %2, %3 */
 "reader.zoom_range" = "Pages %1 to %2 of %3";
+"reader.zoom_screen_range" = "Screens %1 to %2 of %3";
 "reader.previous_chapter" = "Previous chapter";
 "reader.next_chapter" = "Next chapter";
 /* Arguments: %1 */
-"reader.brightness" = "Brightness %1%";
+"reader.brightness" = "Brightness %1";
 "reader.brightness_and_warmth" = "Brightness and warmth";
-"reader.built_in_fonts" = "Built-in Fonts";
+"reader.built_in_fonts" = "System Fonts";
 "reader.chapter_lengths" = "Chapter lengths";
 /* Arguments: %1, %2 */
 "reader.chapter_position" = "%1 · %2";
@@ -659,7 +698,7 @@
 "reader.contents_detail" = "Contents: %1";
 "reader.could_not_change_dark_mode" = "Could not change dark mode";
 "reader.could_not_save_reader_settings" = "Could not save reader settings";
-"reader.settings_write_error" = "Disk write error";
+"reader.settings_write_error" = "Disk Write Error";
 "reader.settings_write_error_description" = "Kobalt could not save your reader settings. Check the available storage space and try again.";
 "reader.could_not_save_reading_position" = "Could not save reading position";
 "reader.dark_mode" = "Dark mode";
@@ -700,6 +739,7 @@
 "reader.front_matter" = "Front matter";
 "reader.go_to_synced_position" = "Go to synced position";
 "reader.header" = "Header";
+"reader.strip_padding" = "Padding";
 "reader.columns" = "Columns";
 "reader.column_spacing" = "Column spacing";
 "reader.hyphenation" = "Hyphenation";
@@ -712,16 +752,19 @@
 "settings.section_paragraphs" = "Paragraphs";
 "settings.paragraph_spacing" = "Paragraph adjustments";
 "settings.paragraph_spacing_summary" = "Adjust spacing and first-line indents.";
-"settings.paragraph_spacing_description" = "Values are percentages of the text size: with 12 pt text, a 100% indent is 12 pt. Applies to all books. Headings and special blocks keep their formatting.";
+"settings.paragraph_spacing_description" = "Values are percentages of the text size: with 12 pt text, a %1 indent is 12 pt. Applies to all books. Headings and special blocks keep their formatting.";
 "settings.paragraph_choices_description" = "Each Publisher choice keeps that part of the book’s formatting. Diagonal lines mark extra space between paragraphs.";
 "settings.paragraph_gap" = "Spacing";
 "settings.paragraph_indent" = "First-line indent";
 "settings.paragraph_adjustments_value" = "Gap %1 · Indent %2";
 "reader.appearance_preview" = "Preview";
+"reader.text_preview_sample" = "This page has no text to preview. This sample shows how your text settings will look.";
+"reader.text_preview_lifted" = "The preview starts below the illustration so you can see how your text settings look.";
 "reader.margins" = "Horizontal margins: ";
 "reader.vertical_margins" = "Vertical margins: ";
 /* Arguments: %1, %2 */
 "reader.menu_page_of" = "PAGE %1 OF %2";
+"reader.menu_screen_of" = "SCREEN %1 OF %2";
 "reader.new_synced_position" = "New synced position";
 "reader.older_synced_position" = "Older synced position";
 "reader.page_layout" = "Page layout";
@@ -736,17 +779,24 @@
 "reader.restore_appearance_defaults" = "Restore appearance defaults";
 "reader.restore_appearance_defaults_prompt" = "Restore appearance defaults?";
 "reader.restore_defaults" = "Restore defaults";
+"reader.restore_book_defaults" = "Restore book defaults";
+"reader.restore_book_defaults_prompt" = "Restore book defaults?";
+"reader.restore_book_defaults_detail" = "The font, size, line spacing, alignment, weight and hyphenation of this book return to Text for new books, or to Book default when that is Same as last book. Other books and other settings do not change. The defaults apply when you close Settings.";
+"reader.book_defaults_selected" = "Book defaults selected";
 "reader.return_to_passage" = "Return to passage";
 "reader.follow_link" = "Follow link";
 "reader.dismiss_link" = "Dismiss";
 "reader.stay_here" = "Stay here and forget return position";
 /* Arguments: %1 */
 "reader.return_page" = "Return to page %1";
+"reader.return_screen" = "Return to screen %1";
 /* Arguments: %1 */
 "reader.jumped_from_chapter" = "You jumped from %1";
 "reader.rotation" = "Rotation";
 "reader.search_book" = "Search book";
 /* Arguments: %1 */
+"reader.counting_pages" = "Counting pages";
+"reader.counting_screens" = "Counting screens";
 "reader.session_minutes" = "You've been reading for %1 minutes now";
 "reader.sideloaded_fonts" = "Sideloaded Fonts";
 "reader.simulate_nickel_progress_these_controls_change_only_the_synthetic" = "Simulate Nickel progress. These controls change only the synthetic progress test book. No server sync is performed.";
@@ -754,15 +804,16 @@
 "reader.text_size" = "Text size: ";
 /* Arguments: %1 */
 "reader.text_size_value" = "%1 pt";
+"reader.strip_size_value" = "%1 px";
 "reader.the_orientation_sensor_is_unavailable" = "The orientation sensor is unavailable";
 "reader.the_simulation_failed_no_successful_update_was_reported" = "The simulation failed. No successful update was reported.";
 "reader.typography" = "Typography";
 "reader.untitled_chapter" = "Untitled chapter";
 /* Arguments: %1 */
-"reader.warmth" = "Warmth %1%";
+"reader.warmth" = "Warmth %1";
 /* Arguments: %1 */
 "reader.weight_value" = "+%1";
-"reader.your_reading_position_stays_the_same_the_defaults_apply_when_you_c" = "Font, layout, and display preferences will be reset to their defaults. Your reading position will not change. The defaults apply when you close Settings.";
+"reader.your_reading_position_stays_the_same_the_defaults_apply_when_you_c" = "Theme, interface fonts, display preferences and the text of this book return to their defaults. Other books keep their text. Your reading position does not change. The defaults apply when you close Settings.";
 
 /* reader_controller */
 "reader_controller.native_authorization_is_unavailable" = "Native authorization is unavailable";
@@ -777,6 +828,7 @@
 "search_panel.no_matches_found" = "No matches";
 /* Arguments: %1, %2 */
 "search_panel.page_detail" = "Page %1: %2";
+"search_panel.screen_detail" = "Screen %1: %2";
 "search_panel.chapter_detail" = "%1: %2";
 "search_panel.return_to_original_position" = "Return to original position";
 "search_panel.search" = "Search";
@@ -787,6 +839,8 @@
 "settings.animations_description" = "Animations are fully supported on this device in light and dark mode.";
 "settings.unsupported_caption" = "Disabled: unsupported on this device.";
 "settings.unsupported_description" = "Disabled because this option is not supported on this device.";
+"settings.dark_mode" = "Dark Mode";
+"settings.night_mode_description" = "Also known as Night Mode. Displays light text on a dark background, and inverts some colors.";
 "settings.dark_description" = "Light text on a dark background.";
 "settings.section_opening" = "Opening books";
 "settings.section_engine" = "Engine";
@@ -819,7 +873,7 @@
 "settings.opening_cover" = "Do not show book cover while opening";
 "settings.opening_cover_description" = "Always show the Kobalt logo when opening a book.";
 "settings.rendering" = "Rendering engine";
-"settings.rendering_summary" = "Hybrid opens books fast and prepares the whole book while you read.";
+"settings.rendering_summary" = "Hybrid opens books fast and prepares the whole book while you read. Once the whole book is prepared, it works the same as More accurate.";
 "settings.rendering_description" = "A change reloads the book at your position when you close Settings.";
 "settings.rendering_hybrid" = "Hybrid";
 "settings.rendering_fast" = "Faster";
@@ -877,6 +931,15 @@
 "settings.section_links" = "Links";
 "settings.section_annotations" = "Annotations";
 "settings.section_chapter_list" = "Chapter List";
+"settings.secondary_numbers" = "Secondary page numbers";
+"settings.secondary_numbers_hint" = "Choose how pages before and after the main text are numbered in every book.";
+"settings.secondary_roman" = "Lowercase Roman";
+"settings.secondary_arabic" = "Arabic numerals";
+"settings.secondary_letters" = "Lowercase letters";
+"settings.secondary_prefixed" = "Section-prefixed numbers";
+"settings.secondary_upper_roman" = "Uppercase Roman";
+/* Arguments: front-matter examples, back-matter examples */
+"settings.secondary_preview" = "Front  %1   ·   Back  %2";
 "settings.chapter_groups" = "Collapsible chapters";
 "settings.chapter_groups_hint" = "Choose whether chapter groups can collapse and how they open.";
 "settings.chapter_groups_current" = "Current section";
@@ -903,6 +966,10 @@
 "settings.section_reading_menu" = "Reading menu";
 "settings.section_feature_visibility" = "Feature visibility";
 "settings.section_system_integration" = "System integration";
+"settings.publisher_page_numbers" = "Always display publisher provided page numbers";
+"settings.publisher_page_numbers_description" = "Use the print edition’s page labels when available. Kobalt counts its own layout in screens.";
+"settings.sideloaded_fonts_first" = "Show sideloaded fonts first";
+"settings.sideloaded_fonts_first_description" = "List your own fonts before recommended fonts in every typeface picker.";
 "settings.section_nitpicks" = "Nitpicks";
 "settings.section_sleep" = "Sleep and wake";
 "settings.section_power" = "Power management";
@@ -941,21 +1008,21 @@
 "sleep.charging" = "Charging";
 "sleep.charged" = "Charged";
 /* Arguments: %1 */
-"sleep.percent_read" = "%1% read";
+"sleep.percent_read" = "%1 read";
 /* Arguments: %1 */
 "sleep.time_left" = "%1 to go";
 "sleep.read" = "read";
 /* Arguments: %1 status, %2 battery percentage */
-"sleep.state_with_battery" = "%1 (%2%)";
+"sleep.state_with_battery" = "%1 (%2)";
 "sleep.goodnight" = "Goodnight";
 /* Arguments: %1 battery percentage */
-"sleep.battery_charged" = "%1% charged";
+"sleep.battery_charged" = "%1 charged";
 "sleep.greeting_title" = "Night greeting";
 "sleep.greeting_hint" = "Shown on the Night sleep screen instead of Goodnight. Leave it empty to use Goodnight.";
 /* Arguments: %1 percentage, %2 book title */
 "sleep.missing_cover" = "?";
 "sleep.private_book" = "your book";
-"sleep.percent_through" = "%1% through %2";
+"sleep.percent_through" = "%1 through %2";
 "sleep.now_reading" = "Now reading";
 "sleep.read_label" = "Read";
 "sleep.today" = "Today";
@@ -986,7 +1053,7 @@
 "sleep.letter_wake" = "Press the power button and we will carry on with this book.";
 "sleep.letter_restart" = "Press the power button to start me again.";
 "sleep.letter_closing" = "Yours,";
-"sleep.gallery_title" = "Sleep and power-off screen";
+"sleep.gallery_title" = "Sleep and Power-Off Screen";
 "sleep.design_stock" = "Use Kobo’s screen";
 "sleep.design_bookmark" = "Bookmark";
 "sleep.design_card" = "Card";
@@ -1004,7 +1071,7 @@
 "sleep.design_page" = "Reading page";
 "sleep.design_overlay" = "PNG over text";
 "sleep.design_custom" = "Custom";
-"sleep.custom_title" = "Customize Lock & Sleep Screen";
+"sleep.custom_title" = "Customize Lock and Sleep Screen";
 "sleep.custom_editing" = "Screen";
 "sleep.custom_background" = "Background";
 "sleep.custom_status" = "Status";
@@ -1016,6 +1083,7 @@
 "sleep.backdrop_wallpaper" = "Wallpaper";
 "sleep.backdrop_plain" = "Blank";
 "sleep.status_none" = "None";
+"sleep.status_random" = "Random status";
 "sleep.wallpaper_random" = "Random wallpaper";
 "sleep.wallpaper_help_title" = "Wallpapers";
 "sleep.wallpaper_help" = "Did you know you can use your own wallpapers? Copy PNG or JPEG images to .adds/kobalt/wallpapers on your Kobo. Each image becomes a step in the Background row, and Random wallpaper picks a different one every time your Kobo sleeps.";
@@ -1040,12 +1108,12 @@
 "debug.section_caches" = "Caches";
 "debug.evict_cache" = "Evict book cache";
 "debug.evict_cache_description" = "Remove the parsed copy and the pages of this book, then close it. Your place, bookmarks and annotations stay.";
-"debug.evict_cache_title" = "Evict Book Cache?";
+"debug.evict_cache_title" = "Evict book cache?";
 "debug.evict_cache_confirm_description" = "The book closes. The next opening parses and lays out the book again.";
 "debug.evict" = "Evict";
 "debug.clear_caches" = "Clear all caches";
 "debug.clear_caches_description" = "Remove the parsed copies of all books and the preview tiles, then close the book. Reading data stays.";
-"debug.clear_caches_title" = "Clear All Caches?";
+"debug.clear_caches_title" = "Clear all caches?";
 "debug.clear_caches_confirm_description" = "The book closes. Every book parses and lays out again when it opens.";
 "debug.clear" = "Clear";
 "debug.section_diagnostics" = "Diagnostics";
@@ -1072,7 +1140,7 @@
 "finish.mark_finished" = "Mark as finished";
 
 /* sync */
-"sync.title" = "Synced reading position";
+"sync.title" = "Synced Reading Position";
 "sync.after" = "Your device just finished syncing. Last time your progress was synced, you were reading beyond this point. Do you want to skip to that point?";
 "sync.before" = "Your device just finished syncing. Last time your progress was synced, you were reading before your current position. Do you want to return to that point?";
 "sync.finished" = "The synced reading state marks this book as finished.";
@@ -1107,6 +1175,7 @@
 "search_panel.empty_query" = "No matches for “%1”";
 /* Arguments: %1 */
 "search_panel.page_number" = "Page %1";
+"reader.screen_number" = "Screen %1";
 
 "settings.asks_first" = "ASKS FIRST";
 "bookmarks.title" = "Bookmarks";
@@ -1126,6 +1195,7 @@
 "bookmarks.remove_current" = "Remove bookmarked page";
 /* Arguments: %1, %2 */
 "bookmarks.remove_detail" = "Page %1 · %2";
+"bookmarks.remove_screen_detail" = "Screen %1 · %2";
 "settings.refresh_smart" = "Smart";
 /* Arguments: %1 */
 "settings.refresh_smart_description" = "At chapter starts, at most once every %1 turns.";
@@ -1145,6 +1215,7 @@
 "chapter_contents.summary" = "Contents · %1 chapters";
 "chapter_contents.summary_one" = "Contents · 1 chapter";
 "chapter_contents.page" = "Page";
+"chapter_contents.location" = "Location";
 "chapter_contents.chapters" = "Chapters";
 "chapter_contents.close" = "Close chapters";
 /* Arguments: %1 */
@@ -1161,15 +1232,19 @@
 "search_panel.no_matches_hint" = "Check the spelling or try a shorter phrase.";
 /* Arguments: %1, %2 */
 "search_panel.page_chapter" = "Page %1 · %2";
+"search_panel.screen_chapter" = "Screen %1 · %2";
 /* Arguments: %1, %2 */
 "stats.contents_position" = "Contents · %1 of %2";
 /* Arguments: %1, %2 */
 "stats.page_of" = "Page %1 of %2";
+"stats.screen_of" = "Screen %1 of %2";
 "stats.chapter" = "Chapter";
 "stats.book" = "Book";
 "stats.session" = "Session";
 "stats.pages_left" = "pages left";
+"stats.screens_left" = "screens remaining";
 "stats.page_left" = "page left";
+"stats.screen_left" = "screen remaining";
 "stats.minutes" = "min";
 /* %1: Page turns in the current reading session. */
 "stats.page_turn" = "%1 page turn";
@@ -1181,11 +1256,17 @@
 /* The same, for a position before the contents. %1 is the total. Arguments: %1 */
 "stats.this_chapter_words" = "This chapter · %1";
 /* The book's word total below the Stats chart. Arguments: %1 */
-"stats.book_words" = "Book · %1";
+"stats.count_words_in" = "Book stats for";
+"stats.count_words_in_title" = "Book Stats For";
+"stats.scope_hint" = "Choose which pages, words and reading time the Book figures cover. This choice applies to all books.";
+"stats.scope_main" = "Main text";
+"stats.scope_main_hint" = "From the start to the end marked in Chapters or supplied by the book.";
+"stats.scope_volume" = "Whole volume";
+"stats.scope_volume_hint" = "Include the front and back matter and every book in the volume.";
+"stats.main_words" = "Main text · %1";
+"stats.volume_words" = "Volume · %1";
 "stats.last_chapter" = "Last chapter";
 "stats.counting" = "Counting words…";
-"reader.dense_graph" = "Compact chapter graphs";
-"settings.dense_graph_description" = "When turned on, the Stats panel shows more chapters at once. If you want wider bars, turn this off.";
 /* Arguments: %1 */
 "stats.time_left" = "≈ %1 left";
 /* Arguments: %1 */
@@ -1200,6 +1281,8 @@
 "activity.title" = "Activity";
 /* The page of one book in Activity. */
 "activity.book_title" = "Book Activity";
+"activity.copies" = "Book copies";
+"activity.copies_count" = "%1 copies";
 "activity.hidden_title" = "Hidden Books";
 /* The row at the end of Books that opens the hidden books. */
 "activity.hidden_books" = "Hidden books";
@@ -1208,14 +1291,14 @@
 "activity.hide_book" = "Hide from Books";
 "activity.show_book" = "Show in Books";
 "activity.delete_book" = "Delete activity";
-"activity.delete_title" = "Delete Reading Activity?";
+"activity.delete_title" = "Delete reading activity?";
 /* Arguments: %1 is the book's title. */
 "activity.delete_detail" = "All reading sessions of “%1” will be deleted, and their time removed from your daily totals and streaks. This cannot be undone.";
 "activity.delete_confirm" = "Delete";
 "activity.close" = "Close Activity";
 /* The alert the first time Activity opens. */
 "activity.welcome_title" = "Welcome to Activity";
-"activity.welcome_description" = "Activity shows your reading time and reading stats on this device. It doesn't sync, so if you also read on another device, your streaks and totals here won't include that reading.";
+"activity.welcome_description" = "Activity only counts time you spend reading books in Kobalt on this device. Your streaks and totals are based on those sessions. Reading history doesn’t sync between devices.";
 "activity.loading" = "Loading reading history…";
 "activity.unavailable" = "Reading history is unavailable right now.";
 "activity.change_not_saved" = "Could not save the change to your reading history.";
@@ -1311,6 +1394,14 @@
 "activity.progress" = "Progress";
 /* Arguments: %1 */
 "activity.started" = "Started %1";
+/* Chart label and value. Arguments: %1, %2 */
+"activity.chart_value" = "%1: %2";
+/* Dates with the same reading time. Arguments: %1, %2 */
+"activity.chart_dates" = "%1 to %2";
+/* Reading time below one minute. */
+"activity.under_minute" = "Less than one minute";
+/* Estimated finish date on the book progress chart. Arguments: %1 */
+"activity.projected_finish" = "Projected finish %1";
 "activity.time_per_day" = "Time per day";
 "activity.at_recent_pace" = "at your recent pace";
 /* A session's progress, such as "21% → 22%". Arguments: %1, %2 */
@@ -1385,7 +1476,7 @@
 "opening.go_back" = "Go back";
 
 "opening.remembered" = "This book uses Kobo's reader";
-"recovery.title" = "Saved data reset";
+"recovery.title" = "Saved Data Reset";
 "benchmark.finished" = "Benchmark finished";
 "benchmark.failed" = "Benchmark failed";
 "benchmark.counts" = "Completed: %1. Skipped: %2. Failed: %3.";
@@ -1399,7 +1490,9 @@
 "recovery.database" = "Kobalt's reading positions, bookmarks and annotations could not be used. Kobalt started again with empty saved data.";
 "recovery.backups" = "The original files are in %1.";
 
-"reader.supplemental_fonts" = "Supplemental Fonts";
+"reader.international_supplemental_fonts" = "Supplemental Fonts (International)";
+"reader.supplemental_fonts" = "Kobalt Collection";
+"reader.ui_fonts" = "UI Fonts";
 
 /* dictionaries */
 "settings.dictionaries" = "Dictionaries";
@@ -1429,17 +1522,62 @@
 /* Arguments: %1, %2 */
 "dictionaries.downloading" = "Downloading · %1 of %2";
 "dictionaries.installing" = "Installing";
+"dictionaries.cannot_activate_installed_dictionary" = "Cannot activate installed dictionary.";
+"dictionaries.cannot_create_dictionary_storage" = "Cannot create dictionary storage.";
+"dictionaries.cannot_install_this_dictionary" = "Cannot install this dictionary.";
+"dictionaries.cannot_read_dictionary_index" = "Cannot read dictionary index.";
+"dictionaries.cannot_remove_this_dictionary" = "Cannot remove this dictionary.";
+"dictionaries.cannot_save_dictionary_files" = "Cannot save dictionary files.";
+"dictionaries.cannot_save_dictionary_index" = "Cannot save dictionary index.";
+"dictionaries.cannot_save_dictionary_metadata" = "Cannot save dictionary metadata.";
+"dictionaries.cannot_save_the_download" = "Cannot save the download.";
+"dictionaries.dictionary_archive_is_damaged" = "Dictionary archive is damaged.";
+"dictionaries.dictionary_archive_is_missing_required_files" = "Dictionary archive is missing required files.";
+"dictionaries.dictionary_checksum_differs" = "Dictionary checksum differs.";
+"dictionaries.dictionary_checksum_or_size_differs" = "Dictionary checksum or size differs.";
+"dictionaries.dictionary_definition_is_damaged" = "Dictionary definition is damaged.";
+"dictionaries.dictionary_download_is_incomplete" = "Dictionary download is incomplete.";
+"dictionaries.dictionary_index_is_damaged" = "Dictionary index is damaged.";
+"dictionaries.dictionary_index_is_too_large" = "Dictionary index is too large.";
+"dictionaries.dictionary_index_points_outside_its_data" = "Dictionary index points outside its data.";
+"dictionaries.dictionary_installed" = "Dictionary installed.";
+"dictionaries.dictionary_removed" = "Dictionary removed.";
+"dictionaries.download_cancelled" = "Download cancelled.";
+"dictionaries.download_size_or_storage_error" = "Download size or storage error.";
+/* Arguments: %1 */
+"dictionaries.downloading_name" = "Downloading %1";
+/* Arguments: %1, %2 */
+"dictionaries.downloading_progress" = "Downloading %1 · %2";
+"dictionaries.installation_cancelled" = "Installation cancelled.";
+"dictionaries.installed_dictionary_is_damaged" = "Installed dictionary is damaged.";
+"dictionaries.installed_inflection_index_is_damaged" = "Installed inflection index is damaged.";
+/* Arguments: %1 */
+"dictionaries.installing_name" = "Installing %1";
+"dictionaries.invalid_dictzip_data" = "Invalid dictzip data.";
+"dictionaries.invalid_stardict_index" = "Invalid StarDict index.";
+"dictionaries.invalid_stardict_metadata" = "Invalid StarDict metadata.";
+"dictionaries.missing_stardict_inflection_index" = "Missing StarDict inflection index.";
+"dictionaries.missing_stardict_metadata" = "Missing StarDict metadata.";
+"dictionaries.no_dictionary_installed" = "No dictionary installed.";
+"dictionaries.not_enough_space_for_this_dictionary" = "Not enough space for this dictionary.";
+"dictionaries.stardict_index_size_differs" = "StarDict index size differs.";
+"dictionaries.stardict_word_count_differs_from_its_index" = "StarDict word count differs from its index.";
+"dictionaries.this_dictionary_is_not_available" = "This dictionary is not available.";
+"dictionaries.this_dictionary_is_not_installed" = "This dictionary is not installed.";
+"dictionaries.unsafe_download_redirect" = "Unsafe download redirect.";
+"dictionaries.unsupported_stardict_format" = "Unsupported StarDict format.";
+"dictionaries.wait_for_this_download_to_finish" = "Wait for this download to finish.";
+"dictionaries.download_timed_out" = "The dictionary download timed out.";
 "dictionaries.download_failed" = "Download failed. Try again.";
 /* Arguments: %1 */
 "dictionary_panel.for_language" = "For %1";
 
 /* Arguments: %1 = number of links */
 "reader.highlight_links" = "Highlight links · %1";
-"reader.long_press_link" = "Long press a link to see its options.";
 "reader.tap_revealed_link" = "Tap a highlighted link to follow it";
 "reader.tap_elsewhere_to_exit" = "Tap elsewhere to exit";
 
-"reader.bold_reading" = "Bold reading";
+"reader.bold_reading" = "Bold Mode";
 "reader.bionic_description" = "Emphasize word beginnings in bold. Thickness and variable weight are unavailable while enabled.";
 "reader.bionic_weight_locked" = "Bold reading";
 
@@ -1454,7 +1592,7 @@
 
 "reader.both" = "Both";
 "reader.lock_current_rotation" = "Lock current rotation";
-"reader.formatting_warning" = "Formatting warning";
+"reader.formatting_warning" = "Formatting Warning";
 "reader.formatting_warning_description" = "This page uses unsupported formatting. You can keep reading, but some text or layout may not appear as intended.";
 
 "reader.hide_nonlinear_fragments" = "Hide non-linear fragments";
@@ -1489,7 +1627,7 @@
 "annotations.export_html" = "Export as HTML…";
 "annotations.export_compression" = "Exports are compressed ZIP files. Unarchive the ZIP to open the Markdown or HTML file.";
 /* Arguments: %1 */
-"annotations.export_format_title" = "Export annotations as %1";
+"annotations.export_format_title" = "Export Annotations as %1";
 "annotations.export_action" = "Export ZIP";
 "annotations.export_title" = "Export annotations?";
 "annotations.export_untitled" = "Untitled book";
@@ -1528,6 +1666,8 @@
 "annotations.add_note" = "Add note";
 "annotations.look_up" = "Look up";
 "annotations.edit_note" = "Edit note";
+"annotations.add_note_title" = "Add Note";
+"annotations.edit_note_title" = "Edit Note";
 "annotations.discard" = "Discard";
 "annotations.note_placeholder" = "Write a note";
 "annotations.note_save_failed" = "Could not save the note. Your text is kept.";
@@ -1557,7 +1697,7 @@
 "settings.section_dictionary_ui" = "Dictionary";
 "settings.section_advanced" = "Advanced";
 "settings.disable_reader_standby" = "Disable standby";
-"settings.disable_reader_standby_description" = "Keeps the device awake while reading. Uses more battery power.";
+"settings.disable_reader_standby_description" = "Keeps the device awake while reading. Uses more battery power, and is not recommended.";
 "settings.disable_reader_standby_title" = "Disable standby while reading?";
 "settings.disable_reader_standby_warning" = "Disabling standby can significantly reduce battery life. It may help with intermittent freezes or missed page turns on some devices, but is generally not recommended. You can still put the device to sleep. Are you sure you want to disable standby?";
 "settings.dictionary_font" = "Dictionary font";
@@ -1571,12 +1711,32 @@
 "settings.dictionary_font_standard_short" = "M";
 "settings.dictionary_font_large_short" = "L";
 "settings.dictionary_font_extra_large_short" = "XL";
+"settings.theming" = "Theming";
+"settings.theme_selection" = "Preset";
+"settings.theme_details" = "Detailed configuration";
+"settings.primary_typography" = "Primary typography";
+"settings.secondary_typography" = "Secondary typography";
+"settings.icon_monochrome" = "Monochrome";
+"settings.icon_color" = "Color only";
+"settings.icon_pastel" = "Pastel tiles";
+"settings.theme_preset" = "Theme preset";
+"settings.icon_theme" = "Icon theme";
+"settings.theme_classic" = "Classic";
+"settings.theme_playful" = "Playful";
+"settings.theme_notebook" = "Notebook";
+"settings.icon_rings" = "Color rings";
+"settings.palette" = "Color theme";
+"settings.palette_grayscale" = "Grayscale";
+"settings.palette_blue" = "Blue";
+"settings.palette_sage" = "Sage";
+"settings.palette_sepia" = "Sepia";
+"settings.theme_custom" = "Custom";
 "settings.ui_font" = "Sans-serif UI typeface";
 "settings.header_footer_font" = "Header & footer UI typeface";
 "settings.ui_mono_font" = "Monospaced UI typeface";
+"settings.font_too_large" = "Font disabled due to size limitations.";
 
 "settings.header_footer_weight" = "Header & footer UI weight";
-"settings.section_graphs" = "Graphs";
 
 "settings.header_footer_weight_lighter" = "Lighter · 0";
 /* Arguments: %1 */
@@ -1584,12 +1744,12 @@
 
 "settings.hide_tab_labels" = "Hide labels in tabs";
 "settings.hide_tab_labels_description" = "Tabs at the bottom of the screen only display an icon when this is selected.";
-"settings.zen_mode" = "Zen mode";
+"settings.zen_mode" = "Zen Mode";
 "settings.zen_mode_description" = "A special mode for those who want to focus on reading. Simplifies the reading menu user interface.";
-"settings.zen_leave" = "Hold to leave Zen mode";
+"settings.zen_leave" = "Hold to leave Zen Mode";
 "settings.zen_leave_holding" = "Keep holding";
-"settings.zen_leave_note" = "All settings return when Zen mode is off.";
-"settings.zen_leave_release" = "Let go to stay in Zen mode.";
+"settings.zen_leave_note" = "All settings return when Zen Mode is off.";
+"settings.zen_leave_release" = "Let go to stay in Zen Mode.";
 "settings.zen_light" = "Light";
 "settings.zen_light_caption" = "Brightness and warmth";
 "settings.zen_light_brightness" = "Brightness";
@@ -1619,9 +1779,9 @@
 "settings.word_spacing_narrow" = "Narrow";
 "settings.word_spacing_normal" = "Normal";
 "settings.word_spacing_wide" = "Wide";
-"settings.word_spacing_narrow_description" = "Use 80% of the normal space width.";
-"settings.word_spacing_normal_description" = "Keep the font’s normal space width (100%).";
-"settings.word_spacing_wide_description" = "Use 120% of the normal space width.";
+"settings.word_spacing_narrow_description" = "Use %1 of the normal space width.";
+"settings.word_spacing_normal_description" = "Keep the font’s normal space width (%1).";
+"settings.word_spacing_wide_description" = "Use %1 of the normal space width.";
 "settings.close" = "Close settings";
 "settings.title" = "Settings";
 "common.more_next_page" = "More on the next page";
@@ -1641,9 +1801,14 @@
 "reader.two_columns" = "Two columns";
 
 "settings.column_spacing_default" = "1.5× (default)";
-"settings.column_spacing_description" = "Gap between columns as a multiple of the current text size. Applies to all books.";
+"settings.columns_description" = "Column spacing is measured in multiples of the current text size.";
 "settings.landscape_columns" = "Use two columns in landscape";
 "settings.landscape_columns_description" = "Portrait uses one column. Applies to all books.";
+"settings.landscape_column_layout" = "Multiple columns in landscape mode";
+"settings.single_column" = "Single column";
+"settings.two_in_landscape" = "Two in landscape";
+"settings.chapter_spread" = "Start chapters on a new spread";
+"settings.chapter_spread_description" = "When a chapter starts on a new page, show it in the first column.";
 
 "annotations.mode" = "Annotation mode";
 "annotations.summary_one" = "1 annotation";
@@ -1653,9 +1818,17 @@
 "marks.sort_newest_description" = "Recently created items come first.";
 "marks.sort_oldest" = "Oldest first";
 "marks.sort_oldest_description" = "Items created longest ago come first.";
+"marks.row_action" = "%1: %2";
+"marks.page_range" = "Pages %1 to %2";
+"marks.location_range" = "%1 to %2";
+"marks.screen_range" = "Screens %1–%2";
+"marks.screen_range_description" = "Screens %1 to %2";
+"annotations.numbered_entry" = "Annotation %1";
+"bookmarks.numbered_entry" = "Bookmark %1";
 "marks.sort_position" = "Book order";
 "marks.sort_position_description" = "Earlier passages in the book come first.";
 "marks.sort_title" = "Sort by";
+"marks.sort_dialog_title" = "Sort By";
 
 "settings.tappable_links" = "Tappable links";
 "settings.tappable_links_description" = "Choose how to open footnotes and links while reading.";
@@ -1681,7 +1854,7 @@
 "settings.vertical_spacing_expand_description" = "Spread spare height between lines. Keep the first line in place.";
 "settings.vertical_spacing_center" = "Center nearly full pages";
 "settings.vertical_spacing_center_short" = "Center";
-"settings.vertical_spacing_center_description" = "Center prose that occupies at least 90% of the reading height. Keep line spacing unchanged.";
+"settings.vertical_spacing_center_description" = "Center prose that occupies at least %1 of the reading height. Keep line spacing unchanged.";
 "settings.vertical_spacing_scope" = "Pages to adjust";
 "settings.vertical_spacing_scope_description" = "Choose which page gaps to adjust.";
 "settings.vertical_spacing_scope_all" = "All suitable pages";
@@ -1696,13 +1869,15 @@
 
 "kosync.sideload_copy" = "To use KOSync, download a DRM-free copy of the book and add it to your device separately.";
 "kosync.learn_more" = "Learn More";
-"kosync.learn_more_title" = "Kobo sync and KOSync";
+"kosync.learn_more_title" = "Kobo Sync and KOSync";
 "kosync.learn_more_description" = "Kobo-managed books use Kobo’s built-in sync, even when the file has no DRM. Kobalt leaves their progress syncing to Kobo.\n\nKOSync is a separate service for KOReader and Kobalt. To use it for this title, add a DRM-free copy to your device as a separate sideloaded book and open that copy.\n\nUse the same book file on every device. Only reading progress is synced; books, bookmarks and annotations are not transferred.";
 
 "kosync.device_name" = "Device name";
+"kosync.device_name_title" = "Device Name";
 "kosync.device_name_saved" = "Device name saved.";
 
 "kosync.matching" = "Document matching";
+"kosync.matching_title" = "Document Matching";
 "kosync.match_binary" = "Binary (default)";
 "kosync.match_filename" = "Filename";
 "kosync.match_binary_description" = "Match identical book files, even if renamed. Use the same matching method on every device.";
@@ -1721,16 +1896,20 @@
 "kosync.jump_ahead" = "Jump ahead";
 "kosync.go_back" = "Go back";
 "kosync.pages_ahead" = "%1 pages ahead";
+"kosync.screens_ahead" = "%1 screens ahead";
 "kosync.pages_ahead_one" = "1 page ahead";
+"kosync.screens_ahead_one" = "1 screen ahead";
 "kosync.pages_back" = "%1 pages back";
+"kosync.screens_back" = "%1 screens back";
 "kosync.pages_back_one" = "1 page back";
+"kosync.screens_back_one" = "1 screen back";
 "kosync.chapters_crossed" = "%1 chapters";
 "kosync.chapters_crossed_one" = "1 chapter";
 "kosync.jump_label" = "%1 · %2";
 "kosync.page_number" = "p. %1";
 "kosync.here" = "Here";
 "kosync.synced_label" = "Synced";
-"kosync.percent" = "%1%";
+"kosync.percent" = "%1";
 "kosync.from" = "From";
 "kosync.to" = "To";
 "kosync.device" = "Device";
@@ -1774,8 +1953,8 @@
 "settings.percentage_format_description" = "Choose how book and chapter progress appears in the header and footer.";
 "settings.percentage_whole" = "Whole percentages";
 "settings.percentage_decimal" = "One decimal place";
-"settings.percentage_whole_description" = "For example, 8%";
-"settings.percentage_decimal_description" = "For example, 8.1%";
+"settings.percentage_whole_description" = "For example, %1";
+"settings.percentage_decimal_description" = "For example, %1";
 "settings.time_remaining_format" = "Time remaining format";
 "settings.time_remaining_format_description" = "Applies to reading-time estimates in the header, footer and sleep screen.";
 "settings.time_remaining_detailed" = "Detailed";
@@ -1798,12 +1977,14 @@
 
 /* Physical button controls */
 "buttons.title" = "Button controls";
-"buttons.upper" = "Upper button";
-"buttons.lower" = "Lower button";
+"buttons.upper" = "Button 1";
+"buttons.lower" = "Button 2";
 "buttons.volume_up" = "Volume up (+)";
 "buttons.volume_down" = "Volume down (−)";
 "buttons.description" = "Choose what each page button does while reading.";
 "buttons.volume_description" = "Choose what the volume buttons do while reading.";
+"buttons.invert_landscape" = "Invert page buttons in landscape";
+"buttons.invert_landscape_hint" = "Turn this on if the buttons are reversed when you hold your device sideways.";
 "buttons.navigation_hint" = "Menus, lists and page previews keep their usual button directions.";
 "buttons.previous" = "Previous page";
 "buttons.next" = "Next page";
@@ -1821,6 +2002,8 @@
 "settings.disable_features_description" = "Maybe you find yourself not needing some of the features Kobalt offers. You can hide what you don't need.";
 "features.navigate" = "Navigation";
 "features.navigate_description" = "Hides the Navigate tab and its options. If it is your default menu view, the default returns to None.";
+"features.activity" = "Activity";
+"features.activity_description" = "Hides the Activity section in Stats. Reading history continues.";
 "features.stats" = "Stats";
 "features.stats_description" = "Hides the Stats tab and its options. Reading history and time estimates continue.";
 "features.annotations" = "Annotations";
@@ -1859,7 +2042,7 @@
 "text_presets.delete_prompt" = "Delete %1?";
 "text_presets.delete_detail" = "Books keep their text. Only the preset is removed.";
 "text_presets.restore" = "Restore default presets";
-"text_presets.restore_prompt" = "Restore Default Presets?";
+"text_presets.restore_prompt" = "Restore default presets?";
 "text_presets.restore_detail" = "The presets that come with Kobalt return as they shipped. Your own presets stay. The presets apply when you close Settings.";
 "text_presets.restore_confirm" = "Restore presets";
 "text_presets.restore_selected" = "Default presets selected";
@@ -1915,6 +2098,7 @@
 "words.in_context" = "In context";
 /* Arguments: %1 */
 "words.go_to_page" = "Go to page %1";
+"words.go_to_screen" = "Go to screen %1";
 "words.open_passage" = "Open at this passage";
 "words.book_missing" = "Book not on this device";
 "words.open_book_first" = "Open this book to go to the passage.";
@@ -1941,7 +2125,7 @@
 "words.no_entry_detail" = "The dictionary had no entry for this word. You added it to My Words yourself.";
 
 /* Android resource folders */
-"library.resource_folders" = "Resource folders";
+"library.resource_folders" = "Resource Folders";
 "library.resource_folders_description" = "Choose folders for dictionaries, fonts and custom icons. Changes load when you next open a book.";
 "library.dictionary_folder" = "Dictionaries";
 "library.font_folder" = "Fonts";

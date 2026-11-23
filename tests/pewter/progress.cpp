@@ -1,9 +1,13 @@
 #include "nickel.h"
 #include "platforms/kobo/common/native_progress.h"
 #include "reading/reading_bridge.h"
+#include "storage/record_writer.h"
 #include "support/main_thread.h"
 #include <QCoreApplication>
+#include <QEventLoop>
+#include <QTimer>
 #include <QRegularExpression>
+#include <QSemaphore>
 #include <QSqlQuery>
 #include <QTemporaryDir>
 #include <cmath>
@@ -463,7 +467,61 @@ int main(int argc, char **argv)
     pewter::start(directory.path());
     addBook();
     require(NativeProgress::available(), "the adapter resolves every Nickel function it requires");
+    const auto syncing = NativeProgress::syncQuery();
+    require(syncing && !syncing(), "the adapter can read an idle sync manager");
+    pewter::options().syncing = true;
+    require(syncing(), "the adapter observes an active sync");
+    pewter::options().syncing = false;
+    require(!syncing(), "the adapter observes the end of sync");
     NativeProgress progress(book);
+    {
+        QSqlQuery writer(pewter::database());
+        require(writer.exec("BEGIN EXCLUSIVE"), "hold the fake Nickel database");
+        ReadingProgress result;
+        QEventLoop loop;
+        QTimer timeout;
+        timeout.setSingleShot(true);
+        QObject::connect(&timeout, SIGNAL(timeout()), &loop, SLOT(quit()));
+        progress.changeAvailable = [&loop] { loop.quit(); };
+        auto awaitPoll = [&] {
+            timeout.start(5000);
+            loop.exec();
+            require(timeout.isActive(), "the worker delivered the progress query");
+            timeout.stop();
+            return progress.poll(false, result);
+        };
+        require(!progress.poll(true, result), "interactive progress query returns pending");
+        require(awaitPoll() && !result.valid, "a locked database reports an unavailable position");
+        // Queue the next poll behind a held worker job. The interface must
+        // release its transaction while the poll is still pending, even if
+        // SQLite would return busy before a zero-delay GUI timer could fire.
+        QSemaphore entered, release;
+        kobalt::storage::RecordWriter blocker;
+        require(blocker.tryPost([&] {
+                    entered.release();
+                    return release.tryAcquire(1, 5000);
+                }),
+                "hold the progress worker");
+        require(entered.tryAcquire(1, 5000), "progress worker is held");
+        require(!progress.poll(true, result), "a queued progress query returns pending");
+        require(writer.exec("ROLLBACK"),
+                "release the fake Nickel database while the poll is pending");
+        release.release();
+        require(awaitPoll() && result.valid && result.book == book,
+                "the pending poll reads the book after the interface releases the lock");
+        require(!progress.poll(false, result), "each completed poll is collected once");
+
+        progress.takeChange();
+        require(!progress.poll(true, result), "start a poll before the lifecycle read");
+        current(progress);
+        timeout.start(5000);
+        loop.exec();
+        require(timeout.isActive() && !progress.poll(false, result) && progress.takeChange(),
+                "a newer lifecycle read supersedes the in-flight poll and requests a fresh check");
+        timeout.stop();
+        progress.changeAvailable = {};
+        requireMainThread();
+    }
     markReading(progress);
     recoverStaleCache(progress);
     writePartway(progress);

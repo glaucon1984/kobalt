@@ -1,12 +1,24 @@
 #pragma once
 #include <QJsonObject>
-#include <QString>
+#include <QStringList>
 
 namespace kobalt {
-// Display progress uses zero-based pages: first is 0%, last is 100%.
-// A one-page book is already on its last page; an unknown length is 0%.
+inline QString locationPageLabel(int page, const QString &printed)
+{
+    return !printed.isEmpty() ? printed : page >= 0 ? QString::number(page + 1) : QString();
+}
+
+QString screenLabel(const QString &label, bool useScreens);
+QString remainingScreenUnit(int count, bool useScreens);
+
+inline constexpr auto secondaryNumberKey = "secondary_page_numbers";
+const QStringList &secondaryNumberStyles();
+QString bookPageLabel(int page, int firstMain, int lastMain, const QString &style = {});
+// Display progress counts the current page as read. An unknown length is 0%.
 double pageProgressFraction(int page, int pages);
 int pageProgressPercent(int page, int pages);
+// The same progress in tenths of a percent, for one-decimal percentages.
+int pageProgressTenths(int page, int pages);
 
 struct ReadingProgress
 {

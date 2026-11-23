@@ -23,6 +23,18 @@ class QTouchEvent;
 namespace kobalt {
 struct AnnotationGeometry;
 
+struct ProgressBarColors
+{
+    QColor ink, rest, paper;
+};
+
+// The progress bar across `span`: a rule on the outer side of `edge`, ink up
+// to the reading position and `rest` after it, with a fill against the read
+// part on the inner side, toward the text. Each chapter tick cuts a gap
+// through rule and fill. The page and the header and footer map both paint it.
+void paintProgressBar(QPainter &painter, int left, int span, int edge, bool atTop, qreal fraction,
+                      const QVector<double> &ticks, const ProgressBarColors &colors);
+
 class ReadingPage : public QWidget
 {
 public:
@@ -35,6 +47,10 @@ public:
         int fontPixels = 40, lineSpacing = 150;
         QMargins margins;
         int columns = 1, columnSpacing = 0;
+
+        int lineHeight() const;
+        void paintText(QPainter &painter, const QRect &text, const QVector<int> &words,
+                       const QColor &ink) const;
     };
 
     ReflowLayout reflowLayout;
@@ -66,12 +82,25 @@ public:
     std::array<headerfooter::Content, headerfooter::slotCount> slotContents;
     QString notice;
     qreal progressFraction = 0;
+    // Chapter starts on the progress bar, from 0 to 1.
+    QVector<double> progressTicks;
 
     bool showHeader() const { return chrome.header(); }
 
     bool showFooter() const { return chrome.footer(); }
 
-    bool showProgress() const { return chrome.progressBar; }
+    bool progressAtTop() const
+    {
+        return headerfooter::progressEdge(chrome) == headerfooter::BarEdge::Top;
+    }
+
+    // Chapter starts to draw, when the layout asks for ticks.
+    QVector<double> shownTicks() const;
+
+    bool progressAtBottom() const
+    {
+        return headerfooter::progressEdge(chrome) == headerfooter::BarEdge::Bottom;
+    }
 
     int headerTextPixels() const
     {
@@ -156,10 +185,12 @@ public:
     ReadingPage(QWidget *parent, std::function<void()> cancelAnimation);
     // Copy the cached page and chrome without widget layout or backing-store work.
     QImage snapshot(bool sleeping = false) const;
+    bool needsImageCleanup(bool colorDisplay);
     // Cached chrome with the bookmark ribbon, without copying the page body.
     QImage stripSnapshot(bool footer) const;
     void cleanRefresh(bool clean);
     void refreshContent(bool reading = false, bool now = false);
+    void refreshStrips();
     // Set before refreshContent when the engine prepared the changed rectangle
     // from the image with this cache key to `image`. 0 means not prepared.
     QRect preparedDamage;
@@ -182,10 +213,10 @@ private:
     int animationTurnDirection = 0, animationStep = -1;
     // Text weight and family changes draw the strips again.
     using Slots = std::array<headerfooter::Content, 3>;
-    using HeaderState = std::tuple<Slots, std::array<headerfooter::Field, 3>, bool, bool, int, int,
-                                   qint64, int, QString>;
+    using HeaderState = std::tuple<Slots, std::array<headerfooter::Field, 3>, bool, bool, qreal,
+                                   QVector<double>, bool, int, int, qint64, int, QString>;
     using FooterState = std::tuple<Slots, std::array<headerfooter::Field, 3>, QString, bool, bool,
-                                   qreal, int, int, qint64, int, QString>;
+                                   qreal, QVector<double>, int, int, qint64, int, QString>;
     Slots stripSlots(bool footer) const;
     std::array<headerfooter::Field, 3> stripFields(bool footer) const;
     void paintSlots(QPainter &painter, const QRect &bounds, bool footer,
@@ -213,13 +244,15 @@ private:
     int renderedTop = -1, renderedBottom = -1;
     QRect renderedRibbon;
     QImage renderStrip(int height, const std::function<void(QPainter &)> &draw);
+    QRegion renderStrips(bool geometryChanged, qint64 paletteKey);
     void paintHeader(QPainter &painter, bool sleeping = false) const;
+    void paintBar(QPainter &painter, int edge, bool atTop) const;
     void paintFooter(QPainter &painter, bool sleeping = false) const;
+    QColor pagePaper() const;
     void paintContents(QPainter &painter, bool sleeping = false) const;
     void paintBody(QPainter &painter) const;
-    bool changingViewport = false, viewportNoticeVisible = false;
+    bool changingViewport = false;
     QVector<int> wordLengths;
-    QTimer viewportNoticeTimer;
     int headerRightWidth() const;
     ui::HoldTimer holdTimer;
     enum class HoldTarget { Current, Stale };

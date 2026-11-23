@@ -1,4 +1,5 @@
 #include "header_footer_panel.h"
+#include "app/reader/views/reading_page.h"
 #include "ui/controls/icons.h"
 #include "ui/controls/options.h"
 #include "ui/controls/paging.h"
@@ -26,6 +27,8 @@ using headerfooter::Preset;
 using ui::px;
 
 namespace {
+constexpr auto stripDigits = ui::TextDigits::Tabular;
+
 QFont valueFont()
 {
     QFont font = ui::headerFooterFont(headerFooterMetrics::valueText);
@@ -52,12 +55,12 @@ void paintValue(QPainter &painter, const QRect &bounds, const Content &content, 
     const int room = qMax(0, bounds.width() - icon - gap);
     QString text = content.text;
     int textWidth = text.isEmpty() ? 0
-            : halfSpaces           ? qCeil(ui::halfSpacedWidth(painter.font(), text))
-                                   : ui::interfaceTextWidth(text, textFont);
+            : halfSpaces           ? qCeil(ui::halfSpacedWidth(textFont, text, stripDigits))
+                                   : ui::interfaceTextWidth(text, textFont, stripDigits);
     if (textWidth > room) {
         halfSpaces = false;
         text = ui::headerFooterText(content, textFont, room);
-        textWidth = text.isEmpty() ? 0 : ui::interfaceTextWidth(text, textFont);
+        textWidth = ui::interfaceTextWidth(text, textFont, stripDigits);
     }
     const int total = textWidth + gap + icon;
     const int x = align & Qt::AlignLeft ? bounds.x()
@@ -65,12 +68,13 @@ void paintValue(QPainter &painter, const QRect &bounds, const Content &content, 
                                         : bounds.x() + (bounds.width() - total) / 2;
     if (!text.isEmpty() && content.batteryIcon)
         ui::drawOpticalPrivateText(painter, QRect(x, bounds.y(), textWidth, bounds.height()), text,
-                                   Qt::AlignLeft, ui::headerFooterTextWeight());
+                                   Qt::AlignLeft, ui::headerFooterTextWeight(), {}, stripDigits);
     else if (!text.isEmpty() && halfSpaces)
-        ui::drawHalfSpaced(painter, x, bounds, text, ui::headerFooterTextWeight());
+        ui::drawHalfSpaced(painter, x, bounds, text, ui::headerFooterTextWeight(), stripDigits);
     else if (!text.isEmpty())
         ui::drawInterfaceText(painter, QRect(x, bounds.y(), textWidth, bounds.height()), text,
-                              Qt::AlignLeft | Qt::AlignVCenter, ui::headerFooterTextWeight());
+                              Qt::AlignLeft | Qt::AlignVCenter, ui::headerFooterTextWeight(), {},
+                              stripDigits);
     if (content.batteryIcon) {
         const qreal width = body * int(metrics::panel::batteryBodyWidth)
                 / int(metrics::panel::batteryBodyHeight);
@@ -101,17 +105,10 @@ int dashWidth(Field field)
 } // namespace
 
 namespace {
-// The page's progress bar: its fill and the gap under it.
+// What the page's progress bar keeps between its edge and the strip's text.
 int progressSpace()
 {
-    return metrics::reading::progressFillHeight + metrics::reading::progressBottom;
-}
-
-// A slot's box: its strip's line of text and the padding around it.
-int slotBoxHeight(int size, bool footer)
-{
-    const QFont font = ui::headerFooterFont(metrics::reading::textPixels(size, footer));
-    return ui::interfaceLineHeight(font) + 2 * headerFooterMetrics::slotPadding;
+    return metrics::reading::progressHeight;
 }
 
 // A dashed outline on whole pixels, drawn as filled dashes so every density
@@ -144,16 +141,17 @@ public:
         setEnabled(editable);
     }
 
-    void show(Field shownField, const Content &next, bool stripShown, bool bar, int textPixels)
+    void setContent(Field shownField, const Content &next, headerfooter::BarEdge bar,
+                    int textPixels, int strip)
     {
-        if (field == shownField && content == next && shown == stripShown && progressBar == bar
-            && pixels == textPixels)
+        if (field == shownField && content == next && progressBar == bar && pixels == textPixels
+            && stripHeight == strip)
             return;
         field = shownField;
         content = next;
-        shown = stripShown;
         progressBar = bar;
         pixels = textPixels;
+        stripHeight = strip;
         const auto value = content.empty() ? strings::get("header_footer.empty") : content.text;
         setAccessibleName(
                 strings::get("header_footer.slot_value")
@@ -168,35 +166,28 @@ protected:
         const bool pressed = isDown();
         const auto ink = palette().color(pressed ? QPalette::Window : QPalette::WindowText);
         const auto paper = palette().color(pressed ? QPalette::WindowText : QPalette::Window);
-        // The page shows through around the slot boxes; a held slot fills its box.
-        if (!shown)
-            painter.setOpacity(.45);
         // The strip's own font and size, so Small, Medium and Large show as on the page.
         painter.setFont(ui::headerFooterFont(pixels));
         // Header slots keep the top edge and footer slots the bottom edge,
-        // above the progress bar when there is one, as on the page.
+        // inside the progress bar when it is on their edge, as on the page.
         const bool footer = headerfooter::footerSlot(slot);
-        const int line = painter.fontMetrics().height();
-        const int edge =
-                headerFooterMetrics::mapEdgeInset + (footer && progressBar ? progressSpace() : 0);
-        const int boxHeight = line + 2 * headerFooterMetrics::slotPadding;
-        // Boxes keep half a gap from each other and a wider margin from the page's sides.
+        const auto barEdge = footer ? headerfooter::BarEdge::Bottom : headerfooter::BarEdge::Top;
+        const int bar = progressBar == barEdge ? progressSpace() : 0;
+        const int stripTop = footer ? height() - bar - stripHeight : bar;
+        const int boxInset = qMax(1, int(metrics::control::border) / 2);
         const int column = slot % 3;
-        const int left = column == 0 ? int(headerFooterMetrics::mapSideInset)
-                                     : headerFooterMetrics::slotGap / 2;
-        const int right = column == 2 ? int(headerFooterMetrics::mapSideInset)
-                                      : headerFooterMetrics::slotGap / 2;
-        const QRect box(left, footer ? height() - edge - boxHeight : edge,
-                        qMax(0, width() - left - right), boxHeight);
+        const int sideGap = 2 * metrics::control::border;
+        const QRect box(sideGap, stripTop + boxInset, width() - 2 * sideGap,
+                        stripHeight - 2 * boxInset);
         if (pressed)
             painter.fillRect(box, paper);
         else
             paintDashes(painter, box, ui::dividerColor(this));
-        const QRect bounds =
-                box.adjusted(metrics::list::lineInset - headerFooterMetrics::slotGap / 2,
-                             headerFooterMetrics::slotPadding,
-                             -(metrics::list::lineInset - headerFooterMetrics::slotGap / 2),
-                             -headerFooterMetrics::slotPadding);
+        const int inset = metrics::list::lineInset;
+        const int textLeft = column == 0 ? int(metrics::reading::headerSide) : inset;
+        const int textRight = column == 2 ? int(metrics::reading::headerSide) : inset;
+        const QRect bounds(textLeft, stripTop, qMax(0, width() - textLeft - textRight),
+                           stripHeight);
         // Each column aligns its text as the strip does: left, centre, right.
         const Qt::Alignment align = column == 0 ? Qt::AlignLeft
                 : column == 2                   ? Qt::AlignRight
@@ -218,16 +209,17 @@ protected:
 
 private:
     int slot;
-    bool editable, shown = true, progressBar = false;
-    int pixels = 0;
+    bool editable;
+    headerfooter::BarEdge progressBar = headerfooter::BarEdge::None;
+    int pixels = 0, stripHeight = 0;
     Field field = Field::Nothing;
     Content content;
 };
 
-SlotMap::SlotMap(QWidget *parent, bool editable) : QWidget(parent), editable(editable)
+SlotMap::SlotMap(QWidget *parent, bool editable) : QWidget(parent)
 {
     setObjectName(editable ? "rrHeaderFooterCustomMap" : "rrHeaderFooterPresetMap");
-    setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
     for (int slot = 0; slot < headerfooter::slotCount; ++slot) {
         cells[slot] = new Cell(this, slot, editable);
         connect(cells[slot], &QPushButton::clicked, this, [this, slot] {
@@ -244,17 +236,53 @@ QPushButton *SlotMap::cell(int slot) const
 
 void SlotMap::setSlots(const Layout &next, const SlotContents &contents)
 {
-    const bool repaint = layout != next;
     layout = next;
-    for (int slot = 0; slot < headerfooter::slotCount; ++slot) {
-        const bool footer = headerfooter::footerSlot(slot);
-        const auto &size = footer ? layout.footerSize : layout.headerSize;
-        cells[slot]->show(layout.slotFields[slot], contents[slot],
-                          footer ? layout.footerEnabled : layout.headerEnabled, layout.progressBar,
-                          metrics::reading::textPixels(size, footer));
-    }
-    if (repaint)
+    for (int slot = 0; slot < headerfooter::slotCount; ++slot)
+        setSlot(slot, contents[slot]);
+    update();
+}
+
+void SlotMap::setBodyLayout(const ReadingPage::ReflowLayout &body)
+{
+    if (bodyLayout.margins == body.margins && bodyLayout.fontPixels == body.fontPixels
+        && bodyLayout.lineSpacing == body.lineSpacing && bodyLayout.columns == body.columns
+        && bodyLayout.columnSpacing == body.columnSpacing)
+        return;
+    bodyLayout = body;
+    update();
+}
+
+void SlotMap::setProgress(qreal fraction, const QVector<double> &chapterTicks)
+{
+    fraction = qBound(0.0, fraction, 1.0);
+    if (qFuzzyCompare(1 + progress, 1 + fraction) && ticks == chapterTicks)
+        return;
+    progress = fraction;
+    ticks = chapterTicks;
+    if (layout.progressBar)
         update();
+}
+
+void SlotMap::setSlot(int slot, const Content &content)
+{
+    const bool footer = headerfooter::footerSlot(slot);
+    const int size = footer ? layout.footerSize : layout.headerSize;
+    const bool enabled = footer ? layout.footerEnabled : layout.headerEnabled;
+    cells[slot]->setVisible(enabled);
+    if (!enabled)
+        return;
+    cells[slot]->setContent(layout.slotFields[slot], content, headerfooter::progressEdge(layout),
+                            metrics::reading::textPixels(size, footer),
+                            metrics::reading::stripHeight(size, layout.stripPadding));
+}
+
+void SlotMap::updateBattery(const headerfooter::Values &values)
+{
+    for (int slot = 0; slot < headerfooter::slotCount; ++slot) {
+        const auto field = layout.slotFields[slot];
+        if (headerfooter::batteryField(field))
+            setSlot(slot, headerfooter::content(field, values, layout.uppercase[slot]));
+    }
 }
 
 QSize SlotMap::sizeHint() const
@@ -262,12 +290,11 @@ QSize SlotMap::sizeHint() const
     // Room for the largest strips and the bar, whatever the layout shows, so
     // the sheet keeps its height when a preset or size changes. Smaller
     // strips leave more page between them, as they do on the reader.
-    const int strips = 2 * headerFooterMetrics::mapEdgeInset
-            + slotBoxHeight(headerfooter::maximumSize, false)
-            + slotBoxHeight(headerfooter::maximumSize, true) + progressSpace();
-    // Two lines with a line gap above and below them. The sheet and its size
-    // sliders fit on one page on a Clara BW only with this short space.
-    const int body = 3 * headerFooterMetrics::mapLineGap + headerFooterMetrics::mapLineHeight;
+    const int strips = 2
+                    * metrics::reading::stripHeight(headerfooter::maximumSize,
+                                                    headerfooter::maximumExtraHeight)
+            + progressSpace();
+    const int body = headerFooterMetrics::minimumBodyHeight;
     return { headerFooterMetrics::mapRowHeight * 4,
              qMax(2 * int(headerFooterMetrics::mapRowHeight), strips + body)
                      + 2 * int(metrics::control::border) };
@@ -275,15 +302,16 @@ QSize SlotMap::sizeHint() const
 
 void SlotMap::resizeEvent(QResizeEvent *)
 {
-    const int border = metrics::control::border;
-    const int inner = width() - 2 * border;
     for (int slot = 0; slot < headerfooter::slotCount; ++slot) {
         const int column = slot % 3;
-        const int left = border + inner * column / 3, right = border + inner * (column + 1) / 3;
+        const int left = width() * column / 3, right = width() * (column + 1) / 3;
         const bool footer = headerfooter::footerSlot(slot);
-        const int rowHeight = headerFooterMetrics::mapEdgeInset
-                + slotBoxHeight(headerfooter::maximumSize, footer) + (footer ? progressSpace() : 0);
-        const int top = footer ? height() - border - rowHeight : border;
+        // Either row leaves room for the bar, which can be on either edge.
+        const int rowHeight = qMin(height() / 2,
+                                   metrics::reading::stripHeight(headerfooter::maximumSize,
+                                                                 headerfooter::maximumExtraHeight)
+                                           + progressSpace() + metrics::spacing::row);
+        const int top = footer ? height() - rowHeight : 0;
         cells[slot]->setGeometry(left, top, right - left, rowHeight);
     }
 }
@@ -292,34 +320,67 @@ void SlotMap::paintEvent(QPaintEvent *)
 {
     QPainter painter(this);
     const auto ink = palette().color(QPalette::WindowText);
-    const auto lines = palette().color(QPalette::Midlight);
     const int border = metrics::control::border;
     painter.fillRect(rect(), palette().color(QPalette::Window));
-    ui::paintEdges(painter, rect(),
-                   ui::Edges(Qt::TopEdge) | Qt::BottomEdge | Qt::LeftEdge | Qt::RightEdge, ink,
-                   border);
-    const int inner = width() - 2 * border;
-    // Two lines of text, the last one shorter, stand for the page between
-    // the header and footer slots.
-    const int lineLeft = border + headerFooterMetrics::mapLineInset,
-              lineWidth = inner - 2 * headerFooterMetrics::mapLineInset;
-    const int headerBottom =
-            border + headerFooterMetrics::mapEdgeInset + slotBoxHeight(layout.headerSize, false);
-    const int footerTop = height() - border - headerFooterMetrics::mapEdgeInset
-            - (layout.progressBar ? progressSpace() : 0) - slotBoxHeight(layout.footerSize, true);
-    const int first = (headerBottom + footerTop - headerFooterMetrics::mapLineGap
-                       - headerFooterMetrics::mapLineHeight)
-            / 2;
-    for (int line = 0; line < 2; ++line) {
-        painter.fillRect(lineLeft, first + line * headerFooterMetrics::mapLineGap,
-                         line == 1 ? lineWidth * 3 / 4 : lineWidth,
-                         headerFooterMetrics::mapLineHeight, lines);
+    const auto bar = headerfooter::progressEdge(layout);
+    const int topBar = bar == headerfooter::BarEdge::Top ? progressSpace() : 0;
+    const int bottomBar = bar == headerfooter::BarEdge::Bottom ? progressSpace() : 0;
+    const int headerStrip = layout.headerEnabled
+            ? metrics::reading::stripHeight(layout.headerSize, layout.stripPadding)
+            : 0;
+    const int footerStrip = layout.footerEnabled
+            ? metrics::reading::stripHeight(layout.footerSize, layout.stripPadding)
+            : 0;
+    const int header = topBar + (layout.header() ? headerStrip : 0);
+    const int footer = bottomBar + (layout.footer() ? footerStrip : 0);
+    const auto bandPaper = ui::themeColors(this).overviewPaper;
+    painter.fillRect(0, 0, width(), header, bandPaper);
+    painter.fillRect(0, height() - footer, width(), footer, bandPaper);
+    ui::paintEdges(painter, rect(), ui::Edges(Qt::TopEdge) | Qt::BottomEdge, ink, border);
+    painter.setPen(QPen(ui::dividerColor(this), border, Qt::DotLine, Qt::FlatCap));
+    if (header)
+        painter.drawLine(0, header - border / 2, width(), header - border / 2);
+    if (footer)
+        painter.drawLine(0, height() - footer + border / 2, width(),
+                         height() - footer + border / 2);
+
+    // Enabled strips reserve space for their buttons even when all three slots are empty.
+    const int topBand = topBar + headerStrip, bottomBand = bottomBar + footerStrip;
+    // Compress the page margins when the short preview would otherwise lose its text.
+    const int marginRoom =
+            qMax(0, height() - topBand - bottomBand - headerFooterMetrics::minimumBodyHeight);
+    const auto &margins = bodyLayout.margins;
+    const int marginSum = margins.top() + margins.bottom();
+    const int topMargin =
+            marginSum > marginRoom ? marginRoom * margins.top() / marginSum : margins.top();
+    const int bottomMargin = marginSum > marginRoom ? marginRoom - topMargin : margins.bottom();
+    const int top = topBand + topMargin, bottom = height() - bottomBand - bottomMargin;
+    const int columns = qBound(1, bodyLayout.columns, 2);
+    const int gap = bodyLayout.columnSpacing;
+    const int span =
+            (width() - bodyLayout.margins.left() - bodyLayout.margins.right() - (columns - 1) * gap)
+            / columns;
+    const int pitch = qMax(1, bodyLayout.lineHeight() / 2);
+    const int thickness = qMax(border, bodyLayout.fontPixels / 10);
+    const int rows = qBound(1, (bottom - top + pitch / 2) / pitch, 6);
+    if (span > 0 && bottom - top >= thickness) {
+        const auto lines = ui::sectionColor(this);
+        const int step = (bottom - top) / rows;
+        for (int column = 0; column < columns; ++column) {
+            const int left = bodyLayout.margins.left() + column * (span + gap);
+            for (int row = 0; row < rows; ++row)
+                painter.fillRect(left, top + row * step + (step - thickness) / 2,
+                                 row == rows - 1 ? span / 2 : span, thickness, lines);
+        }
     }
-    if (layout.progressBar) {
-        // Where the page draws it: above the bottom edge, across the width.
-        const int y = height() - border - progressSpace();
-        painter.fillRect(border, y, inner, metrics::reading::progressFillHeight, lines);
-        painter.fillRect(border, y, inner / 30, metrics::reading::progressFillHeight, ink);
+    if (bar != headerfooter::BarEdge::None) {
+        // Where the page draws it, inside the top or bottom edge.
+        const bool atTop = bar == headerfooter::BarEdge::Top;
+        const int edge = atTop ? border + int(metrics::reading::progressRuleEdge)
+                               : height() - border - int(metrics::reading::progressRuleEdge);
+        paintProgressBar(painter, 0, width(), edge, atTop, progress,
+                         layout.progressTicks ? ticks : QVector<double>{},
+                         { ink, ui::themeColors(this).outline, bandPaper });
     }
 }
 
@@ -422,7 +483,7 @@ void PresetCard::paintEvent(QPaintEvent *)
         painter.fillRect(x, (footer ? bottom : top) - headerFooterMetrics::dashHeight / 2, dash,
                          headerFooterMetrics::dashHeight, ink);
     }
-    const auto lines = palette().color(QPalette::Midlight);
+    const auto lines = ui::sectionColor(this);
     const int lineTop = top + pageHeight / 9, lineGap = pageHeight / 11;
     for (int line = 0; line < 6; ++line)
         painter.fillRect(page.x() + inset, lineTop + line * lineGap,
@@ -430,7 +491,9 @@ void PresetCard::paintEvent(QPaintEvent *)
                          metrics::control::border, lines);
     if (miniature.progressBar)
         painter.fillRect(page.x() + edge,
-                         page.bottom() + 1 - edge - headerFooterMetrics::dashHeight / 2,
+                         miniature.progressBarTop
+                                 ? page.y() + edge
+                                 : page.bottom() + 1 - edge - headerFooterMetrics::dashHeight / 2,
                          pageWidth / 12, headerFooterMetrics::dashHeight / 2, ink);
     const QFont label = ui::interfaceFont(metrics::text::secondary);
     painter.setFont(label);
@@ -481,16 +544,19 @@ void paintBarRule(QWidget *owner, int height)
 }
 } // namespace
 
-HeaderFooterView::HeaderFooterView(QWidget *parent) : ui::Panel(parent, Qt::TopEdge)
+HeaderFooterView::HeaderFooterView(QWidget *parent) : ui::Panel(parent)
 {
     setObjectName("rrHeaderFooterView");
-    // The same heavy rule, bold title and close cell as the Font sheet.
-    setEdgeWidth(metrics::chrome::heavyRule);
-    title = new ui::InterfaceLabel(strings::get("header_footer.customize_title"), this);
-    title->setObjectName("rrHeaderFooterTitle");
+    heading = new ui::Panel(this, Qt::BottomEdge);
+    heading->setEdgeWidth(metrics::chrome::heavyRule);
+    title = barTitle(heading, "rrHeaderFooterTitle");
+    title->setText(strings::get("header_footer.customize_title"));
     title->setWordWrap(true);
-    ui::readerStyle(title, ui::styles::font(metrics::text::body, true) + "background:transparent;");
-    close = new ui::CellButton(ui::ControlIcon::Close, this);
+    fontButton = new ui::CellButton(ui::ControlIcon::Typography, heading);
+    fontButton->setObjectName("rrStripFontPicker");
+    fontButton->setAccessibleName(strings::get("settings.header_footer_font"));
+    fontButton->setRule(Qt::LeftEdge);
+    close = new ui::CellButton(ui::ControlIcon::Close, heading);
     close->setObjectName("rrHeaderFooterClose");
     close->setRule(Qt::LeftEdge);
     close->setAccessibleName(strings::get("header_footer.close"));
@@ -506,19 +572,19 @@ HeaderFooterView::HeaderFooterView(QWidget *parent) : ui::Panel(parent, Qt::TopE
             [this] { showPage(pager->turnTarget(-1)); });
     connect(pager->next, &QPushButton::clicked, this, [this] { showPage(pager->turnTarget(1)); });
     contentRows = new QVBoxLayout(content);
-    // Room under the title's divider and below the last row.
+    // Match the visible top inset, including the space above the preset miniatures.
     QMargins margins = metrics::panel::contentMargins;
-    margins.setBottom(metrics::spacing::section);
+    margins.setBottom(margins.top() + headerFooterMetrics::miniatureTop);
     contentRows->setContentsMargins(margins);
     hide();
 }
 
 int HeaderFooterView::headingHeight(int width) const
 {
-    const int cell = qMin(int(metrics::choices::pickerHeader), width / 4);
-    return qMax(int(metrics::choices::pickerHeader),
-                title->heightForWidth(qMax(1, width - cell - metrics::chrome::inset))
-                        + 2 * int(metrics::control::border));
+    const int titleWidth =
+            qMax(1, width - 2 * metrics::chrome::cellWidth - 2 * metrics::chrome::inset);
+    return qMax(int(metrics::chrome::actionHeight),
+                title->heightForWidth(titleWidth) + metrics::chrome::heavyRule);
 }
 
 int HeaderFooterView::preferredHeight(int width) const
@@ -528,31 +594,23 @@ int HeaderFooterView::preferredHeight(int width) const
     return headingHeight(width) + rows;
 }
 
-void HeaderFooterView::paintEvent(QPaintEvent *event)
-{
-    ui::Panel::paintEvent(event);
-    // A divider separates the title row from the presets.
-    QPainter painter(this);
-    painter.fillRect(0, headingHeight(width()) - metrics::control::border, width(),
-                     metrics::control::border, ui::dividerColor(this));
-}
-
 void HeaderFooterView::resizeEvent(QResizeEvent *)
 {
     const int header = headingHeight(width());
-    const int cell = qMin(int(metrics::choices::pickerHeader), width() / 4);
-    title->setGeometry(metrics::chrome::inset, 1, qMax(0, width() - cell - metrics::chrome::inset),
-                       header - 2);
-    // The cell stops above the divider, which runs the full width.
-    close->setGeometry(width() - cell, metrics::chrome::heavyRule, cell,
-                       header - metrics::chrome::heavyRule - int(metrics::control::border));
+    const int cell = metrics::chrome::cellWidth;
+    const int controlsHeight = header - metrics::chrome::heavyRule;
+    heading->setGeometry(0, 0, width(), header);
+    title->setGeometry(metrics::chrome::inset, 0,
+                       qMax(1, width() - 2 * cell - 2 * metrics::chrome::inset), controlsHeight);
+    fontButton->setGeometry(width() - 2 * cell, 0, cell, controlsHeight);
+    close->setGeometry(width() - cell, 0, cell, controlsHeight);
     // Lay out at the natural height before splitting on complete row boundaries.
     // Squeezing this layout makes the slot targets overlap in landscape.
     const int natural = preferredHeight(width()) - header;
     const bool overflow = natural > height() - header;
     const int available =
             qMax(1, height() - header - (overflow ? int(metrics::chrome::actionHeight) : 0));
-    content->resize(width(), natural);
+    content->resize(width(), qMax(natural, available));
     contentRows->setGeometry(content->rect());
     pages.clear();
     int start = 0;
@@ -566,7 +624,7 @@ void HeaderFooterView::resizeEvent(QResizeEvent *)
             start = bounds.top();
         }
     }
-    pages.append({ start, natural });
+    pages.append({ start, content->height() });
     pager->setGeometry(0, height() - metrics::chrome::actionHeight, width(),
                        metrics::chrome::actionHeight);
     clip->setGeometry(0, header, width(), available);
@@ -652,6 +710,44 @@ FieldChooser::FieldChooser(QWidget *parent) : ui::Panel(parent)
     hide();
 }
 
+namespace {
+void setFieldValue(ui::DescribedOption *row, Field field, const headerfooter::Values &values,
+                   bool uppercase, int textPixels)
+{
+    auto shown = headerfooter::content(field, values, uppercase);
+    // Before the first turn the page turn time shows a typical value.
+    if (field == Field::PageTurnTime && values.pageTurnMilliseconds < 0) {
+        auto sample = values;
+        sample.pageTurnMilliseconds = headerfooter::samplePageTurnMilliseconds;
+        shown = headerfooter::content(field, sample, uppercase);
+    }
+    // Each row shows what the slot would: text, a battery, or both.
+    if (shown.text.isEmpty() && !shown.batteryIcon)
+        shown.text = strings::get("header_footer.unavailable");
+    ui::DescribedOption::ValueStyle style;
+    style.battery = shown.batteryIcon;
+    style.percent = shown.battery;
+    style.charging = shown.charging;
+    style.halfSpaces = headerfooter::pageCount(field);
+    style.digits = stripDigits;
+    if (textPixels > 0) {
+        style.sampleFont = ui::headerFooterFont(textPixels);
+        style.sampleWeight = ui::interfaceWeight() + ui::headerFooterAddedWeight();
+    }
+    row->setValue(shown.text, style);
+}
+} // namespace
+
+void FieldChooser::updateBattery(const headerfooter::Values &values, int textPixels)
+{
+    const auto &rows = list->options();
+    for (int index = 0; index < rows.size(); ++index) {
+        const auto field = headerfooter::choosableFields[index];
+        if (headerfooter::batteryField(field))
+            setFieldValue(rows[index], field, values, uppercase->isChecked(), textPixels);
+    }
+}
+
 void FieldChooser::open(int slot, Field current, const headerfooter::Values &values, bool uppercase,
                         int textPixels)
 {
@@ -661,26 +757,8 @@ void FieldChooser::open(int slot, Field current, const headerfooter::Values &val
     for (int index = 0; index < rows.size(); ++index) {
         const auto field = headerfooter::choosableFields[index];
         list->setLeftOut(index, headerfooter::debugField(field) && !debug && field != current);
-        auto shown = headerfooter::content(field, values, uppercase);
-        // Before the first turn the page turn time shows a typical value.
-        if (field == Field::PageTurnTime && values.pageTurnMilliseconds < 0) {
-            auto sample = values;
-            sample.pageTurnMilliseconds = headerfooter::samplePageTurnMilliseconds;
-            shown = headerfooter::content(field, sample, uppercase);
-        }
-        // Each row shows what the slot would: text, a battery, or both.
-        if (shown.text.isEmpty() && !shown.batteryIcon)
-            shown.text = strings::get("header_footer.unavailable");
-        ui::DescribedOption::ValueStyle style;
-        style.battery = shown.batteryIcon;
-        style.percent = shown.battery;
-        style.charging = shown.charging;
-        style.halfSpaces = headerfooter::pageCount(field);
-        if (textPixels > 0) {
-            style.sampleFont = ui::headerFooterFont(textPixels);
-            style.sampleWeight = ui::interfaceWeight() + ui::headerFooterAddedWeight();
-        }
-        rows[index]->setValue(shown.text, style);
+        rows[index]->setText(headerfooter::fieldLabel(field, values.useScreens));
+        setFieldValue(rows[index], field, values, uppercase, textPixels);
         if (field == current)
             list->setCurrent(index);
     }

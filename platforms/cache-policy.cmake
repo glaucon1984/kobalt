@@ -13,8 +13,19 @@ set(layout_policy "849b421de582bf6b89f84263eab8e27dabd97cc0a8cfc807504f170a6ac35
 # Version 10: repaginate chapter slices with corrected breaks after tables.
 # Version 11: repaginate text using the selected font's small caps.
 # Version 12: repaginate small caps for scripts without native substitutions.
-set(rendering_version 12)
-file(GLOB cache_patterns CONFIGURE_DEPENDS "${KOBALT_ROOT}/assets/hyph/*.pattern")
+# Version 13: record forced page endings for chapter alignment in two-column layouts.
+# Version 14: size single flex items to their content.
+# Version 15: column alignment and inline flex sizing.
+# Version 16: correct constrained flex rows and intrinsic inline flex sizing.
+# Version 17: rebuild layouts that resumed with another publication’s language.
+# Version 18: repaginate flex rows with horizontal item margins.
+# Version 19: repaginate block flex rows with percentage item width limits.
+# Version 20: repaginate flex rows with horizontal auto margins.
+# Version 21: repaginate emergency Thai line wraps around attached vowels and marks.
+# Version 22: native small caps for all-small-caps without c2sc, and Croatian hyphen line breaks.
+set(rendering_version 22)
+file(GLOB cache_patterns CONFIGURE_DEPENDS
+    "${KOBALT_ROOT}/assets/hyph/*.pattern" "${KOBALT_ROOT}/assets/hyph/*.khg")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${cache_patterns})
 set(cache_hashes "${rendering_version};")
 foreach(input IN LISTS cache_patterns)

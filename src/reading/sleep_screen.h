@@ -9,6 +9,10 @@
 #include <QVector>
 
 namespace kobalt::sleep {
+// Sample an captured reader overlay without copying or scaling its pixels.
+// A missing or translucent capture cannot rule out an image underneath it.
+bool needsImageCleanup(const QImage &frame, bool colorDisplay);
+
 // The backdrop. Plain is a blank page for designs that draw everything
 // themselves. Wallpaper is one of the reader's own images, filling the screen.
 // Neither is ever saved in the legacy `sleep_screen` preference.
@@ -36,7 +40,8 @@ enum class Design {
     Lines,
     Letter,
     Page,
-    Overlay
+    Overlay,
+    Random // A Custom status choice. Resolve it before drawing.
 };
 
 // Text the newer designs draw besides the status, captured at sleep.
@@ -74,6 +79,9 @@ struct Snapshot
     bool dimPage = true;
     // Unknown in snapshots saved before the percentage was stored.
     int percent = -1;
+    // Tenths of a percent when Progress percentages shows one decimal,
+    // otherwise -1 and the designs show the whole `percent`.
+    int percentTenths = -1;
     Tile tile = Tile::Bookmark;
     // The design that draws the status. A Custom screen is captured as the
     // status it chose, such as Seal, over its own `mode`.
@@ -203,14 +211,14 @@ inline Tile savedTile(const QJsonObject &preferences)
     return Tile::Bookmark;
 }
 
-// The gallery's order: Kobo's own screen, Custom, the reading page, today's
-// default, then the rest.
+// Gallery order: Kobo's screen, Custom, the reading page, then the presets.
 inline constexpr Design designs[] = { Design::Stock,    Design::Custom,    Design::Page,
                                       Design::Bookmark, Design::Card,      Design::Cover,
                                       Design::Seal,     Design::Medallion, Design::Pill,
                                       Design::Caption,  Design::Widgets,   Design::Night,
                                       Design::Ring,     Design::Framed,    Design::Lines,
                                       Design::Letter,   Design::Overlay };
+
 inline constexpr auto designKey = "sleep_design";
 inline constexpr auto followOrientationKey = "sleep_follow_orientation";
 
@@ -230,6 +238,8 @@ inline QString value(Design design)
         return QStringLiteral("stock");
     case Design::Custom:
         return QStringLiteral("custom");
+    case Design::Random:
+        return QStringLiteral("random");
     case Design::Bookmark:
         return QStringLiteral("bookmark");
     case Design::Card:
@@ -491,9 +501,20 @@ inline constexpr auto customKey = "sleep_custom";
 // design stands for no status: it draws the backdrop alone.
 inline constexpr Mode customBackdrops[] = { Mode::Cover, Mode::Page, Mode::Overlay, Mode::Wallpaper,
                                             Mode::Plain };
-inline constexpr Design customStatuses[] = { Design::Cover,  Design::Bookmark,  Design::Card,
-                                             Design::Seal,   Design::Medallion, Design::Pill,
-                                             Design::Caption };
+inline constexpr Design customStatuses[] = { Design::Cover, Design::Random, Design::Bookmark,
+                                             Design::Card,  Design::Seal,   Design::Medallion,
+                                             Design::Pill,  Design::Caption };
+
+// Only visible statuses participate in a random draw.
+inline bool eligibleStatus(Design status)
+{
+    for (const auto choice : customStatuses)
+        if (choice == status)
+            return choice != Design::Random && choice != Design::Cover;
+    return false;
+}
+
+Design pickStatus(Design previous);
 
 struct Layer
 {
@@ -568,6 +589,14 @@ inline void setCustom(QJsonObject &preferences, const Custom &custom)
     preferences[customKey] = saved;
 }
 
+inline bool randomStatus(const QJsonObject &preferences, bool poweredOff = false)
+{
+    if (design(preferences) != Design::Custom)
+        return false;
+    const auto saved = custom(preferences);
+    return (poweredOff && !saved.same ? saved.off : saved.sleep).status == Design::Random;
+}
+
 // A design that is a backdrop with one status, as Custom can show it.
 // Returns false for Kobo's screen, Custom and the designs that draw the whole screen.
 inline bool asLayer(Design design, Tile tile, Layer &result)
@@ -613,14 +642,22 @@ inline Tile tileFor(Design status)
                                       : Tile::None;
 }
 
+inline Look look(const Layer &layer, Design picked = Design::Bookmark)
+{
+    const auto status = layer.status == Design::Random
+            ? (eligibleStatus(picked) ? picked : Design::Bookmark)
+            : layer.status;
+    return { status, layer.backdrop, tileFor(status) };
+}
+
 // Charging uses the sleeping look; only power off can differ.
-inline Look look(const QJsonObject &preferences, bool poweredOff = false)
+inline Look look(const QJsonObject &preferences, bool poweredOff = false,
+                 Design picked = Design::Bookmark)
 {
     const auto chosen = design(preferences);
     if (chosen == Design::Custom) {
         const auto saved = custom(preferences);
-        const auto &layer = poweredOff && !saved.same ? saved.off : saved.sleep;
-        return { layer.status, layer.backdrop, tileFor(layer.status) };
+        return look(poweredOff && !saved.same ? saved.off : saved.sleep, picked);
     }
     Tile tile = Tile::None;
     switch (chosen) {
@@ -681,11 +718,12 @@ inline Tile tile(const QJsonObject &preferences)
 // A Custom screen keeps its status over the neutral backdrop; its wallpaper
 // and PNG are left out.
 inline Snapshot privateSnapshot(QSize size, const QJsonObject &preferences, Snapshot source = {},
-                                bool followReading = false, bool poweredOff = false)
+                                bool followReading = false, bool poweredOff = false,
+                                Design picked = Design::Bookmark)
 {
     auto snapshot = privateSnapshot(size, preferences.value("dark_mode").toBool(source.dark),
                                     followReading);
-    const auto chosen = look(preferences, poweredOff);
+    const auto chosen = look(preferences, poweredOff, picked);
     snapshot.design = chosen.design;
     snapshot.tile = chosen.tile;
     if (snapshot.design == Design::Stock) {
@@ -696,6 +734,7 @@ inline Snapshot privateSnapshot(QSize size, const QJsonObject &preferences, Snap
         snapshot.image.fill(Qt::black);
     snapshot.place = source.place;
     snapshot.percent = source.percent;
+    snapshot.percentTenths = source.percentTenths;
     snapshot.progress = source.progress;
     snapshot.remaining = source.remaining;
     snapshot.details = source.details;

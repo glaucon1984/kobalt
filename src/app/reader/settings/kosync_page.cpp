@@ -19,8 +19,12 @@
 namespace kobalt::reader {
 namespace metrics = ui::metrics;
 
-KosyncPage::KosyncPage(QWidget *parent, QWidget *overlayParent, KeyboardFactory keyboard)
-    : QWidget(parent), overlayParent_(overlayParent), makeKeyboard_(std::move(keyboard))
+KosyncPage::KosyncPage(QWidget *parent, QWidget *overlayParent, KeyboardFactory keyboard,
+                       KosyncScheduleEditor &scheduleEditor)
+    : QWidget(parent),
+      scheduleEditor_(&scheduleEditor),
+      overlayParent_(overlayParent),
+      makeKeyboard_(std::move(keyboard))
 {
     setObjectName("rrKosyncPage");
     auto *rows = new QVBoxLayout(this);
@@ -180,9 +184,9 @@ void KosyncPage::setAccount(const QString &server, const QString &username, bool
     automatic_ = automatic;
     automaticButton_->setEnabled(signedIn);
     if (!signedIn)
-        dismissSchedule();
-    else if (scheduleSheet_)
-        scheduleSheet_->setChoices(automatic_, schedule_);
+        scheduleEditor_->dismiss();
+    else
+        scheduleEditor_->setChoices(automatic_, schedule_);
     updateAutomaticCaption();
     sync_->setEnabled(signedIn);
     logout_->setEnabled(signedIn);
@@ -193,8 +197,7 @@ void KosyncPage::setAccount(const QString &server, const QString &username, bool
 void KosyncPage::setSchedule(const kosync::Schedule &schedule)
 {
     schedule_ = schedule;
-    if (scheduleSheet_)
-        scheduleSheet_->setChoices(automatic_, schedule_);
+    scheduleEditor_->setChoices(automatic_, schedule_);
     updateAutomaticCaption();
 }
 
@@ -204,58 +207,37 @@ void KosyncPage::setScheduleFeatures(bool sleepWake, bool wifi)
         return;
     sleepWake_ = sleepWake;
     wifi_ = wifi;
-    dismissSchedule();
+    scheduleEditor_->setFeatures({ sleepWake_, wifi_ });
     updateAutomaticCaption();
+}
+
+QString KosyncPage::automaticCaption(bool automatic, const kosync::Schedule &schedule, bool wifi)
+{
+    QString caption;
+    if (!automatic)
+        caption = strings::get("kosync.automatic_off_caption");
+    else if (!kosync::syncsWhileReading(schedule))
+        caption = strings::get("kosync.automatic_caption_never");
+    else if (!wifi)
+        caption = KosyncScheduleSheet::intervalLabel(schedule.minutes);
+    else
+        caption = strings::get(schedule.wakeWifi ? "kosync.automatic_caption_wake"
+                                                 : "kosync.automatic_caption_wait")
+                          .arg(KosyncScheduleSheet::intervalLabel(schedule.minutes));
+    return caption;
 }
 
 void KosyncPage::updateAutomaticCaption()
 {
-    QString caption;
-    if (!automatic_)
-        caption = strings::get("kosync.automatic_off_caption");
-    else if (!kosync::syncsWhileReading(schedule_))
-        caption = strings::get("kosync.automatic_caption_never");
-    else if (!wifi_)
-        caption = KosyncScheduleSheet::intervalLabel(schedule_.minutes);
-    else
-        caption = strings::get(schedule_.wakeWifi ? "kosync.automatic_caption_wake"
-                                                  : "kosync.automatic_caption_wait")
-                          .arg(KosyncScheduleSheet::intervalLabel(schedule_.minutes));
-    automaticButton_->setCaption(caption);
+    automaticButton_->setCaption(automaticCaption(automatic_, schedule_, wifi_));
     if (stateChanged)
         stateChanged();
 }
 
 void KosyncPage::showSchedule()
 {
-    if (scheduleSheet_ || !signedIn_)
-        return;
-    auto *sheet =
-            new KosyncScheduleSheet(overlayParent_, automatic_, schedule_, { sleepWake_, wifi_ });
-    scheduleSheet_ = sheet;
-    sheet->closed = [this] { dismissSchedule(); };
-    sheet->automaticChanged = [this](bool enabled) {
-        if (automaticChanged)
-            automaticChanged(enabled);
-    };
-    sheet->scheduleChanged = [this](const kosync::Schedule &schedule) {
-        if (scheduleChanged)
-            scheduleChanged(schedule);
-    };
-    sheet->show();
-    sheet->raise();
-    sheet->fit();
-}
-
-void KosyncPage::dismissSchedule()
-{
-    if (!scheduleSheet_)
-        return;
-    auto *sheet = scheduleSheet_.data();
-    scheduleSheet_ = nullptr;
-    sheet->dismissIntervals();
-    sheet->hide();
-    sheet->deleteLater();
+    if (signedIn_)
+        scheduleEditor_->open(overlayParent_, automatic_, schedule_, { sleepWake_, wifi_ });
 }
 
 void KosyncPage::updateCaptions()
@@ -294,12 +276,16 @@ void KosyncPage::clearPassword()
     updateCaptions();
 }
 
+QString KosyncPage::lastSyncText(const QDateTime &time)
+{
+    return strings::get("kosync.last_synced")
+            .arg(time.isValid() ? QLocale().toString(time.toLocalTime(), QLocale::ShortFormat)
+                                : strings::get("kosync.never"));
+}
+
 void KosyncPage::setLastSync(const QDateTime &time)
 {
-    lastSync_->setText(strings::get("kosync.last_synced")
-                               .arg(time.isValid() ? QLocale().toString(time.toLocalTime(),
-                                                                        QLocale::ShortFormat)
-                                                   : strings::get("kosync.never")));
+    lastSync_->setText(lastSyncText(time));
     if (stateChanged)
         stateChanged();
 }
@@ -378,7 +364,7 @@ void KosyncPage::edit(int field)
     const auto titleText = strings::get(field == 0           ? "kosync.server"
                                                 : field == 1 ? "kosync.username"
                                                 : field == 2 ? "kosync.password"
-                                                             : "kosync.device_name");
+                                                             : "kosync.device_name_title");
     auto *dialog = new ui::ChoiceModal(overlayParent_, { {}, titleText, {} },
                                        { strings::get("common.cancel"), "rrKosyncEditCancel" },
                                        { strings::get("common.ok"), "rrKosyncEditSave" });
@@ -500,7 +486,6 @@ void KosyncPage::edit(int field)
     editorDialog->installEventFilter(this);
     editorDialog->show();
     editorDialog->raise();
-    editorDialog->fitCard();
     editor->setFocus();
     keyboard_->show();
     placeEditor();
@@ -510,7 +495,8 @@ void KosyncPage::dismissEditor()
 {
     dismissSyncHelp();
     dismissMatchingChoices();
-    dismissSchedule();
+    if (scheduleEditor_)
+        scheduleEditor_->dismiss();
     if (!editorDialog)
         return;
     keyboard_->hide();
@@ -532,8 +518,9 @@ void KosyncPage::showMatchingChoices()
 {
     if (matchingDialog_)
         return;
-    auto *dialog = new ui::NoticeModal(overlayParent_, { {}, strings::get("kosync.matching"), {} },
-                                       { strings::get("common.cancel"), "rrKosyncMatchingCancel" });
+    auto *dialog =
+            new ui::NoticeModal(overlayParent_, { {}, strings::get("kosync.matching_title"), {} },
+                                { strings::get("common.cancel"), "rrKosyncMatchingCancel" });
     matchingDialog_ = dialog;
     dialog->setObjectName("rrKosyncMatchingDialog");
     dialog->setDimmed(true);
@@ -560,7 +547,6 @@ void KosyncPage::showMatchingChoices()
     dialog->dismissed = [this] { dismissMatchingChoices(); };
     dialog->show();
     dialog->raise();
-    dialog->fitCard();
 }
 
 void KosyncPage::dismissMatchingChoices()
@@ -589,7 +575,6 @@ void KosyncPage::showSyncHelp()
     dialog->dismissed = [this] { dismissSyncHelp(); };
     dialog->show();
     dialog->raise();
-    dialog->fitCard();
 }
 
 void KosyncPage::dismissSyncHelp()

@@ -23,8 +23,40 @@ QString bookmarkLayoutKey(int pages, const QJsonObject &state, const QSize &page
     if (state.contains("book_fraction")) {
         layout["slice_start"] = state.value("slice_start");
         layout["rough_pages"] = state.value("rough_pages");
+        if (state.value("columns").toInt() == 2 && state.value("whole_book_ready").toBool())
+            layout["whole_book_ready"] = true;
     }
     return QString::fromUtf8(QJsonDocument(layout).toJson(QJsonDocument::Compact));
+}
+
+static bool sameBookmarkLayout(const QJsonObject &state, const QJsonObject &previous)
+{
+    // Repeated calls for the same frame share the JSON object's storage.
+    if (state == previous)
+        return true;
+    const bool sliced = state.contains("book_fraction");
+    if (sliced != previous.contains("book_fraction"))
+        return false;
+    if (sliced
+        && (state.value("slice_start") != previous.value("slice_start")
+            || state.value("rough_pages") != previous.value("rough_pages")
+            || (state.value("columns").toInt() == 2
+                && state.value("whole_book_ready").toBool()
+                        != previous.value("whole_book_ready").toBool())))
+        return false;
+    return appearance::same(state, previous);
+}
+
+QString BookmarkLayoutKeyCache::key(int pages, const QJsonObject &state, const QSize &pageArea)
+{
+    if (lastKey.isEmpty() || pages != lastPages || pageArea != lastArea
+        || !sameBookmarkLayout(state, lastState)) {
+        lastPages = pages;
+        lastArea = pageArea;
+        lastKey = bookmarkLayoutKey(pages, state, pageArea);
+    }
+    lastState = state;
+    return lastKey;
 }
 
 BookmarkSession::BookmarkSession(ReaderSession &session, std::function<QString()> layout,
@@ -76,7 +108,9 @@ int BookmarkSession::bookPage(int index) const
         return -1;
     if (!session.state().contains("book_fraction"))
         return page(index);
-    if (page(index) >= 0 && page(index) == session.page())
+    if ((!session.state().value("whole_book_ready").toBool()
+         || session.state().value("columns").toInt() != 2)
+        && page(index) >= 0 && page(index) == session.page())
         return session.state().value("rough_page").toInt(0) - 1;
     return bookPages_.value(bookmarks()[index].position, -1);
 }
@@ -138,8 +172,11 @@ bool BookmarkSession::sync()
                 guard->layoutRevision_ = revision;
                 guard->pages_ = pages;
                 guard->bookPages_.clear();
-                for (int i = 0; i < positions.size(); ++i)
+                guard->printedPages_.clear();
+                for (int i = 0; i < positions.size(); ++i) {
                     guard->bookPages_.insert(positions[i], locations.bookPages.value(i, -1));
+                    guard->printedPages_.insert(positions[i], locations.printedPages.value(i));
+                }
                 guard->merge();
                 if (guard && guard->changed)
                     guard->changed();
@@ -162,17 +199,18 @@ void BookmarkSession::merge()
             shared.append(it.key());
     if (shared.isEmpty())
         return;
-    auto summaries = std::make_shared<QMap<int, QPair<QString, QString>>>();
+
+    auto summaries = std::make_shared<QMap<int, PageSummary>>();
     auto remaining = std::make_shared<int>(shared.size());
     const auto key = layout_;
     const auto revision = layoutRevision_;
     QPointer<BookmarkSession> guard(this);
     for (int p : shared) {
         session.pageSummary(
-                p, [guard, p, key, revision, summaries, remaining](QString start, QString excerpt) {
+                p, [guard, p, key, revision, summaries, remaining](PageSummary summary) {
                     if (!guard)
                         return;
-                    (*summaries)[p] = { start, excerpt };
+                    (*summaries)[p] = std::move(summary);
                     // A layout change drops the merge; the next lookup merges again.
                     // A list edit does not: the merge below reads the current list and
                     // its pages, and the summaries still describe this layout.
@@ -181,7 +219,7 @@ void BookmarkSession::merge()
                         return;
                     // An unavailable source cannot supply a replacement bookmark.
                     for (auto it = summaries->begin(); it != summaries->end(); ++it) {
-                        if (!it.value().first.isEmpty())
+                        if (!it.value().start.isEmpty())
                             continue;
                         guard->layout_.clear();
                         if (guard->changed)
@@ -212,20 +250,18 @@ void BookmarkSession::merge()
                             return;
                         }
                     }
-                    auto &session = guard->session;
+                    for (auto it = summaries->begin(); it != summaries->end(); ++it)
+                        if (it.value().bookPage >= 0)
+                            bookPageOf.insert(it.key(), it.value().bookPage);
                     const auto previous = guard->store->bookmarks();
                     const bool merged = guard->store->merge(
                             [&pageOf](const QString &position) {
                                 return pageOf.value(position, -1);
                             },
-                            [&session, summaries, bookPageOf](int page, const QDateTime &created) {
-                                QString chapter = session.chapterTitle();
-                                const int bookPage = bookPageOf.value(page, -1);
-                                for (const auto &link : session.chapters())
-                                    if (link.page >= 0 && link.page <= bookPage)
-                                        chapter = link.title;
+                            [summaries](int page, const QDateTime &created) {
                                 const auto summary = summaries->value(page);
-                                return Bookmark{ summary.first, chapter, summary.second, created };
+                                return Bookmark{ summary.start, summary.chapter, summary.excerpt,
+                                                 created };
                             });
                     if (!merged)
                         return;
@@ -234,8 +270,9 @@ void BookmarkSession::merge()
                     // Each replacement starts on a known page. Keep that pairing rather
                     // than resolving the shorter list again after every merge.
                     for (auto it = summaries->begin(); it != summaries->end(); ++it) {
-                        pageOf.insert(it.value().first, it.key());
-                        guard->bookPages_.insert(it.value().first, bookPageOf.value(it.key(), -1));
+                        pageOf.insert(it.value().start, it.key());
+                        guard->printedPages_.insert(it.value().start, it.value().printedPage);
+                        guard->bookPages_.insert(it.value().start, bookPageOf.value(it.key(), -1));
                     }
                     QVector<int> mergedPages;
                     for (const auto &bookmark : mergedBookmarks)
@@ -281,6 +318,7 @@ bool BookmarkSession::save(QVector<Bookmark> bookmarks, QVector<int> pages, cons
     // for repeated edits in one slice. Clearing the layout forces a lookup.
     if (bookPages_.size() > 2 * BookmarkStore::maxBookmarks) {
         bookPages_.clear();
+        printedPages_.clear();
         layout_.clear();
     }
     if (!writer) {
@@ -468,7 +506,7 @@ BookmarkSession::Toggle BookmarkSession::toggle(int current)
     // The reply appends to the current list, so an edit of the list meanwhile
     // does not matter. A layout change or page turn does.
     session.pageSummary(
-            current, [guard, current, key, revision, fast, slice](QString start, QString excerpt) {
+            current, [guard, current, key, revision, fast, slice](const PageSummary &summary) {
                 if (!guard)
                     return;
                 guard->adding.remove(current);
@@ -478,16 +516,16 @@ BookmarkSession::Toggle BookmarkSession::toggle(int current)
                 const bool layoutChanged = fast ? guard->session.layoutRevision() != revision
                                 || guard->session.state().value("slice_start") != slice
                                                 : guard->layout() != key;
-                if (start.isEmpty() || layoutChanged || guard->session.page() != current) {
+                if (summary.start.isEmpty() || layoutChanged || guard->session.page() != current) {
                     diagnostic("bookmark-toggle-refused",
-                               { { "start_empty", start.isEmpty() },
+                               { { "start_empty", summary.start.isEmpty() },
                                  { "layout_changed", layoutChanged },
                                  { "page_changed", guard->session.page() != current } },
                                false);
                     return;
                 }
                 auto list = guard->store->bookmarks();
-                list.append({ start, guard->session.chapterTitle(), excerpt,
+                list.append({ summary.start, summary.chapter, summary.excerpt,
                               QDateTime::currentDateTimeUtc() });
                 // Known pages always pair with the list. When a merge or new lookup
                 // has made them unknown meanwhile, the next lookup finds this page too.
@@ -498,10 +536,11 @@ BookmarkSession::Toggle BookmarkSession::toggle(int current)
                 else
                     pages.clear();
                 const auto state = guard->session.state();
-                const int bookPage = state.contains("book_fraction")
-                        ? state.value("rough_page").toInt(0) - 1
-                        : current;
-                guard->bookPages_.insert(start, bookPage);
+                const int bookPage = summary.bookPage >= 0 ? summary.bookPage
+                        : state.contains("book_fraction")  ? state.value("rough_page").toInt(0) - 1
+                                                           : current;
+                guard->printedPages_.insert(summary.start, summary.printedPage);
+                guard->bookPages_.insert(summary.start, bookPage);
                 if (!guard->save(list, pages, "added"))
                     return;
                 if (guard->added)

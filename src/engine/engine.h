@@ -29,6 +29,7 @@ class LayoutProgress
 {
 public:
     int percent() const { return percent_.load(); }
+
     bool estimateComplete() const { return estimateComplete_.load(); }
 
     void reset()
@@ -56,6 +57,7 @@ public:
     const std::shared_ptr<LayoutProgress> progress = std::make_shared<LayoutProgress>();
 
     Engine &operator=(Engine &&) { return *this; }
+
     virtual ~Engine() = default;
     // The name of the engine, for cache identity and for code that still
     // needs one specific engine.
@@ -106,6 +108,7 @@ public:
         Q_UNUSED(allBooks);
         return false;
     }
+
     // Shared count, on the owning engine thread. Populates the Stats graph
     // from source anchors. Counts visible source text once, including
     // non-linear spine fragments; excludes SVG and ruby annotation text.
@@ -113,6 +116,13 @@ public:
     // properties, so reflow and cached reopening do not scan text again.
     virtual DocumentWordCounts wordCounts(std::function<bool()> current = {}) = 0;
     virtual qint64 totalWords() const = 0;
+
+    virtual qint64 wordsInMainText(const QString &first, const QString &after,
+                                   const std::function<bool()> &)
+    {
+        return first.isEmpty() && after.isEmpty() ? totalWords() : -1;
+    }
+
     virtual QString resourceError() const = 0;
     virtual QJsonObject resourceStats() const = 0;
     virtual bool openPreview(Engine &source, QSize size, QString *error) = 0;
@@ -121,6 +131,7 @@ public:
     // skip other non-linear sections. Returns `from` at either end.
     virtual int turnTarget(int from, int delta) const = 0;
     virtual bool goTo(const QString &position) = 0;
+    virtual OpeningResult restoreSavedPosition(const QString &position) = 0;
 
     // Goes to the entry `index` of chapters(), which has `position`. An
     // engine that loads the text of a part of the book can know the exact
@@ -167,7 +178,7 @@ public:
     virtual QString pageStart(int page) const = 0;
     virtual QString pageExcerpt(int page) const = 0;
     virtual WordSelection wordAt(QPoint point) = 0;
-    virtual QImage imageAt(QPoint point) = 0;
+    virtual QImage imageAt(QPoint point, const QString &resource = {}) = 0;
     virtual AnnotationPageEdges annotationPageEdges() = 0;
     virtual AnnotationToken annotationTokenAt(QPoint point) = 0;
     virtual AnnotationToken annotationDragTokenAt(QPoint point, const QString &boundary,
@@ -177,10 +188,9 @@ public:
     virtual TextRange textRange(const QString &start, const QString &end,
                                 bool withContext = false) = 0;
     // Indices of source ranges intersecting [start, end), in input order.
-    // Invalid, empty and reversed ranges are ignored. No text or geometry is read.
-    virtual QVector<int>
-    intersectingRanges(const QString &start, const QString &end,
-                       const QVector<QPair<QString, QString>> &ranges) const = 0;
+    // Invalid, empty and reversed ranges are ignored. Only source endpoints are compared.
+    virtual QVector<int> intersectingRanges(const QString &start, const QString &end,
+                                            const QVector<QPair<QString, QString>> &ranges) = 0;
     // Crossed boundary edits retain both complete words using wordAt segmentation.
     virtual TextRange annotationRange(const QString &start, const QString &end) = 0;
     // Complete token boundaries preserve explicit punctuation choices when reversed.
@@ -190,7 +200,8 @@ public:
                                       bool endTokenPolicy = false, bool startTokenPolicy = false,
                                       std::function<bool()> current = {}) = 0;
     virtual QVector<PageLink> pageLinks() = 0;
-    virtual LinkDetails linkDetails(const QString &source, bool preview = true) = 0;
+    virtual LinkDetails linkDetails(const QString &source, bool preview = true,
+                                    const std::function<bool()> &current = {}) = 0;
     virtual SearchBatch searchPage(const QString &query, int page) = 0;
     // Worker-only, incremental preparation. The cache belongs to this layout.
     virtual bool prepareSearch() = 0;
@@ -202,9 +213,9 @@ public:
                                              const QString &origin) = 0;
     // Source-only current-page intersection. Does not resolve remote geometry.
     // Returns input indices in order; at most 2000 saved ranges plus one draft.
-    virtual QVector<int> visibleRanges(const QVector<QPair<QString, QString>> &ranges) const = 0;
+    virtual QVector<int> visibleRanges(const QVector<QPair<QString, QString>> &ranges) = 0;
     // Check a changing draft without rebuilding the saved-range index.
-    virtual bool rangeVisible(const QString &start, const QString &end) const = 0;
+    virtual bool rangeVisible(const QString &start, const QString &end) = 0;
     // Text selection excludes images. Links also need their image hit regions.
     virtual AnnotationGeometry annotationGeometry(const QString &start, const QString &end) = 0;
     virtual QVector<QRect> rangeRects(const QString &start, const QString &end,
@@ -246,6 +257,7 @@ public:
     // replaced. Their teardown can write the parsed-book cache, so it waits
     // for idle time instead of holding up the turn.
     virtual void releaseRetired() { }
+
     // Compares the cached images of two pages ahead of a turn between them.
     // Cache key of a page's cached image, or 0. Never draws.
     virtual qint64 cachedImageKey(int page) const = 0;
@@ -267,6 +279,9 @@ public:
     // book. Negative when the page numbers cover the whole book.
     virtual double bookFraction() const = 0;
 
+    // True when bookFraction() is not negative, without the estimate.
+    virtual bool partOfBook() const { return bookFraction() >= 0; }
+
     // Rough page numbers for an engine with the text of only a part of the
     // book: the page in the book and in the spine item, counted from one,
     // and the pages of each. They come from an estimate of each spine item,
@@ -281,6 +296,31 @@ public:
         bool pagesEstimated = true, itemPagesEstimated = true;
     };
 
+    QJsonObject mainTextMarks;
+
+    // Set deferred when a source fragment is temporarily unavailable.
+    virtual QString chapterBoundaryPosition(const QVector<ChapterLink> &links, int index,
+                                            bool * = nullptr) const
+    {
+        return links[index].position;
+    }
+
+    // Null means unresolved. An empty, non-null end includes the last spine item.
+    virtual QString afterChapter(const QVector<ChapterLink> &links, int index,
+                                 bool * = nullptr) const
+    {
+        const int depth = links[index].depth;
+        while (++index < links.size())
+            if (links[index].depth <= depth && !links[index].position.isEmpty())
+                return links[index].position;
+        return QStringLiteral("");
+    }
+
+    virtual bool validMainTextRange(const QString &first, const QString &after,
+                                    bool *deferred = nullptr) const = 0;
+
+    virtual QPair<QString, QString> mainTextHints() const { return {}; }
+
     virtual RoughPages roughPages() const = 0;
 
     // The page of the book, counted from one, of each position anywhere in
@@ -293,6 +333,57 @@ public:
     virtual QVector<int> bookPages(const QStringList &positions,
                                    const std::function<bool()> &current = {},
                                    bool rangeEndpoints = false) const = 0;
+
+    // The same pages from a layout of the whole book only: the shown one, or
+    // a prepared one that waits to be shown. Empty when there is none, so
+    // a caller never gets an estimate. Never lays out text.
+    virtual QVector<int> wholeBookPages(const QStringList &positions,
+                                        const std::function<bool()> &current = {},
+                                        bool rangeEndpoints = false) const
+    {
+        return partOfBook() ? QVector<int>{} : bookPages(positions, current, rangeEndpoints);
+    }
+
+    // The page count of that layout, or 0 when there is none.
+    virtual int wholeBookPageCount() const { return partOfBook() ? 0 : pages(); }
+
+    // Finds the main text and counts its words in that layout ahead of time,
+    // so the turn that shows it does not. A part of the book calls this once
+    // the layout is ready.
+    virtual void prepareWholeBookText(const QString &first, const QString &after,
+                                      const std::function<bool()> &current)
+    {
+        Q_UNUSED(first);
+        Q_UNUSED(after);
+        Q_UNUSED(current);
+    }
+
+    // The contents of that layout, whose positions resolve in it. A part of
+    // the book has placeholders for the entries of spine items it has not
+    // laid out.
+    virtual QVector<ChapterLink> wholeBookChapters() const
+    {
+        return partOfBook() ? QVector<ChapterLink>{} : chapters();
+    }
+
+    // Chapter ticks measured in a layout of the whole book, kept with the
+    // saved page estimate so that a book that opens again shows them before
+    // it has that layout. `range` names the main text they were measured
+    // for. True when ticks, possibly none, were measured for the same range
+    // and layout; `ticks` then holds them.
+    virtual void rememberWholeBookTicks(const QVector<double> &ticks, const QString &range)
+    {
+        Q_UNUSED(ticks);
+        Q_UNUSED(range);
+    }
+
+    virtual bool savedWholeBookTicks(const QString &range, QVector<double> *ticks) const
+    {
+        Q_UNUSED(range);
+        Q_UNUSED(ticks);
+        return false;
+    }
+
     // Goes to about `fraction` of the whole book, from 0 to 1. An engine
     // with the text of only a part of the book lays out the text there
     // first.
@@ -328,9 +419,31 @@ public:
     // True while a document from prepareFullDocument() waits to be shown.
     virtual bool fullDocumentReady() const { return false; }
 
-    // Resolve an adopting turn from the edge column of the screen being left.
-    // A negative result uses the usual turn from the adopted reading position.
-    virtual int preparedSpreadTurn(int) const { return -1; }
+    // After a numbered jump, can the prepared layout show the same spread?
+    virtual bool prepareMatchingSpread() { return true; }
+
+    // The whole-book screen for an adopting turn. -1 uses the ordinary turn
+    // from the adopted position. Set *continues to false if a switch would
+    // repeat or skip a column and the turn must stay in the chapter.
+    virtual int preparedSpreadTurn(int, bool *continues = nullptr) const
+    {
+        if (continues)
+            *continues = true;
+        return -1;
+    }
+
+    // Prepares the forward turn that shows the document from
+    // prepareFullDocument(): that document goes to the page on screen and
+    // draws the page after it, with the changed rectangle against the page
+    // on screen, the targets of its links and its place in the contents.
+    // Only the hidden document changes. Nothing is drawn on screen and the
+    // page on screen stays the same. A turn in the chapter moves the page
+    // on screen; the next call prepares again from there. Stops between its
+    // steps when `current` is false. The turn does what is left.
+    virtual void prepareFullDocumentTurn(const std::function<bool()> &current = {})
+    {
+        Q_UNUSED(current);
+    }
 
     // True once the build of that document has started.
     virtual bool fullDocumentStarted() const { return false; }
@@ -375,6 +488,10 @@ public:
     // requested size and 4 million pixels. Empty means neither is usable.
     virtual QImage coverImage(QSize maximumSize, const QString &preferredPath = {},
                               QString *usedPath = nullptr) const = 0;
+    virtual QVector<ChapterLink> landmarks() const = 0;
+    virtual QString printedPageLabel(const QString &position, bool exclusiveEnd = false,
+                                     bool *deferred = nullptr) = 0;
+    virtual QVector<ChapterLink> printedPages() const = 0;
     virtual QVector<ChapterLink> chapters() const = 0;
     virtual void setChapters(QVector<ChapterLink> contents, QVector<ChapterLink> graph) = 0;
     virtual QVector<ChapterLink> chapterGraph() const = 0;
@@ -391,6 +508,7 @@ public:
         Q_UNUSED(request);
         return {};
     }
+
     virtual QJsonObject state() const = 0;
     // state() without the page estimate, which costs more to make. Enough
     // to compare the settings.

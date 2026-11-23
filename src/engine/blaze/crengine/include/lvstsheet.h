@@ -50,6 +50,8 @@
 #include "cssdef.h"
 #include "lvstyles.h"
 #include "textlang.h"
+#include "../../extensions/css_class_index.h"
+#include <memory>
 #include <vector>
 
 class lxmlDocBase;
@@ -169,8 +171,6 @@ public:
     LVCssSelectorRef getSubSelectors() const { return _subSelectors; }
     void setSubSelectors(LVCssSelectorRef subSelectors) { _subSelectors = subSelectors; }
     ~LVCssSelectorRule() { if (_next) delete _next; }
-    // A fail-fast check, returning false to rule out a match.
-    bool quickClassCheck(const lUInt32 *classHashes, size_t size) const;
     /// check condition for node
     bool check( const ldomNode * & node, bool allow_cache=true ) const;
     /// check next rules for node
@@ -217,6 +217,14 @@ public:
     lUInt16 getElementNameId() const { return _id; }
     bool check( const ldomNode * node, bool allow_cache=true ) const;
     bool quickClassCheck(const lUInt32 *classHashes, size_t size) const;
+    // Blaze: pseudo-element rules may test the originating element's class.
+    // Only a direct class check on this node may select an index bucket.
+    bool requiredClassHash( lUInt32 & hash ) const {
+        if ( !_rules || _pseudo_elem || _rules->getType() != cssrt_class )
+            return false;
+        hash = _rules->getValueHash();
+        return true;
+    }
     /// Blaze: false when the ancestors of the node lack an element name
     /// or a class that the selector requires of them, so it cannot match.
     bool quickAncestorCheck( LVCssAncestors & ancestors ) const;
@@ -292,25 +300,24 @@ private:
     bool _nested;
 
     int _selector_count;
-    LVArray <int> _selector_count_stack;
-
-    LVPtrVector <LVCssSelector> _selectors;
-    LVPtrVector <LVPtrVector <LVCssSelector> > _stack;
-    LVPtrVector <LVCssSelector> * dup()
-    {
-        LVPtrVector <LVCssSelector> * res = new LVPtrVector <LVCssSelector>();
-        res->reserve( _selectors.length() );
-        for ( int i=0; i<_selectors.length(); i++ ) {
-            LVCssSelector * selector = _selectors[i];
-            if ( selector )
-                res->add( new LVCssSelector(*selector) );
-            else
-                res->add(NULL);
-        }
-        return res;
+    LVPtrVector<LVCssSelector> _selectors;
+    // Blaze: push() only records the selector count. The first change after push()
+    // copies the chains, see detachScope(), and pop() swaps the originals back.
+    // Upstream copies every chain on push() and again on pop().
+    struct SavedScope {
+        int selectorCount;
+        std::unique_ptr<LVPtrVector<LVCssSelector>> selectors;
+        std::unique_ptr<LVCssClassIndex> index;
+    };
+    std::vector<SavedScope> _stack;
+    void copySelectorsTo(LVPtrVector<LVCssSelector> & target) const;
+    void detachScope();
+    // Blaze: only the live document sheets build a class index.
+    std::unique_ptr<LVCssClassIndex> _classIndex;
+    void rebuildClassIndex() {
+        if ( _classIndex )
+            _classIndex->rebuild( _selectors.length() ? _selectors[0] : NULL );
     }
-
-    void set(LVPtrVector<LVCssSelector> & v );
 
     LVArray<LVFontFaceDecl> _fontFaceDecls;
     // Off by default. Two distinct consumers opt a given LVStyleSheet
@@ -340,34 +347,52 @@ public:
     /// enable recording of @font-face decls added via addFontFaceDecl()/merge()
     void enableFontFaceDeclTracking() { _trackFontFaceDecls = true; }
 
+    void enableClassIndex() {
+        _classIndex = std::make_unique<LVCssClassIndex>();
+        rebuildClassIndex();
+    }
+
+    // Blaze: a cancelled style pass can unwind through nested fragment stylesheets.
+    class ScopedPush {
+        LVStyleSheet & sheet;
+        size_t depth;
+    public:
+        explicit ScopedPush( LVStyleSheet & sheet ) : sheet(sheet), depth(sheet._stack.size()) {
+            sheet.push();
+        }
+        ~ScopedPush() {
+            while ( sheet._stack.size() > depth )
+                sheet.pop();
+        }
+    };
+
     // save current state of stylesheet
     void push()
     {
-        _selector_count_stack.add( _selector_count );
-        _stack.add( dup() );
+        _stack.push_back({ _selector_count, nullptr, nullptr });
     }
-    // restore previously saved state
     bool pop()
     {
-        // Restore original counter (so we don't overflow the 19 bits
-        // of _specificity reserved for storing selector order, so up
-        // to 524288, when we meet a book with 600 DocFragments each
-        // including a 1000 selectors stylesheet).
-        if ( !_selector_count_stack.empty() )
-            _selector_count = _selector_count_stack.remove( _selector_count_stack.length()-1 );
-        LVPtrVector <LVCssSelector> * v = _stack.pop();
-        if ( !v )
+        if (_stack.empty())
             return false;
-        set( *v );
-        delete v;
+        auto & saved = _stack.back();
+        _selector_count = saved.selectorCount;
+        if (saved.selectors) {
+            _selectors.swap(*saved.selectors);
+            if (!saved.index && _classIndex)
+                rebuildClassIndex(); // Indexing was enabled inside this scope.
+            else
+                _classIndex = std::move(saved.index);
+        }
+        _stack.pop_back();
         return true;
     }
 
     /// remove all rules from stylesheet
     void clear() {
         _selector_count = 0;
-        _selector_count_stack.clear();
         _selectors.clear();
+        rebuildClassIndex();
         _stack.clear();
         _fontFaceDecls.clear();
     }

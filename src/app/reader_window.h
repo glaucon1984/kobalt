@@ -11,6 +11,7 @@ class ReaderOrientation;
 class ReadingBook;
 struct ReaderHostServices;
 struct ReaderNotice;
+enum class OpeningSaveState { Inactive, Sleeping, Awake, Required, LowBatteryShutdown };
 
 // The firmware controller owns opening, authorization and publication lifetime.
 // The window returns a retained engine session only after a normal close.
@@ -24,16 +25,6 @@ public:
     // Prepare optional page-bound content before the host replaces its opening view.
     // Empty preparation completes synchronously. Cancellation destroys the window.
     virtual void preparePresentation(std::function<void(bool)> finished) { finished(true); }
-
-    // A window built with ReaderHostServices::quiet takes no input, starts no
-    // clock, writes nothing and observes no host state until it is activated.
-    // The host activates it when the opening it was built for is accepted,
-    // with that opening's startup notice and cover. An active window ignores it.
-    virtual void activate(const ReaderNotice &notice, const QString &coverImagePath) = 0;
-    // Drops a quiet window that was never activated without saving anything,
-    // and returns its session for a later opening of the same book. The host
-    // deletes the window afterwards.
-    virtual std::unique_ptr<ReaderSession> releaseQuiet() = 0;
 
     virtual void checkpoint() = 0;
 
@@ -60,13 +51,26 @@ public:
         finished(true);
     }
 
-    // Limit the native-position wait to two seconds before file release.
-    virtual void prepareUsb(std::function<void()> finished) = 0;
+    // Sleep cancelled an opening whose reader still owns its final save.
+    virtual void setOpeningSaveState(OpeningSaveState) { }
+
+    virtual bool openingSaveParked() const { return false; }
+
+    // With save, try the final save for at most usbSaveMilliseconds. Then
+    // abandon queued saves and release after active storage users have finished.
+    static constexpr int usbSaveMilliseconds = 3000;
+    virtual void prepareUsb(std::function<void()> finished, bool save = false) = 0;
+
+    // Covers the page while a power-off or reboot saves the book.
+    virtual void showShutdownNotice(bool restarting) { (void)restarting; }
+
     virtual void prepareShutdown(std::function<void()> finished, bool allowFailedSave = false) = 0;
 
     virtual sleep::Snapshot powerScreenSnapshot() { return {}; }
 
-    virtual void sleepReader() = 0;
+    virtual sleep::Snapshot presentedSleepSnapshot() const { return {}; }
+
+    virtual void sleepReader(bool externalScreenVisible = false) = 0;
 
     // A bounded final upload can briefly keep the CPU awake after the sleep view appears.
     virtual bool pendingNetworkSync() const { return false; }
@@ -108,6 +112,10 @@ public:
     virtual QJsonObject benchmarkState() const { return {}; }
 
     virtual bool benchmarkCommand(int, int) { return false; }
+
+    // For the scenario player: what the state report would hold now, built in
+    // memory, so a check can read it without waiting for a file.
+    virtual QJsonObject inspect() { return {}; }
 
     // When the opening began and the host's stages before and around the
     // window's construction. The window adds its own build, theme and show

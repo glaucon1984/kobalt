@@ -13,7 +13,7 @@ struct OpenRequest
     QString identity, path;
     QSize size;
     QJsonObject saved;
-    QString platformLocation, layoutCachePath;
+    QString platformLocation;
     std::shared_ptr<SourceLease> lease;
     ResourceFactory resources;
     PositionCodec positions{};
@@ -37,5 +37,7 @@ struct OpenRequest
     QString customPinsPath{};
     // Optional StarDict folder. Prepare its indexes on the opening worker.
     QString dictionariesPath{};
+    // The Kobo host reuses its original parsed-book cache path.
+    bool migrateKoboDocumentCache = false;
 };
 } // namespace kobalt

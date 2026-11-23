@@ -1,11 +1,13 @@
 #include "reading/header_footer.h"
+#include "reading/appearance_settings.h"
 #include "reading/reading_density.h"
 #include "reading/remaining_time.h"
 #include <limits>
 #include "support/qt_compat.h"
-#include "support/strings.h"
+#include "support/percentage_text.h"
 #include "check.h"
 
+#include <QLocale>
 #include <algorithm>
 #include <iterator>
 
@@ -15,6 +17,7 @@ using namespace kobalt::headerfooter;
 // Checks header and footer layouts: defaults, legacy flags and sizes, the battery field, time-remaining text and round trips.
 int main()
 {
+    QLocale::setDefault(QLocale::c());
     // Default keeps the chapter prominent and the footer free of a bar.
     const auto standard = presetLayout(Preset::Default);
     require(isPhoneScreen({ 720, 1600 }, 300) && isPhoneScreen({ 1600, 720 }, 300),
@@ -38,9 +41,9 @@ int main()
                     && standard.slotFields[3] == Field::ChapterPagesLeft
                     && standard.slotFields[5] == Field::BookPercent,
             "Default does not show the clock, chapter, chapter pages left and book percentage");
-    require(standard.uppercase[1] && !standard.progressBar && standard.headerSize == smallSize
-                    && standard.footerSize == smallSize,
-            "Default lost its uppercase chapter, hidden bar or small sizes");
+    require(standard.uppercase[1] && !standard.progressBar && standard.headerSize == mediumSize
+                    && standard.footerSize == mediumSize,
+            "Default lost its uppercase chapter, hidden bar or medium sizes");
     const auto a = presetLayout(Preset::AlternativeA);
     require(a.slotFields[0] == Field::Time && a.slotFields[1] == Field::ChapterAndPage
                     && a.slotFields[4] == Field::TitleAndPage && a.uppercase[1] && a.uppercase[4]
@@ -71,7 +74,7 @@ int main()
     const auto partial =
             fromJson(qt::object({ { "top_left", "author" }, { "footer_size", "huge" } }), standard);
     require(partial.slotFields[0] == Field::Author && partial.slotFields[1] == Field::Chapter
-                    && partial.footerSize == smallSize,
+                    && partial.footerSize == mediumSize,
             "Missing or invalid layout values did not keep the fallback");
 
     // Old presets map exactly; optional numeric sizes retain a disabled strip's last size.
@@ -134,6 +137,13 @@ int main()
             { { "show_header", true }, { "show_footer", true }, { "show_progress_bar", true } }));
     require(selection.preset == Preset::Default && selection.layout == standard,
             "Old default flags prevented the new Default from applying");
+    const auto legacySmall = qt::object({ { "header_text_size", "small" } });
+    for (const auto &preferences : { legacySmall, appearance::cleanPreferences(legacySmall) }) {
+        selection = select(preferences);
+        require(selection.preset == Preset::Default && selection.layout.headerSize == smallSize
+                        && selection.layout.footerSize == mediumSize,
+                "The new default replaced an explicitly saved legacy Small size");
+    }
     selection = select(qt::object({ { "show_clock", false }, { "footer_text_size", "large" } }));
     require(selection.preset == Preset::Custom && selection.layout.slotFields[0] == Field::Nothing
                     && selection.layout.slotFields[1] == Field::Chapter
@@ -157,6 +167,8 @@ int main()
     auto enlarged = standard;
     enlarged.headerSize = maximumSize;
     enlarged.footerSize = 37;
+    enlarged.stripPadding = maximumExtraHeight;
+    require(fromJson(toJson(enlarged), standard) == enlarged, "Strip heights did not round-trip");
     enlarged.headerEnabled = false;
     for (const auto chosen : presets) {
         const auto preferences = qt::object({ { presetKey, presetValue(chosen) },
@@ -166,6 +178,7 @@ int main()
         const auto expected = chosen == Preset::Custom ? edited : presetLayout(chosen);
         require(resolved.preset == chosen && resolved.layout.slotFields == expected.slotFields
                         && resolved.layout.progressBar == expected.progressBar
+                        && resolved.layout.stripPadding == maximumExtraHeight
                         && resolved.layout.headerSize == maximumSize
                         && resolved.layout.footerSize == 37 && !resolved.layout.headerEnabled
                         && resolved.layout.footerEnabled,
@@ -192,12 +205,11 @@ int main()
             "Default did not uppercase the chapter title");
     require(content(standard.slotFields[3], values, false).text.startsWith(QStringLiteral("15 "))
                     && content(standard.slotFields[5], values, false).text
-                            == strings::get("common.percent").arg(3),
+                            == strings::percentage(3),
             "Default footer did not combine chapter pages left with whole-book percentage");
     values.battery = 80;
     const auto emberProgress = content(b.slotFields[5], values, false).text;
-    require(emberProgress == strings::get("common.percent").arg(3),
-            "Ember does not show whole-book progress");
+    require(emberProgress == strings::percentage(3), "Ember does not show whole-book progress");
     auto nextChapter = values;
     nextChapter.chapterPage = 1;
     nextChapter.chapterPages = 4;
@@ -240,14 +252,54 @@ int main()
         require(content(field, noPages, false).text == calculating,
                 "A page field without page numbers must show that they are being calculated");
     require(content(Field::BookPercent, noPages, false).text == QStringLiteral("42%")
-                    && content(Field::ChapterPercent, noPages, false).text
-                            == QStringLiteral("30%"),
+                    && content(Field::ChapterPercent, noPages, false).text == QStringLiteral("30%"),
             "The percentage fields keep their percentage");
+    auto printed = noPages;
+    printed.useScreens = true;
+    printed.printedPage = "xiv";
+    require(content(Field::BookPage, printed, true).text == "xiv"
+                    && content(Field::TitleAndPage, printed, true).text.endsWith("xiv")
+                    && content(Field::ChapterPage, printed, false).text == calculating
+                    && content(Field::BookPercent, printed, false).text == "42%",
+            "Publisher labels must keep their case and leave layout progress alone");
+    auto screens = values;
+    screens.useScreens = true;
+    screens.chapterPage = 13;
+    require(content(Field::ChapterPagesLeft, screens, false).text == "8 screens remaining"
+                    && content(Field::BookPage, screens, false).text.startsWith("Screen "),
+            "Layout counts should use screens when publisher pages are enabled");
+    screens.chapterPage = screens.chapterPages;
+    require(content(Field::ChapterPagesLeft, screens, false).text == "1 screen remaining",
+            "Use the singular for the final screen");
     noPages.decimalPercentages = true;
     require(content(Field::BookPercent, noPages, false).text == QStringLiteral("42.7%")
                     && content(Field::ChapterPercent, noPages, false).text
                             == QStringLiteral("30.9%"),
             "Chapter mode lost decimal precision before estimates arrived");
+    QLocale::setDefault(QLocale(QStringLiteral("it_IT")));
+    // One rule for numbers: the English interface formats them the same on
+    // every device, whatever its locale.
+    require(content(Field::BookPercent, noPages, false).text == QStringLiteral("42.7%")
+                    && content(Field::ChapterPercent, noPages, false).text
+                            == QStringLiteral("30.9%"),
+            "The device locale changed the decimal separator of progress");
+    QLocale::setDefault(QLocale(QStringLiteral("fr_FR")));
+    require(content(Field::BookPercent, noPages, false).text == QStringLiteral("42.7%"),
+            "The device locale added a space before the percent sign");
+    require(fieldDescription(Field::BatteryWarning)
+                    == QStringLiteral("Shows the battery only below %1%.").arg(batteryWarningBelow),
+            "A composed label must keep the interface's percent format");
+    strings::showKeys(true);
+    require(content(Field::BookPercent, noPages, false).text
+                    == QStringLiteral("common.percent [42.7]"),
+            "Percentage formatting must keep the string key and its numeric argument");
+    strings::showKeys(false);
+    for (const auto *locale : { "tr_TR", "ar_EG" }) {
+        QLocale::setDefault(QLocale(QString::fromLatin1(locale)));
+        require(content(Field::BookPercent, noPages, false).text == QStringLiteral("42.7%"),
+                "The device locale changed the order, digits or sign of progress");
+    }
+    QLocale::setDefault(QLocale::c());
     require(content(Field::ChapterAndPage, estimated, false).text == QStringLiteral("6 of ~20"),
             "An estimated total beside a name needs its mark");
     auto missingTotal = values;
@@ -274,8 +326,7 @@ int main()
     const auto battery = content(Field::Battery, values, false);
     require(battery.batteryIcon && battery.text.isEmpty() && battery.battery == 80,
             "Battery is not an icon");
-    require(content(Field::BatteryPercent, values, false).text
-                    == strings::get("common.percent").arg(80),
+    require(content(Field::BatteryPercent, values, false).text == strings::percentage(80),
             "Battery percentage is missing");
     require(content(Field::BatteryPercent, values, false).batteryIcon,
             "Battery with percentage lost its icon");
@@ -287,8 +338,7 @@ int main()
             const auto shown = content(Field::BatteryPercentOnly, status, false);
             require(!shown.batteryIcon
                             && shown.text
-                                    == (percent < 0 ? QString()
-                                                    : strings::get("common.percent").arg(percent)),
+                                    == (percent < 0 ? QString() : strings::percentage(percent)),
                     "Percentage-only battery showed an icon or the wrong text");
         }
         status.deviceStatus = false;
@@ -304,17 +354,14 @@ int main()
             "The existing battery percentage choice changed");
     // Nickel's count: the page on screen is read and the result rounds down,
     // so page 6 of 20 is 30% and the last page is 100%.
-    require(content(Field::ChapterPercent, values, false).text
-                    == strings::get("common.percent").arg(30),
+    require(content(Field::ChapterPercent, values, false).text == strings::percentage(30),
             "Percent of chapter is wrong");
-    require(content(Field::BookPercent, values, false).text
-                    == strings::get("common.percent").arg(3),
+    require(content(Field::BookPercent, values, false).text == strings::percentage(3),
             "Percent of book is wrong");
     {
         auto last = values;
         last.page = last.pages;
-        require(content(Field::BookPercent, last, false).text
-                        == strings::get("common.percent").arg(100),
+        require(content(Field::BookPercent, last, false).text == strings::percentage(100),
                 "The last page is not 100%");
     }
     {
@@ -365,9 +412,7 @@ int main()
         auto low = values;
         low.battery = batteryWarningBelow - 1;
         const auto warning = content(Field::BatteryWarning, low, false);
-        require(warning.batteryIcon
-                        && warning.text
-                                == strings::get("common.percent").arg(batteryWarningBelow - 1),
+        require(warning.batteryIcon && warning.text == strings::percentage(batteryWarningBelow - 1),
                 "Battery warning did not show a low battery");
         low.battery = batteryWarningBelow;
         require(content(Field::BatteryWarning, low, false).empty(),
@@ -530,8 +575,28 @@ int main()
                                   { "uppercase", false },
                                   { "progress_bar", false } });
     auto oldLayout = standard;
+    oldLayout.headerSize = oldLayout.footerSize = smallSize;
     oldLayout.uppercase.fill(false);
     require(fromJson(old, standard) == oldLayout, "An old layout changed on load");
+    // The bar position is optional: missing or unknown keeps the fallback,
+    // and a saved layout keeps the position it had.
+    require(!fromJson(old, standard).progressBarTop, "A layout without a position moved the bar");
+    auto topBar = standard;
+    topBar.progressBar = topBar.progressBarTop = true;
+    require(toJson(topBar).value("progress_bar_position").toString() == "top",
+            "A top bar was not saved as top");
+    require(fromJson(toJson(topBar), standard) == topBar, "A top bar did not load back");
+    auto unknownPosition = toJson(topBar);
+    unknownPosition["progress_bar_position"] = "left";
+    require(fromJson(unknownPosition, standard).progressBarTop == standard.progressBarTop,
+            "An unknown bar position was used");
+    require(progressEdge(topBar) == BarEdge::Top && progressEdge(standard) == BarEdge::None,
+            "The bar edge does not follow the layout");
+    // Ticks are optional too: a layout without them draws none.
+    require(!fromJson(old, standard).progressTicks, "A layout without ticks gained them");
+    auto ticked = topBar;
+    ticked.progressTicks = true;
+    require(fromJson(toJson(ticked), standard) == ticked, "Ticks did not load back");
     for (int slot = 0; slot < slotCount; ++slot)
         require(!slotLabel(slot).isEmpty(), "A slot has no name");
     for (const auto field : fields)

@@ -17,11 +17,15 @@ struct DownloadDictionary
     qint64 size = 0;
 };
 
+enum class DictionaryDownloadResult { None, Installed, Cancelled, Failed };
+
 struct DictionaryTransfer
 {
     QString id;
     qint64 received = 0, total = 0;
     bool installing = false;
+    // The last completed download, or None while a download is running.
+    DictionaryDownloadResult result = DictionaryDownloadResult::None;
 };
 class StarDict;
 
@@ -30,9 +34,10 @@ class DictionaryManager final : public QObject, public DictionaryService
 {
     Q_OBJECT
 public:
-    // An injected network manager stays owned by the caller and must outlive this object.
+    // Downloads create and own their network manager on the transfer thread.
+    using NetworkFactory = std::function<std::unique_ptr<QNetworkAccessManager>()>;
     DictionaryManager(QString directory, std::unique_ptr<DictionaryService> fallback,
-                      QObject *parent = nullptr, QNetworkAccessManager *network = nullptr);
+                      QObject *parent = nullptr, NetworkFactory network = {});
     ~DictionaryManager() override;
     static QVector<DownloadDictionary> catalog();
     static QString normalizeLanguage(const QString &language);
@@ -58,6 +63,7 @@ public:
                                const std::function<bool()> &cancelled = {});
 signals:
     void changed();
+    void cancelDownload();
 
 private:
     struct Data;

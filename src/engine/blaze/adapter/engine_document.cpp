@@ -28,6 +28,9 @@
 #include <QJsonDocument>
 #include <QRegularExpression>
 #include <QRegion>
+#include <QUrl>
+#include <QXmlStreamReader>
+#include "xml_entities.h"
 #include <QPainter>
 #include <QSet>
 #include <QtMath>
@@ -190,13 +193,17 @@ class PageDrawBuffer : public LVColorDrawBuf
 {
 public:
     PageDrawBuffer(QImage &image, bool dark, bool smooth, bool normalizeTextColors,
-                   QMap<std::tuple<quintptr, int, int>, bool> *inversion = nullptr)
-        : LVColorDrawBuf(image.width(), image.height(), image.bits(), 32),
-          pageSize(image.size()),
+                   QMap<std::tuple<quintptr, int, int>, bool> *inversion = nullptr, int x = 0,
+                   int width = -1)
+        : LVColorDrawBuf(width < 0 ? image.width() : width, image.height(), image.bits() + 4 * x,
+                         32),
+          pageSize(GetWidth(), image.height()),
           dark(dark),
           normalizeTextColors(normalizeTextColors),
           inversion(inversion)
     {
+        // A column starts partway into each scanline of the full page.
+        _rowsize = image.bytesPerLine();
         setInvertColors(dark);
         setSmoothScalingImages(smooth);
     }
@@ -210,6 +217,10 @@ public:
 
     void OnImageDrawn(bool visiblePixels) override { imageHasVisiblePixels = visiblePixels; }
 
+    void OnTableDrawn() override { hasTable = true; }
+
+    bool hasTable = false;
+    int visibleImages = 0;
     bool hasImages = false, hasText = false, hasUnsupportedFormatting = false;
     QVector<QRect> imageRegions;
     using LVColorDrawBuf::Draw;
@@ -254,6 +265,8 @@ public:
         const auto style = node ? node->getStyle() : css_style_ref_t();
         const bool unsupportedImage =
                 !style.isNull() && style->writing_mode_warning == css_wmw_unsupported;
+        if (right > left && bottom > top)
+            ++visibleImages;
         if (!imageRegionsFull && right > left && bottom > top) {
             if (imageRegions.size() < 128)
                 imageRegions.append(
@@ -346,7 +359,17 @@ bool validAlignment(const QString &value)
 class CheckedHyphenationLoader final : public HyphDataLoader
 {
 public:
-    explicit CheckedHyphenationLoader(QStringList excluded) : excluded(std::move(excluded)) { }
+    CheckedHyphenationLoader(QStringList excluded, QMap<QString, QString> packed)
+        : excluded(std::move(excluded)), packed(std::move(packed))
+    {
+    }
+
+    LVStreamRef compiledPatterns(const lString32 &id) override
+    {
+        const auto file = packed.constFind(qstring(id));
+        return file == packed.constEnd() ? LVStreamRef()
+                                         : LVOpenFileStream(cre(file.value()).c_str(), LVOM_READ);
+    }
 
     LVStreamRef loadData(lString32 id) override
     {
@@ -363,6 +386,7 @@ public:
 
 private:
     QStringList excluded;
+    QMap<QString, QString> packed;
 };
 
 } // namespace
@@ -452,7 +476,8 @@ bool EngineDocument::initializeFonts()
     // Bundled dictionaries hyphenate by language. A language whose dictionary
     // is not bundled keeps the engine's algorithmic hyphenation.
     HyphMan::initDictionaries(cre(fonts_.hyphenationDirectory + '/'));
-    HyphMan::setDataLoader(new CheckedHyphenationLoader(fonts_.excludedHyphenation));
+    HyphMan::setDataLoader(
+            new CheckedHyphenationLoader(fonts_.excludedHyphenation, fonts_.compiledHyphenation));
     for (const auto *name : engineHyphenationPatterns) {
         if (QFileInfo::exists(fonts_.hyphenationDirectory + '/' + name))
             continue;
@@ -730,6 +755,8 @@ void EngineDocument::configure(QSize size, const QJsonObject &settings)
     graph_.clear();
     externalChapters_ = false;
     totalWords_ = -1;
+    countedRange_ = {};
+    rangeWords_ = -1;
     nativeLocation_ = saved.value("imported_native_location").toString();
     cache_.clear();
     spareImage_ = {};
@@ -809,6 +836,7 @@ void EngineDocument::configure(QSize size, const QJsonObject &settings)
     const double savedOptical = saved.value("font_optical_size").toDouble();
     opticalSize_ = normalizedOpticalSize(optical, savedOptical);
     activateFontParameters();
+    chapterStartsSpread_ = saved.value("chapter_starts_spread").toBool(false);
     twoColumnsLandscape_ = saved.value("two_columns_landscape").toBool(false);
     columns_ = twoColumnsLandscape_ ? (size.width() > size.height() ? 2 : 1)
                                     : qBound(1, saved.value("columns").toInt(1), 2);
@@ -821,6 +849,11 @@ void EngineDocument::configure(QSize size, const QJsonObject &settings)
         columnSpacing_ = qRound(pixels_ * columnSpacingPercent_ / 100.0);
     hangingPunctuation_ = saved.value("hanging_punctuation").toBool(false);
     spineNames_.clear();
+    spineLocations_.clear();
+    printedPages_.clear();
+    printedBySpine_.clear();
+    orderedPrintedMarkers_.clear();
+    landmarks_.clear();
     engine_ = std::make_unique<ColumnView>();
     engine_->setHangingPunctuation(hangingPunctuation_);
     engine_->setColumns(columns_);
@@ -1029,7 +1062,10 @@ int EngineDocument::turnTarget(int from, int delta) const
 
 bool EngineDocument::goTo(const QString &position)
 {
-    const int item = spineItemIndex(position);
+    const QString prefix = QStringLiteral("#_doc_fragment_");
+    const bool printed = position.startsWith(prefix);
+    const int item = printed ? position.mid(prefix.size()).section('_', 0, 0).toInt()
+                             : spineItemIndex(position);
     if (engine_ && windowFirst_ >= 0 && slicePages_ > 0 && item >= 0
         && (item < windowFirst_ || item > windowLast_)) {
         // A saved position may refer to text that has changed. Resolve it in
@@ -1043,6 +1079,31 @@ bool EngineDocument::goTo(const QString &position)
             return false;
         windowLoadMs_ = loadMs;
         return true;
+    }
+    if (printed) {
+        if (!engine_ || !showSpineItemOf(QString("/body/DocFragment[%1]").arg(item + 1)))
+            return false;
+        auto *doc = engine_->getDocument();
+        const auto id = cre(position.mid(1));
+        auto *target = doc->getNodeById(doc->findAttrValueIndex(id.c_str()));
+        if (!target)
+            return false;
+        ldomXPointerEx pointer(target, 0);
+        if (!pointer.isVisible()) {
+            const auto fragment = [](ldomNode *node) {
+                while (node && !node->isNodeName("DocFragment"))
+                    node = node->getParentNode();
+                return node;
+            };
+            auto *chapter = fragment(target);
+            if (!pointer.nextVisibleText() || fragment(pointer.getNode()) != chapter) {
+                pointer = ldomXPointerEx(target, 0);
+                if (!pointer.prevVisibleText() || fragment(pointer.getNode()) != chapter)
+                    return false;
+                pointer.setOffset(pointer.getNode()->getText().length());
+            }
+        }
+        return goTo(qstring(pointer.toString()));
     }
     if (!engine_ || !showSpineItemOf(position))
         return false;
@@ -1091,15 +1152,13 @@ bool EngineDocument::style(int pixels, int spacing, const QString &face, int mar
 bool EngineDocument::applyAppearance(const appearance::Patch &patch, QSize size,
                                      OpeningProgress progress)
 {
+    return updateAppearance(patch, size, std::move(progress), AppearanceAction::Apply);
+}
+
+bool EngineDocument::updateAppearance(const appearance::Patch &patch, QSize size,
+                                      OpeningProgress progress, AppearanceAction action)
+{
     const auto &settings = patch.fields();
-    if (windowFirst_ >= 0 && !inpageFootnotes_ && settings.value("inpage_footnotes").toBool()) {
-        const auto layout = pageNoteLayout();
-        if (layout == PageNoteLayout::Interrupted)
-            return false;
-        if (layout == PageNoteLayout::WholeBook)
-            return setChapterMode(false, patch, size, std::move(progress),
-                                  [this] { return !interrupt_ || !interrupt_(); });
-    }
     const int pixels = settings.value("font_pixels").toInt(pixels_);
     const int spacing = settings.value("line_spacing").toInt(spacing_);
     const int paragraphSpacing = settings.contains("paragraph_spacing")
@@ -1127,24 +1186,6 @@ bool EngineDocument::applyAppearance(const appearance::Patch &patch, QSize size,
     const int weight = settings.value("weight_steps").toInt(weight_);
     const auto bionic = settings.value("bold_reading").toString(bionic_);
     const auto face = settings.value("font_face").toString(face_);
-    // A part of a book is loaded without what the settings of that moment
-    // did not need: the publisher's fonts while a reading font replaces
-    // them, and the beautifier's marks while every beautifier setting is
-    // off. Load the part again when a new setting needs one of them.
-    const bool needsFonts = fontsSkipped_ && face.isEmpty();
-    const bool needsBeautifier =
-            beautifierSkipped_ && (beautifierInitials || beautifierSpacing || beautifierIndent);
-    if ((needsFonts || needsBeautifier) && source_ && windowFirst_ >= 0) {
-        auto saved = windowSettings(windowFirst_, windowLast_);
-        saved["font_face"] = face;
-        saved["beautifier_initials"] = beautifierInitials;
-        saved["beautifier_spacing"] = beautifierSpacing;
-        saved["beautifier_indent"] = beautifierIndent;
-        dropSideDocuments();
-        QString error;
-        if (!openSource(source_, size_, saved, &error))
-            return false;
-    }
     const auto defaultFace = settings.value("default_font_face").toString(defaultFace_);
     auto fallbackFaces = fallbackFaces_;
     for (size_t index = 0; index < fallbackFaces.size(); ++index) {
@@ -1212,6 +1253,34 @@ bool EngineDocument::applyAppearance(const appearance::Patch &patch, QSize size,
         || (bionic != "off" && bionic != "bold") || (!face.isEmpty() && !fontFaces().contains(face))
         || !fontFaces().contains(defaultFace))
         return false;
+    if (action == AppearanceAction::Validate)
+        return true;
+    if (windowFirst_ >= 0 && !inpageFootnotes_ && inpageFootnotes) {
+        const auto layout = pageNoteLayout();
+        if (layout == PageNoteLayout::Interrupted)
+            return false;
+        if (layout == PageNoteLayout::WholeBook)
+            return setChapterMode(false, patch, size, std::move(progress),
+                                  [this] { return !interrupt_ || !interrupt_(); });
+    }
+    // A part of a book is loaded without what the settings of that moment
+    // did not need: the publisher's fonts while a reading font replaces
+    // them, and the beautifier's marks while every beautifier setting is
+    // off. Load the part again when a new setting needs one of them.
+    const bool needsFonts = fontsSkipped_ && face.isEmpty();
+    const bool needsBeautifier =
+            beautifierSkipped_ && (beautifierInitials || beautifierSpacing || beautifierIndent);
+    if ((needsFonts || needsBeautifier) && source_ && windowFirst_ >= 0) {
+        auto saved = windowSettings(windowFirst_, windowLast_);
+        saved["font_face"] = face;
+        saved["beautifier_initials"] = beautifierInitials;
+        saved["beautifier_spacing"] = beautifierSpacing;
+        saved["beautifier_indent"] = beautifierIndent;
+        dropSideDocuments();
+        QString error;
+        if (!openSource(source_, size_, saved, &error))
+            return false;
+    }
     const bool bionicChanged = bionic != bionic_;
     // Outline thickness changes pixels only. Keep the formatted page and its anchors.
     const bool thicknessChanged = weight != weight_;
@@ -1226,14 +1295,19 @@ bool EngineDocument::applyAppearance(const appearance::Patch &patch, QSize size,
             || paragraphIndent != paragraphIndent_ || face != face_ || defaultFace != defaultFace_
             || margin != margin_ || topMargin != topMargin_ || bottomMargin != bottomMargin_
             || alignment != alignment_ || hyphenation != hyphenation_;
-    const bool regroup = columns > 1 && hideNonlinear != hideNonlinearFragments_;
+    const bool chapterStartsSpread =
+            settings.value("chapter_starts_spread").toBool(chapterStartsSpread_);
+    const bool regroup = columns > 1
+            && (hideNonlinear != hideNonlinearFragments_
+                || chapterStartsSpread != chapterStartsSpread_);
+    chapterStartsSpread_ = chapterStartsSpread;
     const bool resized = size != size_ || columns != columns_ || columnSpacing != columnSpacing_;
     twoColumnsLandscape_ = landscapeColumns;
     columnSpacingPercent_ = gapPercent;
     if (!verticalChanged && !styled && !resized && weight == weight_ && dark == darkMode_
-        && hideNonlinear == hideNonlinearFragments_)
+        && !regroup && hideNonlinear == hideNonlinearFragments_)
         return true;
-    if (styled || resized || verticalChanged) {
+    if (styled || resized || verticalChanged || regroup) {
         searchText_.reset();
         sourceIndex_.reset();
     }
@@ -1346,7 +1420,7 @@ bool EngineDocument::applyAppearance(const appearance::Patch &patch, QSize size,
     }
     if (!styled && !resized && !(regroup && slices())) {
         if (regroup) {
-            engine_->groupColumns(hideNonlinearFragments_);
+            engine_->groupColumns(hideNonlinearFragments_, chapterStartsSpread_);
             forgetObservedPages();
             observeLayout();
             return goTo(anchor);
@@ -1402,7 +1476,7 @@ bool EngineDocument::renderLayout()
 #else
     engine_->Render();
 #endif
-    engine_->groupColumns(hideNonlinearFragments_);
+    engine_->groupColumns(hideNonlinearFragments_, chapterStartsSpread_);
     cutSlice();
     return true;
 }
@@ -1658,9 +1732,14 @@ void EngineDocument::setPageFormat(QImage::Format format)
 bool EngineDocument::preparedDamage(qint64 fromKey, qint64 toKey, QRect *damage) const
 {
     const auto found = damage_.constFind(qMakePair(qMin(fromKey, toKey), qMax(fromKey, toKey)));
-    if (found == damage_.cend())
+    if (found != damage_.cend()) {
+        *damage = found.value();
+        return true;
+    }
+    // The turn that adopted this document leaves a chapter page.
+    if (!fromKey || fromKey != adoptionDamage_.from || toKey != adoptionDamage_.to)
         return false;
-    *damage = found.value();
+    *damage = adoptionDamage_.rect;
     return true;
 }
 
@@ -1836,18 +1915,28 @@ QImage EngineDocument::image(int pageNumber)
         engine_->drawColumn(buffer, pageNumber, 0);
     } else {
         result.fill(Qt::white);
-        QImage column(engine_->columnWidth(), size_.height(), QImage::Format_RGB32);
-        if (column.isNull())
-            return {};
-        QPainter painter(&result);
+        const int width = engine_->columnWidth();
         for (int i = 0; i < columns_; ++i) {
-            PageDrawBuffer part(column, darkMode_, true, normalizeTextColors_, &imageInversion_);
+            const int x = engine_->columnOffset(i);
+            // CREngine enforces a minimum column width. On a narrower viewport,
+            // keep the full column for layout and clip its pixels to the page.
+            QImage clipped;
+            if (x < 0 || x > result.width() - width) {
+                clipped = QImage(width, result.height(), QImage::Format_RGB32);
+                if (clipped.isNull())
+                    return {};
+            }
+            PageDrawBuffer part(clipped.isNull() ? result : clipped, darkMode_, true,
+                                normalizeTextColors_, &imageInversion_, clipped.isNull() ? x : 0,
+                                width);
             engine_->drawColumn(part, pageNumber, i);
+            buffer.hasTable |= part.hasTable;
+            buffer.visibleImages += part.visibleImages;
             buffer.hasImages |= part.hasImages;
             buffer.hasText |= part.hasText;
             buffer.hasUnsupportedFormatting |= part.hasUnsupportedFormatting;
-            const int x = engine_->columnOffset(i);
-            painter.drawImage(x, 0, column);
+            if (!clipped.isNull())
+                QPainter(&result).drawImage(x, 0, clipped);
             for (const auto &region : part.imageRegions)
                 buffer.imageRegions.append(region.translated(x, 0));
         }
@@ -1867,6 +1956,17 @@ QImage EngineDocument::image(int pageNumber)
     PageContent content;
     content.images = { true, buffer.imageRegions };
     content.imageOnly = buffer.imageRegions.size() == 1 && !buffer.hasText;
+    if (!buffer.hasTable && !buffer.hasText) {
+        // A border or rule can draw visible content without glyphs or images.
+        const auto paper = *reinterpret_cast<const quint32 *>(result.constScanLine(0));
+        bool blank = buffer.visibleImages == 0;
+        for (int y = 0; blank && y < result.height(); ++y) {
+            const auto *row = reinterpret_cast<const quint32 *>(result.constScanLine(y));
+            blank = std::all_of(row, row + result.width(),
+                                [paper](quint32 pixel) { return pixel == paper; });
+        }
+        content.sampleText = blank || buffer.visibleImages == 1;
+    }
     content.colours.known = true;
     content.colours.rectangles = hasColor
             ? (boundedTiles ? colorTileRegions(colorTiles, tileColumns, tileRows, result.size())
@@ -1882,6 +1982,119 @@ QImage EngineDocument::image(int pageNumber)
         cache_.insert(pageNumber, result);
     trim();
     return result;
+}
+
+QVector<ChapterLink> EngineDocument::landmarks() const
+{
+    if (!engine_ || !landmarks_.isEmpty())
+        return landmarks_;
+    const auto props = engine_->getDocument()->getProps();
+    const int count = props->getIntDef("blaze.landmarks", 0);
+    for (int i = 0; i < count; ++i) {
+        const auto key = QByteArray("blaze.landmark.") + QByteArray::number(i);
+        landmarks_.append({ qstring(props->getStringDef((key + ".label").constData())),
+                            qstring(props->getStringDef((key + ".href").constData())) });
+    }
+    return landmarks_;
+}
+
+QString EngineDocument::printedPageLabel(const QString &position, bool exclusiveEnd, bool *deferred)
+{
+    const int item = spineItemIndex(position);
+    if (!engine_ || item < 0 || item >= spineItemCount_)
+        return {};
+    const auto markers = printedPages();
+    auto group = printedBySpine_.upperBound(item);
+    if (group == printedBySpine_.cbegin())
+        return {};
+    const auto documentFor = [this](int spine) {
+        return windowFirst_ >= 0 && (spine < windowFirst_ || spine > windowLast_)
+                        && fullDocumentReady()
+                ? full_.get()
+                : textDocument(spine);
+    };
+    auto *unit = documentFor(item);
+    if (!unit) {
+        if (deferred)
+            *deferred = true;
+        return {};
+    }
+    auto *doc = unit->engine_->getDocument();
+#ifdef KOBLAZE_SOURCE_TEXT
+    const KoblazeSourceText sourceText(unit->slices() ? doc : nullptr);
+#endif
+    ldomXPointerEx passage(doc->createXPointer(cre(position)));
+    if (passage.isNull())
+        return {};
+    if (passage.getOffset() < 0)
+        passage.setOffset(0);
+    if (exclusiveEnd)
+        passage.prevVisibleChar(false);
+    const auto pointer = [&](ldomDocument *source, int index) {
+        const auto id = cre(markers[index].position.mid(1));
+        auto *node = source->getNodeById(source->findAttrValueIndex(id.c_str()));
+        return node ? ldomXPointerEx(node, 0) : ldomXPointerEx();
+    };
+    while (group != printedBySpine_.cbegin()) {
+        --group;
+        const int spine = group.key();
+        auto ordered = orderedPrintedMarkers_.constFind(spine);
+        if (ordered == orderedPrintedMarkers_.constEnd()) {
+            // A chapter window retains placeholder entries even for missing anchors.
+            // Use the target chapter to validate and order its markers once.
+            auto *source = spine == item ? unit : documentFor(spine);
+            if (!source) {
+                if (deferred)
+                    *deferred = true;
+                return {};
+            }
+            auto *chapter = source->engine_->getDocument();
+            QVector<int> valid;
+            for (const int index : group.value())
+                if (!pointer(chapter, index).isNull())
+                    valid.append(index);
+            std::stable_sort(valid.begin(), valid.end(), [&](int a, int b) {
+                return pointer(chapter, a).compare(pointer(chapter, b)) < 0;
+            });
+            ordered = orderedPrintedMarkers_.insert(spine, valid);
+        }
+        const auto &entries = ordered.value();
+        auto end = entries.cend();
+        if (spine == item)
+            end = std::upper_bound(entries.cbegin(), end, passage,
+                                   [&](const ldomXPointerEx &p, int index) {
+                                       return p.compare(pointer(doc, index)) < 0;
+                                   });
+        if (end != entries.cbegin())
+            return markers[*(end - 1)].title;
+    }
+    return {};
+}
+
+QVector<ChapterLink> EngineDocument::printedPages() const
+{
+    if (!engine_)
+        return {};
+    if (!printedPages_.isEmpty())
+        return printedPages_;
+    auto &pages = printedPages_;
+    auto *map = engine_->getDocument()->getPageMap();
+    if (!map || !map->isDocumentProvided())
+        return pages;
+    for (int i = 0; i < map->getChildCount(); ++i) {
+        auto *entry = map->getChild(i);
+        const auto path = qstring(entry->getPath());
+        const QString prefix = QStringLiteral("#_doc_fragment_");
+        if (!path.startsWith(prefix))
+            continue;
+        bool ok = false;
+        const int item = path.mid(prefix.size()).section('_', 0, 0).toInt(&ok);
+        if (ok && item >= 0) {
+            printedBySpine_[item].append(pages.size());
+            pages.append({ qstring(entry->getLabel()), path });
+        }
+    }
+    return pages;
 }
 
 QVector<ChapterLink> EngineDocument::chapters() const
@@ -1918,6 +2131,7 @@ quint64 EngineDocument::layoutSignature() const
     mix(engine_->getDocumentRenderingHash(true));
     mix(columns_);
     mix(columns_ > 1 && hideNonlinearFragments_);
+    mix(columns_ > 1 && chapterStartsSpread_);
     mix(verticalSpacing_ == "center" ? 2 : verticalSpacing_ == "expand" ? 1 : 0);
     mix(verticalSpacingScope_ == "protection");
     return hash ? hash : 1;
@@ -1975,6 +2189,94 @@ const EngineDocument::ChapterIndex &EngineDocument::chapterIndex(ChapterIndex &i
     return index;
 }
 
+namespace {
+QString chapterImage(ReaderSource &source, ldomNode *node)
+{
+    while (node && !node->isNodeName("DocFragment"))
+        node = node->getParentNode();
+    if (!node)
+        return {};
+    const auto path = qstring(node->getAttributeValue("Source"));
+    const auto known = source.chapterImages.constFind(path);
+    if (known != source.chapterImages.constEnd())
+        return known.value();
+    // Map plates normally have a short wrapper. Bound optional reads on slow storage.
+    constexpr int maxWrapper = 8192;
+    const auto length = source.sizes.value(path, -1);
+    if (length <= 0 || length > maxWrapper || source.chapterImageProbes >= 128)
+        return {};
+    ++source.chapterImageProbes;
+    QByteArray bytes;
+    if (source.resources) {
+        bytes = source.resources->readOptional(path, maxWrapper);
+    } else {
+        auto stream = source.container->OpenStream(cre(path).c_str(), LVOM_READ);
+        if (!stream.isNull() && stream->GetSize() <= maxWrapper) {
+            bytes.resize(int(stream->GetSize()));
+            lvsize_t read = 0;
+            if (stream->Read(bytes.data(), bytes.size(), &read) != LVERR_OK
+                || read != lvsize_t(bytes.size()))
+                bytes.clear();
+        }
+    }
+    QString image;
+    if (!bytes.isEmpty()) {
+        QXmlStreamReader xml(bytes);
+        bool body = false;
+        while (!xml.atEnd()) {
+            xml.readNext();
+            if (xml.isDTD() && unsafeEntities(xml)) {
+                image.clear();
+                break;
+            }
+            const auto name = xml.name().toString();
+            if (xml.isStartElement()
+                && (name == "base" || xml.attributes().hasAttribute("xml:base"))) {
+                image.clear();
+                break;
+            }
+            if (name == "body" && (xml.isStartElement() || xml.isEndElement())) {
+                body = xml.isStartElement();
+                continue;
+            }
+            if (!body)
+                continue;
+            if (xml.isCharacters() && !xml.isWhitespace()) {
+                image.clear();
+                break;
+            }
+            if (!xml.isStartElement())
+                continue;
+            if (name == "div" || name == "span" || name == "p" || name == "a" || name == "figure"
+                || name == "section" || name == "svg" || name == "g")
+                continue;
+            if ((name != "img" && name != "image") || !image.isEmpty()) {
+                image.clear();
+                break;
+            }
+            auto url = xml.attributes().value(name == "img" ? "src" : "href").toString();
+            if (url.isEmpty() && name == "image")
+                url = xml.attributes().value("http://www.w3.org/1999/xlink", "href").toString();
+            const QUrl relative(url);
+            if (url.isEmpty() || !relative.isRelative() || !relative.authority().isEmpty()
+                || relative.hasQuery() || relative.hasFragment())
+                break;
+            QUrl origin;
+            origin.setPath("/" + path);
+            image = origin.resolved(relative).path().mid(1);
+            if (!source.sizes.contains(image)) {
+                image.clear();
+                break;
+            }
+        }
+        if (xml.hasError())
+            image.clear();
+    }
+    source.chapterImages.insert(path, image);
+    return image;
+}
+} // namespace
+
 QVector<ChapterLink> EngineDocument::tocChapters(ChapterPositions *positions) const
 {
     QVector<ChapterLink> result;
@@ -1989,9 +2291,12 @@ QVector<ChapterLink> EngineDocument::tocChapters(ChapterPositions *positions) co
             const int start = pointer.isNull() || pointer.toPoint().y < 0
                     ? -1
                     : engine_->getBookmarkPage(pointer);
+            auto image = qstring(child->getLabelImage());
+            if (image.isEmpty() && source_ && !pointer.isNull() && !child->getChildCount())
+                image = chapterImage(*source_, pointer.getNode());
             result.append({ qstring(child->getName()),
-                            pointer.isNull() ? QString() : qstring(child->getPath()), start,
-                            depth });
+                            pointer.isNull() ? QString() : qstring(child->getPath()), start, depth,
+                            0, image });
             if (positions)
                 positions->append(ldomXPointerEx(pointer));
             visit(child, depth + 1);
@@ -2280,6 +2585,7 @@ QJsonObject EngineDocument::settingsState() const
               { "vertical_spacing_scope", verticalSpacingScope_ },
               { "columns", columns_ },
               { "two_columns_landscape", twoColumnsLandscape_ },
+              { "chapter_starts_spread", chapterStartsSpread_ },
               { "column_spacing_percent", columnSpacingPercent_ },
               { "column_spacing", columnSpacing_ },
               { "word_spacing", wordSpacing_ },

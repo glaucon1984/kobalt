@@ -75,19 +75,23 @@ public:
 
     // A non-linear flow must be reachable on its own screen when ordinary
     // turns skip it. A short last screen has an empty trailing column.
-    void groupColumns(bool separateFlows)
+    void groupColumns(bool separateFlows, bool chapterStartsSpread)
     {
         screenStarts.clear();
-        if (!separateFlows || columns == 1)
+        if (columns == 1 || (!separateFlows && !chapterStartsSpread))
             return;
         auto *pages = getPageList();
-        if (!pages->hasNonLinearFlows())
+        separateFlows = separateFlows && pages->hasNonLinearFlows();
+        const auto startsChapter = chapterStartsSpread ? chapterColumns() : std::vector<bool>();
+        if (!separateFlows && startsChapter.empty())
             return;
         for (int first = 0; first < pages->length();) {
             screenStarts.push_back(first);
             const auto flow = pages->get(first)->flow;
             int end = first + 1;
-            while (end < pages->length() && end - first < columns && pages->get(end)->flow == flow)
+            while (end < pages->length() && end - first < columns
+                   && (!separateFlows || pages->get(end)->flow == flow)
+                   && (startsChapter.empty() || !startsChapter[end]))
                 ++end;
             first = end;
         }
@@ -98,6 +102,31 @@ public:
         return screenStarts.empty() ? (LVDocView::getPageCount() + columns - 1) / columns
                                     : int(screenStarts.size());
     }
+
+    // Inspect a physical column without changing the reading bookmark. A page
+    // with only decoration can have its nearest text on a different spread.
+    class ScopedColumn
+    {
+        ColumnView &view;
+        int originalColumn;
+        bool moved;
+
+    public:
+        ScopedColumn(ColumnView &view, int column)
+            : view(view),
+              originalColumn(view.LVDocView::getCurPage(true)),
+              moved(column != originalColumn)
+        {
+            if (moved)
+                view.LVDocView::goToPage(column, true, false);
+        }
+
+        ~ScopedColumn()
+        {
+            if (moved)
+                view.LVDocView::goToPage(originalColumn, true, false);
+        }
+    };
 
     int firstColumn(int screen) const
     {
@@ -202,7 +231,7 @@ public:
         const int target = first + column;
         if (column >= count)
             return {};
-        Position restore(*this, target);
+        ScopedColumn restore(*this, target);
         point.x = local + overflow;
         return LVDocView::getNodeByPoint(point, strict, selection);
     }
@@ -234,7 +263,7 @@ public:
         const int target = getPageList()->FindNearestPage(point.y - (bottom ? 1 : 0), 0);
         if (target < first || target >= first + count)
             return false;
-        Position restore(*this, target);
+        ScopedColumn restore(*this, target);
         if (!LVDocView::docToWindowPoint(point, bottom, fit))
             return false;
         point.x += columnOffset(target - first);
@@ -252,7 +281,7 @@ public:
         const int first = firstColumn(screen);
         const int count = columnCount(screen);
         for (int i = 0; i < count; ++i) {
-            Position restore(*this, first + i);
+            ScopedColumn restore(*this, first + i);
             ldomXRangeList links;
             LVDocView::getCurrentPageLinks(links);
             for (int j = 0; j < links.length(); ++j)
@@ -261,6 +290,46 @@ public:
     }
 
 private:
+    std::vector<bool> chapterColumns()
+    {
+        auto *pages = getPageList();
+        std::vector<bool> starts(pages->length());
+        auto mark = [&](const ldomXPointer &anchor) {
+            const int y = anchor.isNull() ? -1 : anchor.toPoint().y;
+            const int column = y < 0 ? -1 : pages->FindNearestPage(y, 0);
+            // Use the actual split chosen by the paginator. Ignore ordinary
+            // page overflow, including headings that happen to wrap to the top.
+            if (column <= 0 || column >= pages->length() || starts[column]
+                || !(pages->get(column - 1)->flags & RN_PAGE_ENDS_AT_FORCED_BREAK))
+                return;
+            // A break earlier on this same page may belong to something else.
+            // The chapter must start before the first text on the physical page.
+            auto first = LVDocView::getPageBookmark(column, true, true);
+            if (!first.isNull() && ldomXPointerEx(anchor).compare(ldomXPointerEx(first)) <= 0)
+                starts[column] = true;
+        };
+        auto *document = getDocument();
+        if (auto *body = document->nodeFromXPath(U"/body")) {
+            for (int i = 0; i < body->getChildCount(); ++i) {
+                auto *fragment = body->getChildNode(i);
+                if (fragment->isElement() && fragment->isNodeName("DocFragment"))
+                    mark(ldomXPointer(fragment, 0));
+            }
+        }
+        // A publisher can put several chapters in one EPUB spine item.
+        std::vector<LVTocItem *> pending{ document->getToc() };
+        while (!pending.empty()) {
+            auto *entry = pending.back();
+            pending.pop_back();
+            if (!entry)
+                continue;
+            mark(entry->getXPointer());
+            for (int i = 0; i < entry->getChildCount(); ++i)
+                pending.push_back(entry->getChild(i));
+        }
+        return starts;
+    }
+
     int noteTop(const LVRendPageInfo &page) const
     {
         int y = viewportHeight - margins.bottom;
@@ -283,27 +352,5 @@ private:
     const std::shared_ptr<CallbackTarget> callbackTarget_ =
             std::make_shared<CallbackTarget>(CallbackTarget{ this });
     lvRect margins;
-
-    struct Position
-    {
-        ColumnView &view;
-        ldomXPointer bookmark;
-        bool moved;
-
-        Position(ColumnView &view, int page)
-            : view(view),
-              bookmark(view.getBookmark()),
-              moved(page != view.LVDocView::getCurPage(true))
-        {
-            if (moved)
-                view.LVDocView::goToPage(page, true);
-        }
-
-        ~Position()
-        {
-            if (moved)
-                view.goToBookmark(bookmark);
-        }
-    };
 };
 } // namespace kobalt

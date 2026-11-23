@@ -1,10 +1,13 @@
 #pragma once
 #include "ui/style/theme.h"
 #include "ui/style/font_preview.h"
+#include "ui/style/private_text.h"
 #include <QCheckBox>
 #include <QFont>
 #include <QVector>
 #include <functional>
+
+class QLabel;
 
 namespace kobalt::ui {
 enum class ControlIcon;
@@ -39,6 +42,7 @@ public:
         bool opticalLabel = false;
         // Narrow field lists keep the complete label above its sample value.
         bool valueBelowLabel = false;
+        bool wrapLabel = false;
         bool operator==(const Presentation &other) const;
     };
 
@@ -54,6 +58,7 @@ public:
         int percent = -1;
         bool charging = false;
         bool halfSpaces = false;
+        TextDigits digits = TextDigits::Default;
         QFont sampleFont;
         int sampleWeight = -1;
 
@@ -61,7 +66,8 @@ public:
         {
             return battery == other.battery && percent == other.percent
                     && charging == other.charging && halfSpaces == other.halfSpaces
-                    && sampleFont == other.sampleFont && sampleWeight == other.sampleWeight;
+                    && digits == other.digits && sampleFont == other.sampleFont
+                    && sampleWeight == other.sampleWeight;
         }
     };
 
@@ -69,12 +75,19 @@ public:
     void setValue(const QString &value, const ValueStyle &style);
     // A non-interactive thumbnail shares the row's click target.
     void setPreview(QWidget *widget, QSize size);
+
+    QWidget *previewWidget() const { return preview; }
+
     // An icon before the label, placed like the icons of list action rows.
-    void setLeadingIcon(ControlIcon icon);
+    enum class IconBranch { None, Parent, Child };
+    void setLeadingIcon(ControlIcon icon, IconBranch branch = IconBranch::None);
+    // The wordmark replaces the painted title and shares the checkbox's click target.
+    void setTitleLabel(QLabel *label);
 
 protected:
     void mouseReleaseEvent(QMouseEvent *event) override;
     void resizeEvent(QResizeEvent *) override;
+    bool event(QEvent *event) override;
     bool hitButton(const QPoint &position) const override;
     void paintEvent(QPaintEvent *) override;
 
@@ -83,18 +96,25 @@ private:
     FontPreviewSource fontPreview;
     QString description, value;
     ValueStyle valueStyle;
+    QLabel *titleLabel = nullptr;
     QWidget *preview = nullptr;
     QSize previewSize;
     int leadingIcon = -1;
+    IconBranch iconBranch = IconBranch::None;
     int iconSpace() const;
     // Large text makes the title line taller by what it adds to the line
     // height; the description moves down with it.
-    int labelHeight() const;
+    int labelHeight(int textWidth = 0) const;
     int valueHeight() const;
     // How far a label that stands alone beside its indicator is raised, so
     // its capitals center on the indicator.
     int labelRaise(const QFont &labelFont) const;
-    int descriptionTop() const;
+    int descriptionTop(int textWidth) const;
+    // The title line, before a label that stands alone is raised.
+    QRect labelLine() const;
+    QFont labelFont() const;
+    // Moves the title label to its place in the title line.
+    void placeTitleLabel();
 };
 
 // A pick-one list: a row per choice with a radio on the left, its label and
@@ -117,9 +137,10 @@ public:
     void setTopDivider(bool shown);
     // False lets each row take the height it needs.
     void setUniformRows(bool uniform);
+    void setTwoColumns(bool enabled);
     int rowHeight(int width) const;
     int rowHeight(int index, int width) const;
-    // Shows `count` rows from `first`, one under the other.
+    // Shows the next count choices in row-major order.
     void showRows(int first, int count);
     // A left-out row stays in options() but is never shown and takes no
     // height, also inside the range of showRows().
@@ -138,7 +159,7 @@ private:
     QVector<DescribedOption *> rows;
     QVector<bool> leftOut;
     int minimum = 0, first = 0, count = -1;
-    bool topDivider = false, uniformRows = true;
+    bool topDivider = false, uniformRows = true, twoColumns = false;
     void arrange();
 };
 } // namespace kobalt::ui
