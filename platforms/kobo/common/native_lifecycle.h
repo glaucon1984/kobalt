@@ -17,6 +17,26 @@ extern void (*nativeAboutUsbConnect)(void *);
 extern void (*nativePowerOff)(void *, bool);
 extern void (*nativeReboot)(void *);
 
+// Observes Nickel's USB completion even when no reader coordinator is installed.
+class StockStorageHandoff final : public QObject
+{
+    Q_OBJECT
+public:
+    enum class State { Available, Preparing, Exported, Remounting, Shutdown };
+    void begin(State state);
+    void cancel();
+
+    bool blocked() const { return state != State::Available; }
+
+private slots:
+    void unplugging();
+    void processingDone();
+
+private:
+    State state = State::Available;
+    QPointer<QObject> usb;
+};
+
 // Construct only after firmwareSupported() accepts Nickel. Nickel owns power and storage;
 // this adapter prepares Kobalt before those native transitions continue.
 class NativeLifecycle : public QObject
@@ -27,16 +47,24 @@ public:
     explicit NativeLifecycle(QObject *parent);
     static bool powerAvailable();
     static bool suspended();
+    static bool deviceSleeping();
     // PIN entry can own native rotation while the reader remains suspended.
     static bool pinScreenActive();
     static bool sleepSaveAllowed();
-    static bool usbSaveAllowed();
     // Thread-safe gate for queued session writes. Closed before storage is
     // handed to USB or Nickel begins its final shutdown.
     static bool nativeSessionSaveAllowed();
-    // GUI-thread permission for progress writes, including a held shutdown
-    // while Nickel's sleep or PIN screen is still visible.
+    static bool stockStorageBlocked();
+    // A boot worker may read through this generation. A stock handoff retires
+    // it, even when storage returns before the worker reports its result.
+    // Zero means USB or shutdown currently owns storage.
+    static quint64 stockStorageGeneration();
+    // GUI-thread permission for progress writes, including the sleep handoff
+    // and a held USB or shutdown save behind a native dialog or sleep screen.
     static bool nativeProgressSaveAllowed();
+    // How long power-off, low-battery power-off and reboot wait for the reader
+    // to save before Nickel continues. Nickel must be able to shut down.
+    static constexpr int shutdownSaveMilliseconds = 10000;
 
     bool connected() const { return connected_; }
 
@@ -44,29 +72,30 @@ public:
     // The completion is consumed once, when doneProcessing is emitted.
     bool scanLibrary(std::function<void()> done);
 
-    bool blocked() const
-    {
-        return asleep || usbPending || exported || poweringOff || removalPending;
-    }
-
-    bool batteryLowShutdown() const { return poweringOff && batteryLow_; }
+    bool blocked() const { return asleep || storageBlocked() || poweringOff || removalPending; }
 
     bool shuttingDown() const { return poweringOff; }
 
-    bool storageBlocked() const { return usbPending || exported; }
+    bool storageBlocked() const { return usbPending || exported || stockStorageBlocked(); }
 
     bool draining = false;
+
+    bool sleepRequested() const { return asleep; }
+
     std::function<void(Shutdown)> preparePowerScreen;
     std::function<void()> sleep, sleepViewReady, wake, beforeWake, cancelWake, usbPrompt;
     std::function<bool()> sleepWorkPending;
     // True while a book opens, from the request until the reader is shown.
     // canSuspend then answers false. A dialog that waits for the user is not
     // opening work.
-    std::function<bool()> openingWorkPending;
+    std::function<bool()> openingWorkPending, openingSaveParked;
+    std::function<void()> usbCancelled;
     static void finishSleepView();
     std::function<void(std::function<void()>)> prepareUsb;
     std::function<void()> storageReleased, storageRestored;
-    std::function<void(std::function<void()>)> prepareShutdown;
+    // Saves the reader before Nickel shuts down. Nickel continues when the
+    // continuation runs or after shutdownSaveMilliseconds, whichever is first.
+    std::function<void(Shutdown, std::function<void()>)> prepareShutdown;
     // False keeps the device awake while pending reader saves are started.
     std::function<bool()> beforeStandby;
     std::function<void()> afterStandby;
@@ -81,6 +110,8 @@ public:
     static bool interceptUsb(QObject *manager);
     static bool interceptUsbWorkflow(QObject *manager);
     static bool interceptShutdown(QObject *manager, Shutdown mode);
+    // The held USB workflow may still write the reader's final save.
+    static bool usbSaveAllowed();
 #ifndef KOBALT_READER_HARDWARE
     void testCommand();
     bool testUsb = false;
@@ -93,18 +124,20 @@ private slots:
     void usbPlugged();
     void aboutToSleep();
     void resumed();
+    void resumeCompleted();
     void processingDone();
     void unplugging();
 
 private:
     std::function<void()> scanDone;
     bool eventFilter(QObject *object, QEvent *event) override;
+    void beginSleep(const char *source);
     void checkSleepView(const char *source);
     void queueSleepViewCheck();
     bool sleepHandoffPending = false;
+    bool sleepStartedFromView = false;
     QTimer sleepViewCheck;
     bool savingBeforeSleep = false;
-    bool batteryLow_ = false;
     bool connected_ = false, asleep = false, usbPending = false, exported = false,
          poweringOff = false;
     bool storageReady = false, remounting = false;

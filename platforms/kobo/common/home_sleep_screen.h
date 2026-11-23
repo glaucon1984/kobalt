@@ -1,13 +1,16 @@
 #pragma once
+#include "native_ui.h"
 #include <QVector>
 #include "storage/reader_storage.h"
 #include "reading/sleep_screen.h"
 #include "platform/api/window_presentation.h"
 #include <QObject>
 #include <functional>
-#include <future>
+#include <memory>
 
 namespace kobalt::nickel {
+struct ReaderEnvironment;
+
 class HomeSleepScreen final : public QObject
 {
 public:
@@ -16,6 +19,7 @@ public:
     void forget();
     void prepare(bool enabled, bool powerOff = false);
     void preparePowerOff(sleep::Snapshot);
+    bool keepPresentedForPowerOff(sleep::Snapshot shown = {});
     // Rebuild from the last book's durable privacy choice, never a cached image.
     bool preparePrivateScreen(bool powerOff = false, const QString &identity = {});
     // Kobalt's own screen outside the reader, when Kobalt opened the last book.
@@ -25,10 +29,15 @@ public:
     // Nickel's own reading view keeps Nickel's screen. A private book keeps
     // its neutral screen. Returns false to leave Nickel's screen.
     bool prepareHomeScreen(bool powerOff = false, const QString &identity = {});
-    // Registers Kobalt's interface fonts, once it is clear Kobalt draws.
-    std::function<void()> prepareFonts;
+    void setFontSource(ReaderEnvironment &environment, std::function<bool()> install);
+
+    bool waitingForFonts() const { return !fontBackdrop.image.isNull(); }
+
     void persistPowerOff(const QString &identity);
     void present();
+    // Drop the overlay while a sleep or tentative wake is in progress.
+    void clearFrame();
+    // A completed wake or a different owner ends the current random status.
     void clear();
     // Waits for the background write of a remembered screen.
     void finishSave();
@@ -40,11 +49,18 @@ private:
     bool eventFilter(QObject *, QEvent *) override;
     void updateBattery();
     storage::Paths paths;
-    sleep::Snapshot snapshot, shutdownBackdrop;
+    sleep::Snapshot snapshot, shutdownBackdrop, fontBackdrop;
     // What lies under the status, so a battery change repaints only that.
     QVector<QImage> underlay;
+    NativeBatteryStatus paintedBattery;
     void save(const sleep::Snapshot &, const QString &identity);
-    bool poweredOff = false, invalidated = false;
+    bool poweredOff = false, presented = false, invalidated = false;
+    std::function<bool()> prepareFonts;
+    void finishFonts(bool ready);
+    sleep::Design statusPick(const QJsonObject &preferences, bool powerOff);
+    sleep::Design lastStatus = sleep::Design::Stock;
+    bool statusChosen = false;
+    void composeHome();
     void compose();
     std::unique_ptr<WindowPresentation> presentation;
 
@@ -52,13 +68,18 @@ private:
     {
         bool ok = false;
         QString token;
+#ifdef KOBALT_SCENARIO_PLAYER
+        double prepareMs = 0;
+        QJsonObject measurement;
+#endif
     };
 
-    std::future<Saved> pendingSave;
+    // Only this generation may supply the remembered image and token.
+    std::shared_ptr<Saved> pendingSave;
     sleep::Snapshot remembered;
     QString rememberedToken;
 #ifdef KOBALT_SCENARIO_PLAYER
-    std::shared_ptr<QJsonObject> saveMeasurement;
+    std::shared_ptr<Saved> measuredSave;
 #endif
 };
 } // namespace kobalt::nickel

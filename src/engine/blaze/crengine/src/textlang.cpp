@@ -996,6 +996,8 @@ static const cjk_width_adjustment_table_t japanese_cjk_width_adjustment_table = 
 // or start a new quote after the full stop...)
 
 
+// Blaze: the hyphenation method is resolved on first use, not in the constructor.
+// Not thread-safe for the first use of a language.
 HyphMethod * TextLangCfg::getDefaultHyphMethod() const {
     if ( !_hyph_method ) {
         lString32 tag = _lang_tag;
@@ -1025,6 +1027,7 @@ TextLangCfg::TextLangCfg( lString32 lang_tag ) {
     lString32 hb_lang_tag = lang_tag;
     // Lowercase it for our tests
     lang_tag.lowercase(); // (used by langStartsWith(…) macros)
+    // Blaze: upstream resolves _hyph_method here. It is now resolved by getDefaultHyphMethod().
 
     // Cleanup if we got "en#@something" from legacy HyphMan methods
     int h_pos = lang_tag.pos("#");
@@ -1052,7 +1055,7 @@ TextLangCfg::TextLangCfg( lString32 lang_tag ) {
     // a bit wrong to limit this feature to documents with lang tags.
     // Better to implement a generic font fallback chain independant of language.
 
-    // https://unicode.org/reports/tr14/#Hyphen : in Polish and Portuguese,
+    // https://unicode.org/reports/tr14/#Hyphen : in Croatian, Polish and Portuguese,
     // a real hyphen at end of line must be duplicated at start of next line.
     _duplicate_real_hyphen_on_next_line = false;
 
@@ -1121,6 +1124,7 @@ TextLangCfg::TextLangCfg( lString32 lang_tag ) {
     }
 #endif
 #endif
+    // Blaze: upstream switches to the grapheme hyphenation method here. getDefaultHyphMethod() does it now.
 
     // getCssLbCharSub(), possibly called on each glyph, has some different behaviours with 'ja' and 'zh'
     _is_ja_zh = false;
@@ -1299,7 +1303,7 @@ TextLangCfg::TextLangCfg( lString32 lang_tag ) {
     else if ( langStartsWith(lang_tag, "cs", "sk") ) { // Czech, Slovak
         _lb_char_sub_func = &lb_char_sub_func_czech_slovak;
     }
-    else if ( langStartsWith(lang_tag, "pt", "sr") ) { // Portuguese, Serbian
+    else if ( langStartsWith(lang_tag, "hr", "pt", "sr") ) { // Croatian, Portuguese, Serbian
         _duplicate_real_hyphen_on_next_line = true;
     }
     else if ( langStartsWith(lang_tag, "ru") ) { // Russian

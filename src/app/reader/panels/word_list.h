@@ -22,13 +22,14 @@ void confirmWordRemoval(QWidget *host, const SavedWord &word, std::function<void
 class WordList : public ui::Panel
 {
 public:
+    bool useScreens = false;
     enum class Scope { Book, Library };
     WordList(QWidget *parent, Scope scope);
     // `loading` shows the list's loading text until the words arrive.
     void setWords(QVector<SavedWord> words, bool loading = false);
     // Book scope: the zero-based page of each saved position, as the reader
     // resolved it. A position without a page has none in this layout.
-    void setPages(QHash<QString, int> pages);
+    void setPages(QHash<QString, int> pages, QHash<QString, QString> labels = {});
 
     int pageOf(const QString &position) const { return pages.value(position, -1); }
 
@@ -60,6 +61,8 @@ private:
     int page = 0, rows = 0;
     QVector<int> pageStarts;
     QHash<QString, int> pages;
+    QHash<QString, QString> printedLabels;
+    QString pageLabel(const QString &position) const;
     ui::CellButton *backButton = nullptr, *sortButton = nullptr;
     QLabel *title = nullptr, *count = nullptr, *empty, *emptyHint;
     ui::CaptionDropdown *filter = nullptr;

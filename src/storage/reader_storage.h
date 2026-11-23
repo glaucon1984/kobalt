@@ -20,7 +20,6 @@ struct Paths
     QString annotations() const;
     QString customPins() const;
     QString database() const;
-    QString layoutCache() const;
     QString sleepScreen() const;
     // Finished preview tiles, such as the All presets grid's. Disposable.
     QString previews() const;
@@ -42,6 +41,7 @@ struct JsonRead
 // Ordinary state files are small. A larger file is refused, not parsed.
 inline constexpr qint64 maxJsonBytes = 16384;
 // Invalid covers bad JSON and a top level that is not an object.
+JsonRead parseJsonObject(QByteArray bytes);
 JsonRead readJsonFile(const QString &path, qint64 maxBytes = maxJsonBytes);
 const char *readStatusName(ReadStatus status);
 // The object, or an empty one after any failure. Use readJsonFile when a
@@ -56,6 +56,14 @@ bool writeRecord(const QString &directory, const QString &name, const QString &l
 JsonRead readBookState(const Paths &, const QString &identity, const QString &legacy = {});
 bool writeBookState(const Paths &, const QString &identity, const QJsonObject &,
                     const QString &legacy = {});
+// Reading checkpoints preserve the stored dictionary choice, even when a
+// snapshot was taken before that choice was saved.
+bool writeBookCheckpoint(const Paths &, const QString &identity, const QJsonObject &,
+                         const QString &legacy = {});
+// Update only the dictionary field if a book already has saved state. On the
+// first save, the supplied checkpoint establishes the book's initial state.
+bool writeBookDictionaryChoice(const Paths &, const QString &identity, const QJsonObject &,
+                               const QString &legacy = {});
 // Commit one immutable reading snapshot. Roll back all members and legacy
 // imports together if any member fails.
 bool writeReadingActivity(const Paths &, const QString &identity, const QJsonObject &book,
@@ -82,6 +90,9 @@ struct ProfileRecovery
 
     bool recovered() const { return settings || syncAccount || database; }
 };
+
+// Kobo opening worker only. A failed migration leaves cache use disabled.
+bool prepareDocumentCache(const Paths &, const std::function<bool()> &cancelled);
 
 // Moves damaged saved data, and saved data from a newer version, into
 // backups/ and starts again from defaults. Then imports recognized durable

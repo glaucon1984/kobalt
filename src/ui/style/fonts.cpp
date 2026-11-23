@@ -14,9 +14,14 @@
 #include <QWidget>
 #include <QMap>
 #include <functional>
-#include <future>
 
 namespace kobalt::ui {
+struct OpeningFontData
+{
+    quint64 generation;
+    QMap<QString, QByteArray> sources, digests;
+};
+
 namespace {
 struct Face
 {
@@ -32,6 +37,7 @@ struct Family
 // remaining controls, such as editable fields, in the regular weight. The
 // private renderer draws everything else and adds the interface weight itself.
 enum class FamilyIndex { Sans, Mono, Serif };
+constexpr auto jostFamily = "NV Jost";
 
 const QVector<Family> &families()
 {
@@ -57,10 +63,9 @@ struct Registration
     QVector<int> scriptFallbackIds;
     // Interface faces and script fallbacks load separately: the opening view
     // needs only the faces, before the whole asset bundle is verified.
-    QMap<QString, QByteArray> sources, fallbackSources;
+    OpeningFonts active, prepared;
+    QMap<QString, QByteArray> fallbackSources;
     QMap<QString, std::function<QByteArray()>> fallbackReaders;
-    // Faces read and checked ahead of the first opening.
-    std::future<QMap<QString, QByteArray>> preparing;
 };
 
 Registration &registration()
@@ -88,7 +93,7 @@ void removeFaces(const QVector<QVector<int>> &ids)
             QFontDatabase::removeApplicationFont(id);
 }
 
-QVector<QVector<int>> addFaces()
+QVector<QVector<int>> addFaces(const OpeningFontData &faces)
 {
     QVector<QVector<int>> ids;
     for (const auto &family : families()) {
@@ -96,7 +101,7 @@ QVector<QVector<int>> addFaces()
         // Qt 5.2 files a face under the first face registered for its weight
         // and slant, so the regular face comes first.
         for (const auto &face : family.faces) {
-            const auto source = registration().sources.value(face.file);
+            const auto source = faces.sources.value(face.file);
             const int id =
                     source.isEmpty() ? -1 : QFontDatabase::addApplicationFontFromData(source);
             if (id >= 0)
@@ -111,9 +116,9 @@ QVector<QVector<int>> addFaces()
 void registerFaces()
 {
     auto &current = registration();
-    if (current.registered || current.sources.isEmpty())
+    if (current.registered || !current.active)
         return;
-    current.ids = addFaces();
+    current.ids = addFaces(*current.active);
     current.registered = true;
 }
 
@@ -148,113 +153,167 @@ QFont sizedFont(const QString &family, int pixels)
 namespace {
 // Replaces the registered faces when their bytes change. Keeps the faces in
 // use when the new set cannot be registered in full.
-bool replaceFaces(QMap<QString, QByteArray> sources, bool *changed)
+bool installFaces(const AssetBundle &assets, const OpeningFonts &faces, bool opening, bool *changed)
 {
     auto &current = registration();
-    if (current.sources == sources)
-        return true;
-    if (!current.registered) {
-        // Nothing has drawn with the faces yet. They register on first use.
-        current.sources = std::move(sources);
-        *changed = true;
-        return true;
+    const bool different = !current.active
+            || (current.active != faces && current.active->digests != faces->digests);
+    QVector<QVector<int>> added;
+    if (different && current.registered) {
+        added = addFaces(*faces);
+        if (faceCount(added) != faces->sources.size()) {
+            removeFaces(added);
+            return false;
+        }
     }
-    auto old = std::move(current.sources);
-    current.sources = std::move(sources);
-    auto added = addFaces();
-    if (faceCount(added) != current.sources.size()) {
+    if (!initializePrivateInterfaceText(assets, opening, faces->sources)) {
         removeFaces(added);
-        current.sources = std::move(old);
         return false;
     }
-    removeFaces(current.ids);
-    current.ids = std::move(added);
-    *changed = true;
+    if (!added.isEmpty()) {
+        removeFaces(current.ids);
+        current.ids = std::move(added);
+    }
+    *changed = different;
+    current.active = faces;
+    current.prepared.reset();
     return true;
 }
 
-QMap<QString, QByteArray> takePreparedFaces()
+QStringList interfaceFiles()
 {
-    auto &preparing = registration().preparing;
-    return preparing.valid() ? preparing.get() : QMap<QString, QByteArray>();
-}
-} // namespace
-
-void prepareOpeningFonts(const AssetBundle &assets)
-{
-    auto &current = registration();
-    if (!current.sources.isEmpty() || current.preparing.valid())
-        return;
-    QMap<QString, std::function<QByteArray()>> readers;
-    for (const auto &family : families())
-        for (const auto &face : family.faces)
-            readers.insert(face.file, assets.deferredManifestFontData(face.file));
-    current.preparing = std::async(std::launch::async, [readers] {
-        QMap<QString, QByteArray> sources;
-        for (auto it = readers.cbegin(); it != readers.cend(); ++it) {
-            const auto bytes = it.value()();
-            if (bytes.isEmpty())
-                return QMap<QString, QByteArray>();
-            sources.insert(it.key(), bytes);
-        }
-        // The opening view's first text is the wordmark.
-        warmTextShaping(sources.value("InstrumentSerif-Regular.ttf"), QStringLiteral("Kobalt"));
-        return sources;
-    });
-}
-
-bool initializeOpeningFonts(const AssetBundle &assets)
-{
-    // A previous opening registered verified faces. The full check after the
-    // first paint replaces them if the bundle changed.
-    if (!registration().sources.isEmpty())
-        return true;
-    // Prepared faces were checked against the manifest when they were read.
-    // This waits for preparation that is still running.
-    auto sources = takePreparedFaces();
-    if (sources.isEmpty())
-        for (const auto &family : families())
-            for (const auto &face : family.faces) {
-                const auto bytes = assets.manifestFontData(face.file);
-                if (bytes.isEmpty())
-                    return false;
-                sources.insert(face.file, bytes);
-            }
-    if (!initializePrivateInterfaceText(assets, true, sources))
-        return false;
-    bool changed = false;
-    return replaceFaces(std::move(sources), &changed);
-}
-
-bool initializeInterfaceFonts(const AssetBundle &assets, bool *changed)
-{
-    bool facesChanged = false;
-    if (changed) {
-        *changed = false;
-    }
-    // These sources come from the full check. Drop a preparation that no
-    // opening took, rather than keep its faces in memory.
-    takePreparedFaces();
-    if (!initializePrivateInterfaceText(assets))
-        return false;
     QStringList files;
     for (const auto &family : families())
         for (const auto &face : family.faces)
             files.append(QLatin1String(face.file));
+    return files;
+}
+
+OpeningFonts readFaces(const AssetBundle &assets, bool opening,
+                       const std::function<bool()> &current = {})
+{
+    auto faces = std::make_shared<OpeningFontData>();
+    faces->generation = assets.generation();
+    const auto files = interfaceFiles();
+    if (opening) {
+        for (const auto &file : files) {
+            QByteArray digest;
+            const auto bytes = assets.manifestFontData(file, &digest);
+            if (bytes.isEmpty())
+                return {};
+            faces->sources.insert(file, bytes);
+            faces->digests.insert(file, digest);
+        }
+    } else {
+        const auto readers = assets.deferredFontData(files, &faces->digests);
+        if (readers.size() != files.size())
+            return {};
+        for (auto it = readers.cbegin(); it != readers.cend(); ++it) {
+            if (current && !current())
+                return {};
+            const auto bytes = it.value()();
+            if (bytes.isEmpty())
+                return {};
+            faces->sources.insert(it.key(), bytes);
+        }
+    }
+    return faces->generation == assets.generation() ? faces : OpeningFonts();
+}
+
+// The faces of the bundle's current verification that need no file read.
+OpeningFonts preparedFaces(const AssetBundle &assets)
+{
+    const auto generation = assets.generation();
+    const auto &current = registration();
+    if (current.prepared && current.prepared->generation == generation)
+        return current.prepared;
+    if (current.active && current.active->generation == generation)
+        return current.active;
+    return {};
+}
+
+OpeningFonts interfaceFaces(const AssetBundle &assets, bool opening)
+{
+    const bool explicitBundle = assets.verification() == AssetBundle::Verification::Explicit;
+    // On-demand opening screens can draw before unrelated assets are verified.
+    const bool requireVerified = explicitBundle || !opening;
+    if (requireVerified && !assets.available())
+        return {};
+    const auto generation = assets.generation();
+    const auto &current = registration();
+    // Explicit bundles change generation with every verification. Their worker
+    // read against that generation's digests before it published these bytes.
+    if (explicitBundle)
+        return preparedFaces(assets);
+    const auto verified = assets.verifiedFontDigests();
+    const auto matches = [&](const OpeningFonts &faces) {
+        if (!faces || faces->generation != generation)
+            return false;
+        // Before the first full check, this loading view can reuse its own
+        // manifest-checked bytes until the bundle is invalidated.
+        if (opening && verified.isEmpty())
+            return true;
+        for (auto it = faces->digests.cbegin(); it != faces->digests.cend(); ++it)
+            if (verified.value(assets.file("fonts/" + it.key())) != it.value())
+                return false;
+        return true;
+    };
+    if (matches(current.prepared))
+        return current.prepared;
+    if (matches(current.active))
+        return current.active;
+    return readFaces(assets, opening);
+}
+} // namespace
+
+OpeningFonts readOpeningFonts(const AssetBundle &assets, const std::function<bool()> &current)
+{
+    if ((current && !current()) || !assets.available())
+        return {};
+    auto faces = readFaces(assets, false, current);
+    if (!faces || (current && !current()))
+        return {};
+    warmTextShaping(faces->sources.value("InstrumentSerif-Regular.ttf"), QStringLiteral("Kobalt"));
+    return current && !current() ? OpeningFonts() : faces;
+}
+
+bool openingFontsPrepared(const AssetBundle &assets)
+{
+    return bool(preparedFaces(assets));
+}
+
+void setPreparedOpeningFonts(const AssetBundle &assets, OpeningFonts faces)
+{
+    if (!faces || faces->generation == assets.generation())
+        registration().prepared = std::move(faces);
+}
+
+bool initializeOpeningFonts(const AssetBundle &assets)
+{
+    auto faces = interfaceFaces(assets, true);
+    if (!faces)
+        return false;
+    if (registration().active == faces)
+        return true;
+    bool changed = false;
+    return installFaces(assets, faces, true, &changed);
+}
+
+bool initializeInterfaceFonts(const AssetBundle &assets, bool *changed)
+{
+    if (changed)
+        *changed = false;
+    const auto faces = interfaceFaces(assets, false);
+    if (!faces)
+        return false;
+    QStringList files;
     for (const auto *file : scriptFallbackFontFiles)
         files.append(QLatin1String(file));
-    const auto readers = assets.deferredFontData(files);
-    if (readers.isEmpty())
-        return false;
-    QMap<QString, QByteArray> sources;
-    for (const auto &family : families())
-        for (const auto &face : family.faces) {
-            const auto bytes = readers.value(QLatin1String(face.file))();
-            if (bytes.isEmpty())
-                return false;
-            sources.insert(face.file, bytes);
-        }
-    if (!assets.available())
+    // Validate the fallbacks along with the required interface files. All
+    // optional script fallbacks may have been set aside.
+    const auto readers = assets.deferredFontData(files + interfaceFiles());
+    bool facesChanged = false;
+    if (readers.isEmpty() || !installFaces(assets, faces, false, &facesChanged))
         return false;
     // Native editors need only the scripts actually present in their text.
     // Private text has its own lazy fallback selection and byte budget.
@@ -268,17 +327,15 @@ bool initializeInterfaceFonts(const AssetBundle &assets, bool *changed)
     current.fallbackReaders.clear();
     for (const auto *file : scriptFallbackFontFiles)
         current.fallbackReaders.insert(file, readers.value(file));
-    if (!replaceFaces(std::move(sources), &facesChanged))
-        return false;
-    // Some sleep screens use bundled book faces: Jost for figures and Libron
-    // for the letter. Registration records the files; bytes load when drawn.
+    // The strips and some sleep screens use Jost. The sleep letter uses Libron.
+    // Registration records the files; bytes load when drawn.
     const auto bookFace = [&assets](const char *face, const QString &family) {
         const auto name = QStringLiteral("fonts/ebook-core/") + QLatin1String(face);
         if (!assets.setAside(name))
             registerPrivateInterfaceFont(assets.file(name), family);
     };
     for (const auto *face : { "NV_Jost-Regular.ttf", "NV_Jost-Bold.ttf" })
-        bookFace(face, QStringLiteral("NV Jost"));
+        bookFace(face, QString::fromLatin1(jostFamily));
     for (const auto *face : { "Libron-Regular.ttf", "Libron-Italic.ttf" })
         bookFace(face, QStringLiteral("Libron"));
     if (changed) {
@@ -424,20 +481,22 @@ QFont renewedFont(const QFont &font)
     return renewed;
 }
 
-void refreshInterfaceText(QWidget *root)
+void refreshInterfaceText(QWidget *root, bool restyled)
 {
     // Qt keeps the faces that a font object has loaded. After a font database
     // change it drops them only for fonts in its cache, and only once, so
-    // widgets need new font objects. Setting a style sheet again parses new
-    // rule fonts and resolves the fonts of the widget and its children anew.
+    // widgets need new font objects. Setting the root's style sheet again
+    // repolishes the root and every widget under it once. That parses new rule
+    // fonts, resolves each widget's font anew and gives back the sheet colors
+    // of widgets whose palette was set since their last polish. Setting each
+    // widget's sheet again would repolish a widget once for every styled
+    // ancestor, and took two thirds of a theme change.
+    if (!restyled && !root->styleSheet().isEmpty())
+        root->setStyleSheet(root->styleSheet());
     auto widgets = root->findChildren<QWidget *>();
     widgets.prepend(root);
     QEvent change(QEvent::FontChange);
     for (auto *widget : widgets) {
-        if (const auto sheet = widget->styleSheet(); !sheet.isEmpty()) {
-            widget->setStyleSheet(QString());
-            widget->setStyleSheet(sheet);
-        }
         // Labels lay out rich text again, and paged text renews its document font.
         QCoreApplication::sendEvent(widget, &change);
         widget->update();
@@ -512,9 +571,22 @@ void setHeaderFooterFontFamily(const QString &family)
     selectedHeaderFooterFamily = family;
 }
 
+bool interfaceFontsMatch(const QString &mainFace, const QString &monoFace, const QString &stripFace,
+                         int stripWeight)
+{
+    return mainFace == selectedInterfaceFamily && monoFace == selectedInterfaceMonoFamily
+            && stripFace == selectedHeaderFooterFamily && stripWeight == stripAddedWeight;
+}
+
+QString defaultHeaderFooterFontFamily()
+{
+    const auto jost = QString::fromLatin1(jostFamily);
+    return privateInterfaceFontRegistered(jost) ? jost : family(FamilyIndex::Mono);
+}
+
 QFont headerFooterFont(int pixels)
 {
-    return sizedFont(selectedHeaderFooterFamily.isEmpty() ? family(FamilyIndex::Mono)
+    return sizedFont(selectedHeaderFooterFamily.isEmpty() ? defaultHeaderFooterFontFamily()
                                                           : selectedHeaderFooterFamily,
                      pixels);
 }

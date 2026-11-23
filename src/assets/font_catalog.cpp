@@ -10,6 +10,49 @@
 #include FT_MULTIPLE_MASTERS_H
 
 namespace kobalt {
+bool internationalSupplementalFont(const QString &family)
+{
+    static const QStringList specialistFamilies{ "Noto Naskh Arabic",   "Noto Sans Math",
+                                                 "Noto Serif",          "Noto Serif Armenian",
+                                                 "Noto Serif Bengali",  "Noto Serif Devanagari",
+                                                 "Noto Serif Georgian", "Noto Serif Hebrew",
+                                                 "Noto Serif Tamil",    "Noto Serif Thai" };
+    return family.startsWith("Noto Serif CJK ") || specialistFamilies.contains(family);
+}
+
+FontSection fontSection(const ReadingFont &font)
+{
+    if (font.origin == FontOrigin::Recommended)
+        return FontSection::Recommended;
+    if (font.origin == FontOrigin::Sideloaded)
+        return FontSection::Sideloaded;
+    if (font.origin == FontOrigin::Interface
+        && (font.family == "IBM Plex Mono" || font.family == "IBM Plex Sans"
+            || font.family == "Kalam" || font.family == "Playpen Sans"))
+        return FontSection::Ui;
+    if (font.origin == FontOrigin::BuiltIn)
+        return FontSection::BuiltIn;
+
+    return internationalSupplementalFont(font.family) ? FontSection::International
+                                                      : FontSection::Supplemental;
+}
+
+void sortFontSections(QVector<ReadingFont> &fonts, bool sideloadedFirst)
+{
+    std::stable_sort(fonts.begin(), fonts.end(), [=](const ReadingFont &a, const ReadingFont &b) {
+        const auto left = fontSection(a), right = fontSection(b);
+        if (left != right) {
+            if (sideloadedFirst
+                && (left == FontSection::Sideloaded || right == FontSection::Sideloaded))
+                return left == FontSection::Sideloaded;
+            return left < right;
+        }
+        return left == FontSection::Supplemental
+                && fontDisplayName(a.family).compare(fontDisplayName(b.family), Qt::CaseInsensitive)
+                < 0;
+    });
+}
+
 QVector<ReadingFont> orderedReadingFonts(QVector<ReadingFont> fonts, const QStringList &selected)
 {
     const auto available = fonts;
@@ -99,7 +142,8 @@ bool EngineFontInputs::operator==(const EngineFontInputs &other) const
     return sources == other.sources && fallbackFiles == other.fallbackFiles
             && hyphenationDirectory == other.hyphenationDirectory
             && excludedHyphenation == other.excludedHyphenation
-            && verifiedFontDigests == other.verifiedFontDigests;
+            && verifiedFontDigests == other.verifiedFontDigests
+            && compiledHyphenation == other.compiledHyphenation;
 }
 
 QString fontFamilyKey(const QString &family)
@@ -166,6 +210,7 @@ QVector<ReadingFont> discoverReadingFonts(const FontSources &sources)
         FT_Done_Face(face);
         if (family.isEmpty())
             return;
+        const qint64 bytes = QFileInfo(path).size();
         QByteArray version;
         if (origin == FontOrigin::Sideloaded
             || (origin == FontOrigin::BuiltIn && !sources.systemFiles.contains(path))) {
@@ -180,6 +225,7 @@ QVector<ReadingFont> discoverReadingFonts(const FontSources &sources)
             if (entry.origin == origin && !entry.files.contains(path)) {
                 entry.files.append(path);
                 entry.directoryFileVersions += version;
+                entry.bytes += bytes;
                 if (entry.opticalSizeAxis.available() && optical.available()) {
                     auto &range = entry.opticalSizeAxis;
                     range.minimum = qMax(range.minimum, optical.minimum);
@@ -207,7 +253,7 @@ QVector<ReadingFont> discoverReadingFonts(const FontSources &sources)
             return;
         }
         seen.insert(key, result.size());
-        result.append({ family, { path }, origin, axis, optical, version });
+        result.append({ family, { path }, origin, axis, optical, version, bytes });
     };
     const auto core = [](const QString &path) {
         return path.contains("/ebook-core/") || path.contains("/ebook-core-");

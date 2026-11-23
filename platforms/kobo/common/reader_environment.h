@@ -2,14 +2,23 @@
 #include "assets/assets.h"
 #include "assets/bundled_fonts.h"
 #include "assets/system_fonts.h"
+#include "diagnostics.h"
+#include "last_boot.h"
 #include "storage/reader_storage.h"
 #include "storage/record_writer.h"
 #include "support/diagnostics.h"
+#include "support/main_thread.h"
 #include "engine/engine_worker.h"
 #include "support/qt_compat.h"
+#include "ui/style/fonts.h"
+#ifdef KOBALT_SCENARIO_PLAYER
+#  include "scenario/files.h"
+#endif
 #include <QCoreApplication>
 #include <QPointer>
 #include <atomic>
+#include <mutex>
+#include <utility>
 
 namespace kobalt::nickel {
 inline constexpr auto configDir = KOBALT_CONFIG_DIR;
@@ -29,7 +38,9 @@ inline constexpr auto sessionReport = "/instance/artifacts/kobalt-session.json";
 // values from it; engine and UI code do not look up a platform environment.
 struct ReaderEnvironment
 {
-    ReaderEnvironment()
+    explicit ReaderEnvironment(const QString &assetRoot = QStringLiteral(KOBALT_CONFIG_DIR
+                                                                         "/assets"))
+        : assets(assetRoot, QStringLiteral(KOBALT_VERSION), AssetBundle::Verification::Explicit)
     {
 #ifdef KOBALT_READER_HARDWARE
         if (!diagnosticsRequested(QString::fromLatin1(configDir))) {
@@ -37,46 +48,160 @@ struct ReaderEnvironment
             paths.sessionReport.clear();
         }
 #endif
+#ifdef KOBALT_SCENARIO_PLAYER
+        const auto checks = scenario::checkProfile(paths.directory);
+        if (!checks.isEmpty())
+            paths.directory = checks;
+#endif
     }
 
     void reportSession(const QJsonObject &report) const
     {
         if (!paths.sessionReport.isEmpty()
-            && !sessionReports.tryPost(
-                    [path = paths.sessionReport, report] { return storage::writeJson(path, report); }))
+            && !sessionReports.tryPost([path = paths.sessionReport, report] {
+                   return storage::writeJson(path, report);
+               }))
             diagnostic("session-report-worker-unavailable", {}, DiagnosticSeverity::Warning);
     }
 
-    AssetBundle assets{ QStringLiteral(KOBALT_CONFIG_DIR "/assets"), QStringLiteral(KOBALT_VERSION),
-                        AssetBundle::Verification::Explicit };
+    void recordSuccessfulLaunch(quint64 (*storageGeneration)())
+    {
+        if (!lastBoot.tryPost([this, directory = paths.directory, storageGeneration] {
+                // USB revokes storage before draining this same lock.
+                std::lock_guard<std::mutex> storage(stockStorageWork());
+                if (lastBootRecorded || !storageGeneration())
+                    return true;
+                QFile version(QStringLiteral("/mnt/onboard/.kobo/version"));
+                const auto firmware = version.open(QIODevice::ReadOnly)
+                        ? diagnosticDeviceFields(version.read(512)).value("firmware").toString()
+                        : QString();
+                lastBootRecorded =
+                        recordLastBoot(directory, QStringLiteral(KOBALT_VERSION), firmware);
+                if (!lastBootRecorded)
+                    diagnostic("last-boot-write-failed", {}, DiagnosticSeverity::Warning);
+                return lastBootRecorded;
+            }))
+            diagnostic("last-boot-worker-unavailable", {}, DiagnosticSeverity::Warning);
+    }
+
+    AssetBundle assets;
     std::function<void()> assetsChanged;
+
+    bool verificationForStorage(quint64 permit) const
+    {
+        return permit && permit == requestedStorage;
+    }
+
+    bool assetsAvailable() const
+    {
+        return (!stockStorage || verificationForStorage(stockStorage())) && assets.available();
+    }
+
+    // Called after the stock workflow revokes storage. Workers check availability
+    // under the same lock before touching files.
+    static void finishStockStorageWork()
+    {
+        mainthread::blocking("stock storage work");
+        std::lock_guard<std::mutex> finished(stockStorageWork());
+    }
 
     // USB calls this only after draining the engine and releasing storage.
     // A cancelled USB cleanup must not invalidate an otherwise usable bundle.
     void invalidateAssets()
     {
         ++assetGeneration;
+        requestedStorage = 0;
+        preparingOpeningFonts = false;
+        cancelOpeningFontWait();
+        finishHomeFontWait(false);
         assets.invalidate();
+        ui::setPreparedOpeningFonts(assets, {});
         if (assetsChanged)
             assetsChanged();
     }
 
-    void verifyAssets(QObject *context, const char *reason, std::function<void(bool)> finished = {})
+    // A verified bundle can already admit a tap while its font bytes are still
+    // being prepared. Only the active loading surface needs this continuation.
+    void whenOpeningFontsReady(std::function<void()> ready)
+    {
+        // The worker can verify the bundle and then fail to read its fonts.
+        // Read them again on the worker instead of refusing every opening
+        // until the next USB session or restart.
+        if (!preparingOpeningFonts && assetsAvailable() && !ui::openingFontsPrepared(assets))
+            readOpeningFontsAgain();
+        if (preparingOpeningFonts)
+            openingFontsReady = std::move(ready);
+        else
+            ready();
+    }
+
+    void cancelOpeningFontWait() { openingFontsReady = {}; }
+
+    // The Home frame can outlive an opening cancelled by sleep or power-off.
+    bool deferHomeFonts(std::function<void(bool)> ready)
+    {
+        // As for an opening, a failed font read is tried again on the worker.
+        if (!preparingOpeningFonts && assetsAvailable() && !ui::openingFontsPrepared(assets))
+            readOpeningFontsAgain();
+        if (!preparingOpeningFonts)
+            return false;
+        homeFontsReady = std::move(ready);
+        return true;
+    }
+
+    void verifyAssets(QObject *context, const char *reason, std::function<void(bool)> finished = {},
+                      std::function<quint64()> storageGeneration = {})
     {
         invalidateAssets();
+        preparingOpeningFonts = true;
         const auto generation = assetGeneration.load();
+        stockStorage = storageGeneration;
+        const auto permit = requestedStorage = storageGeneration ? storageGeneration() : 1;
+        const auto current = [this, generation, storageGeneration, permit] {
+            return generation == assetGeneration.load() && permit
+                    && (!storageGeneration || storageGeneration() == permit);
+        };
         const QPointer<QObject> guard(context);
         qt::invoke(
                 engineWorker(),
-                [this, guard, generation, reason, finished] {
+                [this, guard, generation, reason, finished, current, storageGeneration, permit] {
+                    // Holding this lock never waits for a GUI callback. The queued
+                    // result runs separately, after the last asset file is closed.
+                    std::lock_guard<std::mutex> reading(stockStorageWork());
                     if (generation != assetGeneration.load())
                         return;
                     DiagnosticOperation operation("asset-verification");
-                    const bool valid = assets.verify(
-                            [this, generation] { return generation == assetGeneration.load(); });
+                    const bool valid = current() && assets.verify(current);
+                    auto fonts = valid ? ui::readOpeningFonts(assets, current) : ui::OpeningFonts{};
                     qt::invoke(
                             qApp,
-                            [this, guard, generation, reason, valid, finished] {
+                            [this, guard, generation, reason, valid, fonts, finished,
+                             storageGeneration, permit] {
+                                if (generation != assetGeneration.load())
+                                    return;
+                                const auto storage =
+                                        storageGeneration ? storageGeneration() : permit;
+                                if (!storage || storage != permit) {
+                                    // Stock USB can start before a coordinator exists. If storage
+                                    // already came back, check the new files before resuming a tap.
+                                    if (guard && storage) {
+                                        auto resume = std::move(openingFontsReady);
+                                        verifyAssets(guard, reason, finished, storageGeneration);
+                                        openingFontsReady = std::move(resume);
+                                    } else {
+                                        invalidateAssets();
+                                        if (guard && finished)
+                                            finished(false);
+                                    }
+                                    return;
+                                }
+                                ui::setPreparedOpeningFonts(assets, fonts);
+                                preparingOpeningFonts = false;
+                                finishHomeFontWait(bool(fonts));
+                                auto resume = std::move(openingFontsReady);
+                                openingFontsReady = {};
+                                if (resume)
+                                    resume();
                                 if (!guard || generation != assetGeneration.load())
                                     return;
                                 diagnostic("assets-checked",
@@ -93,6 +218,7 @@ struct ReaderEnvironment
                 },
                 Qt::QueuedConnection);
     }
+
     FontCopies fontCopies;
     storage::Paths paths{ QString::fromLatin1(configDir),
 #ifdef KOBALT_READER_HARDWARE
@@ -124,8 +250,86 @@ struct ReaderEnvironment
     }
 
 private:
+    static std::mutex &stockStorageWork()
+    {
+        static std::mutex mutex;
+        return mutex;
+    }
+
+    // Reads the interface fonts of the current verification again, under the
+    // same storage permit. A changed generation means that USB or a new
+    // verification took over the opening's wait.
+    void readOpeningFontsAgain()
+    {
+        preparingOpeningFonts = true;
+        const auto generation = assetGeneration.load();
+        const auto storageGeneration = stockStorage;
+        const auto permit = requestedStorage;
+        const auto current = [this, generation, storageGeneration, permit] {
+            return generation == assetGeneration.load() && permit
+                    && (!storageGeneration || storageGeneration() == permit);
+        };
+        qt::invoke(
+                engineWorker(),
+                [this, generation, current, storageGeneration, permit] {
+                    // The same lock as verification, so that USB waits for this read.
+                    std::lock_guard<std::mutex> reading(stockStorageWork());
+                    if (generation != assetGeneration.load())
+                        return;
+                    auto fonts =
+                            current() ? ui::readOpeningFonts(assets, current) : ui::OpeningFonts{};
+                    qt::invoke(
+                            qApp,
+                            [this, generation, fonts, storageGeneration, permit] {
+                                if (generation != assetGeneration.load())
+                                    return;
+                                // Stock USB can take the storage before this result arrives.
+                                // As after a verification, check remounted files first.
+                                const auto storage =
+                                        storageGeneration ? storageGeneration() : permit;
+                                if (!storage || storage != permit) {
+                                    if (storage) {
+                                        auto resume = std::move(openingFontsReady);
+                                        verifyAssets(qApp, "opening-fonts", {}, storageGeneration);
+                                        openingFontsReady = std::move(resume);
+                                    } else {
+                                        invalidateAssets();
+                                    }
+                                    return;
+                                }
+                                diagnostic("opening-fonts-read", { { "ready", bool(fonts) } },
+                                           fonts ? DiagnosticSeverity::Activity
+                                                 : DiagnosticSeverity::Warning);
+                                ui::setPreparedOpeningFonts(assets, fonts);
+                                preparingOpeningFonts = false;
+                                finishHomeFontWait(bool(fonts));
+                                auto resume = std::move(openingFontsReady);
+                                openingFontsReady = {};
+                                if (resume)
+                                    resume();
+                            },
+                            Qt::QueuedConnection);
+                },
+                Qt::QueuedConnection);
+    }
+
+    std::function<quint64()> stockStorage;
+    quint64 requestedStorage = 0;
     std::atomic<quint64> assetGeneration{ 0 };
+    bool preparingOpeningFonts = false;
+    std::function<void()> openingFontsReady;
+    std::function<void(bool)> homeFontsReady;
+
+    void finishHomeFontWait(bool prepared)
+    {
+        if (const auto ready = std::exchange(homeFontsReady, {}))
+            ready(prepared);
+    }
+
     mutable storage::RecordWriter sessionReports;
+    // Accessed on the writer thread while the stock storage lock is held.
+    bool lastBootRecorded = false;
+    storage::RecordWriter lastBoot;
     QString placeholder;
     QStringList systemFonts;
     bool systemFontsReady = false;

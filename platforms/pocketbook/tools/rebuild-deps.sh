@@ -1,13 +1,14 @@
 #!/bin/bash
-# Rebuild Kobalt's third-party libraries (CREngine and friends) for the repository synced to
-# /work/kobalt with the GCC 12 toolchain, then refresh /work/kobalt-deps (crengine-src/,
-# crengine-build/, install/), which the PocketBook build links against. Needed whenever upstream
-# moves dependencies/manifest.json or dependencies/patches (a CREngine upgrade, a new patch). Runs
-# inside the pbqt-build container; tools/remote-rebuild-deps.sh runs it from the PC.
+# Rebuild Kobalt's third-party libraries (FreeType, HarfBuzz, libpng, libwebp, Brotli, Lua and
+# friends) for the repository synced to /work/kobalt with the GCC 12 toolchain, then refresh
+# /work/kobalt-deps/install, the prefix the PocketBook build links against. Needed whenever
+# upstream moves dependencies/manifest.json, dependencies/patches or the recipes. Runs inside the
+# pbqt-build container; tools/remote-rebuild-deps.sh runs it from the PC.
 # Upstream's dependency cache (dependencies/cache.cmake) builds the set at configure time into
 # /work/dependency-cache/<key>/, keyed by the toolchain and the recipes, so an unchanged set is
 # found at once and a changed one is built in full (about half an hour).
-# Env: BUILD_DIR (default /work/kobalt-check-gcc12)
+# The reader engine is not part of the set: the application build compiles it from the repository.
+# Env: BUILD_DIR (default /work/kobalt-check-gcc12), KOBALT_SRC (default /work/kobalt)
 set -uo pipefail
 B=${BUILD_DIR:-/work/kobalt-check-gcc12}
 D=/work/kobalt-deps
@@ -27,18 +28,8 @@ echo "configure ok"
 entry=$(sed -n 's/^-- Dependency set [0-9a-f]*: //p' configure.log | tail -1)
 [ -n "$entry" ] && [ -f "$entry/complete" ] || { echo "no published dependency set in configure.log"; tail -20 configure.log; exit 1; }
 echo "dependency set: $entry"
-src=$entry/sources/crengine
-build=$entry/crengine
 install=$entry/install
-[ -f "$src/crengine/include/lvtinydom.h" ] || { echo "no CREngine source at $src"; exit 1; }
-[ -f "$build/libcrengine.a" ] || { echo "no libcrengine.a at $build"; exit 1; }
 [ -d "$install/include" ] || { echo "no install prefix at $install"; exit 1; }
-rm -rf "$D/crengine-src.new" "$D/crengine-build.new"
-cp -a "$src" "$D/crengine-src.new" && cp -a "$build" "$D/crengine-build.new" || { echo "copy failed"; exit 1; }
-rm -rf "$D/crengine-src.old" "$D/crengine-build.old"
-[ -d "$D/crengine-src" ] && mv "$D/crengine-src" "$D/crengine-src.old"
-[ -d "$D/crengine-build" ] && mv "$D/crengine-build" "$D/crengine-build.old"
-mv "$D/crengine-src.new" "$D/crengine-src" && mv "$D/crengine-build.new" "$D/crengine-build"
 # The install prefix (FreeType, HarfBuzz, libpng, ... also linked into Qt) follows the tree. Its
 # headers changing means a library moved and Qt should be rebuilt too (tools/build-qt-gcc12.sh);
 # archives alone differ at every rebuild (ar timestamps) and need nothing.

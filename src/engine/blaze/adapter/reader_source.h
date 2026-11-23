@@ -1,6 +1,7 @@
 #pragma once
 #include "publication/page_estimate.h"
 #include "publication/resource_cache.h"
+#include <QCache>
 #include <QHash>
 #include <QJsonObject>
 #include <atomic>
@@ -25,6 +26,9 @@ struct ReaderSource
     bool contentContainer = false;
     // A number for this source and no other, also after it is destroyed.
     const quint64 identity = nextIdentity();
+    // The open book. The documents that replace one another while it is
+    // open share it, such as the whole book that Hybrid builds. Embedded
+    // fonts and the Nickel position cache are kept per open book.
     quint64 fontIdentity = identity;
 
     static quint64 nextIdentity()
@@ -37,14 +41,42 @@ struct ReaderSource
     // first needed. They decide the spine items of a unit and give the
     // page estimate its sizes.
     QVector<qint64> spineBytes;
+    // Positive and negative image-only chapter lookups survive chapter-window changes.
+    QHash<QString, QString> chapterImages;
+    int chapterImageProbes = 0;
+
+    struct TocAnchor
+    {
+        QString path, id, position;
+    };
+
+    QVector<TocAnchor> tocAnchors;
+    struct TocFragments
+    {
+        QMultiHash<QString, int> ids;
+        QVector<int> items;
+    };
+    QHash<QString, TocFragments> pendingTocFragments;
+    QHash<QString, int> boundaryElementOrder;
+    bool mainTextChecked = false;
+    QPair<QString, QString> mainTextHints;
     // EPUB spine flags, including fragments whose text the chapter window omitted.
     QVector<bool> nonLinearItems;
-    // The plain text of each spine item, folded for a quick check whether a
-    // search can match there. Filled when first needed.
-    QVector<QString> searchTexts;
+    // Folded chapter text used to skip items during search. Recent keys share
+    // one byte budget across the documents of an open book.
+    std::shared_ptr<QCache<int, QString>> searchTexts;
     // The part of the text of its spine item before each position that was
     // looked up in the XHTML. It does not depend on the layout.
     QHash<QString, double> textFractions;
+
+    // One entry per saved endpoint, shared by chapter windows for the same appearance.
+    struct SelectionEndpoints
+    {
+        QString appearance;
+        QCache<QString, bool> valid{ 4096 };
+    };
+
+    std::shared_ptr<SelectionEndpoints> selectionEndpoints;
     QHash<QString, qint64> textWordPrefixes;
     // Whether a linked target exists, checked on demand without loading its
     // chapter. Unknown or interrupted checks are not retained.
@@ -93,12 +125,17 @@ struct ReaderSource
         quint64 recordGeneration = 0;
         QString recordKey;
         int recordItem = -1;
+        // Where top-level chapters start on the progress bar, measured in a
+        // layout of the whole book for the estimateKey() `ticksKey` and the
+        // main text marks `ticksRange`. Saved with the record.
+        QVector<double> ticks;
+        QString ticksKey, ticksRange;
     } pageEstimate;
 };
 
 // The spine item that a position names as DocFragment[n], counted from zero,
-// or -1.
-int spineItemIndex(const QString &position);
+// or -1. atStart reports whether the position names the fragment itself at its start.
+int spineItemIndex(const QString &position, bool *atStart = nullptr);
 // The pages of one slice in chapter mode. Zero lays out three spine items
 // as a whole.
 int chapterSlicePages();

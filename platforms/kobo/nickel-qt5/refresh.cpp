@@ -10,6 +10,7 @@
 #include "platforms/kobo/display/page_animation_hook.h"
 #include "platforms/kobo/display/page_transition.h"
 #include "platforms/kobo/display/refresh_policy.h"
+#include "platforms/kobo/display/sleep_refresh.h"
 #include <QApplication>
 #include <QBackingStore>
 #include <QPointer>
@@ -192,13 +193,18 @@ static void flushReaderUsing(QBackingStore *store, const QRegion &region, QWindo
         submit(region, flags);
         return;
     }
-    if (readerWindow && readerWindow->property("reader_sleep_handoff").toBool()
-        && store->window() != readerWindow->windowHandle() && (!target || target == store->window())
-        && offset.isNull() && !region.isEmpty()) {
-        // Nickel's sleep view replaces the page. One full GC16 refresh shows
-        // it and clears the page, so the panel flashes once.
+    auto *window = store->window();
+    const bool yielding = readerWindow && readerWindow->property("reader_sleep_handoff").toBool();
+    const bool stockCleanup =
+            yielding && readerWindow->property("reader_sleep_clean_pending").toBool();
+    if (window && (!readerWindow || window != readerWindow->windowHandle())
+        && (!target || target == window) && offset.isNull() && !region.isEmpty()
+        && (stockCleanup
+            || SleepRefresh::take(window, {}, yielding ? readerWindow.data() : nullptr))) {
+        if (stockCleanup)
+            readerWindow->setProperty("reader_sleep_clean_pending", false);
         keyboardPixels.clear();
-        const QRect screen(QPoint(), store->window()->size());
+        const QRect screen(QPoint(), window->size());
         submit(QRegion(screen), { { screen, gc16 | full } });
         return;
     }
@@ -259,8 +265,10 @@ static void flushReaderUsing(QBackingStore *store, const QRegion &region, QWindo
             submit(area, { { area.boundingRect(), (text == automatic ? gl16 : text) | full } });
         }
     }
-    const QRegion annotationRepairs = annotationRepairRegions(readerWindow);
-    if (pageAnimationPanel() == AnimationPanel::Color && !(region & annotationRepairs).isEmpty()) {
+    const QRegion annotationRepairs = pageAnimationPanel() == AnimationPanel::Color
+            ? annotationRepairDamage(readerWindow, region, pageTurn || direction)
+            : QRegion();
+    if (!annotationRepairs.isEmpty()) {
         keyboardPixels.clear();
         if (wide && (pageTurn || direction)) {
             // Nickel turns onto and away from coloured highlights with its
@@ -270,7 +278,7 @@ static void flushReaderUsing(QBackingStore *store, const QRegion &region, QWindo
             consumeAnnotationRepairs(readerWindow, QRegion(screen));
         } else {
             submit(region, { { region.boundingRect(), repairPolicy(dark, wide) } });
-            consumeAnnotationRepairs(readerWindow, region);
+            consumeAnnotationRepairs(readerWindow, annotationRepairs);
         }
         return;
     }

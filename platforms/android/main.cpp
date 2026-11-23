@@ -27,6 +27,7 @@
 #include <QCloseEvent>
 #include <QDebug>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QFontDatabase>
 #include <QPushButton>
@@ -41,6 +42,11 @@
 using namespace kobalt;
 
 namespace {
+// Some devices keep a system bar visible in immersive mode. Once the first page
+// is ready, wait this long for both bars to hide, then open with the geometry
+// the reader has.
+constexpr qint64 openingGeometryLimitMs = 1500;
+
 class Window : public QWidget
 {
 public:
@@ -168,8 +174,15 @@ public:
                 return;
             }
             sizeCanvas();
-            if (!android::readingGeometryReady() || !reader->readyForPresentation())
+            if (!reader->readyForPresentation())
                 return;
+            if (!android::readingGeometryReady()) {
+                if (!openingWait.isValid())
+                    openingWait.start();
+                if (!openingWait.hasExpired(openingGeometryLimitMs))
+                    return;
+                qWarning() << "Kobalt system bars still visible; opening with current geometry";
+            }
             // Discard any proxy pixels prepared while the canvas was covered.
             QCoreApplication::sendPostedEvents(reader, QEvent::UpdateLater);
             QCoreApplication::sendPostedEvents(reader, QEvent::UpdateRequest);
@@ -257,6 +270,7 @@ public:
             reader->show();
             surfaceHandoff.present(true);
             setUpdatesEnabled(true);
+            openingWait.invalidate();
             openingHandoff.start();
             QSettings settings;
             settings.remove("lastBook");
@@ -269,8 +283,7 @@ public:
                     openingHandoff.stop();
                     layout->setStackingMode(QStackedLayout::StackOne);
                     applyLibraryTheme();
-                    android::activity("showStartup");
-                    setReadingInsets(false);
+                    setReadingMode(false);
                     start->showLibraryError(error);
                     layout->setCurrentWidget(start);
                     syncPageButtons();
@@ -287,8 +300,7 @@ public:
             layout->setStackingMode(QStackedLayout::StackOne);
             recordProgress();
             applyLibraryTheme();
-            android::activity("showStartup");
-            setReadingInsets(false);
+            setReadingMode(false);
             if (!failedOpening)
                 start->showLibrary();
             libraryPreparedSize = {};
@@ -332,8 +344,11 @@ private:
     int surfaceCorner = 0;
     bool readingInsets = false;
 
-    void setReadingInsets(bool reading)
+    void setReadingMode(bool reading)
     {
+        // Qt reapplies the host window state when the loading surface is destroyed.
+        setWindowState(windowState().setFlag(Qt::WindowFullScreen, reading));
+        android::activity(reading ? "showReading" : "showStartup");
         if (readingInsets == reading)
             return;
         readingInsets = reading;
@@ -343,7 +358,7 @@ private:
     void applyLibraryTheme()
     {
         const bool dark = controller.preferences().value("dark_mode").toBool(false);
-        start->setDark(dark);
+        start->applyLibraryTheme(controller.preferences(), controller.fontSources());
         setPalette(start->palette());
         android::setLibraryDark(dark);
     }
@@ -362,6 +377,7 @@ private:
     }
 
     QTimer openingHandoff;
+    QElapsedTimer openingWait;
     bool closing = false, layoutRepairPending = false, failedOpening = false;
 
     QSize pixels() const
@@ -476,8 +492,7 @@ private:
         layout->setCurrentWidget(start);
         // Keep the canvas laid out behind the opaque loader as insets change.
         layout->setStackingMode(QStackedLayout::StackAll);
-        android::activity("showReading");
-        setReadingInsets(true);
+        setReadingMode(true);
         layout->activate();
         controller.open(path, pixels(), openedKey, restart, selection.position);
     }
@@ -602,7 +617,6 @@ int main(int argc, char **argv)
                                    QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
                                            + "/user-folders/fonts"),
                   placeholderFontFamily(*assets, copies));
-    // Keep edge-to-edge geometry while the activity controls bar visibility.
     window.show();
     qInfo() << "Kobalt Android ready; density" << physicalPpi;
     return app.exec();

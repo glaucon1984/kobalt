@@ -15,19 +15,25 @@ namespace {
 template <class File>
 QStringList fontFiles(File file)
 {
-    QFile manifest(file("fonts/ebook-core.json"));
-    if (!manifest.open(QIODevice::ReadOnly))
-        return {};
     QStringList result;
     const auto add = [&result](const QString &path) {
         if (!path.isEmpty())
             result.append(path);
     };
-    for (const auto &entry :
-         QJsonDocument::fromJson(manifest.readAll()).object().value("files").toArray())
-        add(file("fonts/ebook-core/" + entry.toObject().value("file").toString()));
+    for (const auto *collection : { "ebook-core", "ebook-supplemental" }) {
+        const QString base = QStringLiteral("fonts/") + QLatin1String(collection);
+        QFile manifest(file(base + ".json"));
+        if (!manifest.open(QIODevice::ReadOnly))
+            continue;
+        const auto entries =
+                QJsonDocument::fromJson(manifest.readAll()).object().value("files").toArray();
+        for (const auto &entry : entries)
+            add(file(base + "/" + entry.toObject().value("file").toString()));
+    }
     for (const auto *face : { "Regular", "Italic", "Bold" })
         add(file(QString("fonts/IBMPlexSans-%1.ttf").arg(face)));
+    for (const auto *face : { "Kalam-Regular.ttf", "Kalam-Bold.ttf", "PlaypenSans.ttf" })
+        add(file(QStringLiteral("fonts/") + QLatin1String(face)));
     for (const auto *name : kobalt::scriptFallbackFontFiles)
         add(file(QString("fonts/") + QLatin1String(name)));
     return result;
@@ -66,6 +72,7 @@ kobalt::EngineFontInputs kobalt::engineFontInputs(const AssetBundle &assets,
             inputs.fallbackFiles.append(path);
     }
     inputs.hyphenationDirectory = assets.file("hyph");
+    inputs.compiledHyphenation = assets.verifiedHyphenation();
     QDir hyphenation(inputs.hyphenationDirectory);
     for (const auto &name : hyphenation.entryList(QDir::Files))
         if (assets.setAside("hyph/" + name))

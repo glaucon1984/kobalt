@@ -193,6 +193,7 @@ public:
         symbols->setObjectName("widgetKeyboardSymbols");
         shift->setCheckable(true);
         symbols->setCheckable(true);
+        symbols->setProperty("reader_invert_pressed", true);
         QObject::connect(shift, &QPushButton::clicked, this, [this] {
             const auto interval = quint32(QApplication::doubleClickInterval());
             const bool doubleTap = shift->pointerRelease && pointerShift
@@ -587,7 +588,7 @@ private:
                 const auto shown =
                         caseMode != Case::Lower && !symbolPage ? character.toUpper() : character;
                 key->setProperty("keyboard.character", shown);
-                key->setText(shown == "&" ? QStringLiteral("&&") : shown);
+                key->setText(shown);
                 characterFont(key);
                 key->setVisible(!shown.isEmpty());
                 key->setFixedSize(narrow && rows[row].size() <= 10 ? widthFor(10) : width, height);

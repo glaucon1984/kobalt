@@ -18,6 +18,8 @@
 #include <stdio.h>
 #include <string.h>
 #include "../include/lvdrawbuf.h"
+#include "../qimagescale/qimagescale_p.h"
+#include <memory>
 
 #define GUARD_BYTE 0xa5
 #define CHECK_GUARD_BYTE \
@@ -455,7 +457,10 @@ private:
     bool invert;
     bool smoothscale;
     lUInt8 * __restrict decoded;
+    // Blaze: scales rows while they decode, so a large image needs no full-size 32bpp copy. Upstream always buffers the whole decoded image.
+    std::unique_ptr<CRe::SmoothRowScaler> rowScaler;
     bool isNinePatch;
+    // Blaze: set when any pixel is not fully transparent. Draw() reports it through OnImageDrawn().
     bool visiblePixels = false;
 public:
     bool hasVisiblePixels() const { return visiblePixels; }
@@ -538,11 +543,20 @@ public:
             else if (!smoothscale)
                 ymap = GenMap( src_dy, dst_dy );
         }
-        // If we have a smoothscale post-processing pass, we'll need to build a buffer of the *full* decoded image.
-        if (smoothscale) {
-            // Byte-sized buffer, we're 32bpp, so, 4 bytes per pixel.
-            decoded = new lUInt8[src_dy * (src_dx * 4)];
-        }
+    }
+    // Blaze: decoders that can scale while decoding ask for the target size here. Nine-patch images keep the upstream path.
+    bool GetRasterTargetSize(int &width, int &height) const override {
+        if (!smoothscale || isNinePatch)
+            return false;
+        return GetTargetSize(width, height);
+    }
+    void OnStartRasterDecode(LVImageSource *, int w, int h) override {
+        if (!smoothscale || isNinePatch)
+            return;
+        src_dx = w;
+        src_dy = h;
+        if (h > dst_dy && dst_dy > 1 && w >= dst_dx)
+            rowScaler.reset(new CRe::SmoothRowScaler(w, h, dst_dx, dst_dy));
     }
     virtual bool GetTargetSize(int & width, int & height) const {
         width = dst_dx;
@@ -568,10 +582,17 @@ public:
             if (y == 0 || y == src_dy-1) // ignore first and last lines
                 return true;
         }
-        // Defer everything to the post-process pass for smooth scaling, we just have to store the line in our decoded buffer
+        // Blaze: Keep the scaled result off the drawing surface until decoding succeeds.
+        // The buffer is allocated on the first row, with size_t math, so large images do not overflow int.
         if (smoothscale) {
             //fprintf( stderr, "Smoothscale l_%d pass\n", y );
-            memcpy(decoded + (y * (src_dx * 4)), data, (src_dx * 4));
+            if (rowScaler) {
+                rowScaler->addRow(y, data);
+                return true;
+            }
+            if (!decoded)
+                decoded = new lUInt8[size_t(src_dx) * src_dy * 4];
+            memcpy(decoded + size_t(y) * src_dx * 4, data, size_t(src_dx) * 4);
             return true;
         }
         int yy = -1;
@@ -853,23 +874,27 @@ public:
         }
         return true;
     }
-    virtual void OnEndDecode( LVImageSource * obj, bool )
+    virtual void OnEndDecode( LVImageSource * obj, bool errors )
     {
-        // If we're not smooth scaling, we're done!
-        if (!smoothscale) {
+        // Blaze: skip the smooth scaling pass when decoding failed, so a partial image is not drawn.
+        if (errors || !smoothscale) {
             return;
         }
 
         // Scale our decoded data...
         lUInt8 * __restrict sdata = nullptr;
         //fprintf( stderr, "Requesting smooth scaling (%dx%d -> %dx%d)\n", src_dx, src_dy, dst_dx, dst_dy );
-        sdata = CRe::qSmoothScaleImage(decoded, src_dx, src_dy, false, dst_dx, dst_dy);
-        if (sdata == nullptr) {
-                // Hu oh... Scaling failed! Return *without* drawing anything!
-                // We skipped map generation, so we can't easily fallback to nearest-neighbor...
-                //fprintf( stderr, "Smooth scaling failed :(\n" );
-                return;
+        std::unique_ptr<lUInt8, decltype(&free)> scaled(nullptr, &free);
+        if (rowScaler) {
+            sdata = reinterpret_cast<lUInt8 *>(rowScaler->result());
+        } else if (src_dx == dst_dx && src_dy == dst_dy) {
+            sdata = decoded;
+        } else if (decoded) {
+            scaled.reset(CRe::qSmoothScaleImage(decoded, src_dx, src_dy, false, dst_dx, dst_dy));
+            sdata = scaled.get();
         }
+        if (!sdata)
+            return;
 
         // Process as usual, with a bit of a hack to avoid code duplication...
         smoothscale = false;
@@ -878,16 +903,6 @@ public:
             this->OnLineDecoded( obj, y, (lUInt32 *) row );
         }
 
-        // This prints the unscaled decoded buffer, for debugging purposes ;).
-        /*
-        for (int y=0; y < src_dy; y++) {
-            lUInt8 * row = decoded + (y * (src_dx * 4));
-            this->OnLineDecoded( obj, y, (lUInt32 *) row );
-        }
-        */
-
-        // And now that it's been rendered we can free the scaled buffer (it was allocated by CRe::qSmoothScaleImage).
-        free(sdata);
     }
 };
 
@@ -1648,6 +1663,9 @@ int  LVColorDrawBuf::GetBitsPerPixel() const
 
 void LVColorDrawBuf::Draw( LVImageSourceRef img, int x, int y, int width, int height, bool dither )
 {
+    // Blaze: nothing to draw at zero size. Return before the image is decoded for no result.
+    if (width <= 0 || height <= 0)
+        return;
     //fprintf( stderr, "LVColorDrawBuf::Draw( img(%d, %d), %d, %d, %d, %d\n", img->GetWidth(), img->GetHeight(), x, y, width, height );
     LVImageScaledDrawCallback drawcb( this, img, x, y, width, height, dither, _invertImages, _smoothImages );
     img->Decode( &drawcb );

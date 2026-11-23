@@ -10,7 +10,6 @@
 #include <QTimer>
 #include <QElapsedTimer>
 #include <QJsonObject>
-#include <QDateTime>
 #include <QSize>
 #include <functional>
 #include <memory>
@@ -29,6 +28,14 @@ class SourceLease;
 enum class ReaderBookRoute;
 
 namespace nickel {
+// Nickel can request standby before a reader exists or after its window closes.
+inline std::function<bool()> readerStandbyCheck(ReaderWindow *reader)
+{
+    return [window = QPointer<ReaderWindow>(reader)] {
+        return !window || window->flushBeforeStandby();
+    };
+}
+
 struct ReaderEnvironment;
 class HomeSleepScreen;
 // Every accepted native opening invalidates a closed reader snapshot.
@@ -62,7 +69,7 @@ public:
                       QObject *parent);
     ~ReaderCoordinator() override;
     bool available() const;
-    void finishPreviewMigration();
+    void finishStartup();
     bool idleForBenchmark() const;
 #if defined(KOBALT_BENCHMARK_API) || defined(KOBALT_SCENARIO_PLAYER)
     QJsonObject benchmarkState(const QString &identity) const;
@@ -86,8 +93,12 @@ private:
     void startScenarios();
     void runScenarios(const QString &path);
     bool scenariosStarted = false;
+    storage::RecordWriter scenarioWriter;
     // A copy of the first opening, so scenarios can open the same book again.
     std::unique_ptr<NativeOpening> scenarioOpening;
+#endif
+#ifdef KOBALT_READER_HARDWARE
+    bool startupReady = false;
 #endif
     ReaderEnvironment &environment_;
     CoordinatorBindings bindings_;
@@ -126,6 +137,13 @@ private:
         qint64 progressPainted = -1000;
     } run;
 
+    // A cancelled opening can retain its reader and failed checkpoint until unlock.
+    bool disposingForUsb = false;
+    // A shown book saves for a bounded time before USB. An opening book or a
+    // drain that was already closing the book releases at once.
+    bool saveBeforeUsb = false;
+    QPointer<kobalt::ReaderWindow> sleepingOpening;
+
     void updateOpening(kobalt::OpeningStage stage, int percent);
     unsigned generation = 0;
     bool busy = false;
@@ -142,7 +160,7 @@ private:
     void status(const QString &value, const QString &reason = {});
     void hideLoading();
     void drainReadingJobs(std::function<void()> finished);
-    void disposeForTransition(std::function<void()> finished, bool nativeAllowed = true);
+    void disposeForTransition(std::function<void()> finished, bool nativeAllowed = true, bool usb = false);
     void finishDisposal(const QString &finalStatus, bool nativeAllowed);
     void release(bool endAuthorization = true);
     void cancelOpening();
@@ -153,23 +171,14 @@ private:
     void poll();
     void checkProgressSoon();
     void watch();
-    void prepareOpening(kobalt::ReaderBookRoute candidate);
+    void prepareOpening(kobalt::ReaderBookRoute candidate, QJsonObject preferences);
     void prepareOpeningControls();
     bool openingDark = false;
     void missingAssets(bool assetsReady);
-    void load();
+    void load(const QJsonObject &globalPreferences);
 
-    // Shows the reader for the current opening: the quiet window when load()
-    // chose it, otherwise a window built now.
-    void showReader(bool fromQuiet = false);
-    kobalt::ReaderWindow *createReader(std::unique_ptr<kobalt::ReaderSession> session,
-                                       std::unique_ptr<kobalt::NativeProgress> progress,
-                                       bool koboCloud, const QString &identity,
-                                       const QString &statePath, const QByteArray &hash,
-                                       const kobalt::ReadingProgress &baseline,
-                                       const kobalt::ReadingProgress &diskBaseline,
-                                       kobalt::ReaderOrientation *orientation,
-                                       const QString &coverPath, bool quiet);
+    void showReader();
+    kobalt::ReaderWindow *createReader(bool koboCloud);
     std::unique_ptr<HomeSleepScreen> homeSleep;
 
     // The book being preloaded; see preloadLastBook(). When it is ready it
@@ -189,32 +198,6 @@ private:
     void startPreload(const QString &identity, const QString &path, QJsonObject saved,
                       const QJsonObject &preferences);
     void cancelPreload();
-
-    // The reader window built quietly for the preloaded book, kept hidden
-    // until the book is tapped; see ReaderWindow::activate(). The tap shows it
-    // only when its own opening would start from the same state.
-    struct Quiet
-    {
-        QPointer<kobalt::ReaderWindow> window;
-        std::unique_ptr<kobalt::ReaderOrientation> orientation;
-        std::shared_ptr<kobalt::SourceLease> lease;
-        QString identity, path;
-        QJsonObject saved, bookDefaults;
-        QSize size;
-        int density = 0;
-        qreal largeText = 0;
-        kobalt::ReadingProgress diskBaseline;
-        QDateTime modified;
-        qint64 bytes = -1;
-    } quiet;
-
-    bool buildQuietReader(std::unique_ptr<kobalt::ReaderSession> &session, const QJsonObject &saved,
-                          const QJsonObject &preferences, QSize size);
-    bool quietMatches(const QJsonObject &saved, const QJsonObject &bookDefaults, QSize size,
-                      const QString &nativeLocation, bool restart, bool koboCloud) const;
-    // Deletes the quiet window. With keepSession, its book stays in memory as
-    // the kept book in run.session.
-    void dropQuietReader(bool keepSession);
 };
 
 } // namespace nickel

@@ -14,6 +14,9 @@
 #include "document_cache.h"
 #include "engine/engine_activity.h"
 #include "publication/publication.h"
+#include "publication/zip_resource.h"
+#include <QBuffer>
+#include "render/image_damage.h"
 #include <atomic>
 #include <lvdocview.h>
 #include <lvrend.h>
@@ -273,7 +276,7 @@ public:
         // Other resources can be transformed by their provider, so their
         // stream size must still come from the returned bytes.
         const auto suffix = QFileInfo(key).suffix().toLower();
-        const bool rawFont = suffix == "ttf" || suffix == "otf";
+        const bool rawFont = suffix == "ttf" || suffix == "otf" || suffix == "woff2";
         const auto length =
                 rawFont && sizes.contains(key) ? sizes.value(key) : resources->size(key);
         return length < 0 ? LVStreamRef() : LVStreamRef(new ResourceStream(resources, key, length));
@@ -447,18 +450,21 @@ int chapterSlicePages()
                                      : 25;
 }
 
-int spineItemIndex(const QString &position)
+int spineItemIndex(const QString &position, bool *atStart)
 {
     static const QRegularExpression fragment(QStringLiteral("/DocFragment(?:\\[(\\d+)\\])?"));
     const auto match = fragment.match(position);
+    if (atStart) {
+        const auto end = match.capturedEnd();
+        *atStart = match.hasMatch()
+                && (end == position.size()
+                    || (end + 2 == position.size() && position.endsWith(".0")));
+    }
     return match.hasMatch() ? qMax(1, match.captured(1).toInt()) - 1 : -1;
 }
 
-bool EngineDocument::supportedArchive(const QByteArray &bytes, QString *error,
-                                      QSet<QString> *skippedFonts)
+static bool inspectMemoryArchive(const QByteArray &bytes, Publication &publication, QString *error)
 {
-    if (skippedFonts)
-        skippedFonts->clear();
     auto fail = [error](const QString &message) {
         *error = message;
         return false;
@@ -466,52 +472,24 @@ bool EngineDocument::supportedArchive(const QByteArray &bytes, QString *error,
     if (bytes.size() < 22 || bytes.size() > maxBook)
         return fail(strings::get("error.unsupported_publication_size"));
     // Inspect the central directory before giving the archive to the engine.
-    // Reject ZIP encryption and ZIP64 rather than guessing.
-    Publication publication;
     if (!publication.inspect(bytes, error))
         return false;
-    auto u16 = [&bytes](int p) {
-        return qFromLittleEndian<quint16>(reinterpret_cast<const uchar *>(bytes.constData() + p));
-    };
-    auto u32 = [&bytes](int p) {
-        return qFromLittleEndian<quint32>(reinterpret_cast<const uchar *>(bytes.constData() + p));
-    };
-    int end = -1;
-    for (int p = bytes.size() - 22; p >= qMax(0, int(bytes.size()) - 65557); --p) {
-        if (u32(p) == 0x06054b50 && p + 22 + u16(p + 20) == bytes.size()) {
-            end = p;
-            break;
-        }
-    }
-    if (end < 0 || u16(end + 4) || u16(end + 6) || u16(end + 8) != u16(end + 10))
-        return fail(strings::get("error.unsupported_epub_archive"));
-    const quint32 offset = u32(end + 16), length = u32(end + 12);
-    const int count = u16(end + 10);
-    if (!count || count == 65535 || quint64(offset) + length != quint64(end))
-        return fail(strings::get("error.unsupported_epub_directory"));
-    int at = int(offset);
-    quint64 expanded = 0;
-    bool container = false;
-    for (int i = 0; i < count; ++i) {
-        if (at > end - 46 || u32(at) != 0x02014b50)
-            return fail(strings::get("error.invalid_epub_directory"));
-        const int nameSize = u16(at + 28), extra = u16(at + 30), comment = u16(at + 32);
-        const quint64 next = quint64(at) + 46 + nameSize + extra + comment;
-        if (next > quint64(end) || (u16(at + 8) & 0x41) || u32(at + 20) == 0xffffffffU)
-            return fail(strings::get("error.encrypted_or_unsupported_epub"));
-        const QByteArray name = bytes.mid(at + 46, nameSize);
-        if (name == "META-INF/container.xml")
-            container = true;
-        expanded += u32(at + 24);
-        if (expanded > 256 * 1024 * 1024)
-            return fail(strings::get("error.expanded_publication_is_too_large"));
-        at = int(next);
-    }
-    if (!container || at != end)
-        return fail(strings::get("error.missing_epub_container"));
-    if (skippedFonts)
-        *skippedFonts = publication.skippedFonts();
+    qint64 expanded = 0;
+    for (const auto size : publication.sizes())
+        expanded += size;
+    if (expanded > 256 * 1024 * 1024)
+        return fail(strings::get("error.expanded_publication_is_too_large"));
     return true;
+}
+
+bool EngineDocument::supportedArchive(const QByteArray &bytes, QString *error,
+                                      QSet<QString> *skippedFonts)
+{
+    Publication publication;
+    const bool valid = inspectMemoryArchive(bytes, publication, error);
+    if (skippedFonts)
+        *skippedFonts = valid ? publication.skippedFonts() : QSet<QString>{};
+    return valid;
 }
 
 void setChapterModeOverride(int mode)
@@ -522,19 +500,51 @@ void setChapterModeOverride(int mode)
 bool EngineDocument::open(QByteArray bytes, QSize size, const QJsonObject &saved, QString *error,
                           OpeningProgress progress)
 {
-    QSet<QString> skippedFonts;
-    if (!supportedArchive(bytes, error, &skippedFonts))
+    Publication publication;
+    if (!inspectMemoryArchive(bytes, publication, error))
         return false;
     auto source = std::make_shared<ReaderSource>();
-    source->bytes = std::move(bytes);
-    source->container = LVOpenArchieve(
-            LVCreateMemoryStream(source->bytes.data(), source->bytes.size(), false, LVOM_READ));
-    if (source->container.isNull()) {
-        *error = strings::get("error.the_reading_engine_could_not_open_this_epub");
-        return false;
+    source->sizes = publication.sizes();
+    if (publication.zip64()) {
+        // Blaze's memory ZIP reader uses 32-bit offsets. Use the same bounded
+        // member reader as file-backed books for ZIP64 input.
+        struct MemoryArchive
+        {
+            QMutex mutex;
+            QBuffer buffer;
+            ZipResourceIndex index;
+        };
+
+        auto archive = std::make_shared<MemoryArchive>();
+        archive->buffer.setData(bytes);
+        archive->buffer.open(QIODevice::ReadOnly);
+        source->resources = std::make_shared<ResourceCache>(
+                publication.names(),
+                [archive](const QString &name, const ResourceCache::Sink &sink, QString *) {
+                    QMutexLocker lock(&archive->mutex);
+                    ZipResource member;
+                    if (!member.open(archive->buffer, name, archive->index))
+                        return false;
+                    while (member.valid() && !member.finished()) {
+                        const auto block = member.next();
+                        if (!block.isEmpty() && !sink(block.constData(), block.size()))
+                            return false;
+                    }
+                    return member.valid();
+                },
+                std::make_shared<std::atomic_bool>(false));
+        source->container = LVContainerRef(new ResourceContainer(source->resources, source->sizes));
+    } else {
+        source->bytes = std::move(bytes);
+        source->container = LVOpenArchieve(
+                LVCreateMemoryStream(source->bytes.data(), source->bytes.size(), false, LVOM_READ));
+        if (source->container.isNull()) {
+            *error = strings::get("error.the_reading_engine_could_not_open_this_epub");
+            return false;
+        }
     }
     return openSource(std::move(source), size, saved, error, std::move(progress), nullptr, {},
-                      std::move(skippedFonts));
+                      publication.skippedFonts());
 }
 
 bool EngineDocument::openResources(std::shared_ptr<ResourceCache> resources,
@@ -749,6 +759,15 @@ bool EngineDocument::openSource(std::shared_ptr<ReaderSource> source, QSize size
                        strings::key("error.the_reading_engine_could_not_open_this_epub"))
                 : fail(OpeningFailureKind::Io, "opening.resource-read", resourceFailure);
     }
+    // A saved chapter may have disappeared. Start the first window at the book
+    // start and let position restoration report the fallback after layout.
+    if (result && firstSpineItem > 0 && firstSpineItem >= spineItems().size()) {
+        auto first = saved;
+        first["koblaze_first_spine_item"] = 0;
+        first["koblaze_last_spine_item"] = 0;
+        return openSource(source_, size, first, error, std::move(progress), result,
+                          std::move(coverReady), {}, std::move(cacheReady));
+    }
     if (coverReady)
         coverReady();
     source_->embeddedFonts = source_->parent ? source_->parent->embeddedFonts : embeddedFontCount();
@@ -832,7 +851,7 @@ bool EngineDocument::openSource(std::shared_ptr<ReaderSource> source, QSize size
     activateFastShaping();
     applySlice();
     engine_->Render();
-    engine_->groupColumns(hideNonlinearFragments_);
+    engine_->groupColumns(hideNonlinearFragments_, chapterStartsSpread_);
     openingTimes_["model_paginate_ms"] = double(phase.restart());
     cutSlice();
 #if __has_include(<koblaze.h>)
@@ -886,15 +905,21 @@ bool EngineDocument::openSource(std::shared_ptr<ReaderSource> source, QSize size
     engine_->getCurPage();
     anchor_ = qstring(engine_->getBookmark().toString());
     const auto bookmark = saved.value("position").toString();
-    if (!bookmark.isEmpty() && !goTo(bookmark)) {
+    if (!bookmark.isEmpty() && result) {
+        *result = restoreSavedPosition(bookmark);
+        if (!result->ready()) {
+            engine_.reset();
+            if (error)
+                *error = result->failure()->detail.isEmpty()
+                        ? strings::get(result->failure()->reason.constData())
+                        : result->failure()->detail;
+            return false;
+        }
+    } else if (!bookmark.isEmpty() && !goTo(bookmark)) {
         engine_.reset();
         return fail(OpeningFailureKind::InvalidContent,
                     strings::key("error.saved_reading_position_no_longer_exists"));
     }
-    // The first slice has a layout now. The saved position can be in
-    // another one.
-    if (slices() && !saved.value("position").toString().isEmpty())
-        goTo(saved.value("position").toString());
     return true;
 }
 
@@ -965,13 +990,33 @@ void EngineDocument::carryTextKnowledge(EngineDocument &next) const
         map.setPrior(from.pageEstimate.map.model());
         map.takeMeasurements(from.pageEstimate.map);
     }
-    for (auto it = from.textFractions.cbegin(); it != from.textFractions.cend(); ++it)
-        to.textFractions.insert(it.key(), it.value());
-    for (auto it = from.textWordPrefixes.cbegin(); it != from.textWordPrefixes.cend(); ++it)
-        to.textWordPrefixes.insert(it.key(), it.value());
-    for (auto it = from.linkTargets.cbegin(); it != from.linkTargets.cend(); ++it)
-        to.linkTargets.insert(it.key(), it.value());
-    if (to.searchTexts.isEmpty())
+    // Chapter ticks come from the whole book: the next document keeps them
+    // until it measures its own, so the record that it saves has them.
+    if (to.pageEstimate.ticks.isEmpty() && !from.pageEstimate.ticks.isEmpty()) {
+        to.pageEstimate.ticks = from.pageEstimate.ticks;
+        to.pageEstimate.ticksKey = from.pageEstimate.ticksKey;
+        to.pageEstimate.ticksRange = from.pageEstimate.ticksRange;
+    }
+    // A new document usually knows nothing yet: it shares the tables then,
+    // so that the turn that adopts the whole book copies nothing.
+    const auto merge = [](auto &into, const auto &known) {
+        if (into.isEmpty()) {
+            into = known;
+            return;
+        }
+        for (auto it = known.cbegin(); it != known.cend(); ++it)
+            into.insert(it.key(), it.value());
+    };
+    // The chapter file that the Nickel position codec parsed belongs to the
+    // book, not to this document.
+    if (nativePositions_ && !next.nativePositions_)
+        next.nativePositions_ = nativePositions_;
+    if (!to.selectionEndpoints)
+        to.selectionEndpoints = from.selectionEndpoints;
+    merge(to.textFractions, from.textFractions);
+    merge(to.textWordPrefixes, from.textWordPrefixes);
+    merge(to.linkTargets, from.linkTargets);
+    if (!to.searchTexts)
         to.searchTexts = from.searchTexts;
 }
 
@@ -999,20 +1044,14 @@ bool EngineDocument::setChapterMode(bool fast, const appearance::Patch &patch, Q
 #if __has_include(<koblaze.h>)
     if (!source_ || !engine_ || (current && !current()))
         return false;
-    auto saved = state();
-    for (auto it = patch.fields().begin(); it != patch.fields().end(); ++it)
-        saved[it.key()] = it.value();
-    saved.remove("page_estimate");
-    const int item = fast ? qMax(0, spineItemIndex(position())) : -1;
-    saved["koblaze_first_spine_item"] = item;
-    saved["koblaze_last_spine_item"] = item;
     // Hybrid rendering prepared the whole book for this appearance: show
-    // that document. Nothing is loaded and nothing moves on the page.
+    // that document. Nothing is loaded and nothing moves on the page. The
+    // appearance compares without the page estimate, which costs more to
+    // make.
     bool prepared = false;
-    if (!fast && full_ && fullSize_ == (size.isValid() ? size : size_)
-        && fullKey_ == fullDocumentKey(settingsState())) {
-        const auto before = state();
-        prepared = true;
+    if (!fast && full_ && fullSize_ == (size.isValid() ? size : size_)) {
+        const auto before = settingsState();
+        prepared = fullKey_ == fullDocumentKey(before);
         for (auto it = patch.fields().begin(); it != patch.fields().end() && prepared; ++it)
             prepared = !before.contains(it.key()) || before.value(it.key()) == it.value();
     }
@@ -1035,6 +1074,17 @@ bool EngineDocument::setChapterMode(bool fast, const appearance::Patch &patch, Q
         retire(std::move(full));
         return false;
     }
+    // Opening a document repairs invalid saved settings. A live edit must
+    // pass the same checks as an edit that keeps the current layout.
+    if (!patch.fields().isEmpty() && !updateAppearance(patch, size, {}, AppearanceAction::Validate))
+        return false;
+    auto saved = state();
+    for (auto it = patch.fields().begin(); it != patch.fields().end(); ++it)
+        saved[it.key()] = it.value();
+    saved.remove("page_estimate");
+    const int item = fast ? qMax(0, spineItemIndex(position())) : -1;
+    saved["koblaze_first_spine_item"] = item;
+    saved["koblaze_last_spine_item"] = item;
     EngineDocument next(fonts_);
     next.openingFontSource_ =
             source_->parent ? source_->parent->fontIdentity : source_->fontIdentity;
@@ -1127,13 +1177,8 @@ bool EngineDocument::showSpineItems(int first, int last, QString *error)
     return opened;
 }
 
-int EngineDocument::adjacentSpineItem(int direction) const
+const QVector<bool> &EngineDocument::nonLinearSpineItems() const
 {
-    int item = direction > 0 ? windowLast_ + 1 : windowFirst_ - 1;
-    if (item < 0 || item >= spineItemCount_)
-        return -1;
-    if (!hideNonlinearFragments_)
-        return item;
     // Even a chapter window has a DocFragment for each omitted spine item.
     // The manifest flag lets us skip entire hidden chapters without laying them out.
     auto &hidden = source_->nonLinearItems;
@@ -1147,6 +1192,17 @@ int EngineDocument::adjacentSpineItem(int direction) const
                 hidden.append(fragment->hasAttribute(flag));
         }
     }
+    return hidden;
+}
+
+int EngineDocument::adjacentSpineItem(int direction) const
+{
+    int item = direction > 0 ? windowLast_ + 1 : windowFirst_ - 1;
+    if (item < 0 || item >= spineItemCount_)
+        return -1;
+    if (!hideNonlinearFragments_)
+        return item;
+    const auto &hidden = nonLinearSpineItems();
     // Blaze lays out adjacent non-linear spine items as one non-linear flow.
     // A direct jump into that flow keeps its adjacent pages available.
     const int from = direction > 0 ? windowLast_ : windowFirst_;
@@ -1298,21 +1354,15 @@ EngineDocument *EngineDocument::openAhead(int item, const std::function<bool()> 
         return ahead_.get();
     // The document that was here stays in memory while there is room.
     keepUnit(std::move(ahead_), aheadSettings_, aheadSize_);
-    auto ahead = takeKept(unit.first, settings);
-    if (!ahead) {
-        DiagnosticOperation load("chapter-load", [&current] {
-            return (current && !current()) || engineCancellationRequested();
-        });
-        ahead = openSide(settings, current, error);
-        if (!ahead && !kept_.empty() && (!current || current())) {
-            // The kept documents must never cost the reader a chapter:
-            // without them the engine has room for this one.
-            kept_.clear();
-            if (error)
-                error->clear();
-            ahead = openSide(settings, current, error);
-        }
-    }
+    // Following a previewed link can adopt the unit that supplied the preview.
+    std::unique_ptr<EngineDocument> ahead;
+    if (lookupUnit_.document && lookupUnit_.settings == settings && lookupUnit_.size == size_
+        && lookupUnit_.document->userStyleSheet_ == userStyleSheet_
+        && lookupUnit_.document->slicePages_ == slicePages_)
+        ahead = std::move(lookupUnit_.document);
+    lookupUnit_ = {};
+    if (!ahead)
+        ahead = loadUnit(unit.first, settings, current, error);
     if (!ahead)
         return nullptr;
     ahead_ = std::move(ahead);
@@ -1327,6 +1377,53 @@ EngineDocument *EngineDocument::openAhead(int item, const std::function<bool()> 
     Q_UNUSED(error);
     return nullptr;
 #endif
+}
+
+EngineDocument *EngineDocument::openLookupUnit(int item, const std::function<bool()> &current,
+                                               int last, bool borrowAhead)
+{
+    if (item < 0 || item >= spineItemCount_ || (current && !current()))
+        return nullptr;
+    const auto unit = last >= item ? qMakePair(item, last) : unitFrom(item);
+    auto settings = windowSettings(unit.first, unit.second);
+    settings.remove("position");
+    auto &document = lookupUnit_.document;
+    if (document && lookupUnit_.settings == settings && lookupUnit_.size == size_
+        && document->userStyleSheet_ == userStyleSheet_ && document->slicePages_ == slicePages_)
+        return document.get();
+    document.reset();
+    document = loadUnit(unit.first, settings, current, nullptr);
+#if __has_include(<koblaze.h>)
+    // A lookup still needs its target when the engine has room for only one spare.
+    if (!document && borrowAhead && ahead_ && ldomDocument::koblazeFreeDocumentSlots() < 3
+        && (!current || current()) && openAhead(unit.first, current, unit.second))
+        document = std::move(ahead_);
+#endif
+    lookupUnit_.settings = std::move(settings);
+    lookupUnit_.size = size_;
+    return document.get();
+}
+
+std::unique_ptr<EngineDocument> EngineDocument::loadUnit(int first, const QJsonObject &settings,
+                                                         const std::function<bool()> &current,
+                                                         QString *error)
+{
+    auto document = takeKept(first, settings);
+    if (!document) {
+        DiagnosticOperation load("chapter-load", [&current] {
+            return (current && !current()) || engineCancellationRequested();
+        });
+        document = openSide(settings, current, error);
+        if (!document && !kept_.empty() && (!current || current())) {
+            // The kept documents must never cost the reader a chapter:
+            // without them the engine has room for this one.
+            kept_.clear();
+            if (error)
+                error->clear();
+            document = openSide(settings, current, error);
+        }
+    }
+    return document;
 }
 
 std::unique_ptr<EngineDocument> EngineDocument::openSide(const QJsonObject &settings,
@@ -1485,6 +1582,7 @@ struct EngineDocument::FullBuild
         // document: the stop check, the quote levels of the languages and
         // the cache of parsed books. A chapter that has the engine meanwhile
         // must not write to that cache.
+        const auto mainLanguage = TextLangMan::getMainLang();
         const auto levels = TextLangMan::koblazeQuoteLevels();
         const int fontWeight = LVRendGetBaseFontWeight();
         const float opticalSize = LVRendGetFontOpticalSize();
@@ -1514,6 +1612,7 @@ struct EngineDocument::FullBuild
 #  endif
         ldomDocCache::koblazeSuspend(false);
         koblazeSwapCancelScopes(&noCancel, &parserCanStop);
+        TextLangMan::setMainLang(mainLanguage);
         TextLangMan::koblazeSetQuoteLevels(levels);
         LVRendSetBaseFontWeight(fontWeight);
         LVRendSetFontOpticalSize(opticalSize);
@@ -1542,8 +1641,36 @@ bool EngineDocument::fullDocumentReady() const
     return full_ && fullSize_ == size_ && fullKey_ == fullDocumentKey(settingsState());
 }
 
-int EngineDocument::preparedSpreadTurn(int direction) const
+bool EngineDocument::prepareMatchingSpread()
 {
+    if (columns_ != 2)
+        return true;
+    if (!full_)
+        return false;
+    // A decorative column can borrow a nearby bookmark. Check that go()
+    // saved a passage on the requested spread's first column.
+    const auto place = position();
+    const auto anchor = engine_->getDocument()->createXPointer(cre(place));
+    const int y = anchor.isNull() ? -1 : anchor.toPoint().y;
+    const int screen = page();
+    if (y < 0 || engine_->getPageList()->FindNearestPage(y, 0) != engine_->firstColumn(screen)
+        || !full_->goTo(place))
+        return false;
+    auto &whole = *full_->engine_;
+    const int spread = full_->page();
+    if (whole.getCurPage(true) != whole.firstColumn(spread)
+        || whole.columnCount(spread) != engine_->columnCount(screen))
+        return false;
+    // Publisher CSS can change the rest of the spread even when its first
+    // column agrees. Both images are cached for the frame that wins.
+    const auto requested = image(screen);
+    return !requested.isNull() && requested == full_->image(spread);
+}
+
+int EngineDocument::preparedSpreadTurn(int direction, bool *continues) const
+{
+    if (continues)
+        *continues = true;
     if ((direction != 1 && direction != -1) || columns_ != 2 || !fullDocumentReady())
         return -1;
     const int screen = page();
@@ -1564,12 +1691,75 @@ int EngineDocument::preparedSpreadTurn(int direction) const
         return -1;
     const int spread = whole.screenOfColumn(physical);
     const int firstInSpread = whole.firstColumn(spread);
-    // The adjoining column may already be on this whole-book screen.
-    // Showing that screen repeats one column instead of skipping the other.
-    const bool sameSpread = direction < 0
-            ? physical > firstInSpread
-            : physical + 1 < firstInSpread + whole.columnCount(spread);
-    return sameSpread ? spread : full_->turnTarget(spread, direction);
+    // The whole book pairs columns from the start of the book, a chapter
+    // from its own start. The turn continues the text exactly only when the
+    // column on the edge also ends its whole-book screen.
+    const bool exact = direction < 0 ? physical == firstInSpread
+                                     : physical + 1 == firstInSpread + whole.columnCount(spread);
+    if (continues)
+        *continues = exact;
+    return exact ? full_->turnTarget(spread, direction) : -1;
+}
+
+void EngineDocument::prepareFullDocumentTurn(const std::function<bool()> &current)
+{
+    const auto stopped = [&current] { return current && !current(); };
+    if (!fullDocumentReady() || stopped())
+        return;
+    auto &whole = *full_;
+    // adoptLayout() keeps the place on screen. A document that is there
+    // already does not move at the turn.
+    const auto place = position();
+    if (stopped())
+        return;
+    if (whole.position() != place && (!whole.hasPageAt(place) || !whole.goTo(place)))
+        return;
+    if (stopped())
+        return;
+    // The page that the forward turn shows in the whole book. image()
+    // keeps it, because it is next to the page of `place`. A turn with
+    // shifted column pairs does not switch, and gets nothing.
+    bool continues;
+    const int spread = preparedSpreadTurn(1, &continues);
+    const int target = spread >= 0 ? spread : whole.turnTarget(whole.page(), 1);
+    if (continues && target != whole.page()) {
+        if (stopped())
+            return;
+        const auto next = whole.image(target);
+        if (stopped())
+            return;
+        const auto shown = cache_.value(page());
+        auto &damage = whole.adoptionDamage_;
+        if (!next.isNull() && !shown.isNull() && !stopped()
+            && (damage.from != shown.cacheKey() || damage.to != next.cacheKey())) {
+            damage.rect = render::imageDamage(shown, next);
+            damage.from = shown.cacheKey();
+            damage.to = next.cacheKey();
+        }
+        // The links of that page lay out the blocks that they point to.
+        // The turn then finds them laid out.
+        if (!stopped() && whole.go(target)) {
+            if (!stopped())
+                whole.pageLinks();
+            // Restore the reading position even when close interrupts preparation.
+            if (!whole.goTo(place))
+                return;
+        }
+    }
+    if (stopped())
+        return;
+    // The lists that setChapterMode() gives the document, so that the
+    // turn finds their pages ready.
+    if (externalChapters_) {
+        whole.setChapters(contents_, graph_);
+        whole.externalChapters_ = true;
+    }
+    if (stopped())
+        return;
+    whole.chapters();
+    if (stopped())
+        return;
+    whole.chapterGraph();
 }
 
 bool EngineDocument::fullDocumentStarted() const
@@ -1620,6 +1810,7 @@ Engine::FullDocument EngineDocument::prepareFullDocument(const std::function<boo
     if (!building_) {
         // The whole book needs the room of the documents that only chapter
         // mode uses.
+        lookupUnit_ = {};
         kept_.clear();
         auto saved = state();
         // The page to show is resolved at adoption. The reader can turn
@@ -1665,9 +1856,10 @@ Engine::FullDocument EngineDocument::prepareFullDocument(const std::function<boo
                 koblazeSetPausePoint(&FullBuild::pausePoint, state);
                 try {
                     const StopCheck check(wanted);
-                    const OpeningProgress progress = [bookProgress](OpeningStage stage, int percent) {
-                        bookProgress->setBuildProgress(
-                                openingProgressPercent(stage, percent) * 99 / openingBarEngine);
+                    const OpeningProgress progress = [bookProgress](OpeningStage stage,
+                                                                    int percent) {
+                        bookProgress->setBuildProgress(openingProgressPercent(stage, percent) * 99
+                                                       / openingBarEngine);
                     };
                     opened = source->resources
                             ? document->openResources(source->resources->fresh(), source->sizes,
@@ -1711,8 +1903,10 @@ Engine::FullDocument EngineDocument::prepareFullDocument(const std::function<boo
     // after a park. The engine has room for 16 documents, and a document
     // made without room shares the nodes of another one. The kept units
     // make room. Without room the build waits for a later idle moment.
-    if (ldomDocument::koblazeFreeDocumentSlots() < 3)
+    if (ldomDocument::koblazeFreeDocumentSlots() < 3) {
+        lookupUnit_ = {};
         kept_.clear();
+    }
     if (ldomDocument::koblazeFreeDocumentSlots() < 3)
         return FullDocument::None;
     if (building_->run(current) != FullBuild::State::Done)
@@ -1746,7 +1940,7 @@ Engine::FullDocument EngineDocument::prepareFullDocument(const std::function<boo
         PageEstimateRecord whole;
         if (PageEstimateRecord::fromJson(full_->wholeBookEstimateRecord(settings), &whole)
             && whole.spineItems == spineItemCount_ && whole.layout == estimateKey(settings))
-            pageMap().restore(whole.read);
+            pageMap().restore(whole.read, whole.wholeSpreads);
     }
     // Ready: the next turn shows it.
     progress->setBuildProgress(100);
@@ -1825,6 +2019,7 @@ std::unique_ptr<EngineDocument> EngineDocument::takeKept(int first, const QJsonO
 
 void EngineDocument::dropSideDocuments()
 {
+    lookupUnit_ = {};
     building_.reset();
     full_.reset();
     ahead_.reset();
@@ -1841,6 +2036,7 @@ bool EngineDocument::adoptAhead(int first, int last)
     if (settings != aheadSettings_ || size_ != aheadSize_
         || ahead_->userStyleSheet_ != userStyleSheet_ || ahead_->slicePages_ != slicePages_)
         return false;
+    lookupUnit_ = {};
     auto next = std::move(ahead_);
     next->setChapters(contents_, graph_);
     next->externalChapters_ = externalChapters_;
@@ -1866,6 +2062,8 @@ bool EngineDocument::adoptAhead(int first, int last)
     fullFailed_ = std::move(old->fullFailed_);
     fullUncached_ = std::move(old->fullUncached_);
     fullSize_ = old->fullSize_;
+    // Idle cleanup runs on the displayed document after a chapter turn.
+    retired_ = std::move(old->retired_);
     kept_ = std::move(old->kept_);
     visitedUnits_ = std::move(old->visitedUnits_);
     visitedSource_ = old->visitedSource_;
@@ -1977,7 +2175,7 @@ bool EngineDocument::turnInWindow(int delta)
             passedHiddenPages |= linear;
         }
     }
-    const auto items = spineItems();
+    const auto items = spineLocationNames();
     const int count = items.size();
     const int item = adjacentSpineItem(delta > 0 ? 1 : -1);
     if (item < 0)

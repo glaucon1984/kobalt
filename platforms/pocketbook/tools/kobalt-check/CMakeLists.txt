@@ -1,4 +1,4 @@
-# Kobalt's third-party dependencies (CREngine and friends) built with the PocketBook toolchain
+# Kobalt's third-party dependencies built with the PocketBook toolchain
 # into the shared dependency cache at configure time (dependencies/cache.cmake;
 # tools/rebuild-deps.sh copies the set to KOBALT_DEPS for the application build), plus a compile
 # check of the portable sources (src/) without linking.
@@ -22,6 +22,9 @@ find_package(Qt5 REQUIRED COMPONENTS Core Gui Widgets Network Sql Sensors)
 option(KOBALT_POCKETBOOK "Build the dependency set for the PocketBook sysroot" ON)
 include("${KOBALT_ROOT}/dependencies/cache.cmake")
 kobalt_dependencies()
+# CRENGINE_SOURCE and CRENGINE_BUILD: the repository's engine, built against that set.
+include("${KOBALT_ROOT}/dependencies/local-engine.cmake")
+kobalt_local_engine()
 add_subdirectory("${KOBALT_ROOT}/assets" "${CMAKE_CURRENT_BINARY_DIR}/assets")
 set(source "${KOBALT_ROOT}/src")
 file(READ "${KOBALT_ASSETS}/manifest.json" assets)

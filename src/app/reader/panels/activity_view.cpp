@@ -2,7 +2,7 @@
 #include "stats_cell.h"
 #include "app/reader/settings/settings_panel.h"
 #include "platform/api/kobo_refresh.h"
-#include "support/strings.h"
+#include "support/percentage_text.h"
 #include "ui/controls/buttons.h"
 #include "ui/controls/icons.h"
 #include "ui/controls/paging.h"
@@ -13,6 +13,7 @@
 #include "ui/style/private_text.h"
 #include "ui/style/styles.h"
 #include "ui/style/theme.h"
+#include <QUrl>
 #include <QDateTime>
 #include <QLocale>
 #include <QPainter>
@@ -54,6 +55,38 @@ QString duration(qint64 milliseconds)
     const qint64 minutes = qMax<qint64>(0, (milliseconds + 30000) / minute);
     return minutes < 60 ? strings::get("stats.duration_minutes").arg(minutes)
                         : strings::get("stats.duration_hours").arg(minutes / 60).arg(minutes % 60);
+}
+
+QString chartValue(const QString &label, const QString &value)
+{
+    return strings::get("activity.chart_value").arg(label, value);
+}
+
+QString chartDuration(qint64 milliseconds)
+{
+    return milliseconds > 0 && milliseconds < minute ? strings::get("activity.under_minute")
+                                                     : duration(milliseconds);
+}
+
+QString chartDates(QDate first, QDate last)
+{
+    return first == last ? day(first)
+                         : strings::get("activity.chart_dates").arg(day(first), day(last));
+}
+
+// Consecutive days with the same reading time need only one entry.
+QString dailyValues(const QMap<QDate, qint64> &days, QDate first, QDate last)
+{
+    QStringList entries;
+    while (first.isValid() && first <= last) {
+        const auto time = days.value(first);
+        auto end = first;
+        while (end < last && days.value(end.addDays(1)) == time)
+            end = end.addDays(1);
+        entries << chartValue(chartDates(first, end), chartDuration(time));
+        first = end.addDays(1);
+    }
+    return entries.join(QStringLiteral(". "));
 }
 
 // A short form for small places, such as a bar or a calendar day: "38 min" or "1 h 04".
@@ -264,6 +297,13 @@ public:
     {
         week = values;
         today = todayIndex;
+        setAccessibleName(strings::get("activity.this_week"));
+        QStringList entries;
+        for (int i = 0; i < week.size(); ++i)
+            if (week[i] >= 0)
+                entries << chartValue(english().dayName(i + 1, QLocale::ShortFormat),
+                                      chartDuration(week[i]));
+        setAccessibleDescription(entries.join(QStringLiteral(". ")));
         update();
     }
 
@@ -547,11 +587,17 @@ class MonthGrid final : public QWidget
 public:
     explicit MonthGrid(QWidget *parent) : QWidget(parent) { setObjectName("rrActivityMonth"); }
 
-    void setMonth(const QDate &first, const QMap<QDate, qint64> &values, const QDate &now)
+    void setMonth(const QDate &first, const QMap<QDate, qint64> &values, const QDate &now,
+                  const QDate &since)
     {
         month = first;
         days = values;
         today = now;
+        setAccessibleName(english().toString(month, QStringLiteral("MMMM yyyy")));
+        setAccessibleDescription(since.isValid()
+                                         ? dailyValues(days, qMax(month, since),
+                                                       qMin(now, month.addMonths(1).addDays(-1)))
+                                         : QString());
         update();
     }
 
@@ -663,12 +709,33 @@ class YearStrip final : public QWidget
 public:
     explicit YearStrip(QWidget *parent) : QWidget(parent) { setObjectName("rrActivityYear"); }
 
-    void setYear(const QMap<QDate, qint64> &values, const QDate &now, const QDate &since)
+    int setYear(const QMap<QDate, qint64> &values, const QDate &now, const QDate &since)
     {
+        if (first == since && today == now && days == values)
+            return readingDays;
         days = values;
         today = now;
         first = since;
+        readingDays = 0;
+        setAccessibleName(now.isValid() ? QString::number(now.year()) : QString());
+        QStringList entries;
+        const auto startOfHistory = qMax(since, QDate(now.year(), 1, 1));
+        auto it = values.lowerBound(startOfHistory);
+        for (QDate start = startOfHistory; since.isValid() && start.isValid() && start <= now;) {
+            const QDate last = qMin(now, QDate(start.year(), start.month(), start.daysInMonth()));
+            int read = 0;
+            for (; it != values.cend() && it.key() <= last; ++it)
+                read += level(it.value()) > 0;
+            readingDays += read;
+            entries << chartValue(english().monthName(start.month()),
+                                  plural("activity.day_read", "activity.days_read_count", read));
+            start = last.addDays(1);
+        }
+        if (!entries.isEmpty())
+            entries.prepend(chartDates(startOfHistory, now));
+        setAccessibleDescription(entries.join(QStringLiteral(". ")));
         update();
+        return readingDays;
     }
 
 protected:
@@ -718,6 +785,7 @@ protected:
 private:
     QMap<QDate, qint64> days;
     QDate today, first;
+    int readingDays = 0;
 };
 } // namespace
 
@@ -744,6 +812,14 @@ public:
         cells = { streak, longest, month };
     }
 
+    void reset()
+    {
+        summary = {};
+        shown = {};
+        grid->setMonth({}, {}, {}, {});
+        year->setYear({}, {}, {});
+    }
+
     void setSummary(const activity::Summary &value, const ActivityRecords &) override
     {
         summary = value;
@@ -764,14 +840,9 @@ public:
                      summary.longest.days ? day(summary.longest.first) + QStringLiteral(" – ")
                                      + day(summary.longest.last)
                                           : QString());
-        int read = 0;
-        for (auto it = summary.days.cbegin(); it != summary.days.cend(); ++it)
-            if (it.key().year() == summary.today.year()
-                && it.value() >= activity::readingDayMinimum)
-                ++read;
+        const int read = year->setYear(summary.days, summary.today, summary.since);
         setBand(yearBand, QString::number(summary.today.year()),
                 plural("activity.day_read", "activity.days_read_count", read));
-        year->setYear(summary.days, summary.today, summary.since);
         showMonth();
         arrange();
     }
@@ -827,7 +898,7 @@ private:
                     strings::get(days == 1 ? "activity.days_of_one" : "activity.days_of")
                             .arg(read)
                             .arg(days));
-        grid->setMonth(shown, summary.days, summary.today);
+        grid->setMonth(shown, summary.days, summary.today, summary.since);
         months->setPage(monthIndex(shown), monthIndex(summary.today) + 1,
                         english().toString(shown, QStringLiteral("MMMM yyyy")), false, {}, true);
     }
@@ -961,12 +1032,13 @@ public:
         return { height * 2 / 3, height };
     }
 
-    void setBook(const activity::BookTotal &value)
+    void setBook(const activity::BookTotal &value, const QString &caption = {})
     {
         book = value;
+        copyCaption = caption;
         author = authorCaption(book.author);
-        setObjectName("rrActivityBook");
         setAccessibleName(book.title);
+        setAccessibleDescription(caption);
         update();
     }
 
@@ -978,6 +1050,8 @@ public:
     }
 
     activity::BookTotal book;
+    QString copyCaption;
+    QDate month;
     QImage cover;
     bool missing = false;
 
@@ -1053,7 +1127,11 @@ protected:
                     ui::elideInterfaceText(author, caption, textRight - left),
                     Qt::AlignLeft | Qt::AlignTop, note);
         y += captionHeight + ui::px(18);
-        if (book.finished) {
+        if (!copyCaption.isEmpty()) {
+            drawCaption(painter, QRect(left, y, textRight - left, captionHeight),
+                        ui::elideInterfaceText(copyCaption, caption, textRight - left),
+                        Qt::AlignLeft | Qt::AlignTop, ink);
+        } else if (book.finished) {
             drawCaption(painter, QRect(left, y, textRight - left, captionHeight),
                         strings::get("activity.finished_mark"), Qt::AlignLeft | Qt::AlignTop, ink);
         } else if (book.percent >= 0) {
@@ -1066,8 +1144,7 @@ protected:
                            ui::Edges(Qt::TopEdge) | Qt::BottomEdge | Qt::LeftEdge | Qt::RightEdge,
                            ink);
             drawCaption(painter, QRect(left + bar + ui::px(16), y, ui::px(120), captionHeight),
-                        strings::get("common.percent").arg(book.percent),
-                        Qt::AlignLeft | Qt::AlignTop, ink);
+                        strings::percentage(book.percent), Qt::AlignLeft | Qt::AlignTop, ink);
         }
         const int baseline = height() / 2 - ui::px(4);
         drawFigure(&painter, right, baseline, book.milliseconds, sizes::figureText * 3 / 4, ink);
@@ -1111,6 +1188,22 @@ public:
         });
     }
 
+    void reset()
+    {
+        months.clear();
+        hiddenCount = page = 0;
+        pages.clear();
+        copyCaptions.clear();
+        copyDescriptions.clear();
+        clearCovers();
+        for (auto *row : rows) {
+            row->setBook({}, {});
+            row->setCover({}, false);
+            row->hide();
+        }
+        setProperty("activity_covers_pending", 0);
+    }
+
     void setSummary(const activity::Summary &summary, const ActivityRecords &) override
     {
         setGroups(summary.months, int(summary.hiddenBooks.size()));
@@ -1119,18 +1212,18 @@ public:
     // The books in groups, each under its band, and a row to the hidden
     // books after them when there are any. A group without a month is the
     // hidden books' own list.
-    void setGroups(const QVector<activity::MonthBooks> &groups, int hidden)
+    void setGroups(const QVector<activity::MonthBooks> &groups, int hidden, bool firstPage = false)
     {
-        known.clear();
-        missingBooks.clear();
-        covers.clear();
+        clearCovers();
         months = groups;
         hiddenCount = hidden;
         // A reload, such as after hiding a book, keeps the page in view.
-        showPage(page);
+        showPage(firstPage ? 0 : page);
     }
 
-    std::function<void(const QString &)> chosen;
+    QHash<QString, QString> copyCaptions, copyDescriptions;
+    bool showCopySource = false;
+    std::function<void(QDate, const QString &)> chosen;
     std::function<void()> hiddenRequested;
 
 protected:
@@ -1224,8 +1317,10 @@ private:
                             month.month.isValid()
                                     ? english().toString(month.month, QStringLiteral("MMMM yyyy"))
                                     : strings::get("activity.hidden"),
-                            plural("activity.book_count", "activity.books_count",
-                                   month.books.size())
+                            (showCopySource
+                                     ? strings::get("activity.copies_count").arg(month.books.size())
+                                     : plural("activity.book_count", "activity.books_count",
+                                              month.books.size()))
                                     + QStringLiteral(" · ") + duration(month.milliseconds));
                     header->setGeometry(0, y, width(), ui::metrics::list::headerHeight);
                     header->show();
@@ -1234,19 +1329,29 @@ private:
                 }
                 if (rowsUsed == rows.size()) {
                     auto *row = new BookRow(this);
+                    row->setObjectName(rowName + QString::number(rowsUsed + 1));
                     connect(row, &QPushButton::clicked, this, [this, row] {
                         if (chosen)
-                            chosen(row->book.book);
+                            chosen(row->month, row->book.book);
                     });
                     rows.append(row);
                 }
                 auto *row = rows[rowsUsed++];
-                row->setBook(month.books[item.book]);
+                const auto &book = month.books[item.book];
+                const int copies = month.copies.value(book.book).size();
+                row->month = month.month;
+                QString caption;
+                if (copies)
+                    caption = strings::get("activity.copies_count").arg(copies);
+                else if (showCopySource)
+                    caption = copyCaptions.value(book.book);
+                row->setBook(book, caption);
+                if (showCopySource)
+                    row->setAccessibleDescription(copyDescriptions.value(book.book));
                 row->setCover(covers.value(month.books[item.book].book),
                               missingBooks.contains(month.books[item.book].book));
                 if (!known.contains(month.books[item.book].book))
                     wanted.append(month.books[item.book]);
-                row->setObjectName(rowName + QString::number(rowsUsed));
                 row->setGeometry(0, y, width(), BookRow::preferredHeight());
                 row->show();
                 y += BookRow::preferredHeight();
@@ -1288,6 +1393,13 @@ public:
     }
 
 private:
+    void clearCovers()
+    {
+        known.clear();
+        missingBooks.clear();
+        covers.clear();
+    }
+
     QHash<QString, QImage> covers;
     QSet<QString> known, missingBooks;
 };
@@ -1303,6 +1415,15 @@ public:
     {
         hours = values;
         busiest = peak;
+        setAccessibleName(strings::get("activity.when_you_read"));
+        QStringList entries;
+        for (int i = 0; i < hours.size(); ++i)
+            if (hours[i] > 0)
+                entries << chartValue(QTime(i, 0).toString(QStringLiteral("HH:mm")),
+                                      chartDuration(hours[i]));
+        if (hours.size() == 24 && entries.isEmpty())
+            entries << duration(0);
+        setAccessibleDescription(entries.join(QStringLiteral(". ")));
         update();
     }
 
@@ -1375,6 +1496,15 @@ public:
         time = milliseconds;
         number = count;
         units = unit;
+        setAccessibleName(title);
+        QStringList description;
+        if (!number.isEmpty())
+            description << number + QLatin1Char(' ') + units;
+        else if (time > 0)
+            description << duration(time);
+        if (!caption.isEmpty())
+            description << caption;
+        setAccessibleDescription(description.join(QStringLiteral(" · ")));
         update();
     }
 
@@ -1501,13 +1631,25 @@ public:
         : QWidget(parent)
     {
         setObjectName(name);
+        setAccessibleName(strings::get("activity.milestones"));
     }
 
     void setMilestones(const QVector<activity::Milestone> &values, int columnCount, bool names)
     {
-        milestones = values;
         columns = columnCount;
+        if (milestones.constData() == values.constData() && named == names) {
+            update();
+            return;
+        }
+        milestones = values;
         named = names;
+        QStringList entries;
+        for (const auto &m : milestones) {
+            const auto progress =
+                    strings::get("activity.progress_of").arg(qMin(m.value, m.target)).arg(m.target);
+            entries << (named ? chartValue(milestoneName(m), progress) : progress);
+        }
+        setAccessibleDescription(entries.join(QStringLiteral(". ")));
         update();
     }
 
@@ -1831,6 +1973,8 @@ public:
         });
     }
 
+    void resetPage() { page = 0; }
+
     // The streaks let the streak line say whether the longest one is still
     // going, and if not, when it ended and what the current one is.
     void setMilestones(const QVector<activity::Milestone> &all, const activity::Streak &current,
@@ -1850,6 +1994,7 @@ public:
                 }
             setBand(bands[kind], strings::get(titles[kind]),
                     strings::get("activity.reached_of").arg(reached).arg(ladder.size()));
+            ladders[kind]->setAccessibleName(strings::get(titles[kind]));
             ladders[kind]->setMilestones(ladder, qMax(1, int(ladder.size())), false);
             counts[kind] = ladder.size();
             columnWidths[kind] = badgeColumn(ladder);
@@ -2046,6 +2191,17 @@ public:
         days.clear();
         today = now;
         end = finish;
+        setAccessibleName(strings::get("activity.progress"));
+        QStringList entries;
+        if (!points.isEmpty()) {
+            const auto &first = points.first();
+            if (first.first != today)
+                entries << chartValue(day(first.first), strings::percentage(first.second));
+            entries << chartValue(day(today), strings::percentage(points.last().second));
+            if (finish > today)
+                entries << strings::get("activity.projected_finish").arg(day(finish, true));
+        }
+        setAccessibleDescription(entries.join(QStringLiteral(". ")));
         update();
     }
 
@@ -2054,6 +2210,12 @@ public:
         points.clear();
         days = values;
         today = now;
+        setAccessibleName(strings::get("activity.time_per_day"));
+        setAccessibleDescription(
+                days.isEmpty()
+                        ? QString()
+                        : dailyValues(days, qMax(days.firstKey(), days.lastKey().addDays(-29)),
+                                      days.lastKey()));
         update();
     }
 
@@ -2081,13 +2243,13 @@ private:
         // The percent column grows with the text, so "100%" keeps its digits.
         const int axis =
                 qMax<int>(sizes::chartInset,
-                          ui::interfaceTextWidth(strings::get("common.percent").arg(100), caption)
-                                  + ui::px(12));
+                          ui::interfaceTextWidth(strings::percentage(100), caption) + ui::px(12));
         const QRect plot(chrome::inset + axis, chrome::blockTop + captionHeight,
                          width() - 2 * chrome::inset - axis - ui::px(12),
                          height() - 2 * chrome::blockTop - 2 * captionHeight - sizes::labelGap);
         const QDate first = points.first().first;
-        const QDate last = end.isValid() && end > today ? end : today;
+        const bool ahead = end.isValid() && end > today;
+        const QDate last = ahead ? end : today;
         const qint64 span = qMax<qint64>(1, first.daysTo(last));
         const auto x = [&](const QDate &date) {
             return plot.left() + plot.width() * double(first.daysTo(date)) / double(span);
@@ -2103,8 +2265,7 @@ private:
             drawCaption(painter,
                         QRect(chrome::inset, int(y(percent)) - captionHeight / 2, axis - ui::px(12),
                               captionHeight),
-                        strings::get("common.percent").arg(percent),
-                        Qt::AlignRight | Qt::AlignVCenter, ink);
+                        strings::percentage(percent), Qt::AlignRight | Qt::AlignVCenter, ink);
         }
         QPainterPath line;
         line.moveTo(x(first), y(0));
@@ -2123,7 +2284,7 @@ private:
         painter.setPen(QPen(ink, ui::metrics::control::border));
         painter.drawLine(QPointF(x(today), plot.top() - ui::px(6)),
                          QPointF(x(today), plot.bottom()));
-        if (end.isValid() && end > today) {
+        if (ahead) {
             painter.setPen(QPen(ink, ui::px(3), Qt::DashLine));
             painter.drawLine(QPointF(x(today), y(previous)), QPointF(x(end), y(100)));
             painter.setPen(QPen(ink, ui::px(3)));
@@ -2150,16 +2311,20 @@ private:
                 left = int(x(date)) - textWidth;
             return QRect(left, labelTop, textWidth, captionHeight);
         };
-        const bool ahead = end.isValid() && end > today;
+        const int labelGap = ui::px(16);
         const auto todayText = strings::get("activity.today");
-        const auto todayArea = area(today, todayText, ahead ? Qt::AlignHCenter : Qt::AlignRight);
-        const auto firstArea = area(first, day(first), Qt::AlignLeft);
-        if (!firstArea.adjusted(0, 0, ui::px(16), 0).intersects(todayArea))
-            drawCaption(painter, firstArea, day(first), Qt::AlignLeft | Qt::AlignTop, ink);
+        auto todayArea = area(today, todayText, ahead ? Qt::AlignHCenter : Qt::AlignRight);
+        if (ahead) {
+            const auto finishText = day(end);
+            const auto finishArea = area(end, finishText, Qt::AlignRight);
+            todayArea.moveRight(qMin(todayArea.right(), finishArea.left() - labelGap - 1));
+            drawCaption(painter, finishArea, finishText, Qt::AlignLeft | Qt::AlignTop, ink);
+        }
+        const auto firstText = day(first);
+        const auto firstArea = area(first, firstText, Qt::AlignLeft);
+        if (!firstArea.adjusted(0, 0, labelGap, 0).intersects(todayArea))
+            drawCaption(painter, firstArea, firstText, Qt::AlignLeft | Qt::AlignTop, ink);
         drawCaption(painter, todayArea, todayText, Qt::AlignLeft | Qt::AlignTop, ink);
-        if (ahead)
-            drawCaption(painter, area(end, day(end), Qt::AlignRight), day(end),
-                        Qt::AlignLeft | Qt::AlignTop, ink);
     }
 
     void paintDays(QPainter &painter)
@@ -2296,7 +2461,7 @@ protected:
         ui::paintEdges(painter, track,
                        ui::Edges(Qt::TopEdge) | Qt::BottomEdge | Qt::LeftEdge | Qt::RightEdge, ink);
         drawCaption(painter, QRect(chrome::inset + bar + ui::px(16), y, ui::px(120), captionHeight),
-                    strings::get("common.percent").arg(percent), Qt::AlignLeft | Qt::AlignTop, ink);
+                    strings::percentage(percent), Qt::AlignLeft | Qt::AlignTop, ink);
     }
 
 private:
@@ -2322,7 +2487,10 @@ public:
     {
         start = when;
         detail = range;
-        time = milliseconds;
+        length = duration(milliseconds);
+        setAccessibleName(start);
+        setAccessibleDescription(detail.isEmpty() ? length
+                                                  : length + QStringLiteral(" · ") + detail);
         update();
     }
 
@@ -2338,7 +2506,6 @@ protected:
         const int captionHeight = detail.isEmpty() ? 0 : ui::interfaceLineHeight(caption);
         const int top =
                 (height() - nameHeight - (captionHeight ? ui::px(4) + captionHeight : 0)) / 2;
-        const auto length = duration(time);
         const int lengthWidth = ui::interfaceTextWidth(length, name) + 2;
         drawText(painter, QRect(width() - chrome::inset - lengthWidth, 0, lengthWidth, height()),
                  length, Qt::AlignRight | Qt::AlignVCenter, name, ink);
@@ -2352,8 +2519,7 @@ protected:
     }
 
 private:
-    QString start, detail;
-    qint64 time = 0;
+    QString start, detail, length;
 };
 } // namespace
 
@@ -2380,6 +2546,17 @@ public:
     }
 
     void forget() { book.clear(); }
+
+    void reset()
+    {
+        book.clear();
+        total = {};
+        sessions.clear();
+        days.clear();
+        extras = {};
+        chart->setDays({}, {});
+        page = 0;
+    }
 
     void setBook(const QString &key, const ActivityRecords &records, const QDate &now,
                  const ActivityOpenBook &open)
@@ -2552,10 +2729,10 @@ private:
                 const auto value = extras.ranges.value(session.started);
                 // A session that stayed on one page shows that place once.
                 range = value.first == value.second
-                        ? strings::get("common.percent").arg(value.second)
+                        ? strings::percentage(value.second)
                         : strings::get("activity.range")
-                                  .arg(strings::get("common.percent").arg(value.first))
-                                  .arg(strings::get("common.percent").arg(value.second));
+                                  .arg(strings::percentage(value.first),
+                                       strings::percentage(value.second));
             }
             auto *row = rows[used++];
             row->setSession(when, range, session.milliseconds);
@@ -2629,7 +2806,20 @@ ActivityView::ActivityView(QWidget *parent) : ui::Panel(parent)
     overview = new ActivityOverview(this);
     calendar = new ActivityCalendar(this);
     books = new ActivityBooks(this, "rrActivityBooks", "rrActivityBook", true);
-    books->chosen = [this](const QString &key) { openBook(key); };
+    books->chosen = [this](QDate month, const QString &key) {
+        for (const auto &group : summary.months)
+            if (group.month == month && group.copies.contains(key)) {
+                const auto copy = group.copies.value(key).first();
+                copiesTitle = copy.title.simplified();
+                copiesAuthor = copy.author.simplified();
+                copiesMonth = month;
+                detail = Detail::Copies;
+                updateCopies(true);
+                arrange();
+                return;
+            }
+        openBook(key);
+    };
     books->coversRequested = [this](const QVector<activity::BookTotal> &wanted, QSize size) {
         if (coversRequested)
             coversRequested(wanted, size);
@@ -2639,11 +2829,18 @@ ActivityView::ActivityView(QWidget *parent) : ui::Panel(parent)
         arrange();
     };
     hiddenPage = new ActivityBooks(this, "rrActivityHidden", "rrActivityHiddenBook", false);
-    hiddenPage->chosen = [this](const QString &key) {
+    hiddenPage->chosen = [this](QDate, const QString &key) {
         openBook(key);
         bookReturn = Detail::Hidden;
     };
     hiddenPage->coversRequested = books->coversRequested;
+    copiesPage = new ActivityBooks(this, "rrActivityCopies", "rrActivityCopy", false);
+    copiesPage->showCopySource = true;
+    copiesPage->chosen = [this](QDate, const QString &key) {
+        openBook(key);
+        bookReturn = Detail::Copies;
+    };
+    copiesPage->coversRequested = books->coversRequested;
     recordsPage = new ActivityRecordsPage(this);
     bookPage = new ActivityBookPage(this);
     milestonesPage = new ActivityMilestones(this);
@@ -2671,6 +2868,26 @@ ActivityView::ActivityView(QWidget *parent) : ui::Panel(parent)
     setLoading();
 }
 
+void ActivityView::reset()
+{
+    records = {};
+    summary = {};
+    openBookData = {};
+    bookKey.clear();
+    currentBook.clear();
+    copiesMonth = {};
+    copiesTitle.clear();
+    copiesAuthor.clear();
+    current = Section::Overview;
+    detail = bookReturn = Detail::None;
+    calendar->reset();
+    for (auto *list : { books, hiddenPage, copiesPage })
+        list->reset();
+    milestonesPage->resetPage();
+    bookPage->reset();
+    setLoading();
+}
+
 void ActivityView::setLoading()
 {
     loading = true;
@@ -2687,6 +2904,79 @@ void ActivityView::setUnavailable()
     arrange();
 }
 
+void ActivityView::updateCopies(bool firstPage)
+{
+    activity::MonthBooks copies;
+    copies.month = copiesMonth;
+    for (const auto &month : summary.months) {
+        if (month.month != copiesMonth)
+            continue;
+        for (const auto &group : month.copies) {
+            const auto &copy = group.first();
+            if (copy.title.simplified() == copiesTitle
+                && copy.author.simplified() == copiesAuthor) {
+                copies.books = group;
+                break;
+            }
+        }
+        break;
+    }
+    if (copies.books.isEmpty()) {
+        if (detail == Detail::Copies)
+            detail = Detail::None;
+        if (bookReturn == Detail::Copies)
+            bookReturn = Detail::None;
+        return;
+    }
+    QStringList sources;
+    for (const auto &copy : copies.books) {
+        const QUrl identity(copy.identity);
+        sources.append(identity.isLocalFile()                   ? identity.toLocalFile()
+                               : copy.sourceKey.startsWith('/') ? copy.sourceKey
+                                                                : copy.identity);
+        copies.milliseconds += copy.milliseconds;
+    }
+    // Start each narrow caption at the part of its source that distinguishes
+    // this copy. In sorted order only the two neighbouring sources can share
+    // a longer prefix. Keep the complete source in the accessible description.
+    auto ordered = sources;
+    ordered.removeDuplicates();
+    ordered.sort();
+    QHash<QString, QString> labels;
+    for (int i = 0; i < ordered.size(); ++i) {
+        const auto &source = ordered[i];
+        int start = 0;
+        for (int other : { i - 1, i + 1 }) {
+            if (other < 0 || other >= ordered.size())
+                continue;
+            int common = 0;
+            while (common < source.size() && common < ordered[other].size()
+                   && source[common] == ordered[other][common])
+                ++common;
+            start = qMax(start, common);
+        }
+        // When the source is also a prefix of another, show its filename.
+        if (ordered.size() == 1 || start == source.size())
+            start = source.lastIndexOf('/') + 1;
+        labels.insert(source, source.mid(start));
+    }
+    copiesPage->copyCaptions.clear();
+    copiesPage->copyDescriptions.clear();
+    for (int i = 0; i < copies.books.size(); ++i) {
+        const auto &copy = copies.books[i];
+        const auto date =
+                english().toString(activity::localDate(copy.last), QStringLiteral("d MMM yyyy"));
+        const auto number = QString::number(i + 1) + QStringLiteral(" · ");
+        auto caption = labels.value(sources[i]);
+        if (!caption.isEmpty())
+            caption += QStringLiteral(" · ");
+        copiesPage->copyCaptions.insert(copy.book, number + caption + date);
+        copiesPage->copyDescriptions.insert(copy.book,
+                                            number + sources[i] + QStringLiteral(" · ") + date);
+    }
+    copiesPage->setGroups({ copies }, 0, firstPage);
+}
+
 void ActivityView::setRecords(ActivityRecords value, activity::Summary computed)
 {
     records = std::move(value);
@@ -2698,6 +2988,8 @@ void ActivityView::setRecords(ActivityRecords value, activity::Summary computed)
     overview->setSummary(summary, records);
     calendar->setSummary(summary, records);
     books->setSummary(summary, records);
+    if (detail == Detail::Copies || bookReturn == Detail::Copies)
+        updateCopies();
     activity::MonthBooks hidden;
     hidden.books = summary.hiddenBooks;
     for (const auto &book : hidden.books)
@@ -2734,6 +3026,7 @@ void ActivityView::setCover(const QString &book, const QImage &cover, bool missi
 {
     books->setCover(book, cover, missing);
     hiddenPage->setCover(book, cover, missing);
+    copiesPage->setCover(book, cover, missing);
 }
 
 void ActivityView::showSection(Section section)
@@ -2782,6 +3075,7 @@ void ActivityView::arrange()
     title->setText(detail == Detail::Book ? strings::get("activity.book_title")
                            : detail == Detail::Milestones
                            ? strings::get("activity.milestones_title")
+                           : detail == Detail::Copies ? strings::get("activity.copies")
                            : detail == Detail::Hidden ? strings::get("activity.hidden_title")
                                                       : strings::get("activity.title"));
     // The section cells give way to the title on a narrow screen.
@@ -2827,6 +3121,8 @@ void ActivityView::arrange()
     milestonesPage->setGeometry(body);
     hiddenPage->setVisible(ready && detail == Detail::Hidden);
     hiddenPage->setGeometry(body);
+    copiesPage->setVisible(ready && detail == Detail::Copies);
+    copiesPage->setGeometry(body);
     update();
 }
 } // namespace kobalt

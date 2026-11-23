@@ -1,3 +1,4 @@
+#include "support/percentage_text.h"
 #include "ui/controls/buttons.h"
 #include "ui/controls/icons.h"
 #include "ui/controls/text.h"
@@ -7,6 +8,7 @@
 #include "ui/style/theme.h"
 #include "support/strings.h"
 #include "search_panel.h"
+#include "reading/reading_progress.h"
 #include "ui/style/fonts.h"
 #include "ui/style/metrics.h"
 #include "ui/style/styles.h"
@@ -17,7 +19,6 @@
 #include "ui/controls/options.h"
 #include <QGridLayout>
 #include <QIntValidator>
-#include <QLocale>
 #include <algorithm>
 
 namespace kobalt {
@@ -305,67 +306,8 @@ void SearchPanel::choosePage()
     dialog->setGeometry(rect());
     dialog->setDimmed(true);
     dialog->dismissed = [this] { closePopup(); };
-    auto *card = dialog->card();
-    auto *entry = new QWidget(card);
-    auto *layout = new QVBoxLayout(entry);
-    layout->setContentsMargins(chrome::inset, 0, chrome::inset,
-                               metrics::notice::cardMargins.bottom());
-    ui::readerStyle(dialog->descriptionLabel(), ui::styles::font(chrome::labelText));
-    layout->setSpacing(metrics::notice::cardGap);
-    auto *number = new QLineEdit(entry);
-    number->setObjectName("rrSearchPageNumber");
-    number->setAccessibleName(strings::get("search_panel.go_to_page"));
-    number->setAttribute(Qt::WA_InputMethodEnabled, false);
+    auto *number = dialog->addPageKeypad("rrSearchPage", QString::number(resultPage + 1));
     number->setValidator(new QIntValidator(1, resultPageCount, number));
-    number->setAlignment(Qt::AlignCenter);
-    number->setMinimumHeight(chrome::actionHeight);
-    ui::readerStyle(number,
-                    "QLineEdit{border:1px solid palette(mid);background:palette(window);"
-                            + ui::styles::font(chrome::labelText) + "}");
-    number->setPlaceholderText(QString::number(resultPage + 1));
-    dialog->primaryButton()->setEnabled(false);
-    layout->addWidget(number);
-    auto *keys = new QGridLayout;
-    keys->setSpacing(ui::px(12));
-    layout->addLayout(keys);
-    const int columns = width() > height() ? 6 : 3;
-    for (int position = 0; position < 12; ++position) {
-        // Landscape keeps digits together and puts Clear after Backspace.
-        const int i =
-                columns == 6 && position >= 9 ? (position == 11 ? 9 : position + 1) : position;
-        const QString value = i < 9 ? QString::number(i + 1) : i == 10 ? "0" : QString();
-        auto *button =
-                ui::makeButton(entry, nullptr, qPrintable(QString("rrSearchPageKey%1").arg(i)),
-                               value, [number, value, i] {
-                                   if (i == 9)
-                                       number->clear();
-                                   else if (i == 11)
-                                       number->backspace();
-                                   else
-                                       number->insert(value);
-                               });
-        button->setFocusPolicy(Qt::NoFocus);
-        ui::readerStyle(
-                button,
-                QString("QPushButton{border:%1px solid palette(mid);border-radius:%2px;min-height:%3px;max-height:%3px;"
-                        "background:palette(window);color:palette(window-text);padding:0;")
-                                .arg(int(ui::px(2)))
-                                .arg(int(ui::px(12)))
-                                .arg(columns == 6 ? ui::px(80) : int(chrome::actionHeight))
-                        + ui::styles::font(i == 9 ? int(chrome::descriptionText)
-                                                  : int(chrome::queryText))
-                        + "}QPushButton:pressed{background:palette(midlight);}");
-        if (i == 9) {
-            button->setText(strings::get("search_panel.clear_number"));
-            button->setAccessibleName(strings::get("search_panel.clear_page"));
-        } else if (i == 11) {
-            ui::buttonIcon(button, ui::ControlIcon::KeyboardBackspace);
-            button->setIconSize(QSize(ui::px(48), ui::px(48)));
-            button->setAccessibleName(strings::get("search_panel.erase_digit"));
-        }
-        keys->addWidget(button, position / columns, position % columns);
-    }
-    card->rows()->insertWidget(1, entry);
     const auto go = [this, number] {
         if (!number->hasAcceptableInput())
             return;
@@ -379,13 +321,13 @@ void SearchPanel::choosePage()
     connect(number, &QLineEdit::textChanged, dialog, [dialog, number] {
         dialog->primaryButton()->setEnabled(number->hasAcceptableInput());
     });
-    dialog->fitCard();
     dialog->show();
     dialog->raise();
     number->setFocus();
 }
 
-void SearchPanel::open(bool returnAvailable, int originalPage, const QString &initialQuery)
+void SearchPanel::open(bool returnAvailable, int originalPage, const QString &initialQuery,
+                       const QString &printedPage)
 {
     if (!keyboard) {
         keyboard = keyboardFactory(this, query);
@@ -400,7 +342,10 @@ void SearchPanel::open(bool returnAvailable, int originalPage, const QString &in
     }
     canReturn = returnAvailable;
     clearDetails();
-    original->setCaption(strings::get("search_panel.page_number").arg(originalPage + 1));
+    original->setCaption(strings::get(useScreens && printedPage.isEmpty()
+                                              ? "reader.screen_number"
+                                              : "search_panel.page_number")
+                                 .arg(locationPageLabel(originalPage, printedPage)));
     show();
     raise();
     redraw();
@@ -465,24 +410,25 @@ QFont SearchPanel::excerptFont() const
 
 QString SearchPanel::caption(const SearchHit &hit) const
 {
-    // In chapter mode a hit names its chapter, with an estimated page once
-    // there is one.
-    if (!hit.chapter.isEmpty())
-        return hit.page < 0 ? hit.chapter.simplified()
-                            : strings::get("search_panel.page_chapter")
-                                      .arg(hit.page + 1)
-                                      .arg(hit.chapter.simplified());
-    // The chapter that starts last at or before the hit's page contains it.
-    QString title;
-    int start = -1;
-    for (const auto &chapter : chapters)
-        if (chapter.page >= 0 && chapter.page <= hit.page && chapter.page >= start
-            && !chapter.title.trimmed().isEmpty()) {
-            start = chapter.page;
-            title = chapter.title.simplified();
-        }
-    return title.isEmpty() ? strings::get("search_panel.page_number").arg(hit.page + 1)
-                           : strings::get("search_panel.page_chapter").arg(hit.page + 1).arg(title);
+    QString title = hit.chapter.simplified();
+    if (title.isEmpty()) {
+        // The chapter that starts last at or before the hit contains it.
+        int start = -1;
+        for (const auto &chapter : chapters)
+            if (chapter.page >= 0 && chapter.page <= hit.page && chapter.page >= start
+                && !chapter.title.trimmed().isEmpty()) {
+                start = chapter.page;
+                title = chapter.title.simplified();
+            }
+    }
+    const auto label = locationPageLabel(hit.page, hit.printedPage);
+    if (label.isEmpty())
+        return title;
+    const bool screen = useScreens && hit.printedPage.isEmpty();
+    return title.isEmpty()
+            ? strings::get(screen ? "reader.screen_number" : "search_panel.page_number").arg(label)
+            : strings::get(screen ? "search_panel.screen_chapter" : "search_panel.page_chapter")
+                      .arg(label, title);
 }
 
 void SearchPanel::run()
@@ -585,21 +531,19 @@ void SearchPanel::redraw()
 {
     const int first = resultPage * pageSize, textWidth = qMax(1, width() - 2 * chrome::inset);
     const auto font = excerptFont();
-    // Book text keeps a reading line height rather than the tight UI default.
-    const QString excerptBlock = QString("<div style=\"line-height:%1%\">%2</div>")
-                                         .arg(metrics::search::excerptLineHeight);
     if (!rowHeight || measuredWidth != width()) {
         measuredWidth = width();
         // Room for two excerpt lines, or for a long bold match on its own.
         QStringList sample;
         for (int line = 0; line < metrics::search::excerptLines; ++line)
             sample.append("M");
-        qreal lines = ui::excerptTextHeight(excerptBlock.arg(sample.join("<br>")), font, textWidth);
-        lines = qMax(
-                lines,
-                ui::excerptTextHeight(
-                        excerptBlock.arg("<b><u>" + submittedQuery.toHtmlEscaped() + "</u></b>"),
-                        font, textWidth));
+        qreal lines =
+                ui::excerptTextHeight(ui::searchExcerptBlock(sample.join("<br>")), font, textWidth);
+        lines = qMax(lines,
+                     ui::excerptTextHeight(ui::searchExcerptBlock("<b><u>"
+                                                                  + submittedQuery.toHtmlEscaped()
+                                                                  + "</u></b>"),
+                                           font, textWidth));
         rowHeight = qMax(int(metrics::list::threeLines),
                          metrics::search::excerptTop + qCeil(lines) + metrics::search::rowBottom);
     }
@@ -607,7 +551,7 @@ void SearchPanel::redraw()
     const int scopeBottom = chrome::actionHeight + chrome::statusHeight;
     const auto matches =
             strings::get(shownCount == 1 ? "search_panel.match" : "search_panel.matches")
-                    .arg(QLocale().toString(shownCount));
+                    .arg(strings::count(shownCount));
     scopeStatus->setText(searched ? strings::get(complete ? "search_panel.matches_in_scope"
                                                           : "search_panel.matches_so_far_in_scope")
                                             .arg(matches, scopeLabel())
@@ -628,10 +572,10 @@ void SearchPanel::redraw()
     pager->setGeometry(0, height() - chrome::actionHeight, width(), chrome::actionHeight);
     const int used =
             listTop + qMin(pageSize, qMax(0, shownCount - resultPage * pageSize)) * rowHeight;
-    const auto pageCaption =
-            strings::get(complete ? "search_panel.result_pages"
-                                  : "search_panel.result_pages_so_far")
-                    .arg(QLocale().toString(resultPage + 1), QLocale().toString(count));
+    const auto pageCaption = strings::get(complete ? "search_panel.result_pages"
+                                                   : "search_panel.result_pages_so_far")
+                                     .arg(resultPage + 1)
+                                     .arg(count);
     pager->setPage(resultPage, count, pageCaption, true,
                    { chrome::inset, used, width() - 2 * chrome::inset, pager->y() - used },
                    shownCount > 0);
@@ -752,48 +696,15 @@ void SearchPanel::redraw()
         renderedSizes[row] = labels[row]->size();
         metadata[row]->setText(
                 ui::elideInterfaceText(caption(hit), metadata[row]->font(), textWidth));
-        // The engine keeps a space at the edges of its context only where the
-        // book has one, so punctuation stays attached to the match.
-        QString before = hit.before, after = hit.after;
-        if (before.trimmed().isEmpty())
-            before.clear();
-        if (after.trimmed().isEmpty())
-            after.clear();
-        auto excerpt = [&] {
-            return excerptBlock.arg(
-                    (before.isEmpty() ? QString() : QStringLiteral("…") + before.toHtmlEscaped())
-                    + "<b><u>" + hit.text.toHtmlEscaped() + "</u></b>"
-                    + (after.isEmpty() ? QString() : after.toHtmlEscaped() + QStringLiteral("…")));
-        };
-        // Trim context, never the match, using the same rich-text width as the label.
-        while (ui::excerptTextHeight(excerpt(), font, labels[row]->width()) > labels[row]->height()
-               && (!before.isEmpty() || !after.isEmpty())) {
-            if (before.size() >= after.size())
-                before.remove(0, before.at(0).isHighSurrogate() ? 2 : 1);
-            else
-                after.chop(after.at(after.size() - 1).isLowSurrogate() ? 2 : 1);
-        }
-        // Engine context can already end mid-word; keep whole words at the outer ends.
-        if (!before.isEmpty()) {
-            int boundary = 0;
-            while (boundary < before.size() && !before.at(boundary).isSpace())
-                ++boundary;
-            before = before.mid(boundary);
-            while (!before.isEmpty() && before.at(0).isSpace())
-                before.remove(0, 1);
-        }
-        if (!after.isEmpty()) {
-            int boundary = after.size() - 1;
-            while (boundary >= 0 && !after.at(boundary).isSpace())
-                --boundary;
-            after = after.left(qMax(0, boundary));
-            while (!after.isEmpty() && after.at(after.size() - 1).isSpace())
-                after.chop(1);
-        }
-        labels[row]->setText(excerpt());
+        labels[row]->setText(
+                ui::fitSearchExcerpt(hit.before, hit.text, hit.after, font, labels[row]->size()));
         buttons[row]->setAccessibleName(
-                hit.page >= 0 || hit.chapter.isEmpty()
-                        ? strings::get("search_panel.page_detail").arg(hit.page + 1).arg(hit.text)
+                !hit.printedPage.isEmpty() || hit.page >= 0 || hit.chapter.isEmpty()
+                        ? strings::get(useScreens && hit.printedPage.isEmpty()
+                                               ? "search_panel.screen_detail"
+                                               : "search_panel.page_detail")
+                                  .arg(locationPageLabel(hit.page, hit.printedPage))
+                                  .arg(hit.text)
                         : strings::get("search_panel.chapter_detail")
                                   .arg(hit.chapter.simplified(), hit.text));
     }

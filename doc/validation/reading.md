@@ -2,6 +2,8 @@
 
 The opening bar gives page formatting the largest share. It advances again when the engine finishes and when the window is built. It reaches 100% after presentation preparation. `desktop.openingProgressStages` checks this order. Presentation does not wait for text preset previews. Opening queues neighbour and estimate work after its completion callback. Preview requests can interrupt estimates without changing the session revision; the estimates resume after the preview. Deferred-image completion also resumes this idle work. The focused checks are `lifecycle.appearancePreviewInterruptsEstimate`, `lifecycle.pageImageDuringHold` and `session.reader-session`, including superseded whole-book-ready notifications.
 
+CTest runs the session checks in Accurate and Hybrid by default. To run its Hybrid cases alone, use `ctest --preset mac -L session -R "[.]hybrid$"`.
+
 `session.reader-session` parks a whole-book build before each of two font increases and a decrease in the same Hybrid session. It checks that a turn during reflow is refused, then compares the new page, the following turn and the final whole-book handoff with an Accurate session at the same size.
 
 A numbered jump during handoff uses the displayed chapter. A second number can be used once the new pagination is on screen. A buffered reverse turn must return across the chapter boundary to the same pixels. Rotation while a whole-book count is ready keeps the chapter at the new viewport.
@@ -18,7 +20,7 @@ The finish prompt on exit uses whole-book progress even when later slices remain
 
 A revoked source also discards queued illustration frames and neighbour-cache updates.
 
-`lifecycle.quietWindowWaitsForActivation` builds a reader window ahead of its opening, as Kobo does for the last book after a restart. Until it is activated, the window registers no host observers, does not run its clock and loads no plugin. Activation registers the observers once and loads the plugins. A window dropped before activation returns its book for reuse, writes no saved state and never read the plugin folder.
+`lifecycle.preloadedBookOpensWithFreshHost` prepares a book on the engine worker, retains it and checks that its original source lease has ended. It opens the retained book through a fresh publication, checks for a reuse hit with unchanged settings and a new layout after dark mode changes. Both openings register the window’s device observers.
 
 A session discards an unfinished frame when the host revokes the source or the reader cancels it. Font and viewport changes must keep the last displayed image and finish their progress indication.
 
@@ -39,6 +41,10 @@ A pending native progress comparison must report a stale result when its source 
 The Hybrid session test delivers an old pagination result after two font changes while the worker still holds an unpublished whole-book frame. The final frame must use the last font size and chapter pagination.
 
 The chapter-parity reverse-group check records the source anchor and pixels of forward turns, then retraces them after neighboring chapters have been prepared and old documents evicted. It covers one and two columns.
+
+`engine.chapter-parity` uses chapters with an even or odd number of text columns before the next chapter. It checks bookmarks, exclusive highlight ends, search results, contents and chapter lengths against the known column order. With three columns before an eight-column chapter, the second chapter starts on book page 2 and touches five whole-book spreads. Fast pairs its eight columns into four chapter spreads. Once Hybrid has prepared the whole book, its list labels use the whole-book pages while its marks still follow the chapter layout. The optional-chapter check reads the words painted in each column during forward and backward turns and after a direct jump, with the optional chapter shown and hidden.
+
+`session.bookmark-session` reopens saved bookmarks and a highlight from SQLite. It checks their source anchors, local marks and book-page labels as the whole-book layout becomes ready. It also adds a bookmark on the last chapter spread and merges two bookmarks there whose anchors lie on different whole-book spreads.
 
 Search scopes use the next page in the displayed layout, including the page beyond an exposed slice. Hybrid prepares the whole book on the first submitted query. Selecting a result keeps the displayed layout. A later page turn can adopt the prepared book. Fast scans the chapter windows in batches. A batch keeps its original spine range and returns each distinct source range once, including matches in ligatures and reordered combining marks.
 

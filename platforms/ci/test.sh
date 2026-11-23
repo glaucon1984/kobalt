@@ -3,7 +3,7 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"
-for script in platforms/ci/*.sh platforms/android/*.sh platforms/kobo/*.sh platforms/sdk-image.sh; do bash -n "$script"; done
+for script in platforms/ci/*.sh platforms/android/*.sh platforms/kobo/*.sh platforms/sdk-image.sh platforms/build-container.sh; do bash -n "$script"; done
 mkdir -p build
 scratch=$(mktemp -d "$root/build/release-check.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT
@@ -105,6 +105,7 @@ set -eu
 if [[ $1 == image && $2 == inspect ]]; then printf 'fixture-sdk\n'; exit 0; fi
 [[ $1 == run ]]
 shift
+printf '%s\n' "$@" > "$KOBALT_NATIVE_FIXTURE/container-args"
 environment=()
 while [[ $1 != bash ]]; do
     if [[ $1 == -e ]]; then environment+=("$2"); shift; fi
@@ -144,6 +145,23 @@ KOBALT_NATIVE_SANITIZE=1 JOBS=2 \
 [[ $(cat "$scratch/native/configure-preset") == linux-sanitize ]]
 [[ $(cat "$scratch/native/build-preset") == linux-sanitize ]]
 [[ $(cat "$scratch/native/ctest-args") == '--preset linux-sanitize' ]]
+# The linked checkout's .git file must resolve inside the Linux container.
+git -C "$scratch/native" init -q
+git -C "$scratch/native" add platforms dependencies
+git -C "$scratch/native" -c user.name=Test -c user.email=test@localhost -c commit.gpgsign=false \
+    -c core.hooksPath=/dev/null commit -qm fixture
+git -C "$scratch/native" -c core.hooksPath=/dev/null worktree add --quiet --detach "$scratch/linked native"
+for checkout in "$scratch/native" "$scratch/linked native"; do
+    CONTAINER_ENGINE="$scratch/native-bin/docker" CMAKE_COMMAND="$scratch/native-bin/cmake" \
+        PATH="$scratch/native-bin:$PATH" bash "$checkout/platforms/ci/native-tests.sh" test
+    if [[ $checkout == "$scratch/native" ]]; then
+        grep -Fxq "$checkout:/work" "$scratch/native/container-args"
+    else
+        grep -Fxq "$checkout:$checkout" "$scratch/native/container-args"
+        grep -Fxq "$scratch/native/.git:$scratch/native/.git:ro" "$scratch/native/container-args"
+        grep -Fxq "$checkout/platforms/desktop" "$scratch/native/container-args"
+    fi
+done
 if KOBALT_TEST_SHARD=3 KOBALT_TEST_SHARDS=2 bash platforms/ci/native-tests.sh test; then
     echo 'Native CI accepted an invalid shard' >&2; exit 1
 fi
@@ -171,7 +189,7 @@ CONTAINER_ENGINE="$scratch/container-engine" KOBALT_ANDROID_IMAGE=fixture-sdk KO
 exported="$scratch/export/application"
 mkdir -p "$exported/platforms/android" "$exported/platforms/kobo" "$exported/assets" "$exported/dependencies"
 cp dependencies/cache.cmake "$exported/dependencies/"
-cp platforms/source-info.cmake platforms/release-version.cmake platforms/sdk-image.sh platforms/load-lock.cmake "$exported/platforms/"
+cp platforms/source-info.cmake platforms/release-version.cmake platforms/sdk-image.sh platforms/build-container.sh platforms/load-lock.cmake "$exported/platforms/"
 cp platforms/android/build.sh "$exported/platforms/android/"
 cp platforms/kobo/build.sh "$exported/platforms/kobo/"
 printf '{"version":"v1.0-beta.1"}\n' > "$exported/assets/manifest.json"
@@ -241,6 +259,37 @@ fi
 rm "$exported/source-info.json"
 [[ $(env -u KOBALT_RELEASE_VERSION cmake -P "$exported/platforms/source-info.cmake") == 'unknown OFF v1.0-beta.1' ]]
 echo 'PASS: Git-free source provenance, release versions and launchers'
+# An incremental desktop build refreshes both the revision and its modified flag.
+(
+    mkdir -p "$scratch/stamp/platforms" "$scratch/stamp/src/support"
+    cp platforms/source-info.cmake "$scratch/stamp/platforms/"
+    cp src/support/build_info.h.in "$scratch/stamp/src/support/"
+    cd "$scratch/stamp"
+    git init -q
+    git config user.name Fixture
+    git config user.email fixture@example.invalid
+    git config commit.gpgsign false
+    cat > CMakeLists.txt <<'CMAKE'
+cmake_minimum_required(VERSION 3.22)
+project(stamp NONE)
+include(platforms/source-info.cmake)
+kobalt_desktop_build_info("${CMAKE_CURRENT_SOURCE_DIR}")
+CMAKE
+    touch source
+    git add .
+    git -c core.hooksPath=/dev/null commit -qm initial
+    cmake -S . -B "$scratch/stamp-build"
+    check_stamp() {
+        cmake --build "$scratch/stamp-build" --target kobalt-build-info
+        grep -F "kobaltCommit = \"$(git rev-parse --short HEAD)\"" "$scratch/stamp-build/build_info.h"
+        grep -F "#define KOBALT_COMMIT_MODIFIED $1" "$scratch/stamp-build/build_info.h"
+    }
+    check_stamp 0
+    echo changed > source
+    check_stamp 1
+    git -c core.hooksPath=/dev/null commit -qam changed
+    check_stamp 0
+)
 # Release filenames stay fixed while the tag selects the release and version.
 mkdir -p "$scratch/bin" "$scratch/draft/build/release"
 cat > "$scratch/bin/gh" <<'SH'

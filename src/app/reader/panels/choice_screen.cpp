@@ -256,7 +256,23 @@ ChoiceScreen::ChoiceScreen(QWidget *parent)
     fontHeader->hide();
     fontPager->hide();
     fontSectionBar->hide();
-    contents = new ChapterContents(this);
+    contents = new ChapterContents(this, parent);
+    contents->previewImage = [this](const QString &path) {
+        if (previewImage)
+            previewImage(path);
+    };
+    contents->switchList = [this](ContentsList mode) {
+        if (switchList)
+            switchList(mode);
+    };
+    contents->boundaryRequested = [this](int i) {
+        if (boundaryRequested)
+            boundaryRequested(i);
+    };
+    contents->printedLabel = [this](int i) { return printedLabel ? printedLabel(i) : QString(); };
+    contents->pageLabel = [this](int page) {
+        return pageLabel ? pageLabel(page) : QString::number(page + 1);
+    };
     contents->selected = [this](const QString &value) {
         if (selected)
             selected(value);
@@ -314,7 +330,7 @@ void ChoiceScreen::showChoices(const QString &heading, QVector<Choice> choices,
     page = 0;
     layoutChoices();
     for (int i = 0; i < items.size(); ++i)
-        if (!current.isEmpty() && items[i].value == current)
+        if (!items[i].placeholder && items[i].value == current)
             page = pageForIndex(i);
     redraw();
     for (auto *widget : findChildren<QWidget *>())

@@ -235,7 +235,9 @@ public:
     bool supportsSleepScreen() const override {
         return true;
     }
-    bool presentSleepScreen(QImage image, Qt::ScreenOrientation) override {
+    // `clean` asks for a flashing refresh when the frame reaches the display; here the frame
+    // only reaches a file that the firmware draws at the next standby.
+    bool presentSleepScreen(QImage image, Qt::ScreenOrientation, bool) override {
         if (!writeLockImages(image))
             return false;
         markLockReloadPending();

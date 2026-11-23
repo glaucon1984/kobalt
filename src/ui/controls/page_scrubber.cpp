@@ -1,3 +1,4 @@
+#include "reading/reading_progress.h"
 #include "page_scrubber.h"
 #include "render/bookmark_paint.h"
 #include "buttons.h"
@@ -8,7 +9,7 @@
 #include "ui/style/private_text.h"
 #include "ui/style/styles.h"
 #include "ui/style/theme.h"
-#include "support/strings.h"
+#include "support/percentage_text.h"
 #include "ui/input/input.h"
 #include <QMouseEvent>
 #include <QPainter>
@@ -245,7 +246,7 @@ PageScrubber::PageScrubber(QWidget *parent)
     captionBackground->setObjectName("rrScrubberCaptionBackground");
     captionBackground->setAttribute(Qt::WA_TransparentForMouseEvents);
     captionBackground->setEdgeWidth(metrics::chrome::heavyRule);
-    captionBackground->setFill(QPalette::Midlight);
+    captionBackground->setFill(QPalette::Base);
     captionBackground->setDividers(Qt::BottomEdge);
     captionBackground->hide();
     chapterLabel = new PrivateTextLabel(this);
@@ -260,10 +261,10 @@ PageScrubber::PageScrubber(QWidget *parent)
     overviewRule = new Panel(this, Qt::LeftEdge);
     overviewRule->setSoftEdges(true);
     overviewRule->setAttribute(Qt::WA_TransparentForMouseEvents);
-    overviewRule->setFill(QPalette::Midlight);
+    overviewRule->setFill(QPalette::Base);
     auto *disclosure = button("rrScrubberOverviewToggle", ControlIcon::Up,
                               strings::get("reader.expand_book_map"));
-    disclosure->setFill(QPalette::Midlight);
+    disclosure->setFill(QPalette::Base);
     overviewToggle = disclosure;
     connect(overviewToggle, &QPushButton::clicked, this, [this] {
         overviewExpanded = !overviewExpanded;
@@ -340,12 +341,20 @@ PageScrubber::PageScrubber(QWidget *parent)
 }
 
 void PageScrubber::setBook(int page, int pages, const QVector<QPair<int, QString>> &values,
-                           QSize size)
+                           QSize size, int firstMain, int lastMain, const QString &style)
 {
     const int count = qMax(1, pages);
     const bool changed = count != totalPages || chapters != values;
-    const bool unchanged = !changed && current == qBound(0, page, count - 1)
-            && (!size.isValid() || pageSize == size) && !rangeLabel->text().isEmpty();
+    const bool resized = size.isValid() && pageSize != size;
+    if (lastMain < 0)
+        lastMain = count - 1;
+    const bool sameRange =
+            firstMainPage == firstMain && lastMainPage == lastMain && style == secondaryStyle;
+    secondaryStyle = style;
+    firstMainPage = firstMain;
+    lastMainPage = lastMain;
+    const bool unchanged = sameRange && !changed && current == qBound(0, page, count - 1)
+            && !resized && !rangeLabel->text().isEmpty();
     if (unchanged) {
         return;
     }
@@ -361,12 +370,18 @@ void PageScrubber::setBook(int page, int pages, const QVector<QPair<int, QString
     if (size.isValid()) {
         pageSize = size;
     }
-    if (selecting() && !changed)
+    if (selecting() && !changed) {
+        if (resized)
+            arrange();
         return;
+    }
     if (changed || current < rangeFirst || current > rangeLast)
         centerRange(current);
     syncRange(changed);
-    arrange();
+    if (changed || resized)
+        arrange();
+    else
+        updateCaption();
 }
 
 int PageScrubber::maximumZoomLevel() const
@@ -419,17 +434,43 @@ void PageScrubber::syncRange(bool chaptersChanged)
         position->setMarkers(markers);
     }
     overview->setRange(totalPages, rangeFirst, rangeLast, current);
-    position->setAccessibleDescription(strings::get("reader.zoom_range")
-                                               .arg(rangeFirst + 1)
-                                               .arg(rangeLast + 1)
-                                               .arg(totalPages));
+    const auto printedAt = [this](int page) {
+        return !chapterBar && printedLabel ? printedLabel(page) : QString();
+    };
+    const auto label = [this](int page, const QString &printed) {
+        return printed.isEmpty()
+                ? screenLabel(bookPageLabel(page, firstMainPage, lastMainPage, secondaryStyle),
+                              useScreens)
+                : printed;
+    };
+    const auto firstPrint = printedAt(rangeFirst), lastPrint = printedAt(rangeLast);
+    const auto first = label(rangeFirst, firstPrint), last = label(rangeLast, lastPrint);
+    if (useScreens && firstPrint.isEmpty() != lastPrint.isEmpty())
+        position->setAccessibleDescription(
+                strings::get("marks.location_range")
+                        .arg(firstPrint.isEmpty()
+                                     ? first
+                                     : strings::get("search_panel.page_number").arg(first),
+                             lastPrint.isEmpty()
+                                     ? last
+                                     : strings::get("search_panel.page_number").arg(last)));
+    else if (!firstPrint.isEmpty() || !lastPrint.isEmpty())
+        position->setAccessibleDescription(strings::get("marks.page_range").arg(first, last));
+    else
+        position->setAccessibleDescription(
+                strings::get(useScreens ? "reader.zoom_screen_range" : "reader.zoom_range")
+                        .arg(rangeFirst + 1)
+                        .arg(rangeLast + 1)
+                        .arg(totalPages));
     const auto scope = strings::get("reader.zoom_scale").arg(zoomScales[zoomLevel]);
-    rangeLabel->setText(
-            chapterBar ? strings::get("chapter_graph.book_progress").arg(bookPercent).toUpper()
-                       : scope.toUpper());
-    rangeStart->setText(QString::number(rangeFirst + 1));
-    rangeEnd->setText(QString::number(rangeLast + 1));
-    overviewEnd->setText(QString::number(totalPages));
+    rangeLabel->setText(chapterBar ? strings::get("chapter_graph.book_progress")
+                                             .arg(strings::percentArgument(bookPercent))
+                                             .toUpper()
+                                   : scope.toUpper());
+    rangeStart->setText(first);
+    rangeEnd->setText(last);
+    overviewStart->setText(label(0, printedAt(0)));
+    overviewEnd->setText(label(totalPages - 1, printedAt(totalPages - 1)));
     updateButtons();
 }
 
@@ -462,10 +503,10 @@ void PageScrubber::pan(int first)
 
 void PageScrubber::choose(int page)
 {
-    if (candidate == page) {
+    const int target = qBound(0, page, totalPages - 1);
+    if (candidate == target) {
         return;
     }
-    const int target = qBound(0, page, totalPages - 1);
     QImage retained[3];
     if (selecting() && qAbs(target - candidate) == 1) {
         for (int index = 0; index < 3; ++index) {
@@ -492,7 +533,7 @@ void PageScrubber::choose(int page)
     syncRange();
     barRule->setSoftEdges(true);
     position->setValue(candidate);
-    setProperty("preview_page", page);
+    setProperty("preview_page", target);
     setProperty("preview_ready", false);
     updateButtons();
     updateMask();
@@ -569,8 +610,10 @@ void PageScrubber::setChapterBar(bool enabled, bool keepNavigation)
 }
 
 void PageScrubber::setChapterPosition(int index, int count, QString title, int percent,
-                                      int bookPage, int bookPages, const QVector<int> &chapterPages)
+                                      int bookPage, int bookPages, const QVector<int> &chapterPages,
+                                      const QString &printed)
 {
+    chapterPrintedPage = printed;
     chapterIndex = index;
     chapterCount = count;
     chapterTitle = std::move(title);
@@ -578,7 +621,7 @@ void PageScrubber::setChapterPosition(int index, int count, QString title, int p
     indicator->setRange(0, bookPages > 0 ? qMax(1, bookPages - 1) : 100);
     indicator->setValue(bookPages > 0 ? bookPage : percent);
     indicator->setMarkers(chapterPages);
-    indicator->setAccessibleDescription(QString::number(percent) + QLatin1Char('%'));
+    indicator->setAccessibleDescription(strings::localizedPercent(percent));
     syncRange();
     updateCaption();
 }
@@ -750,7 +793,10 @@ void PageScrubber::showCurrentPage()
         candidate = current;
         setProperty("preview_page", current);
         syncRange();
-        arrange();
+        // The replacements repaint the cards when they are ready.
+        preceding->setVisible(candidate > 0);
+        following->setVisible(candidate < totalPages - 1);
+        updateCaption();
     } else {
         if (selecting())
             return;
@@ -823,8 +869,8 @@ QRect PageScrubber::imageBounds() const
 
 void PageScrubber::updateMask()
 {
-    const QRegion previousArea = mask().isEmpty() ? QRegion(rect()) : mask();
     if (selecting()) {
+        setAttribute(Qt::WA_TransparentForMouseEvents, false);
         clearMask();
     } else {
         QRegion hitArea = barVisible ? QRegion(panelBounds()) : QRegion();
@@ -839,6 +885,11 @@ void PageScrubber::updateMask()
             hitArea += returnFrame;
             hitArea += QRect(actions->pos() + stay->pos(), stay->size());
         }
+        QRegion previousArea = mask();
+        if (previousArea.isEmpty() && !testAttribute(Qt::WA_TransparentForMouseEvents))
+            previousArea = rect();
+        // An empty widget mask accepts input over the whole rectangle.
+        setAttribute(Qt::WA_TransparentForMouseEvents, hitArea.isEmpty());
         const QRegion exposed = previousArea - hitArea;
         const bool reclip = isVisible() && !exposed.isEmpty();
         if (reclip) {
@@ -1112,13 +1163,25 @@ void PageScrubber::updateCaption()
             chapterName = chapter.second.toUpper();
         }
     }
-    const QString pageLabel = strings::get("reader.menu_page_of").arg(page + 1).arg(totalPages);
-    const QString label = chapterBar ? chapterTitle.toUpper()
-            : chapterName.isEmpty()  ? pageLabel
-                                     : pageLabel + QStringLiteral(" · ") + chapterName;
+    QString pageLabel = bookPageLabel(page, firstMainPage, lastMainPage, secondaryStyle);
+    const auto printed = !chapterBar && printedLabel ? printedLabel(page) : QString();
+    if (!printed.isEmpty())
+        pageLabel = strings::get("search_panel.page_number").arg(printed);
+    else if (page >= firstMainPage && page <= lastMainPage)
+        pageLabel = strings::get(useScreens ? "reader.menu_screen_of" : "reader.menu_page_of")
+                            .arg(pageLabel)
+                            .arg(lastMainPage - firstMainPage + 1);
+    else
+        pageLabel = screenLabel(pageLabel, useScreens);
+    if (chapterBar && !chapterPrintedPage.isEmpty()) {
+        pageLabel = strings::get("search_panel.page_number").arg(chapterPrintedPage);
+        chapterName = chapterTitle.toUpper();
+    }
+    const QString label = chapterBar && chapterPrintedPage.isEmpty() ? chapterTitle.toUpper()
+            : chapterName.isEmpty()                                  ? pageLabel
+                                    : pageLabel + QStringLiteral(" · ") + chapterName;
     captionBackground->setGeometry(0, panelBounds().top(), width(), scrubber::captionHeight);
     captionBackground->show();
-    chapterLabel->setGeometry(captionBackground->geometry());
     const int toggleWidth = zoomAvailable() ? int(metrics::chrome::cellWidth) : 0;
     overviewToggle->setGeometry(
             width() - toggleWidth, captionBackground->y() + int(metrics::chrome::heavyRule),
@@ -1126,9 +1189,15 @@ void PageScrubber::updateCaption()
             int(scrubber::captionHeight - metrics::chrome::heavyRule - metrics::control::border));
     overviewRule->setGeometry(
             overviewToggle->geometry().adjusted(-int(metrics::control::border), 0, 0, 0));
-    chapterLabel->setText(
-            elideInterfaceText(label, chapterLabel->font(),
-                               chapterLabel->width() - 2 * (int(scrubber::padding) + toggleWidth)));
+    const int room = qMax(1, width() - 2 * (int(scrubber::padding) + toggleWidth));
+    const auto text = elideInterfaceText(label, chapterLabel->font(), room);
+    // Keep the caption's backing-store damage around the text.
+    const int labelWidth = qMin(room,
+                                interfaceTextWidth(text, chapterLabel->font())
+                                        + 2 * int(metrics::control::border));
+    chapterLabel->setGeometry((width() - labelWidth) / 2, captionBackground->y(), labelWidth,
+                              captionBackground->height());
+    chapterLabel->setText(text);
     chapterLabel->setAccessibleName(label);
     chapterLabel->show();
 }
@@ -1242,6 +1311,12 @@ bool PageScrubber::eventFilter(QObject *watched, QEvent *event)
 
 bool PageScrubber::event(QEvent *event)
 {
+    // The action buttons have manual geometry. A new typeface can change
+    // their preferred widths even when the scrubber itself hasn't resized.
+    if (event->type() == QEvent::FontChange
+        && !(requestedLinksLabel.isEmpty() && requestedReturnLabel.isEmpty()
+             && imageLabel.isEmpty()))
+        arrange();
     return pointerEvent(event) || QWidget::event(event);
 }
 } // namespace kobalt::ui

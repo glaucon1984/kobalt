@@ -62,6 +62,13 @@ inline constexpr bool debugField(Field field)
     return field == Field::PageTurnTime || field == Field::ChapterLoadTime
             || field == Field::BookStatus;
 }
+
+inline constexpr bool batteryField(Field field)
+{
+    return field == Field::Battery || field == Field::BatteryPercent
+            || field == Field::BatteryPercentOnly || field == Field::BatteryWarning;
+}
+
 // What the field list shows for the page turn time before the first turn.
 inline constexpr qint64 samplePageTurnMilliseconds = 12;
 // Battery warning shows the battery only below this percentage.
@@ -81,6 +88,7 @@ inline constexpr Preset presets[] = { Preset::Default, Preset::AlternativeA, Pre
 
 // Both strips use the same sizes in 300 PPI pixels.
 inline constexpr int smallSize = 24, mediumSize = 26, largeSize = 28, maximumSize = 48;
+inline constexpr int maximumExtraHeight = 48;
 inline constexpr int offSize = smallSize - 1;
 int legacySize(const QString &value);
 
@@ -88,11 +96,16 @@ int legacySize(const QString &value);
 struct Layout
 {
     std::array<Field, slotCount> slotFields{};
-    int headerSize = smallSize, footerSize = smallSize;
+    int headerSize = mediumSize, footerSize = mediumSize;
+    int stripPadding = 0;
     bool headerEnabled = true, footerEnabled = true;
     // Each slot chooses its own case.
     std::array<bool, slotCount> uppercase{ { true, true, true, true, true, true } };
     bool progressBar = true;
+    // The bar sits along the bottom edge, or along the top edge when this is set.
+    bool progressBarTop = false;
+    // Ticks on the bar where chapters start.
+    bool progressTicks = false;
     // A strip is drawn when enabled and one of its slots shows something.
     bool header() const;
     bool footer() const;
@@ -100,6 +113,16 @@ struct Layout
 
     bool operator!=(const Layout &other) const { return !(*this == other); }
 };
+
+// Where the progress bar is drawn, if at all.
+enum class BarEdge { None, Top, Bottom };
+
+inline BarEdge progressEdge(const Layout &layout)
+{
+    return !layout.progressBar      ? BarEdge::None
+            : layout.progressBarTop ? BarEdge::Top
+                                    : BarEdge::Bottom;
+}
 
 // The preset is saved per book. Custom is one layout shared by every book.
 inline constexpr auto presetKey = "header_footer";
@@ -148,6 +171,8 @@ Layout customLayout(const QJsonObject &preferences, const Layout &fallback);
 struct Values
 {
     QString title, author, chapter, time;
+    QString matterPage, printedPage;
+    bool useScreens = false;
     int chapterPage = 0, chapterPages = 0, page = 0, pages = 0;
     // True for a total that is an estimate. It shows with a mark.
     bool pagesEstimated = false, chapterPagesEstimated = false;
@@ -209,7 +234,7 @@ Content content(Field field, const Values &values, bool uppercase);
 // A page count alone, such as 5 / 33, which is drawn with half-width spaces.
 bool pageCount(Field field);
 
-QString fieldLabel(Field field);
+QString fieldLabel(Field field, bool useScreens = false);
 // A line that explains a field whose name does not, or an empty string.
 QString fieldDescription(Field field);
 QString slotLabel(int slot);

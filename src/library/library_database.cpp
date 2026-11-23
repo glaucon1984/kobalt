@@ -3,7 +3,6 @@
 #include "storage/reader_storage.h"
 #include <QCryptographicHash>
 #include <QFile>
-#include <QJsonDocument>
 #include <QSqlQuery>
 #include <QSqlError>
 #include <QVariant>
@@ -66,22 +65,67 @@ Settings parseSettings(const QJsonObject &object)
     return result;
 }
 
-bool saveRows(QSqlDatabase &db, const Index &index)
+bool saveFolders(QSqlDatabase &db, const QVector<Folder> &folders)
 {
     QSqlQuery query(db);
-    if (!query.exec("SELECT key FROM library_books"))
+    if (!query.exec("SELECT CAST(key AS BLOB),CAST(label AS BLOB),ordinal FROM library_folders"))
         return false;
-    QStringList removed;
+    QHash<QByteArray, QPair<QByteArray, qint64>> stored;
     while (query.next())
-        if (!index.books.contains(query.value(0).toString()))
-            removed.append(query.value(0).toString());
+        stored.insert(query.value(0).toByteArray(),
+                      qMakePair(query.value(1).toByteArray(), query.value(2).toLongLong()));
     if (query.lastError().isValid())
         return false;
     query.finish();
-    for (const auto &key : removed) {
-        if (!query.prepare("DELETE FROM library_books WHERE key=?"))
+    for (int i = 0; i < folders.size(); ++i) {
+        const auto key = folders[i].key.toUtf8();
+        const auto label = folders[i].label.isEmpty() ? QByteArray("") : folders[i].label.toUtf8();
+        auto found = stored.find(key);
+        if (found != stored.end()) {
+            const bool unchanged = found->first == label && found->second == i;
+            stored.erase(found);
+            if (unchanged)
+                continue;
+            if (!query.prepare(
+                        "UPDATE library_folders SET label=CAST(? AS TEXT),ordinal=? WHERE key=CAST(? AS TEXT)"))
+                return false;
+        } else if (
+                !query.prepare(
+                        "INSERT INTO library_folders(label,ordinal,key) VALUES(CAST(? AS TEXT),?,CAST(? AS TEXT))"))
             return false;
+        query.addBindValue(label);
+        query.addBindValue(i);
         query.addBindValue(key);
+        if (!query.exec())
+            return false;
+    }
+    if (!stored.isEmpty()
+        && !query.prepare("DELETE FROM library_folders WHERE key=CAST(? AS TEXT)"))
+        return false;
+    for (auto it = stored.constBegin(); it != stored.constEnd(); ++it) {
+        query.bindValue(0, it.key());
+        if (!query.exec())
+            return false;
+    }
+    return true;
+}
+
+bool saveRows(QSqlDatabase &db, const Index &index)
+{
+    QSqlQuery query(db);
+    if (!query.exec("SELECT CAST(key AS BLOB) FROM library_books"))
+        return false;
+    QList<QByteArray> removed;
+    while (query.next())
+        if (!index.books.contains(text(query.value(0))))
+            removed.append(query.value(0).toByteArray());
+    if (query.lastError().isValid())
+        return false;
+    query.finish();
+    if (!removed.isEmpty() && !query.prepare("DELETE FROM library_books WHERE key=CAST(? AS TEXT)"))
+        return false;
+    for (const auto &key : removed) {
+        query.bindValue(0, key);
         if (!query.exec())
             return false;
     }
@@ -94,10 +138,11 @@ bool saveRows(QSqlDatabase &db, const Index &index)
     const auto statement = "INSERT OR REPLACE INTO library_books(" + columns.join(',') + ") SELECT "
             + placeholders.join(',') + " WHERE NOT EXISTS(SELECT 1 FROM library_books WHERE "
             + matches.join(" AND ") + ')';
+    if (!index.books.isEmpty() && !query.prepare(statement))
+        return false;
     for (const auto &book : index.books) {
-        auto object = book.json();
-        if (!query.prepare(statement))
-            return false;
+        const auto object = book.json();
+        int parameter = 0;
         for (int repeat = 0; repeat < 2; ++repeat)
             for (int i = 0; i < fields.size(); ++i) {
                 const auto value = object.value(fields[i]);
@@ -105,28 +150,16 @@ bool saveRows(QSqlDatabase &db, const Index &index)
                     auto bytes = value.toString().toUtf8();
                     if (bytes.isNull())
                         bytes = QByteArray("");
-                    query.addBindValue(bytes);
+                    query.bindValue(parameter++, bytes);
                 } else if (boolColumn(i))
-                    query.addBindValue(value.toBool() ? 1 : 0);
+                    query.bindValue(parameter++, value.toBool() ? 1 : 0);
                 else
-                    query.addBindValue(value.toDouble());
+                    query.bindValue(parameter++, value.toDouble());
             }
         if (!query.exec())
             return false;
     }
-    if (!query.exec("DELETE FROM library_folders"))
-        return false;
-    for (int i = 0; i < index.folders.size(); ++i) {
-        if (!query.prepare("INSERT INTO library_folders VALUES(CAST(? AS TEXT),CAST(? AS TEXT),?)"))
-            return false;
-        query.addBindValue(index.folders[i].key.toUtf8());
-        query.addBindValue(index.folders[i].label.isEmpty() ? QByteArray("")
-                                                            : index.folders[i].label.toUtf8());
-        query.addBindValue(i);
-        if (!query.exec())
-            return false;
-    }
-    return true;
+    return saveFolders(db, index.folders);
 }
 } // namespace
 
@@ -170,8 +203,10 @@ bool Index::loadDatabase(const QString &directory)
                 if (!file.open(QIODevice::ReadOnly))
                     return false;
                 const auto bytes = file.read(16 * 1024 * 1024 + 1);
-                if (bytes.size() > 16 * 1024 * 1024
-                    || QJsonDocument::fromJson(bytes).object() != source.object)
+                if (bytes.size() > 16 * 1024 * 1024)
+                    return false;
+                const auto checked = storage::parseJsonObject(bytes);
+                if (checked.status != storage::ReadStatus::Ok || checked.object != source.object)
                     return false;
                 if (!query.prepare("INSERT INTO imports VALUES(?,?,'library')"))
                     return false;

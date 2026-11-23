@@ -13,6 +13,7 @@
 
 *******************************************************/
 
+#include <algorithm>
 #include "crsetup.h"
 #include "../../extensions/css_ancestors.h"
 
@@ -194,6 +195,17 @@ enum css_decl_code {
     cssd_writing_mode_ms,
     cssd_writing_mode_moz,
     cssd_writing_mode_o,
+    cssd_justify_content,
+    cssd_align_items,
+    cssd_flex_direction,
+    cssd_flex_wrap,
+    cssd_flex,
+    cssd_flex_basis,
+    cssd_flex_grow,
+    cssd_flex_shrink,
+    cssd_gap,
+    cssd_row_gap,
+    cssd_column_gap,
     cssd_stop,
     cssd_writing_mode_warning // Internal diagnostic declaration; no author-facing property.
 };
@@ -353,6 +365,17 @@ static const char * css_decl_name[] = {
     "-ms-writing-mode",
     "-moz-writing-mode",
     "-o-writing-mode",
+    "justify-content",
+    "align-items",
+    "flex-direction",
+    "flex-wrap",
+    "flex",
+    "flex-basis",
+    "flex-grow",
+    "flex-shrink",
+    "gap",
+    "row-gap",
+    "column-gap",
     NULL
 };
 
@@ -420,7 +443,7 @@ enum LVCssSelectorPseudoElement
     csspe_after  = 2,   // ::after
     csspe_first_letter  = 3,   // ::first-letter
     csspe_first_line    = 4,   // ::first-line
-    csspe_existing_first_letter = 5, // User-agent styling of an existing pseudo element.
+    csspe_existing_first_letter = 5, // Blaze: user-agent styling of an existing pseudo element.
 };
 
 static const char * css_pseudo_elements[] =
@@ -938,6 +961,21 @@ bool parse_number_value( const char * & str, css_length_t & value,
     if (negative)
         value.value = -value.value;
     return true;
+}
+
+// Blaze: flex factors use the same eight fractional bits as CSS lengths.
+static bool parse_flex_factor(const char *&str, int &factor)
+{
+    const char *start = str;
+    css_length_t number;
+    if (parse_number_value(str, number, false, false, false, false, false, true) &&
+            (number.type == css_val_unspecified || (number.value == 0 &&
+             std::none_of(start, str, [](char c) { return css_is_alpha(c); })))) {
+        factor = number.value;
+        return true;
+    }
+    str = start;
+    return false;
 }
 
 static bool parse_html_length( const char * & str, css_length_t & value, bool parse_as_dimension=false)
@@ -2907,9 +2945,11 @@ static const char * css_d_names[] =
     "run-in",
     "inline",
     "block",
+    "flex",
     "-cr-list-item-final", // non-standard, legacy crengine rendering of list items as final: css_d_list_item_legacy
     "list-item",           // correct rendering of list items as block: css_d_list_item_block
     "inline-block",
+    "inline-flex",
     "inline-table",
     "table", 
     "table-row-group", 
@@ -4163,6 +4203,7 @@ bool LVCssDeclaration::parse( const char * &decl, bool higher_importance, lxmlDo
                         else if ( substr_icompare("footnote", decl) )               hints |= CSS_CR_HINT_FOOTNOTE;
                         else if ( substr_icompare("footnote-ignore", decl) )        hints |= CSS_CR_HINT_FOOTNOTE_IGNORE;
                         else if ( substr_icompare("no-cap-image-size", decl) )      hints |= CSS_CR_HINT_NO_CAP_IMAGE_SIZE;
+                        // Blaze: -cr-hint: default-text-indent marks a reader default indent.
                         else if ( substr_icompare("default-text-indent", decl) )    hints |= CSS_CR_HINT_DEFAULT_TEXT_INDENT;
                         else if ( substr_icompare("no-presentational", decl) ) {
                             // "-cr-hint: no-presentational" can be explicitely set on a node so any presentational-hint
@@ -4217,9 +4258,88 @@ bool LVCssDeclaration::parse( const char * &decl, bool higher_importance, lxmlDo
             case cssd_cr_apply_func:
                 n = parse_name( decl, css_cr_apply_func_names, -1 );
                 break;
+            case cssd_justify_content: {
+                static const char * names[] = { "flex-start", "center", "flex-end", "normal", "start", "end", "space-between", NULL };
+                n = parse_name(decl, names, -1);
+                if (n == 3 || n == 4) n = 0;
+                if (n == 5) n = 2;
+                if (n == 6) n = 3;
+                break;
+            }
+            case cssd_flex_grow:
+            case cssd_flex_shrink:
+                parse_flex_factor(decl, n);
+                break;
+            case cssd_flex_basis:
+            case cssd_flex: {
+                const bool shorthand = prop_code == cssd_flex;
+                int grow = 0, shrink = 256;
+                css_length_t basis(css_val_unspecified, css_generic_auto);
+                if (!shorthand) {
+                    if (!parse_number_value(decl, basis, true, false, true)) break;
+                }
+                else if (substr_icompare("none", decl)) shrink = 0;
+                else if (substr_icompare("initial", decl)) {}
+                else if (substr_icompare("auto", decl)) grow = 256;
+                else if (parse_flex_factor(decl, grow)) {
+                    parse_flex_factor(decl, shrink);
+                    css_length_t explicit_basis;
+                    basis = parse_number_value(decl, explicit_basis, true, false, true)
+                            ? explicit_basis : css_length_t(css_val_percent, 0);
+                }
+                else if (parse_number_value(decl, basis, true)) grow = 256;
+                else break;
+                skip_spaces(decl);
+                if (*decl && *decl != '!' && *decl != ';' && *decl != '}' && *decl != ')') break;
+                lUInt32 flags = importance | parse_important(decl);
+                if (shorthand) {
+                    buf << (lUInt32)(cssd_flex_grow | flags) << (lUInt32)grow;
+                    buf << (lUInt32)(cssd_flex_shrink | flags) << (lUInt32)shrink;
+                }
+                buf << (lUInt32)(cssd_flex_basis | flags) << (lUInt32)basis.type << (lUInt32)basis.value;
+                break;
+            }
+            case cssd_gap:
+            case cssd_column_gap:
+            case cssd_row_gap: {
+                css_length_t first, second;
+                if (!parse_number_value(decl, first, false))
+                    break;
+                second = first;
+                if (prop_code == cssd_gap) {
+                    css_length_t next;
+                    if (parse_number_value(decl, next, false)) second = next;
+                }
+                skip_spaces(decl);
+                if (*decl && *decl != '!' && *decl != ';' && *decl != '}' && *decl != ')') break;
+                lUInt32 flags = importance | parse_important(decl);
+                if (prop_code != cssd_column_gap)
+                    buf << (lUInt32)(cssd_row_gap | flags) << (lUInt32)first.type << (lUInt32)first.value;
+                if (prop_code != cssd_row_gap)
+                    buf << (lUInt32)(cssd_column_gap | flags) << (lUInt32)second.type << (lUInt32)second.value;
+                break;
+            }
+            case cssd_flex_wrap: {
+                static const char * names[] = { "nowrap", "wrap", NULL };
+                n = parse_name(decl, names, -1);
+                break;
+            }
+            case cssd_align_items: {
+                static const char *names[] = { "stretch", "flex-start", "center", "flex-end", NULL };
+                n = parse_name(decl, names, -1);
+                break;
+            }
+            case cssd_flex_direction: {
+                static const char * names[] = { "row", "column", "row-reverse", "column-reverse", NULL };
+                n = parse_name(decl, names, -1);
+                break;
+            }
             case cssd_display:
                 IF_g_SET_n_AND_break(false, css_d_inherit, css_d_inline);
                 n = parse_name( decl, css_d_names, -1 );
+                // Blaze implements a subset. Keep publisher @supports fallbacks active.
+                if ( _check_if_supported && css_is_flex((css_display_t)n) )
+                    n = -1;
                 if (n == css_d_list_item_block && doc && doc->getDOMVersionRequested() < 20180524) {
                     n = css_d_list_item_legacy; // legacy rendering of list-item
                 }
@@ -4304,7 +4424,8 @@ bool LVCssDeclaration::parse( const char * &decl, bool higher_importance, lxmlDo
                 prop_code = cssd_page_break_inside;
                 IF_g_SET_n_AND_break(false, css_pb_inherit, css_pb_auto);
                 n = parse_name( decl, css_pb_names, -1 );
-                // The internal default waits for inline layout styles too.
+                // Blaze: accept the internal value -cr-avoid-normal-block, a reader default that
+                // waits for inline layout styles too.
                 if (n == -1 && substr_icompare("-cr-avoid-normal-block", decl))
                     n = css_pb_avoid_normal_block;
                 else if (n > css_pb_avoid)
@@ -6232,6 +6353,33 @@ void LVCssDeclaration::apply( css_style_rec_t * style, const ldomNode * node ) c
                 style->Apply( v, &style->border_radius_v[3], imp_bit_border_radius_bl_v, is_important );
             }
             break;
+        case cssd_justify_content:
+            style->Apply((lUInt8)*p++, &style->justify_content, imp_bit_justify_content, is_important);
+            break;
+        case cssd_flex_grow:
+            style->Apply((int)*p++, &style->flex_grow, imp_bit_flex_grow, is_important);
+            break;
+        case cssd_flex_shrink:
+            style->Apply((int)*p++, &style->flex_shrink, imp_bit_flex_shrink, is_important);
+            break;
+        case cssd_flex_basis:
+            style->Apply(read_length(p), &style->flex_basis, imp_bit_flex_basis, is_important);
+            break;
+        case cssd_row_gap:
+            style->Apply(read_length(p), &style->row_gap, imp_bit_row_gap, is_important);
+            break;
+        case cssd_column_gap:
+            style->Apply(read_length(p), &style->column_gap, imp_bit_column_gap, is_important);
+            break;
+        case cssd_flex_wrap:
+            style->Apply((lUInt8)*p++, &style->flex_wrap, imp_bit_flex_wrap, is_important);
+            break;
+        case cssd_align_items:
+            style->Apply((css_flex_align_t)*p++, &style->align_items, imp_bit_align_items, is_important);
+            break;
+        case cssd_flex_direction:
+            style->Apply((lUInt8)*p++, &style->flex_direction, imp_bit_flex_direction, is_important);
+            break;
         case cssd_display:
             style->Apply( (css_display_t) *p++, &style->display, imp_bit_display, is_important );
             break;
@@ -6342,7 +6490,7 @@ void LVCssDeclaration::apply( css_style_rec_t * style, const ldomNode * node ) c
             {
                 css_length_t text_indent = read_length(p);
                 style->Apply( text_indent, &style->text_indent, imp_bit_text_indent, is_important );
-                // epub.css places DEFAULT_TEXT_INDENT after its own declaration.
+                // Blaze: epub.css places DEFAULT_TEXT_INDENT after its own declaration.
                 // Any later authored declaration targeting this node turns the
                 // value back into ordinary authored CSS, even when numerically
                 // equal to the reading default.
@@ -6779,7 +6927,7 @@ void LVCssDeclaration::apply( css_style_rec_t * style, const ldomNode * node ) c
                         // Let's have "display:none" not matched by neither inline nor not-inline
                         return;
                     }
-                    if ( display <= css_d_inline || display == css_d_inline_block || display == css_d_inline_table ) {
+                    if ( display <= css_d_inline || css_is_inline_box(display) ) {
                         // It is inline-like
                         if ( only_if == cr_only_if_not_inline )
                             return; // don't apply anything more of this declaration to this style
@@ -7121,16 +7269,6 @@ bool LVCssSelectorRule::checkInnerText( const ldomNode * & node ) const {
         break;
     default:
         break;
-    }
-    return false;
-}
-
-bool LVCssSelectorRule::quickClassCheck(const lUInt32 *classHashes, size_t size) const {
-    if (_type != cssrt_class)
-        return true;
-    for (size_t i = 0; i < size; ++i) {
-        if (classHashes[i] == _valueHash)
-            return true;
     }
     return false;
 }
@@ -7793,6 +7931,8 @@ bool LVCssSelector::check( const ldomNode * node, bool allow_cache ) const
         }
         // We might be the pseudoElem that was created by this selector: we need to
         // confirm that by checking the rules on the real element that created us.
+        // Blaze: the user-agent pseudo-element -cr-existing-first-letter is checked on
+        // the originating element, like ::first-letter.
         if ( (_pseudo_elem == csspe_first_letter || _pseudo_elem == csspe_existing_first_letter)
              && node->hasAttribute(attr_FirstLetter) ) {
             // We need to find among ancestors the one that got to get a HasFirstLetter attribute
@@ -7873,9 +8013,19 @@ bool LVCssSelector::check( const ldomNode * node, bool allow_cache ) const
     return true;
 }
 
+// Blaze: the class to look for comes from requiredClassHash(), which the class
+// index also uses. Upstream asks the first rule, LVCssSelectorRule::quickClassCheck(),
+// which Blaze removed. The result is the same: true without a class on the first
+// rule or with a pseudo-element, else true only when the node has that class.
 bool LVCssSelector::quickClassCheck(const lUInt32 *classHashes, size_t size) const {
-    // pseudo_elem: `LVCssSelector::check()` may move the check to its parent node
-    return !_rules || _pseudo_elem || _rules->quickClassCheck(classHashes, size);
+    lUInt32 hash;
+    if ( !requiredClassHash(hash) )
+        return true;
+    for ( size_t i = 0; i < size; ++i ) {
+        if ( classHashes[i] == hash )
+            return true;
+    }
+    return false;
 }
 
 bool parse_attr_value( const char * &str, char * buf, bool &parse_trailing_i, char stop_char=']' )
@@ -8335,6 +8485,7 @@ bool LVCssSelector::parse( const char * &str, lxmlDocBase * doc, bool useragent_
                         if ( *str==':' ) // skip double ::
                             str++;
                         int n = parse_name( str, css_pseudo_elements, -1 );
+                        // Blaze: -cr-existing-first-letter is accepted only in the user-agent sheet.
                         if (n != -1 && (useragent_sheet || n+1 != csspe_existing_first_letter)) {
                             _pseudo_elem = n+1; // starts at 1
                             _specificity += WEIGHT_SPECIFICITY_ELEMENT;
@@ -8452,6 +8603,7 @@ void LVCssSelector::applyToPseudoElement( const ldomNode * node, css_style_rec_t
         // checks (the style remains the one of the cloneNode).
         node = node->getCloneNodeSource();
     }
+    // Blaze: only add the declarations. Upstream has no such pseudo-element.
     if ( _pseudo_elem == csspe_existing_first_letter ) {
         // Apply the decoration without changing display or marking this pseudo as active.
         // A previously generated first letter stays hidden when its author rule is gone.
@@ -8541,19 +8693,30 @@ LVCssSelector::LVCssSelector( LVCssSelector & v )
         _next = new LVCssSelector( *v._next );
 }
 
-void LVStyleSheet::set(LVPtrVector<LVCssSelector> & v  )
+void LVStyleSheet::copySelectorsTo(LVPtrVector<LVCssSelector> & target) const
 {
-    _selectors.clear();
-    if ( !v.size() )
+    target.reserve(_selectors.length());
+    for (int i = 0; i < _selectors.length(); ++i)
+        target.add(_selectors[i] ? new LVCssSelector(*_selectors[i]) : NULL);
+}
+
+// Blaze: copy the selector chains at the first change after push(), and swap the
+// originals back in pop(). Upstream copies every chain on each push() and again
+// on pop(). The class index points into the chains, so it moves with them.
+void LVStyleSheet::detachScope()
+{
+    if (_stack.empty() || _stack.back().selectors)
         return;
-    _selectors.reserve( v.size() );
-    for ( int i=0; i<v.size(); i++ ) {
-        LVCssSelector * selector = v[i];
-        if ( selector )
-            _selectors.add( new LVCssSelector( *selector ) );
-        else
-            _selectors.add( NULL );
-    }
+    // The index points into its selector chains. Keep both originals for pop
+    // and let parse or merge build the working index after it adds the rules.
+    auto working = std::make_unique<LVPtrVector<LVCssSelector>>();
+    copySelectorsTo(*working);
+    auto index = _classIndex ? std::make_unique<LVCssClassIndex>() : nullptr;
+    _selectors.swap(*working);
+    auto & saved = _stack.back();
+    saved.selectors = std::move(working);
+    saved.index = std::move(_classIndex);
+    _classIndex = std::move(index);
 }
 
 LVStyleSheet::LVStyleSheet( LVStyleSheet & sheet )
@@ -8562,7 +8725,10 @@ LVStyleSheet::LVStyleSheet( LVStyleSheet & sheet )
 ,   _fontFaceDecls( sheet._fontFaceDecls )
 ,   _trackFontFaceDecls( sheet._trackFontFaceDecls )
 {
-    set( sheet._selectors );
+    if ( sheet._classIndex )
+        _classIndex = std::make_unique<LVCssClassIndex>();
+    sheet.copySelectorsTo(_selectors);
+    rebuildClassIndex();
     _selector_count = sheet._selector_count;
 }
 
@@ -8668,33 +8834,32 @@ void LVStyleSheet::apply( const ldomNode * node, css_style_rec_t * style ) const
             selector->apply( node, style );
     };
 
-    for (;;)
-    {
-        if (selector_0!=NULL)
-        {
-            if (selector_id==NULL || selector_0->getSpecificity() < selector_id->getSpecificity() )
-            {
-                // step by sel_0
-                apply_selector( selector_0 );
-                selector_0 = selector_0->getNext();
+    // Blaze: both traversals use the same cascade merge. Tagged selectors
+    // precede universal selectors of equal specificity, including zero weight.
+    auto apply_chains = [&]( auto next_universal ) {
+        const LVCssSelector * universal = next_universal();
+        while ( universal || selector_id ) {
+            if ( !selector_id || ( universal && universal->getSpecificity() < selector_id->getSpecificity() ) ) {
+                apply_selector( universal );
+                universal = next_universal();
             }
-            else
-            {
-                // step by sel_id
+            else {
                 apply_selector( selector_id );
                 selector_id = selector_id->getNext();
             }
         }
-        else if (selector_id!=NULL)
-        {
-            // step by sel_id
-            apply_selector( selector_id );
-            selector_id = selector_id->getNext();
-        }
-        else
-        {
-            break; // end of chains
-        }
+    };
+    if ( _classIndex && _classIndex->hasClasses() ) {
+        LVCssClassIndex::Cursor cursor( *_classIndex, class_hash_array.ptr(), class_hash_array.length() );
+        apply_chains( [&]() { return cursor.next(); } );
+    }
+    else {
+        apply_chains( [&]() {
+            auto * current = selector_0;
+            if ( current )
+                selector_0 = current->getNext();
+            return current;
+        } );
     }
 }
 
@@ -8785,6 +8950,8 @@ bool LVStyleSheet::parseAndAdvance( const char * &str, bool useragent_sheet, lSt
         // We can't parse anything if no _doc to get element name ids from
         return false;
     }
+    // Blaze: copy the selectors before the first change, see detachScope().
+    detachScope();
     LVCssSelector * selector = NULL;
     LVCssSelector * prev_selector;
     for (;*str;)
@@ -8851,6 +9018,7 @@ bool LVStyleSheet::parseAndAdvance( const char * &str, bool useragent_sheet, lSt
             else if ( *str == '}' && _nested ) {
                 // We're done parsing this nested CSS block
                 str++; // skip it so upper stylesheet can continue from there
+                rebuildClassIndex();
                 return true;
             }
             else {
@@ -8868,6 +9036,7 @@ bool LVStyleSheet::parseAndAdvance( const char * &str, bool useragent_sheet, lSt
             }
         }
     }
+    rebuildClassIndex();
     return _selectors.length() > 0;
 }
 
@@ -8949,6 +9118,8 @@ bool LVStyleSheet::gatherNodeMatchingRulesets(ldomNode * node, const char * str,
 }
 
 void LVStyleSheet::merge(const LVStyleSheet &other) {
+    // Blaze: copy the selectors before the first change, see detachScope().
+    detachScope();
     int length = other._selectors.length();
     if (length > _selectors.length())
         _selectors.set(length - 1, nullptr);
@@ -8972,6 +9143,7 @@ void LVStyleSheet::merge(const LVStyleSheet &other) {
             prev = item;
         }
     }
+    rebuildClassIndex();
     _selector_count += other._selector_count;
     // Propagate @font-face declarations so they are preserved in cache entries
     // up the @import chain and can be replayed for subsequent DocFragments --

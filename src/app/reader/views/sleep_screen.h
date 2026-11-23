@@ -8,8 +8,10 @@
 #include <QVector>
 
 class QPainter;
+class QWidget;
 
 namespace kobalt::reader {
+bool sleepViewNeedsImageCleanup(QWidget &view, bool colorDisplay);
 enum class SleepStatus { Sleeping, Charging, Charged, PoweredOff };
 QString sleepStatusText(SleepStatus status);
 // Keep inverted portrait; fit landscape backdrops into upright portrait without
@@ -49,6 +51,11 @@ void paintSleepTile(QPainter &painter, QSize size, const QString &progress,
 // page or a blank image for designs without a cover. Tiled designs draw the
 // tile above; the others draw themselves. Takes ownership like sleepScreenImage.
 // When `underlay` is given, it receives what lies under the status areas.
+// The percentage a sleep design shows: one decimal when the snapshot has
+// tenths, the whole number otherwise. `argument` leaves out the sign the same
+// way strings::percentArgument() does.
+QString sleepPercentText(const sleep::Snapshot &shot, bool argument = false);
+
 QImage sleepDesignImage(QImage backdrop, const sleep::Snapshot &snapshot, int batteryPercent,
                         SleepStatus status, QVector<QImage> *underlay = nullptr);
 // The areas a battery change repaints. They do not depend on the status.

@@ -1,3 +1,4 @@
+#include "library/arrangement.h"
 #include "app/reader/panels/choice_screen.h"
 #include "ui/input/hold_timer.h"
 #include "render/page_turn_paint.h"
@@ -998,7 +999,18 @@ private slots:
         QVERIFY(action("widgetKeyboardShift"));
         typePage();
         QVERIFY(action("widgetKeyboardSymbols"));
-        QCOMPARE(panel->findChild<QPushButton *>("widgetKeyboardSymbols")->text(), QString("ABC"));
+        QCOMPARE(symbols->text(), QString("ABC"));
+        const auto labelRect = symbols->rect().adjusted(6, 6, -6, -6);
+        const auto checkedLabel = symbols->grab(labelRect).toImage();
+        symbols->setText({});
+        const auto emptyLabel = symbols->grab(labelRect).toImage();
+        symbols->setText("ABC");
+        QVERIFY2(checkedLabel != emptyLabel, "The checked ABC label is invisible");
+        for (auto *key : panel->findChildren<QPushButton *>()) {
+            const auto character = key->property("keyboard.character").toString();
+            if (key->isVisible() && !character.isEmpty())
+                QCOMPARE(key->text(), character);
+        }
         typePage();
         QVERIFY(action("widgetKeyboardSpace"));
         expected += ' ';
@@ -2101,6 +2113,23 @@ private slots:
                                                    .arg(size.height())));
             }
         }
+        // A landscape phone pages four books at a time. Every cell, including
+        // the right column, opens its own book in reading order.
+        view.resize(ui::px(1480), ui::px(720));
+        QCoreApplication::processEvents();
+        QCOMPARE(counter->text(), QString("1 of 10"));
+        const auto sorted = library::arrange(index, { index.settings.sort, false, {} });
+        for (int page = 0; page < 2; ++page) {
+            for (int i = 0; i < 4; ++i) {
+                opened.clear();
+                QTest::mouseClick(pages, Qt::LeftButton, Qt::NoModifier,
+                                  QPoint((2 * (i % 2) + 1) * pages->width() / 4,
+                                         (2 * (i / 2) + 1) * pages->height() / 4));
+                QCOMPARE(opened, sorted.at(page * 4 + i)->key);
+            }
+            if (page == 0)
+                view.pageButton(1);
+        }
         // Five rows fit without a pager here, but not with its old space
         // still reserved. Removing books must reclaim that space immediately.
         view.resize(ui::px(1072), ui::px(1400));
@@ -2361,10 +2390,10 @@ private slots:
                 // Keep the canvas visible, as Android can do while suspended.
                 qApp->applicationStateChanged(Qt::ApplicationInactive);
                 const int beforePause = rejected;
-                QTest::qWait(250);
+                start.libraryCanvas()->viewport()->repaint(QRect(20, 20, 30, 30));
                 const bool stopped = rejected == beforePause;
                 targetAvailable = true;
-                QTest::qWait(250);
+                start.libraryCanvas()->viewport()->repaint(QRect(20, 20, 30, 30));
                 const bool held = frames.isEmpty();
                 qApp->applicationStateChanged(Qt::ApplicationActive);
                 QVERIFY(stopped);
@@ -2380,6 +2409,15 @@ private slots:
             QCOMPARE(frames.size(), 2);
             QVERIFY(!frames.last().clean);
         }
+        // Damage first received while inactive must also reach the Surface on resume.
+        frames.clear();
+        qApp->applicationStateChanged(Qt::ApplicationInactive);
+        start.libraryCanvas()->viewport()->repaint(QRect(20, 20, 30, 30));
+        const bool queued = frames.isEmpty();
+        qApp->applicationStateChanged(Qt::ApplicationActive);
+        QVERIFY(queued);
+        QTRY_COMPARE_WITH_TIMEOUT(frames.size(), 1, 1000);
+        QVERIFY(!frames.first().clean);
         // A rejected text frame must keep its mode without assigning REGAL
         // to unrelated UI damage that arrives before the Surface recovers.
         frames.clear();
@@ -2690,8 +2728,7 @@ private slots:
             modal.card()->rows()->insertWidget(modal.card()->rows()->count() - 1, row);
             rows.append(row);
         }
-        modal.setGeometry(host.rect());
-        modal.fitCard();
+        QCOMPARE(modal.card()->maximumWidth(), QWIDGETSIZE_MAX);
         modal.show();
         QCoreApplication::processEvents();
         const auto divider = ui::dividerColor(modal.card());
@@ -2804,6 +2841,83 @@ private slots:
             QCOMPARE(wrapped->height(), wrapped->heightForWidth(wrapped->width()));
             QCOMPARE(filled.primaryButton()->grab().toImage().pixelColor(x, 0), paper);
         }
+    }
+
+    // The first visible frame fits the contents added after construction.
+    void modalFitsCompletedContentsOnShow()
+    {
+        QWidget host;
+        host.resize(ui::px(540), ui::px(1100));
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        QImage image(40, 20, QImage::Format_RGB32);
+        image.fill(Qt::gray);
+        ui::NoticeModal notice(&host, { {}, "Font options", image }, { "Done", "close" });
+        auto *card = notice.card();
+        auto *art = card->rows()->itemAt(0)->widget();
+        auto *artwork = qobject_cast<QLabel *>(art);
+        QVERIFY(artwork);
+        // Fitting scales the artwork. No copy is needed until the full contents exist.
+        QVERIFY(artwork->pixmap().isNull());
+        auto *body = card->message("Choose a font for the labels shown in the header and footer. "
+                                   "The preview uses the selected font at the current text size.");
+        ui::readerStyle(body, ui::styles::font(ui::px(28)));
+        card->rows()->removeWidget(body);
+        card->rows()->insertWidget(card->rows()->count() - 1, body);
+        notice.show();
+        const auto expectedWidth = [&] {
+            return qMin<int>(ui::metrics::notice::cardWidth,
+                             host.width() - 2 * ui::metrics::notice::sideClearance);
+        };
+        QCOMPARE(card->width(), expectedWidth());
+        QVERIFY(!artwork->pixmap().isNull());
+        QVERIFY(body->height() >= body->heightForWidth(body->width()));
+        QVERIFY(body->geometry().bottom() < notice.primaryButton()->mapTo(card, QPoint()).y());
+        QCOMPARE(card->geometry().center(), notice.rect().center());
+        const auto geometry = card->geometry();
+        const auto pixels = artwork->pixmap().cacheKey();
+        QCoreApplication::processEvents();
+        QCOMPARE(card->geometry(), geometry);
+        QCOMPARE(artwork->pixmap().cacheKey(), pixels);
+
+        const int narrowHeight = body->height();
+        host.resize(ui::px(1100), ui::px(700));
+        QTRY_COMPARE(card->width(), expectedWidth());
+        QVERIFY(body->height() < narrowHeight);
+        QCOMPARE(card->geometry().center(), notice.rect().center());
+        const int wrappedHeight = body->height();
+        body->setText("Updated");
+        notice.fitCard();
+        QVERIFY(body->height() < wrappedHeight);
+        QVERIFY(card->rect().contains(notice.primaryButton()->mapTo(card, QPoint())));
+        // A single wrapped row can need more width even on a card that prefers paging.
+        const int wide = 2 * int(ui::metrics::notice::cardWidth);
+        const int clearance = 2 * int(ui::metrics::notice::sideClearance);
+        host.resize(wide + clearance, wide * 2);
+        notice.preferPagingToWidening();
+        body->setText(
+                QStringLiteral("A translated explanation must stay on one page. ").repeated(18));
+        card->fitToWidth(wide);
+        const int room = card->height();
+        card->fitToWidth(ui::metrics::notice::cardWidth);
+        QVERIFY(card->height() > room);
+        host.resize(wide + clearance, room + clearance);
+        QTRY_COMPARE(card->width(), wide);
+        QVERIFY(card->height() <= room);
+        QVERIFY(body->isVisible());
+        QVERIFY(card->rect().contains(notice.primaryButton()->mapTo(card, QPoint())));
+        notice.hide();
+
+        ui::ModalOverlay custom(&host);
+        custom.card()->message("Narrow notice");
+        const int customWidth = ui::px(400);
+        custom.card()->fitToWidth(customWidth);
+        custom.show();
+        QCOMPARE(custom.card()->width(), customWidth);
+        host.resize(ui::px(700), ui::px(1100));
+        QTRY_COMPARE(custom.size(), host.size());
+        QCOMPARE(custom.card()->width(), customWidth);
+        QCOMPARE(custom.card()->geometry().center(), custom.rect().center());
     }
 
     void connectedModalFooter_data() { variants(); }
@@ -3190,6 +3304,26 @@ private slots:
         QVERIFY(row());
         row()->click();
         QCOMPARE(selected, QString("first"));
+        const auto checkNames = [&](const QString &prefix, const QString &actionPrefix,
+                                    const QString &title, const QString &actionLabel) {
+            QStringList names;
+            for (int i = 0; i < 2; ++i) {
+                auto *entry = list.findChild<QWidget *>(prefix + QString::number(i));
+                auto *action = list.findChild<QWidget *>(actionPrefix + QString::number(i));
+                QVERIFY(entry && action);
+                const auto name = entry->accessibleName();
+                QVERIFY2(name.contains("Page 3"), qPrintable(name));
+                QVERIFY(name.contains(i ? b.chapter : title));
+                QVERIFY(name.contains(i ? b.excerpt : QStringLiteral("A lengthy quotation")));
+                QVERIFY(!name.contains(a.excerpt));
+                QVERIFY(action->accessibleName().contains(actionLabel));
+                QVERIFY(action->accessibleName().contains(name));
+                names.append(name);
+            }
+            QVERIFY(names[0] != names[1]);
+        };
+        checkNames("rrAnnotation", "rrAnnotationRemove", a.chapter,
+                   strings::get("annotations.remove"));
         QCOMPARE(row()->detailLabel()->text(), a.excerpt);
         QVERIFY(row()->titleLabel()->font().pixelSize() < row()->detailLabel()->font().pixelSize());
         // A small gap separates the chapter from the excerpt.
@@ -3205,7 +3339,9 @@ private slots:
         auto pinned = a;
         pinned.pinName = "Reference";
         pinned.pinIcon = "map";
-        list.showBookmarks({ pinned });
+        list.showBookmarks({ pinned, b });
+        checkNames("rrBookmark", "rrBookmarkMore", pinned.pinName,
+                   strings::get("bookmarks.actions"));
         list.showAnnotations({ c, b, a });
         QCoreApplication::processEvents();
         QCOMPARE(row()->grab().toImage(), annotationImage);
@@ -3571,6 +3707,9 @@ private slots:
             auto *row = static_cast<ui::ListRow *>(list.findChild<QWidget *>("rrAnnotation0"));
             auto *remove = list.findChild<QPushButton *>("rrAnnotationRemove0");
             QVERIFY(row && remove && !row->isEnabled() && !remove->isEnabled());
+            QVERIFY(row->accessibleName().contains("Page 1"));
+            QVERIFY(row->accessibleName().contains(strings::get("annotations.load_failed")));
+            QVERIFY(remove->accessibleName().contains(row->accessibleName()));
             QCOMPARE(
                     row->detailLabel()->text(),
                     QStringLiteral(
@@ -3657,6 +3796,25 @@ private slots:
     }
 
     // Checks partial tab refresh coverage without changing panel or overlay cleanup policies.
+    // A new palette replaces the text colors that style sheets gave widgets.
+    // refreshInterfaceText gives them back, as after a palette-only theme switch.
+    void paletteSwitchKeepsSheetColors()
+    {
+        QWidget root;
+        root.setStyleSheet("QLabel{color:#cccccc;}");
+        QLabel caption("CAPTION", &root);
+        root.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&root));
+        const QColor sheet(0xcc, 0xcc, 0xcc);
+        QCOMPARE(caption.palette().color(QPalette::WindowText), sheet);
+        auto palette = caption.palette();
+        palette.setColor(QPalette::WindowText, Qt::white);
+        caption.setPalette(palette);
+        QCOMPARE(caption.palette().color(QPalette::WindowText), QColor(Qt::white));
+        ui::refreshInterfaceText(&root);
+        QCOMPARE(caption.palette().color(QPalette::WindowText), sheet);
+    }
+
     void navigationRefreshKeepsOverlayAndPanelPolicies()
     {
         QWidget owner;
@@ -4615,6 +4773,94 @@ private slots:
         QCOMPARE(calls, 1);
     }
 
+    void pagePaintsPaperAroundBody_data() { variants(); }
+
+    void pagePaintsPaperAroundBody()
+    {
+        QFETCH(bool, dark);
+        QFETCH(int, ppi);
+        ui::setDensity(ppi);
+        ReadingPage page(nullptr, [] { });
+        page.setProperty("reader_dark", dark);
+        page.resize(400, 600);
+        page.slotContents[0].text = "09:00";
+        page.slotContents[4].text = "2 / 10";
+        page.refreshContent();
+        const auto paper = ui::themeColors(dark).paper;
+        const int top = page.topHeight(), bottom = page.bottomHeight();
+        QVERIFY(top > 0 && bottom > 0);
+        const QSize body(page.width(), page.height() - top - bottom);
+        const auto blank = page.snapshot();
+        const auto sleeping = page.snapshot(true);
+        QCOMPARE(blank.pixelColor(0, top), paper);
+        QCOMPARE(sleeping.pixelColor(0, top), paper);
+
+        const auto checkBody = [&](QImage image) {
+            page.image = image;
+            page.refreshContent();
+            for (const bool sleep : { false, true }) {
+                // The old paint order put opaque paper under the body. The
+                // empty page supplies the same header and footer for each case.
+                auto expected = sleep ? sleeping : blank;
+                QPainter painter(&expected);
+                painter.drawImage(0, top, image);
+                painter.end();
+                QCOMPARE(page.snapshot(sleep), expected);
+            }
+        };
+        for (const auto format : { QImage::Format_RGB32, QImage::Format_RGBX8888 }) {
+            QImage image(body, format);
+            image.fill(QColor(137, 85, 63));
+            checkBody(image);
+        }
+        QImage shortBody(body - QSize(3, 5), QImage::Format_RGB32);
+        shortBody.fill(Qt::red);
+        checkBody(shortBody);
+        QImage translucent(body, QImage::Format_ARGB32_Premultiplied);
+        translucent.fill(QColor(23, 120, 180, 104));
+        checkBody(translucent);
+        QImage retina(body, QImage::Format_RGB32);
+        retina.fill(Qt::blue);
+        retina.setDevicePixelRatio(2);
+        checkBody(retina);
+
+        QImage opaque(body, QImage::Format_RGB32);
+        opaque.fill(Qt::green);
+        checkBody(opaque);
+        // Keep a sentinel outside a clipped, mirrored widget render. The
+        // clip crosses both strips and the body.
+        QImage actual(page.size() + QSize(14, 16), QImage::Format_RGB32);
+        actual.fill(Qt::magenta);
+        auto expected = actual;
+        const auto prepare = [&](QPainter &painter) {
+            painter.translate(page.width() + 7, 8);
+            painter.scale(-1, 1);
+            painter.setClipRect(23, 3, page.width() / 2, page.height() - 6);
+        };
+        {
+            QPainter painter(&expected);
+            prepare(painter);
+            painter.drawImage(0, 0, page.snapshot());
+        }
+        {
+            QPainter painter(&actual);
+            prepare(painter);
+            page.render(&painter);
+        }
+        QCOMPARE(actual, expected);
+
+        page.reflowLayout.margins = QMargins(22, 25, 22, 25);
+        page.setReflowText("A few words to draw while the viewport changes.");
+        page.setViewportTransition(true);
+        const auto transition = page.snapshot();
+        QCOMPARE(transition.pixelColor(0, top), paper);
+        QVERIFY(transition.copy(0, top, body.width(), body.height())
+                != blank.copy(0, top, body.width(), body.height()));
+        page.image = {};
+        page.refreshContent();
+        QCOMPARE(page.snapshot(), transition);
+    }
+
     // Checks that strip changes leave the reading body unpainted, strip captures match full-page crops and a rejected BOOX frame retries unchanged.
     void readingStripChangesLeaveBodyUnpainted_data() { variants(); }
 
@@ -4624,6 +4870,8 @@ private slots:
         QFETCH(int, ppi);
         ui::setDensity(ppi);
         ReadingPage page(nullptr, [] { });
+        page.setFont(ui::headerFooterFont());
+        page.setProperty("reader_dark", dark);
         auto colors = page.palette();
         colors.setColor(QPalette::Window, dark ? Qt::black : Qt::white);
         colors.setColor(QPalette::WindowText, dark ? Qt::white : Qt::black);
@@ -4631,21 +4879,37 @@ private slots:
         page.resize(400, 600);
         page.image = QImage(400, 480, QImage::Format_RGB32);
         page.image.fill(Qt::white);
-        page.slotContents[0].text = "09:00";
-        page.slotContents[4].text = "1 / 10";
+        page.slotContents[0].text = "09:04";
+        page.slotContents[3].text = "24 left";
+        page.slotContents[5].text = "11.4%";
         page.refreshContent();
         page.show();
         QCoreApplication::processEvents();
         PaintRegions paints;
         page.installEventFilter(&paints);
-        page.slotContents[0].text = "09:01";
-        page.slotContents[4].text = "2 / 10";
-        page.refreshContent();
-        QCoreApplication::processEvents();
-        QVERIFY(!paints.painted.isEmpty());
-        QVERIFY(!paints.painted.intersects(
-                QRect(0, page.topHeight(), page.width(),
-                      page.height() - page.topHeight() - page.bottomHeight())));
+        // Jost draws 4 and 5 at different ink widths, but they must occupy one cell.
+        for (const auto &change :
+             { qMakePair(0, QStringLiteral("09:05")), qMakePair(3, QStringLiteral("25 left")),
+               qMakePair(5, QStringLiteral("11.5%")) }) {
+            const bool footer = headerfooter::footerSlot(change.first);
+            const int pixels = footer ? page.footerTextPixels() : page.headerTextPixels();
+            const auto font = ui::headerFooterFont(pixels);
+            const auto advance = [&font](const QString &text) {
+                return ui::interfaceTextWidth(text, font, ui::TextDigits::Tabular);
+            };
+            const int digit = advance(QStringLiteral("4"));
+            QCOMPARE(digit, advance(QStringLiteral("5")));
+            QCOMPARE(advance(page.slotContents[change.first].text), advance(change.second));
+            paints.painted = {};
+            page.slotContents[change.first].text = change.second;
+            page.refreshContent();
+            QCoreApplication::processEvents();
+            QVERIFY(!paints.painted.isEmpty());
+            QVERIFY(paints.painted.boundingRect().width() <= digit);
+            QVERIFY(!paints.painted.intersects(
+                    QRect(0, page.topHeight(), page.width(),
+                          page.height() - page.topHeight() - page.bottomHeight())));
+        }
         QVERIFY(!page.property("reader_page_turn").toBool());
         paints.painted = {};
         page.refreshContent();
@@ -4757,22 +5021,20 @@ private slots:
                                    : slot % 3 == 2 ? ribbon
                                                    : 0);
                 const auto fitted = ui::headerFooterText(content, font, room);
+                const auto width = [&font](const QString &text) {
+                    return ui::interfaceTextWidth(text, font, ui::TextDigits::Tabular);
+                };
                 QVERIFY(fitted.endsWith(content.chapterPosition));
                 QVERIFY(fitted.contains(QChar(0x2026)));
-                QVERIFY(ui::interfaceTextWidth(fitted, font) <= room);
+                QVERIFY(width(fitted) <= room);
                 const auto ellipsisAndPage =
                         strings::get("reader.chapter_position")
                                 .arg(QString(QChar(0x2026)), content.chapterPosition);
-                QCOMPARE(ui::headerFooterText(content, font,
-                                              ui::interfaceTextWidth(ellipsisAndPage, font)),
+                QCOMPARE(ui::headerFooterText(content, font, width(ellipsisAndPage)),
                          ellipsisAndPage);
-                QCOMPARE(
-                        ui::headerFooterText(content, font,
-                                             ui::interfaceTextWidth(content.chapterPosition, font)),
-                        content.chapterPosition);
-                QCOMPARE(ui::headerFooterText(content, font,
-                                              ui::interfaceTextWidth(content.text, font)),
-                         content.text);
+                QCOMPARE(ui::headerFooterText(content, font, width(content.chapterPosition)),
+                         content.chapterPosition);
+                QCOMPARE(ui::headerFooterText(content, font, width(content.text)), content.text);
                 page.refreshContent();
                 const auto actual = page.snapshot();
                 const auto captures = qEnvironmentVariable("KOBALT_CAPTURE_HEADER_FOOTER");
@@ -4796,13 +5058,10 @@ private slots:
                 contents[slot] = content;
                 preview.setSlots(page.chrome, contents);
                 auto *cell = preview.cell(slot);
-                namespace headerFooterMetrics = ui::metrics::headerFooter;
-                const int left = slot % 3 == 0 ? int(headerFooterMetrics::mapSideInset)
-                                               : headerFooterMetrics::slotGap / 2;
-                const int right = slot % 3 == 2 ? int(headerFooterMetrics::mapSideInset)
-                                                : headerFooterMetrics::slotGap / 2;
-                const int previewRoom = cell->width() - left - right
-                        - 2 * (ui::metrics::list::lineInset - headerFooterMetrics::slotGap / 2);
+                const int inset = ui::metrics::list::lineInset;
+                const int previewRoom = cell->width()
+                        - (slot % 3 == 0 ? int(ui::metrics::reading::headerSide) : inset)
+                        - (slot % 3 == 2 ? int(ui::metrics::reading::headerSide) : inset);
                 const auto previewImage = cell->grab().toImage();
                 contents[slot] = {};
                 contents[slot].text = ui::headerFooterText(content, font, previewRoom);
@@ -4841,6 +5100,7 @@ private slots:
 
         ui::setDensity(ppi);
         ReadingPage page(nullptr, [] { });
+        page.setProperty("reader_dark", dark);
         page.resize(ui::px(800), ui::px(1000));
         page.image = QImage(page.size(), QImage::Format_RGB32);
         const auto paper = dark ? Qt::black : Qt::white;
@@ -4915,8 +5175,8 @@ private slots:
             for (const int size : { 24, 26, 28, 48 }) {
                 page.chrome.headerSize = page.chrome.footerSize = size;
                 const int step = (size - 24) / 2;
-                QCOMPARE(page.topHeight(), ui::px(48 + step * 4));
-                QCOMPARE(page.bottomHeight(), ui::px(48 + step * 4));
+                QCOMPARE(page.topHeight(), ui::px(size == 26 ? 48 : 48 + step * 4));
+                QCOMPARE(page.bottomHeight(), ui::px(size == 26 ? 48 : 48 + step * 4));
                 QCOMPARE(page.headerTextPixels(), ui::px(24 + step * 2));
                 QCOMPARE(page.footerTextPixels(), ui::px(24 + step * 2));
                 int iconHeight = 0;

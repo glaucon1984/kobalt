@@ -32,6 +32,8 @@ public:
 
     QString error() const { return error_; }
 
+    quint64 generation() const { return generation_; }
+
     const QVector<Highlight> &highlights() const;
     // Ordinary reading fetches payloads only for visible rows or an edited passage.
     bool excerpts(const QStringList &ids, QVector<HighlightExcerpt> *rows);
@@ -68,6 +70,7 @@ public:
     bool remove(const QString &id);
 
     // True until the newest save has reported back.
+    bool discardQueuedWrites() { return !writer_ || writer_->discardQueued(); }
     bool saving() const { return reported_ < posted_; }
 
     // Waits for the running and pending save, for example before USB export.
@@ -93,6 +96,7 @@ private:
     std::function<QString()> layout;
     std::unique_ptr<HighlightStore> store_;
     QString layout_, lookup_, error_;
+    QStringList printedPages_;
     QVector<int> pages_, order_, bookPages_;
     std::shared_ptr<std::atomic_bool> lookupCancelled_;
     quint64 generation_ = 0;

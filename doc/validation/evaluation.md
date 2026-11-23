@@ -2,7 +2,7 @@
 
 Label `evaluation`. Build `mac-tests`, then run `ctest --preset mac -L evaluation` from `platforms/desktop/`. `ctest --preset mac -N -L evaluation` lists its tests.
 
-These checks cover the performance-mode timing events, the release-evaluation result formats, the evaluation lock and the scenario player's sleep, KOSync and Wi-Fi steps and its resource samples. `platform.scenario-sleep` runs the scenario player with a controlled host and no reader window. [Release evaluation](../release-evaluation.md) describes the comparison workflow.
+These checks cover the performance-mode timing events, the release-evaluation result formats, the evaluation lock and the scenario player's sleep, KOSync, Wi-Fi and check steps and its resource samples. `desktop.deviceChecks` runs the `check.` scenarios of the scenario file through the player and fails on a failed check; see [Device checks](../release-evaluation.md#device-checks). `platform.scenario-sleep` runs the scenario player with a controlled host. Rendering-mode checks use a headless window. [Release evaluation](../release-evaluation.md) describes the comparison workflow. A fresh opening needs a cache-removal callback. A standalone cache-removal step requires the host to report that the book is closed. The application keeps processing events while the writer removes disposable caches. If removal fails, the scenario fails before the cold opening starts.
 
 ## Performance and release evaluation
 
@@ -14,7 +14,7 @@ Set `KOBALT_LAYOUT_TIMINGS=1` for the alternate-layout executable to run an engi
 
 ## Measuring
 
-Use `KOBALT_CHAPTER_MODE=0 KOBALT_PERF_FILTER=loading.large.accurate.cold cmake -DPARTS=perf -DRUNS=3 -P platforms/eval/run.cmake` for fresh Accurate War and Peace openings. Run Hybrid separately with `KOBALT_CHAPTER_MODE=2 KOBALT_PERF_FILTER=loading.large.hybrid.cold`. Each scenario requires its stated override; the fixture's mode field only labels the results. Both record the production `reader-shown` event. The Hybrid scenario also measures from the third page turn until the whole document is ready, including idle scheduling. This timer is separate from first-page readiness. Fresh openings discard application caches; they do not flush the operating system's file cache. The desktop opener supplies no document-cache path, so ordinary desktop reopening does not prove a disk-cache hit. Test disk reopening through `openResources` and require a cache hit.
+Use `KOBALT_PERF_FILTER=loading.large. cmake -DPARTS=perf -DRUNS=3 -P platforms/eval/run.cmake` for fresh War and Peace openings. Each scenario selects its own rendering mode, Accurate or Hybrid. Both record the production `reader-shown` event. The Hybrid scenario also measures from the third page turn until the whole document is ready, including idle scheduling. This timer is separate from first-page readiness. Fresh openings discard application caches; they do not flush the operating system's file cache. The desktop opener supplies no document-cache path, so ordinary desktop reopening does not prove a disk-cache hit. Test disk reopening through `openResources` and require a cache hit.
 
 Use `KOBALT_PERF_FILTER=memory.large. cmake -DPARTS=perf -DRUNS=3 -P platforms/eval/run.cmake` to measure resident memory while War and Peace is open. It records total process memory and the increase from before the first book opened. Compare baseline and candidate with the same filter. Use `book.` and `page.` in separate runs to compare opening and page-turn timings.
 
@@ -52,3 +52,5 @@ Three consecutive screenshot runs with the corrected Type Tester fixture, fixed 
 The Qt5 package passed ZIP integrity checks and contains the ARM32 library at `usr/local/Kobo/imageformats/libkobalt.so` in `KoboRoot.tgz`. The prepared SDK prints a CMake developer warning for `COPY_ONLY` in its resource macro; this did not prevent compilation or packaging. This check does not run the package on a device or establish firmware compatibility. Neither the Mac nor the Qt5 validation rebuilt Qt.
 
 `desktop.fastLocateText` checks that a scenario can hold a word in another chapter when Fast rendering gives the search hit an estimated book page.
+
+The device report check holds the writer busy while the reader submits the results. It checks the saved JSON lines, the completion on the reader thread and the failure notice input when the destination cannot be written.

@@ -89,11 +89,11 @@ Both runs must measure the same subject. `CALIBRATE` adds the pair to `build/eva
 
 Micro-benchmarks lay out and draw text with new content in each sample, so the layout cache cannot hide the work: a dictionary entry, a footnote, the AGPL notice, a page draw, a wrapped label and an elided title.
 
-All other scenarios come from `platforms/eval/scenarios.json` and run through the reader's built-in scenario player, in the production desktop window. A scenario names its book, an optional rendering mode (see [Resource gate](#resource-gate)), optional `setup` steps that run once, the `steps` of one sample, `after` steps that tidy up between samples and `teardown` steps that run at the end. Steps press a control by its object name, hold a word or a link found by its text, send a page key, wait for a control to appear or close, wait for the reader to settle, wait for a diagnostics event, let a fixed time pass (`wait_ms`), open or close a book, and remove the disposable caches of a book (`forget`). On a Kobo, `wait_ms` counts real time, including time in standby. The player keeps the device awake for the whole run: Kobalt's `PowerManager::canSuspend` hook answers false, so Nickel's standby does not stretch waits and samples. A kernel wake lock does not work for this, because Nickel reads `/sys/power/wakeup_count` on its GUI thread before each suspend and that read waits while a lock is held, which freezes the reader and the run. A scenario that sets `"standby": true` lets the device suspend while it runs. An event step can require more fields with `where`, such as `{"operation":"wifi-off"}`. With `"earlier": true` it also matches the events that earlier steps of the same sample skipped or passed over, for work that can end before or after the step. With `as`, the sample refers to the matched event by that name, so a sample can keep several events of one kind. A `mark_end` step ends the time since `mark`, so later steps can wait for more events without adding to the sample. A `native-sync` step starts the host's own store sync, as its sync button does, and does not wait for it to end. When a sync from an earlier sample still runs, the step first waits for it to end, at most 5 minutes or the step's `timeout`. A scenario that needs it lists `native-sync` in `needs`; the Mac player skips it. A `{"wifi":"off"}` step turns Wi-Fi off on the host and waits until the radio is down, at most 15 seconds or the step's `timeout`. It does nothing when Wi-Fi is already off. On a Kobo it calls Nickel's `WirelessManager::off()`, the same call that KOSync makes after a sync that it connected for. The call waits on the main thread in its own declared scope, `scenario wifi step`, and is timed as `scenario-wifi-off`, so it is not mistaken for KOSync's `wifi-off`. A host without it skips the scenario; the Mac player is such a host. A `kosync` step sets a KOSync account in memory for the rest of the scenario. Its optional `interval_ms` replaces the time between automatic syncs while reading, so a scenario does not wait 30 seconds for each sync; the saved account is not read or written, and the account ends with the scenario, also after a failure. The reader has settled when its engine has no work queued or running, including drawing the pages beside the current one. A page key sent earlier waits for that drawing or misses the page cache, so a sample would measure the race instead of the turn. A list of names or points in a step takes the next entry in each sample. The sample is a field of a diagnostics event, the time since a `mark` step, or the process's memory from a diagnostics event. The player sends taps and holds through the window system, as real input arrives. After a panel or pop-up closes, the reader ignores a tap where its close cell was for 400 ms. A press step first waits until that guard ends, as a person would, so the guard does not swallow it; the wait comes before the sample. Page keys call the reader directly and skip its filter for page turns less than 200 ms after the last one, so a sample measures the turn and not the filter. It is compiled only into the test executable and into evaluation packages.
+All other scenarios come from `platforms/eval/scenarios.json` and run through the reader's built-in scenario player, in the production desktop window. A scenario names its book, an optional rendering mode (see [Resource gate](#resource-gate)), optional `setup` steps that run once, the `steps` of one sample, `after` steps that tidy up between samples and `teardown` steps that run at the end. Steps press a control by its object name, hold a word or a link found by its text, send a page key, wait for a control to appear or close, wait for the reader to settle, wait for a diagnostics event, let a fixed time pass (`wait_ms`), open or close a book, and remove the disposable caches of a book (`forget`). On a Kobo, `wait_ms` counts real time, including time in standby. The player keeps the device awake for the whole run: Kobalt's `PowerManager::canSuspend` hook answers false, so Nickel's standby does not stretch waits and samples. A kernel wake lock does not work for this, because Nickel reads `/sys/power/wakeup_count` on its GUI thread before each suspend and that read waits while a lock is held, which freezes the reader and the run. A scenario that sets `"standby": true` lets the device suspend while it runs. An event step can require more fields with `where`, such as `{"operation":"wifi-off"}`. With `"earlier": true` it also matches the events that earlier steps of the same sample skipped or passed over, for work that can end before or after the step. With `as`, the sample refers to the matched event by that name, so a sample can keep several events of one kind. A `mark_end` step ends the time since `mark`, so later steps can wait for more events without adding to the sample. A `native-sync` step starts the host's own store sync, as its sync button does, and does not wait for it to end. When a sync from an earlier sample still runs, the step first waits for it to end, at most 5 minutes or the step's `timeout`. A scenario that needs it lists `native-sync` in `needs`; the Mac player skips it. A `{"wifi":"off"}` step turns Wi-Fi off on the host and waits until the radio is down, at most 15 seconds or the step's `timeout`. It does nothing when Wi-Fi is already off. On a Kobo it calls Nickel's `WirelessManager::off()`, the same call that KOSync makes after a sync that it connected for. The call waits on the main thread in its own declared scope, `scenario wifi step`, and is timed as `scenario-wifi-off`, so it is not mistaken for KOSync's `wifi-off`. A host without it skips the scenario; the Mac player is such a host. A `kosync` step sets a KOSync account in memory for the rest of the scenario. Its optional `interval_ms` replaces the time between automatic syncs while reading, so a scenario does not wait 30 seconds for each sync; the saved account is not read or written, and the account ends with the scenario, also after a failure. The reader has settled when its engine has no work queued or running, including drawing the pages beside the current one. A page key sent earlier waits for that drawing or misses the page cache, so a sample would measure the race instead of the turn. A list of names or points in a step takes the next entry in each sample. The sample is a field of a diagnostics event, the time since a `mark` step, or the process's memory from a diagnostics event. The player sends taps and holds through the window system, as real input arrives. After a panel or pop-up closes, the reader ignores a tap where its close cell was for 400 ms. A press step first waits until that guard ends, as a person would, so the guard does not swallow it; the wait comes before the sample. Page keys call the reader directly and skip its filter for page turns less than 200 ms after the last one, so a sample measures the turn and not the filter. It is compiled only into the test executable and into evaluation packages. A check scenario adds steps that compare values instead of timing them; see [Device checks](#device-checks).
 
 The scenarios cover book opening and closing, page turns, a page turn back into the previous chapter, the reading menu, a text-size change, long and short dictionary entries, a long footnote, Settings, Acknowledgments, the licence notice and memory use. The word-spacing and tracking scenarios open their Styling sheets and wait for the sample to paint. Their panel-open events use panel styling and include sample_ms for construction and the wait for the rendered sample. Pending sample renders, including cancelled jobs, keep the reader busy until their results reach the GUI thread. They use the benchmark book, a small notes fixture and War and Peace. The `resources.` scenarios measure the CPU time, memory and storage writes of opening, background layout, page turns and closing; see [Resource gate](#resource-gate). On the Mac, a substituted dictionary service gives "set" a long entry and other words a short one, as a real English dictionary does.
 
-`book.open` closes the open book and opens it again, so the parsed book comes from the cache, and samples `reader-shown`. `book.close` turns a page and closes the book, and samples `book-close`. On the measured Mac, a close took about 125 ms while picker fonts were added to Qt's font database, because removing them made Qt rebuild that database. With private picker fonts it takes about 22 ms. `book.open.large` removes the disposable caches and opens War and Peace, so each sample parses and lays out the whole book. `reflow.font-size` taps the larger and smaller text-size buttons in the reading menu, in turn. While the menu is open, only a preview of the current chapter reflows, so the scenario times the menu's close until the reflowed book page has rendered. It also records the engine's `render_ms`. `memory.reading` records the resident size after the reading scenarios, and `memory.peak` the peak resident size at the end of the run, both in KiB. Both depend on what ran earlier in the process, so compare them only between runs with the same filter. `memory.kobalt.reading` and `memory.kobalt.peak` record the same values minus the resident size when the first book began to open. The reader logs that base as `base_rss_kib` in a `memory-base` event. On a Kobo the base is Nickel with Kobalt loaded but not yet reading, taken before Kobalt prepares the last book after a restart, so these two show Kobalt's own share without the host, and Qt 5 and Qt 6 compare directly. On the Mac the base is the app before its first book.
+`book.open` closes the open book, reopens it at the saved position and samples `reader-shown`. `book.close` turns a page and closes the book, and samples `book-close`. On the measured Mac, a close took about 125 ms while picker fonts were added to Qt's font database, because removing them made Qt rebuild that database. With private picker fonts it takes about 22 ms. `book.open.large` removes the disposable caches and opens War and Peace, so each sample parses and lays out the whole book. `reflow.font-size` taps the larger and smaller text-size buttons in the reading menu, in turn. While the menu is open, only a preview of the current chapter reflows, so the scenario times the menu's close until the reflowed book page has rendered. It also records the engine's `render_ms`. `memory.reading` records the resident size after the reading scenarios, and `memory.peak` the peak resident size at the end of the run, both in KiB. Both depend on what ran earlier in the process, so compare them only between runs with the same filter. `memory.kobalt.reading` and `memory.kobalt.peak` record the same values minus the resident size when the first book began to open. The reader logs that base as `base_rss_kib` in a `memory-base` event. On a Kobo the base is Nickel with Kobalt loaded but not yet reading, taken before Kobalt prepares the last book after a restart, so these two show Kobalt's own share without the host, and Qt 5 and Qt 6 compare directly. On the Mac the base is the app before its first book.
 
 The `panel.styling.widows` and `panel.styling.page-spacing` scenarios separate entry from prepared previews. The `.entry` timer starts before pressing Styling and ends when the preview has painted, including tab entry and preparation of the requested preview. Its stages also report the modal event and sample wait. The `.prepared` scenario opens and closes the requested sheet once before measuring cached reopening. Compare both metrics; timing only the modal can hide work moved into the tab.
 
@@ -102,7 +102,7 @@ The `panel.styling.widows` and `panel.styling.page-spacing` scenarios separate e
 `reader-shown` times a book opening from the open request until the first reader page has painted. `total_ms` is the sum of four stages:
 
 - `engine_ms`: until the reading engine has laid out the book. On Kobo, `prepare_ms` gives the part before the engine started.
-- `window_ms`: creating and sizing the reader window. When Kobo shows the hidden window built after Nickel started, it is only the time to activate that window, and `build_ms` and its parts describe the earlier build. `build_ms` is the window's own construction, with one `build_<part>_ms` per part, such as `build_menu_ms`. Settings and the Text and Layout controls are built when they first open, or once the book has settled, so their cost is in that panel's opening time or a `reader-panels-prepare` operation, not in `build_ms`.
+- `window_ms`: creating and sizing the reader window. `build_ms` is the window's own construction, with one `build_<part>_ms` per part, such as `build_menu_ms`. Settings and the Text and Layout controls are built when they first open, or once the book has settled, so their cost is in that panel's opening time or a `reader-panels-prepare` operation, not in `build_ms`.
 - `wait_ms`: waiting until the window may be shown, for example for a pending sync.
 - `show_ms`: from handing the window over until its page has painted. `theme_ms` is the first theme pass inside it.
 
@@ -125,7 +125,11 @@ The `resources.` scenarios measure what the main reading cycle costs in CPU time
 | `resources.turn.backward` | where the forward turns ended | the same, one turn back |
 | `resources.close` | the whole book is laid out | the reader is gone and its saves are done |
 
+Removing the book cache leaves its saved reading position in place. The warm scenario turns three pages before each measured reopen, so the cold and warm scenarios can resume on different pages. Standalone macOS opens do not use the parsed-book disk cache, and either scenario can reuse the operating system's file cache. A comparison that measures the effect of the parsed-book cache needs a host that uses it and the same saved position in both runs.
+
 The second after each turn is quiet time, as a reader pauses. A write that a turn schedules for up to one second later counts for that turn, so the turn samples measure CPU time, not the speed of the turn. `page.turn` measures that. Hybrid starts the background layout only after three page turns, as a reader who has started to read. `resources.layout` turns three pages, so it also includes the two-second quiet time before the build starts. Use its CPU time, not its wall time.
+
+A diagnostics event wakes the scenario player when it matches the current step. A held press uses one timer until release. For host state such as reader activity or widget visibility, the player checks immediately and then every 16 ms. A close also checks when the host emits `book-close`. This wakes the player as soon as the reader is gone and the host is idle. A host that emits no close event or becomes idle after that event uses the periodic check. Other timed steps that wait for host state can include that detection delay. Earlier players polled every millisecond, which also counted the polling work in CPU samples. Use the same player version to compare those measurements.
 
 A sample is the time from `mark` to `mark_end`. With `"resources": true` in `sample`, the player also reads the counters of the operating system at both steps and adds the difference as stages. The reader has no write counters of its own; every value comes from the kernel:
 
@@ -151,7 +155,7 @@ The report starts with `Resource gate: pass` or `fail`, and its last section lis
 - a resource scenario of the base is missing from the target;
 - a resource metric is `slower` or `higher` than its band and floor allow.
 
-A metric that is `faster`, `lower` or `noisy` does not fail the gate. Add `-DGATE=ON` to the comparison to make the command fail with the gate:
+A metric that is `faster`, `lower` or `noisy` does not fail the gate. The report summary names each noisy resource metric. Repeat the measurement with more runs before drawing a conclusion about that metric. Add `-DGATE=ON` to the comparison to make the command fail with the gate:
 
 ```sh
 cmake -DRECORD_BASELINE=ON -P platforms/eval/run.cmake
@@ -166,7 +170,6 @@ Limits of the measurement:
 - Neither system counts `fsync` calls for a process without root, so the gate has no sync count.
 - `disk_written_bytes` includes the diagnostics log that the performance mode writes.
 - On macOS the main thread is the GUI thread of the player. Kobalt's worker threads have no names on the desktop, so most CPU time is under `unnamed` and `QThread`.
-- The desktop opener has no parsed-book cache, so a warm open on the desktop is not a disk-cache hit. It reuses the operating system's file cache only.
 - On Linux, the CPU time of a single thread counts in clock ticks, 10 ms each, and the kernel cuts thread names to 15 characters. The process and GUI-thread times are exact.
 - A Kobo kernel without task I/O accounting has no `/proc/self/io`; the I/O stages are then missing from device results.
 
@@ -203,6 +206,85 @@ The evaluation can also drive a device through an external runner, a program out
 
 The runner installs the package, opens the test book in Kobalt, waits for the `scenario-run-end` event and copies `scenarios.jsonl` into the output folder. It exits with zero when it wrote the file, even if a scenario failed. The comparator still reads `device.json` from runs recorded by an earlier runner.
 
+With `-DDEVICE_FILTER=check.`, `run.cmake` adds `--filter check.` to the runner command. The runner then prepares the device as `install-eval.cmake` does with `SCENARIO_FILTER`: it writes `filter` into `.adds/kobalt/scenarios/scenarios.json`, removes an earlier `scenarios.jsonl` and empties `.adds/kobalt/scenarios/profile`. A runner that can reach the device storage can call `install-eval.cmake` and `collect-eval.cmake` for this. The run records the filter in `meta.json`, and the comparison notes when two device runs used different filters. A runner cannot do the manual USB and power-off checks of [Device checks](#device-checks).
+
+### Device checks
+
+The opt-in `check.` scenarios test what the reader does, not how long it takes. Each one ends as passed, failed or skipped, with a reason. Use them to see if a change works on a real Kobo.
+
+| Scenario | Passes when |
+| --- | --- |
+| `check.settings.sections` | Each Settings section opens and shows one of its own options. |
+| `check.restore.book-defaults` | Larger, Heavier and Wider change the book. Restore book defaults returns the text size and the weight to the defaults, and they stay after the book opens again. |
+| `check.restore.appearance-defaults` | Keep in the confirmation leaves a changed option as it is. Restore returns it to the default, and the default stays after the book opens again. |
+| `check.theme.typeface` | The interface uses Kalam after you choose it, the "Applying theme..." notice closes, and the first typeface comes back. |
+| `check.light.panel` | Dark mode, and automatic brightness and warmth where the device has them, turn over and back in the Light panel. Skipped without a front light. |
+| `check.dark-mode` | Dark mode turns on and off in Settings, the page follows, and the choice stays after the book opens again. |
+| `check.rotation` | Landscape swaps the width and the height of the reader, a page turns, and portrait turns the screen back. The Mac player skips it. |
+| `check.bookmarks` | Add bookmark adds one bookmark, the next page has none, the bookmark stays after the book opens again, and Remove bookmark removes it. Each change saves. |
+| `check.highlights` | A held word gets a highlight, the highlight stays after the book opens again, and Remove deletes it. |
+| `check.search` | Search finds a word of the book, and its result turns to that page. |
+| `check.dictionary` | Holding a word opens the dictionary with an entry, and Close dismisses it. Skipped without a dictionary. |
+
+For firmware 4:
+
+```sh
+bash platforms/kobo/build.sh qt5-eval
+cmake -DPACKAGE=build/kobo-qt5-eval/Kobalt-qt5-eval.zip -DDEVICE=/Volumes/KOBOeReader -DSCENARIO_FILTER=check. -P platforms/kobo/install-eval.cmake
+```
+
+For firmware 5 and 6, use `qt6-eval` and `Kobalt-qt6-eval.zip`. Eject the Kobo, let it restart, open ★ Kobalt Benchmark in Kobalt and wait for the "Benchmark finished" or "Benchmark failed" notice. Then collect the results:
+
+```sh
+cmake -DDEVICE=/Volumes/KOBOeReader -DOUTPUT=build/device-checks/qt5 -P platforms/kobo/collect-eval.cmake
+```
+
+The collect script prints one line for each check scenario, with `pass`, `FAIL` or `skip` and the reason, and then the two manual checks below. In `scenarios.jsonl`, a check scenario has `"kind": "check"` and a `checks` list. Each entry has the name of the check, `pass`, and the `actual` and `expected` values. A check fails when its value does not match within its time limit, when a step fails, or when the main thread is blocked during the check (a `main-thread-blocked` event). After a failure, the scenario still runs its `teardown` to undo its changes. When that fails too, the result has a `cleanup` field with the reason.
+
+The checks change settings, bookmarks and highlights. While the scenario filter starts with `check.`, Kobalt reads and writes the scratch profile `.adds/kobalt/scenarios/profile` instead of the reader's own profile, and `install-eval.cmake` empties it before each run. Kobalt chooses the profile when it loads, so the choice changes only after a restart. To use your own profile again, install the evaluation package without the filter, or remove `.adds/kobalt/scenarios/`, and restart the Kobo. The scratch profile does not cover Nickel: Kobalt still reports the reading position of the benchmark book to Nickel.
+
+The checks are opt-in and take no samples. Runs without the filter, their timings and their comparison are the same as before. On the Mac, `ctest --preset mac -R desktop.deviceChecks` from `platforms/desktop/` runs the same checks through the same player, with a test dictionary and a test front light. It skips `check.rotation`, because the desktop window does not turn.
+
+#### USB and power-off saves
+
+Kobalt saves the open book with a time limit when you connect USB or power off. The player cannot connect a cable or press the power button, so these two checks are manual. Kobalt saves for them only while a book is open in it. Opening a book after a restart starts a new run, so each check has its own order:
+
+1. For the USB check, leave the benchmark book open when the run ends. Connect the Kobo to the computer, choose Connect and collect the results.
+2. For the power-off check, leave the book open when the run ends and turn the Kobo off. Turn it on, do not open a book, then connect it and collect the results.
+
+The collect script reads the event log after the last `scenario-run-end` event and writes the outcomes to `manual-checks.json`.
+
+| Check | Passes on | Fails on |
+| --- | --- | --- |
+| USB connect save | `usb-release-complete` | `usb-save-deadline`, or `usb-release-start` without `usb-release-complete` |
+| Power-off save | `shutdown-save-complete` | `shutdown-save-deadline`, or `shutdown-save-start` without `shutdown-save-complete` |
+
+A check is "not checked" when the log has neither event, for example when no book was open. `compare.cmake` lists the check scenarios and these two saves under "Device checks", and a failed save is a failed part.
+
+#### What the checks cannot cover
+
+- The player sends presses straight to the widget under the point, so Kobalt's touch filter and gestures such as the light swipe and two-finger taps stay untested.
+- Automatic rotation from the motion sensor needs a person to turn the device. `check.rotation` covers the rotation that Kobalt asks for.
+- The checks read the reader's state and its controls. They do not see the front light hardware, e-ink refresh quality or pixel details such as press feedback.
+- Search text goes straight into the search field, so the on-screen keyboard stays untested.
+- The player can only open the benchmark book again, so the checks use that book.
+- KOSync and the Kobo store need a network and an account. See [Wi-Fi off and first open](#wi-fi-off-and-first-open) and [Page turns during a Nickel sync](#page-turns-during-a-nickel-sync).
+
+#### Writing a check
+
+A check scenario has `"kind": "check"` and `"opt_in": true`. It runs once and takes no `sample`. Most checks start with a `setup` that closes and opens the benchmark book, so each one starts from the same screen. These steps add to the ones in [Mac performance scenarios](#mac-performance-scenarios):
+
+| Step | Does |
+| --- | --- |
+| `{"remember": "start"}` | Keeps the reader's state under a name. The state has the fields of the state report, such as `font_pixels`, `bookmark_count`, `highlight_count`, `dark_mode` and `viewport_width`. With `widget` and `property`, it keeps one property of a control instead. |
+| `{"expect": "font_pixels", "above": "start"}` | Compares a state value, found by a dotted path such as `display_settings.dark_mode`. `is` and `is_not` compare with a value. `same_as`, `not_as`, `above` and `below` compare with a remembered one, at the same path or at `field`. `by` asks for an exact difference. The step waits until the comparison holds, at most `timeout` milliseconds (5000 by default), and records it under its `check` name. |
+| `{"widget": "rrDarkMode", "property": "checked", "is": true}` | Compares a property of a control in the same way. `property` is `checked` by default. |
+| `{"reveal": "rrDarkMode"}` | Pages the Settings options until the control can be pressed. `next` and `previous` name the buttons of another pager. |
+| `{"type": "word", "into": "rrSearchQuery"}` | Puts text into a field. |
+| `{"choose": "Kalam", "in": "rrSettingsFontChoices"}` | Presses the option with this label in a list, paging with `next` and `previous`. With `keep`, it first keeps the label of the checked option, and a later `"choose": "@name"` returns to it. |
+
+Any step runs only `if` a control shows, or `unless` it shows. `needs` can also list `light` and `rotation`; a host without them skips the scenario.
+
 ### Reading benchmark on any book
 
 The opt-in `reading.` scenarios measure reading on a book of your choice, not on the benchmark book. They use the book entry `opened` in the scenario file, which is marked `"current": true`: it stands for whichever book is open when the run starts. Copy a book to the Kobo, install the package with the filter, restart, and open that book in Kobalt:
@@ -213,7 +295,7 @@ cmake -DPACKAGE=build/kobo-qt5-eval/Kobalt-qt5-eval.zip -DDEVICE=/Volumes/KOBOeR
 
 The run then needs no further input. It ends with the usual notice.
 
-- `reading.open` closes the book and opens it again cold. The player removes the book's document and layout caches and the closed book that Kobalt keeps in memory, so the opening parses and lays out the book again.
+- `reading.open` closes the book and opens it again cold. The player removes the parsed-book cache and the closed book that Kobalt keeps in memory, so the opening parses and lays out the book again.
 - `reading.turn.paced` turns pages and waits after each turn until the engine is idle, as a reader who reads the page does.
 - `reading.turn.fast` turns pages without that wait.
 - `reading.memory` reports the memory after those turns.
@@ -307,9 +389,11 @@ ctest --preset mac -R '^platform.(sleep-persistence|scenario-sleep)$'
 
 ## Evaluate a candidate
 
+CI does not run the sanitizer checks, so run them for every candidate that you compare against the previous beta: `KOBALT_NATIVE_SANITIZE=1 bash platforms/ci/native-tests.sh` from the repository root, or the Mac `mac-sanitize` preset from [Desktop memory checks](validation.md#desktop-memory-checks). On the development Mac, the `mac-sanitize` test run takes about 6 minutes after the build. Record the result with the report.
+
 Read `report.md` from the top and decide:
 
-1. A failed part at the top of the report, or a newly failing test, blocks the release until it is explained. A removed test needs a reason in the commits. So does a failed resource gate.
+1. A failed part at the top of the report, a newly failing test or a failed sanitizer run blocks the release until it is explained. A removed test needs a reason in the commits. So does a failed resource gate.
 2. Each changed screenshot is explained by a commit, or it is listed as unexplained. Inspect the crops in `screens/`.
 3. Each `slower` or `faster` metric is checked against `touched_by` and the commit messages. An intended speed-up or an accepted cost is expected. A change that no commit explains is unexpected.
 4. A comparability warning, or a `noisy` verdict on a metric that matters, means measure again with more `RUNS`.

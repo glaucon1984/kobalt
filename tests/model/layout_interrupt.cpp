@@ -1,12 +1,23 @@
 #include "check.h"
 #include "engine_fixtures.h"
 #include "reader_inputs.h"
+#include "engine/blaze/adapter/column_view.h"
 #include "engine/blaze/adapter/engine_document.h"
 #include <QElapsedTimer>
 #include <QGuiApplication>
 #include <cstdio>
+#if __has_include(<koblaze.h>)
+#  include <koblaze.h>
+#endif
 
 using namespace kobalt;
+
+namespace kobalt {
+struct ReaderLocationProbe
+{
+    static ColumnView &view(EngineDocument &model) { return *model.engine_; }
+};
+} // namespace kobalt
 
 namespace {
 void open(EngineDocument &model, const test::BookFiles &files)
@@ -39,6 +50,92 @@ bool setFont(EngineDocument &model, int pixels)
 {
     return model.applyAppearance(appearance::Patch(QJsonObject{ { "font_pixels", pixels } }));
 }
+
+#if __has_include(<koblaze.h>)
+void rejectedPageList()
+{
+    LVRendPageList pages;
+    pages.add(new LVRendPageInfo(0, 100, 0));
+    pages.add(new LVRendPageInfo(100, 100, 1));
+    pages[1]->justificationPrefix = 101;
+    SerialBuf saved(128);
+    require(pages.serialize(saved), "Cannot save test page list");
+    SerialBuf input(saved.buf(), saved.pos());
+    LVRendPageList restored;
+    require(!restored.deserialize(input) && restored.empty(),
+            "A rejected page record left a partial page list");
+    pages[1]->justificationPrefix = 0;
+    saved.reset();
+    require(pages.serialize(saved), "Cannot save the corrected page list");
+    SerialBuf incomplete(saved.buf(), saved.pos() / 2);
+    require(!restored.deserialize(incomplete) && restored.empty(),
+            "An incomplete list restored pages");
+    SerialBuf complete(saved.buf(), saved.pos());
+    require(restored.deserialize(complete) && restored.length() == 2 && restored[1]->start == 100,
+            "A valid page list failed to restore after a rejected list");
+}
+
+// A stop after the page split must discard the unfinished layout before another render.
+void cancelledPageSplit()
+{
+    EngineDocument reader(test::readerFonts());
+    open(reader, test::engineBook(false, 2, 120));
+    auto &view = ReaderLocationProbe::view(reader);
+    view.setFontSize(40);
+    LVRendPageList pages;
+    koblazeSetCancelCheck([](void *p) { return static_cast<LVRendPageList *>(p)->length() > 1; },
+                          &pages);
+    bool stopped = false;
+    try {
+        view.Render(0, 0, &pages);
+    } catch (const KoblazeRenderCancelled &) {
+        stopped = true;
+    }
+    koblazeSetCancelCheck(nullptr, nullptr);
+    require(stopped, "The render did not stop after splitting the pages");
+    require(pages.length() == 0 && !view.getDocument()->koblazeSaveLayout(),
+            "A stopped render kept the split pages or accepted an unfinished layout");
+    view.Render();
+    const int count = view.getPageList()->length();
+    require(count > 1 && view.koblazeSaveLayout() && view.koblazeRestoreLayout()
+                    && view.getPageList()->length() == count,
+            "The retry did not produce a restorable page list");
+}
+
+// A style pass can stop with a fragment stylesheet active after the old page geometry was saved.
+void cancelledStylesDiscardSavedLayout()
+{
+    EngineDocument reader(test::readerFonts());
+    open(reader, test::engineBook(false, 2, 120));
+    auto &view = ReaderLocationProbe::view(reader);
+    require(view.koblazeSaveLayout(), "Cannot save the layout before a style change");
+
+    struct StopDuringStyles : LVDocViewCallback
+    {
+        bool entered = false;
+
+        void OnNodeStylesUpdateProgress(int) override { entered = true; }
+    } callback;
+
+    auto *previous = view.getCallback();
+    view.setCallback(&callback);
+    view.setFontSize(40);
+    koblazeSetCancelCheck([](void *p) { return static_cast<StopDuringStyles *>(p)->entered; },
+                          &callback);
+    bool stopped = false;
+    try {
+        view.Render();
+    } catch (const KoblazeRenderCancelled &) {
+        stopped = true;
+    }
+    koblazeSetCancelCheck(nullptr, nullptr);
+    view.setCallback(previous);
+    require(stopped, "The layout did not stop inside the style pass");
+    require(!view.koblazeRestoreLayout(), "Restored old geometry onto partially updated styles");
+    require(!view.getDocument()->getStyleSheet()->pop(),
+            "The stopped style pass left a stylesheet pushed");
+}
+#endif
 
 void interruptedViewportChange()
 {
@@ -101,7 +198,30 @@ int main(int argc, char **argv)
 {
     QGuiApplication app(argc, argv);
 #if __has_include(<koblaze.h>)
+    // A layout destructor can reach a second cancellation check while the first unwinds.
+    int cancellationChecks = 0;
+    koblazeSetCancelCheck(
+            [](void *context) {
+                ++*static_cast<int *>(context);
+                return true;
+            },
+            &cancellationChecks);
+    try {
+        struct CheckOnUnwind
+        {
+            ~CheckOnUnwind() { koblazeCheckCancel(); }
+        } check;
+
+        koblazeCheckCancel();
+        require(false, "The first check did not cancel layout");
+    } catch (const KoblazeRenderCancelled &) {
+        require(cancellationChecks == 1, "Layout asked to cancel again while unwinding");
+    }
+    koblazeSetCancelCheck(nullptr, nullptr);
     interruptedViewportChange();
+    cancelledStylesDiscardSavedLayout();
+    rejectedPageList();
+    cancelledPageSplit();
     EngineDocument model(test::readerFonts());
     open(model, test::engineBook(false, 8, 120));
     require(model.go(model.pages() / 2), "Cannot go to the middle of the book");

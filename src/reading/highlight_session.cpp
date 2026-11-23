@@ -178,7 +178,8 @@ bool HighlightSession::resolved() const
 
 BookmarkLocations HighlightSession::locations() const
 {
-    return resolved() ? BookmarkLocations{ pages_, order_, bookPages_, {} } : BookmarkLocations{};
+    return resolved() ? BookmarkLocations{ pages_, order_, bookPages_, {}, printedPages_ }
+                      : BookmarkLocations{};
 }
 
 int HighlightSession::page(int index) const
@@ -208,6 +209,7 @@ bool HighlightSession::sync()
         pages_.clear();
         order_.clear();
         bookPages_.clear();
+        printedPages_.clear();
         return true;
     }
     if (lookup_ == key && lookupRevision_ == revision && lookupGeneration_ == rangesGeneration_) {
@@ -241,6 +243,7 @@ bool HighlightSession::sync()
                     guard->pages_ = std::move(locations.pages);
                     guard->order_ = std::move(locations.order);
                     guard->bookPages_ = std::move(locations.bookPages);
+                    guard->printedPages_ = std::move(locations.printedPages);
                 }
                 if (guard->changed) {
                     guard->changed();

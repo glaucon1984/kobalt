@@ -1,22 +1,32 @@
 #include "platforms/kobo/common/home_sleep_screen.h"
+#include "platforms/kobo/display/sleep_refresh.h"
 #include "platforms/kobo/common/native_ui.h"
+#include "platforms/kobo/common/reader_environment.h"
+#include "support/font_fixtures.h"
 #include "platforms/kobo/common/window_presentation.h"
 #include "app/reader/views/sleep_screen.h"
 #include "ui/style/fonts.h"
 #include "assets/assets.h"
 #include "storage/sleep_snapshot.h"
-#include "support/strings.h"
+#include "support/percentage_text.h"
 #include <QSqlDatabase>
 #include <QSqlQuery>
 #include <QDir>
 #include <QFile>
 #include <QApplication>
+#include <QCryptographicHash>
 #include <QTemporaryDir>
 #include <QPointer>
 #include <QPainter>
+#include <QLabel>
 #include <QTest>
 #include <QScreen>
 #include <QScopeGuard>
+#include <QSemaphore>
+#include <atomic>
+#include <array>
+#include <algorithm>
+#include "support/main_thread.h"
 #include <qpa/qwindowsysteminterface.h>
 
 // These substitute the native battery service and window types only. The
@@ -52,6 +62,8 @@ class Device
 public:
     static Device *getCurrentDevice();
     const QString &getDbName() const;
+    bool isSpaKobo() const;
+    bool claraColour = false;
 };
 
 Device *Device::getCurrentDevice()
@@ -64,6 +76,11 @@ const QString &Device::getDbName() const
 {
     static const QString name("power-screen-native");
     return name;
+}
+
+bool Device::isSpaKobo() const
+{
+    return claraColour;
 }
 
 class DatabaseAdapter
@@ -87,6 +104,20 @@ class AbstractPowerView : public QWidget
     Q_OBJECT
 public:
     using QWidget::QWidget;
+};
+
+class PaintCounter : public QObject
+{
+public:
+    int count = 0;
+
+protected:
+    bool eventFilter(QObject *, QEvent *event) override
+    {
+        if (event->type() == QEvent::Paint)
+            ++count;
+        return false;
+    }
 };
 
 class PaintProbe : public QWidget
@@ -130,31 +161,321 @@ class PowerScreenTests : public QObject
     Q_OBJECT
 private slots:
 
+    void openingFontsDeliverOnlyToCurrentRequest()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        QVERIFY(!kobalt::test::copyOpeningFontFixture(QStringLiteral(KOBALT_TEST_ASSET_ROOT),
+                                                      root.path())
+                         .isEmpty());
+        kobalt::nickel::ReaderEnvironment environment(root.path());
+        QStringList called;
+        environment.verifyAssets(this, "startup", [&](bool) { called.append("stale startup"); });
+        environment.whenOpeningFontsReady([&] { called.append("stale opening"); });
+
+        // Both verification and preparation finish on the worker. Hold its
+        // queued GUI delivery until a new USB generation replaces it.
+        QSemaphore prepared;
+        kobalt::qt::invoke(
+                kobalt::engineWorker(), [&] { prepared.release(); }, Qt::QueuedConnection);
+        prepared.acquire();
+        QVERIFY(environment.assets.available());
+        QVERIFY(called.isEmpty());
+        environment.verifyAssets(
+                this, "usb", [&](bool valid) { called.append(valid ? "verified" : "invalid"); });
+        environment.whenOpeningFontsReady([&] { called.append("replaced"); });
+        environment.whenOpeningFontsReady([&] { called.append("current"); });
+        QVERIFY(called.isEmpty());
+        QTRY_COMPARE(called.size(), 2);
+        QCOMPARE(called.count("verified"), 1);
+        QCOMPARE(called.count("current"), 1);
+        environment.whenOpeningFontsReady([&] { called.append("ready"); });
+        QCOMPARE(called.last(), QStringLiteral("ready"));
+
+        environment.verifyAssets(
+                this, "usb", [&](bool valid) { called.append(valid ? "finished" : "invalid"); });
+        environment.whenOpeningFontsReady([&] { called.append("cancelled"); });
+        environment.cancelOpeningFontWait();
+        QTRY_COMPARE(called.last(), QStringLiteral("finished"));
+        QCOMPARE(called.count("cancelled"), 0);
+    }
+
+    void openingRechecksFontsAfterFailedRead()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        QVERIFY(!kobalt::test::copyOpeningFontFixture(QStringLiteral(KOBALT_TEST_ASSET_ROOT),
+                                                      root.path())
+                         .isEmpty());
+        kobalt::nickel::ReaderEnvironment environment(root.path());
+        QList<bool> verified;
+        environment.verifyAssets(this, "startup", [&](bool valid) { verified.append(valid); });
+        QTRY_COMPARE(verified.size(), 1);
+        QVERIFY(verified.first());
+        QVERIFY(kobalt::ui::openingFontsPrepared(environment.assets));
+        // The worker verified the bundle, then could not read its fonts.
+        kobalt::ui::setPreparedOpeningFonts(environment.assets, {});
+        QVERIFY(environment.assetsAvailable());
+        QVERIFY(!kobalt::ui::openingFontsPrepared(environment.assets));
+        // The opening waits for a new read on the worker instead of failing.
+        bool resumed = false;
+        environment.whenOpeningFontsReady([&] { resumed = true; });
+        QVERIFY(!resumed);
+        QTRY_VERIFY(resumed);
+        QVERIFY(environment.assetsAvailable());
+        QVERIFY(kobalt::ui::openingFontsPrepared(environment.assets));
+        QCOMPARE(verified.size(), 1);
+    }
+
+    void homeFontsRereadAfterFailedRead()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        QVERIFY(!kobalt::test::copyOpeningFontFixture(QStringLiteral(KOBALT_TEST_ASSET_ROOT),
+                                                      root.path())
+                         .isEmpty());
+        kobalt::nickel::ReaderEnvironment environment(root.path());
+        QList<bool> verified;
+        environment.verifyAssets(this, "startup", [&](bool valid) { verified.append(valid); });
+        QTRY_COMPARE(verified.size(), 1);
+        QVERIFY(verified.first());
+        // The worker verified the bundle, then could not read its fonts.
+        kobalt::ui::setPreparedOpeningFonts(environment.assets, {});
+        // The Home sleep screen waits for a new read instead of drawing without them.
+        QList<bool> delivered;
+        QVERIFY(environment.deferHomeFonts([&](bool prepared) { delivered.append(prepared); }));
+        QTRY_COMPARE(delivered.size(), 1);
+        QVERIFY(delivered.first());
+        QVERIFY(kobalt::ui::openingFontsPrepared(environment.assets));
+        QCOMPARE(verified.size(), 1);
+        // Prepared fonts need no wait.
+        QVERIFY(!environment.deferHomeFonts([&](bool prepared) { delivered.append(prepared); }));
+    }
+
+    void openingFontReadSeesStorageChange_data()
+    {
+        QTest::addColumn<quint64>("nextPermit");
+        QTest::newRow("exported") << quint64(0);
+        QTest::newRow("remounted") << quint64(2);
+    }
+
+    void openingFontReadSeesStorageChange()
+    {
+        QFETCH(quint64, nextPermit);
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        QVERIFY(!kobalt::test::copyOpeningFontFixture(QStringLiteral(KOBALT_TEST_ASSET_ROOT),
+                                                      root.path())
+                         .isEmpty());
+        kobalt::nickel::ReaderEnvironment environment(root.path());
+        std::atomic<quint64> permit{ 1 };
+        QList<bool> verified;
+        environment.verifyAssets(
+                this, "startup", [&](bool valid) { verified.append(valid); },
+                [&] { return permit.load(); });
+        QTRY_COMPARE(verified.size(), 1);
+        QVERIFY(verified.first());
+        kobalt::ui::setPreparedOpeningFonts(environment.assets, {});
+        int resumed = 0;
+        environment.whenOpeningFontsReady([&] { ++resumed; });
+        QSemaphore read;
+        kobalt::qt::invoke(kobalt::engineWorker(), [&] { read.release(); }, Qt::QueuedConnection);
+        read.acquire();
+        // Nickel took storage after the read but before its queued GUI delivery.
+        permit.store(nextPermit);
+        const bool mounted = nextPermit != 0;
+        if (mounted) {
+            // Remounted files are checked again before the opening resumes.
+            QTRY_COMPARE(resumed, 1);
+            QVERIFY(environment.assetsAvailable());
+            QVERIFY(kobalt::ui::openingFontsPrepared(environment.assets));
+        } else {
+            QTRY_VERIFY(!environment.assetsAvailable());
+            QCoreApplication::processEvents();
+            QCOMPARE(resumed, 0);
+        }
+        QCOMPARE(verified.size(), 1);
+    }
+
+    void homeSleepReceivesPreparedFonts_data()
+    {
+        QTest::addColumn<bool>("shown");
+        QTest::addColumn<bool>("dismissed");
+        QTest::addColumn<bool>("powerOff");
+        QTest::newRow("before-power-view") << false << false << false;
+        QTest::newRow("after-power-view") << true << false << false;
+        QTest::newRow("after-wake") << true << true << false;
+        QTest::newRow("power-off") << true << false << true;
+    }
+
+    void homeSleepReceivesPreparedFonts()
+    {
+        QFETCH(bool, shown);
+        QFETCH(bool, dismissed);
+        QFETCH(bool, powerOff);
+        using namespace kobalt;
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const storage::Paths paths{ directory.path() };
+        QJsonObject preferences;
+        sleep::setDesign(preferences, sleep::Design::Card);
+        QVERIFY(storage::writePreferences(paths.preferences(), preferences));
+        QVERIFY(storage::writeBookState(paths, "private",
+                                        { { "book", "private" },
+                                          { "hide_book_on_sleep_screen", true },
+                                          { "percent", 43 } }));
+        // Other rows of this executable already loaded the bundled faces.
+        // Use a different detail face to make the initially drawn text observable.
+        const auto normalFace = ui::interfaceFont().family();
+        const auto restoreFace = qScopeGuard([&] { ui::setInterfaceFontFamily(normalFace); });
+        ui::setInterfaceFontFamily(QStringLiteral("Instrument Serif"));
+
+        MainWindowView window;
+        window.resize(QGuiApplication::primaryScreen()->size());
+        AbstractPowerView power(&window);
+        power.setGeometry(window.rect());
+        window.show();
+        power.show();
+        nickel::HomeSleepScreen owner(paths, nullptr);
+        nickel::ReaderEnvironment environment(QStringLiteral(KOBALT_TEST_ASSET_ROOT));
+        bool delivered = false, registered = false;
+        owner.setFontSource(environment, [&] {
+            registered = ui::initializeInterfaceFonts(environment.assets);
+            ui::setInterfaceFontFamily(normalFace);
+            return registered;
+        });
+        // Sleep can arrive before verification, or while its result is queued on the GUI.
+        QSemaphore startVerification;
+        if (!shown)
+            qt::invoke(engineWorker(), [&] { startVerification.acquire(); }, Qt::QueuedConnection);
+        environment.verifyAssets(this, "boot", [&](bool valid) { delivered = valid; });
+        if (shown) {
+            QSemaphore verified;
+            qt::invoke(engineWorker(), [&] { verified.release(); }, Qt::QueuedConnection);
+            verified.acquire();
+        }
+        bool resumedOpening = false;
+        environment.whenOpeningFontsReady([&] { resumedOpening = true; });
+        const bool wasVerified = environment.assets.available();
+        const bool prepared = owner.prepareHomeScreen(powerOff, "private");
+        if (!shown)
+            startVerification.release();
+        QCOMPARE(wasVerified, shown);
+        QVERIFY(prepared);
+        QVERIFY(owner.waitingForFonts());
+        const auto frame = [&] { return power.findChild<QWidget *>("rrSleepFrame"); };
+        QImage initial;
+        QPointer<QWidget> original;
+        if (shown) {
+            owner.present();
+            original = frame();
+            QVERIFY(original);
+            initial = frame()->grab().toImage().convertToFormat(QImage::Format_RGB32);
+        }
+        QVERIFY(!delivered);
+        if (dismissed)
+            owner.clear();
+        // A new battery reading makes the second composition distinguishable
+        // even when another test has already registered the same font faces.
+        battery = { 31, false, false };
+        environment.cancelOpeningFontWait();
+        QTRY_VERIFY(delivered);
+        QCOMPARE(registered, !dismissed);
+        QVERIFY(!resumedOpening);
+        QVERIFY(!owner.waitingForFonts());
+        if (!shown || dismissed) {
+            QVERIFY(!frame());
+            owner.present();
+        } else {
+            QVERIFY(original && original == frame());
+        }
+        if (dismissed) {
+            QVERIFY(!frame());
+            return;
+        }
+        QVERIFY(frame());
+        sleep::Snapshot progress;
+        progress.percent = 43;
+        progress.progress = strings::get("sleep.percent_read").arg(strings::percentArgument(43));
+        const auto neutral =
+                sleep::privateSnapshot(window.size(), preferences, progress, false, powerOff);
+        const auto expected = reader::sleepDesignImage(neutral.image, neutral, 31,
+                                                       powerOff ? reader::SleepStatus::PoweredOff
+                                                                : reader::SleepStatus::Sleeping);
+        if (shown)
+            QVERIFY(initial != expected);
+        QCOMPARE(frame()->grab().toImage().convertToFormat(QImage::Format_RGB32), expected);
+    }
+
+    void stockStorageChangesBeforeFontDelivery_data()
+    {
+        QTest::addColumn<quint64>("nextPermit");
+        QTest::newRow("exported") << quint64(0);
+        QTest::newRow("remounted") << quint64(2);
+    }
+
+    void stockStorageChangesBeforeFontDelivery()
+    {
+        QFETCH(quint64, nextPermit);
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        QVERIFY(!kobalt::test::copyOpeningFontFixture(QStringLiteral(KOBALT_TEST_ASSET_ROOT),
+                                                      root.path())
+                         .isEmpty());
+        kobalt::nickel::ReaderEnvironment environment(root.path());
+        std::atomic<quint64> permit{ 1 };
+        int resumed = 0;
+        QList<bool> verified;
+        environment.verifyAssets(
+                this, "startup", [&](bool valid) { verified.append(valid); },
+                [&] { return permit.load(); });
+        environment.whenOpeningFontsReady([&] { ++resumed; });
+        QSemaphore prepared;
+        kobalt::qt::invoke(
+                kobalt::engineWorker(), [&] { prepared.release(); }, Qt::QueuedConnection);
+        prepared.acquire();
+        // Nickel took storage after verification but before queued GUI delivery.
+        permit.store(nextPermit);
+        QTRY_COMPARE(verified.size(), 1);
+        const bool mounted = nextPermit != 0;
+        QCOMPARE(verified.first(), mounted);
+        QCOMPARE(environment.assets.available(), mounted);
+        QCOMPARE(resumed, int(mounted));
+    }
+
     // Compare actual native-frame pixels before and after Nickel changes orientation.
-    void sleepImageHandoffKeepsPortraitDirection_data()
+    void sleepImageHandoffKeepsReadingDirection_data()
     {
         QTest::addColumn<int>("reading");
         QTest::addColumn<int>("native");
         QTest::addColumn<bool>("followReading");
+        QTest::addColumn<bool>("claraColour");
         for (auto reading : { Qt::PortraitOrientation, Qt::InvertedPortraitOrientation,
                               Qt::LandscapeOrientation, Qt::InvertedLandscapeOrientation }) {
             for (auto native : { Qt::PortraitOrientation, Qt::InvertedPortraitOrientation,
                                  Qt::LandscapeOrientation, Qt::InvertedLandscapeOrientation }) {
-                for (bool followReading : { false, true })
-                    QTest::newRow(qPrintable(QString("%1-to-%2-follow-%3")
-                                                     .arg(int(reading))
-                                                     .arg(int(native))
-                                                     .arg(followReading)))
-                            << int(reading) << int(native) << followReading;
+                for (bool followReading : { false, true }) {
+                    for (bool claraColour : { false, true })
+                        QTest::newRow(qPrintable(QString("%1-to-%2-follow-%3-%4")
+                                                         .arg(int(reading))
+                                                         .arg(int(native))
+                                                         .arg(followReading)
+                                                         .arg(claraColour ? "clara" : "standard")))
+                                << int(reading) << int(native) << followReading << claraColour;
+                }
             }
         }
     }
 
-    void sleepImageHandoffKeepsPortraitDirection()
+    void sleepImageHandoffKeepsReadingDirection()
     {
         QFETCH(int, reading);
         QFETCH(int, native);
         QFETCH(bool, followReading);
+        QFETCH(bool, claraColour);
+        auto *device = Device::getCurrentDevice();
+        device->claraColour = claraColour;
+        const auto resetDevice = qScopeGuard([device] { device->claraColour = false; });
         auto *screen = QGuiApplication::primaryScreen();
         const auto original = screen->orientation();
         const auto turn = [screen](Qt::ScreenOrientation orientation) {
@@ -203,9 +524,19 @@ private slots:
             const auto expectedOrientation = followReading       ? Qt::ScreenOrientation(reading)
                     : reading == Qt::InvertedPortraitOrientation ? Qt::InvertedPortraitOrientation
                                                                  : Qt::PortraitOrientation;
+            // In successive clockwise turns, the portrait bottom bezel moves
+            // from bottom to left, top, then right. Clara's Landscape has its
+            // bezel on the left; a standard panel has it on the right.
+            const QList<Qt::ScreenOrientation> clockwise = {
+                Qt::PortraitOrientation,
+                claraColour ? Qt::LandscapeOrientation : Qt::InvertedLandscapeOrientation,
+                Qt::InvertedPortraitOrientation,
+                claraColour ? Qt::InvertedLandscapeOrientation : Qt::LandscapeOrientation
+            };
             QTransform transform;
-            transform.rotate(
-                    screen->angleBetween(expectedOrientation, Qt::ScreenOrientation(shown)));
+            transform.rotate(90
+                             * (clockwise.indexOf(Qt::ScreenOrientation(shown))
+                                - clockwise.indexOf(expectedOrientation)));
             QCOMPARE(frame->grab().toImage().convertToFormat(QImage::Format_RGB32),
                      expectedBackdrop.transformed(transform));
         }
@@ -312,7 +643,8 @@ private slots:
             sleep::setDesign(preferences, sleep::Design::Letter);
             QVERIFY(storage::writePreferences(paths.preferences(), preferences));
             progress.percent = 100;
-            progress.progress = strings::get("sleep.percent_read").arg(100);
+            progress.progress =
+                    strings::get("sleep.percent_read").arg(strings::percentArgument(100));
             const auto completed = sleep::privateSnapshot(window.size(), preferences, progress);
             owner.remember(completed, "private");
             owner.finishSave();
@@ -418,7 +750,7 @@ private slots:
         expected.place = sleep::Place::TopLeft;
         expected.dimPage = false;
         expected.percent = 42;
-        expected.progress = strings::get("sleep.percent_read").arg(42);
+        expected.progress = strings::get("sleep.percent_read").arg(strings::percentArgument(42));
         expected.details.title = "Type Tester";
         expected.details.author = "N. Farbridge";
         QCOMPARE(frame->grab().toImage().convertToFormat(QImage::Format_RGB32),
@@ -435,10 +767,169 @@ private slots:
                 != reader::sleepDesignImage(expected.image, expected, 67,
                                             reader::SleepStatus::PoweredOff));
         owner.clear();
+        // Every transition from Nickel requests one flash, even from a text-only screen.
+        QLabel title(QStringLiteral("My Books"), &window);
+        title.adjustSize();
+        title.show();
+        power.raise();
+        for (auto design : { sleep::Design::Seal, sleep::Design::Page }) {
+            choose(design);
+            for (const auto &paper : { QColor(Qt::white), QColor(140, 140, 140), QColor(Qt::red) }) {
+                power.hide();
+                auto palette = window.palette();
+                palette.setColor(QPalette::Window, paper);
+                window.setPalette(palette);
+                window.setAutoFillBackground(true);
+                window.repaint();
+                QVERIFY(owner.prepareHomeScreen());
+                power.show();
+                owner.present();
+                auto *cover = power.findChild<QWidget *>("rrSleepFrame");
+                QVERIFY(cover && !cover->grab().isNull());
+                QVERIFY(platform::SleepRefresh::take(window.windowHandle()));
+                owner.present();
+                QCOMPARE(power.findChild<QWidget *>("rrSleepFrame"), cover);
+                QVERIFY(!cover->grab().isNull());
+                QVERIFY(!platform::SleepRefresh::take(window.windowHandle()));
+                owner.clear();
+            }
+        }
         // A last book Kobalt never opened keeps Nickel's screen.
         QVERIFY(query.exec("UPDATE content SET ContentID = 'nickel-book'"));
         QVERIFY(!owner.prepareHomeScreen());
         database.close();
+    }
+
+    void homeRandomStatusKeepsBackground_data()
+    {
+        QTest::addColumn<bool>("privateBook");
+        QTest::addColumn<bool>("ambiguous");
+        QTest::newRow("known") << false << false;
+        QTest::newRow("private") << true << false;
+        QTest::newRow("ambiguous-last-book") << false << true;
+    }
+
+    void homeRandomStatusKeepsBackground()
+    {
+        using namespace kobalt;
+        QFETCH(bool, privateBook);
+        QFETCH(bool, ambiguous);
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const storage::Paths paths{ directory.path() };
+        const auto connection = Device::getCurrentDevice()->getDbName();
+        const auto forgetConnection =
+                qScopeGuard([&] { QSqlDatabase::removeDatabase(connection); });
+        auto database = QSqlDatabase::addDatabase("QSQLITE", connection);
+        database.setDatabaseName(directory.path() + "/native.sqlite");
+        QVERIFY(database.open());
+        QSqlQuery query(database);
+        QVERIFY(query.exec(
+                "CREATE TABLE content (ContentID TEXT, ContentType INTEGER, DateLastRead TEXT, "
+                "Title TEXT, Attribution TEXT, ImageId TEXT, ___PercentRead INTEGER, ReadStatus INTEGER)"));
+        QVERIFY(query.exec(
+                "INSERT INTO content VALUES ('book', 6, '2026-11-14', 'Private title', 'Private author', '', 42, 1)"));
+        if (ambiguous)
+            QVERIFY(query.exec(
+                    "INSERT INTO content (ContentID, ContentType, DateLastRead) VALUES ('other', 6, '2026-11-14')"));
+        QVERIFY(storage::writeBookState(paths, "book",
+                                        { { "book", "book" },
+                                          { "percent", 42 },
+                                          { "hide_book_on_sleep_screen", privateBook } }));
+
+        MainWindowView window;
+        window.resize(QGuiApplication::primaryScreen()->size());
+        window.setStyleSheet("background-color: red;");
+        AbstractPowerView power(&window);
+        power.setGeometry(window.rect());
+        window.show();
+        nickel::HomeSleepScreen owner(paths, nullptr);
+        const auto pixels = [&] {
+            auto *frame = power.findChild<QWidget *>("rrSleepFrame");
+            if (!frame)
+                return QByteArray();
+            const auto image = frame->grab().toImage().convertToFormat(QImage::Format_RGB32);
+            return QCryptographicHash::hash(
+                    QByteArrayView(reinterpret_cast<const char *>(image.constBits()),
+                                   image.sizeInBytes()),
+                    QCryptographicHash::Sha256);
+        };
+        const auto show = [&](bool off) {
+            power.hide();
+            if (!owner.prepareHomeScreen(off))
+                return QByteArray();
+            power.show();
+            owner.present();
+            return pixels();
+        };
+        const auto choose = [&](sleep::Design sleeping, sleep::Design poweredOff) {
+            QJsonObject preferences;
+            sleep::Custom custom;
+            custom.same = false;
+            custom.sleep = { sleep::Mode::Page, sleeping, {} };
+            custom.off = { sleep::Mode::Plain, poweredOff, {} };
+            sleep::setCustom(preferences, custom);
+            sleep::setDesign(preferences, sleep::Design::Custom);
+            QVERIFY(storage::writePreferences(paths.preferences(), preferences));
+        };
+        // Fixed statuses supply pixel references over both configured backgrounds.
+        using Frames = std::array<QByteArray, 3>;
+        QByteArray repeatedSleep;
+        const auto capture = [&](bool interruptedWake = false) {
+            battery = { 67, true, false };
+            Frames frames;
+            frames[0] = show(false);
+            if (interruptedWake) {
+                // Nickel can repeat sleep while the same book is already asleep.
+                owner.clearFrame();
+                repeatedSleep = show(false);
+            }
+            battery = { 67, false, false };
+            batteryChanged();
+            owner.present();
+            frames[1] = pixels();
+            // Cancelled wake drops the overlay but never completes the wake.
+            if (interruptedWake)
+                owner.clearFrame();
+            frames[2] = show(true);
+            owner.clear(); // Waking ends this choice.
+            return frames;
+        };
+        QVector<Frames> fixed;
+        for (const auto candidate : sleep::customStatuses) {
+            if (!sleep::eligibleStatus(candidate))
+                continue;
+            choose(candidate, candidate);
+            const auto reference = capture();
+            for (const auto &image : reference)
+                QVERIFY(!image.isEmpty());
+            QVERIFY2(!fixed.contains(reference),
+                     "The fixture must distinguish the eligible statuses");
+            fixed.append(reference);
+        }
+        choose(sleep::Design::Random, sleep::Design::Random);
+        const auto first = capture(true);
+        QCOMPARE(repeatedSleep, first[0]);
+        const auto second = capture();
+        QVERIFY(fixed.contains(first));
+        QVERIFY(fixed.contains(second));
+        QVERIFY(first != second);
+        // Direct power-off also uses its layer's random status.
+        const auto direct = show(true);
+        QVERIFY(std::any_of(fixed.begin(), fixed.end(),
+                            [&](const Frames &frames) { return frames[2] == direct; }));
+        owner.clear();
+        choose(sleep::Design::Seal, sleep::Design::Pill);
+        const auto manual = capture();
+        choose(sleep::Design::Random, sleep::Design::Pill);
+        const auto fixedOff = capture();
+        QCOMPARE(fixedOff[2], manual[2]);
+        choose(sleep::Design::Seal, sleep::Design::Random);
+        const auto fixedSleep = capture();
+        QCOMPARE(fixedSleep[0], manual[0]);
+        QCOMPARE(fixedSleep[1], manual[1]);
+        QVERIFY(std::any_of(fixed.begin(), fixed.end(),
+                            [&](const Frames &frames) { return frames[2] == fixedSleep[2]; }));
     }
 
     void saveReadsCommittedTokenOffTheGuiThread()
@@ -468,15 +959,34 @@ private slots:
             QVERIFY(query.exec("COMMIT"));
             screen.finishSave();
             QVERIFY(QFile::exists(paths.sleepScreen()));
-            screen.remember(snapshot, "book");
-            screen.forget();
+            QSemaphore entered, release;
+            std::atomic_bool timedOut{ false };
+            kobalt::storage::queueSleepSnapshotWork("hold", [&] {
+                entered.release();
+                timedOut = !release.tryAcquire(1, 5000);
+            });
+            QVERIFY(entered.tryAcquire(1, 5000));
+            {
+                kobalt::mainthread::Interaction interactive([] { return true; });
+                // Both the old file and the held worker remain until these calls return.
+                screen.remember(snapshot, "book");
+                screen.forget();
+                screen.clear();
+                QVERIFY(QFile::exists(paths.sleepScreen()));
+            }
+            release.release();
+            screen.finishSave();
+            QVERIFY(!timedOut);
             QVERIFY(!QFile::exists(paths.sleepScreen()));
             {
                 kobalt::nickel::HomeSleepScreen retiring(paths, nullptr);
                 retiring.remember(snapshot, "book");
             }
+            // Accepted work owns its input even after the screen owner goes away.
+            kobalt::storage::finishSleepSnapshotWork();
             QVERIFY(QFile::exists(paths.sleepScreen()));
             screen.forget();
+            screen.finishSave();
         }
         QSqlDatabase::removeDatabase(connection);
     }
@@ -548,10 +1058,34 @@ private slots:
             QVERIFY(frame);
             QCOMPARE(frame->grab().toImage().convertToFormat(QImage::Format_RGB32),
                      expected(kobalt::reader::SleepStatus::Charging, 67));
-            kobalt::battery = { 88, false, false };
+            QCoreApplication::processEvents();
+            PaintCounter paints;
+            frame->installEventFilter(&paints);
+            kobalt::batteryChanged();
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::UpdateRequest);
+            QCOMPARE(paints.count, 0);
+
+            kobalt::battery.percent = 68;
+            kobalt::batteryChanged();
+            QTRY_VERIFY(paints.count > 0);
+            QCOMPARE(frame->grab().toImage().convertToFormat(QImage::Format_RGB32),
+                     expected(kobalt::reader::SleepStatus::Charging, 68));
+            kobalt::battery = { 68, false, false };
             kobalt::batteryChanged();
             QCOMPARE(frame->grab().toImage().convertToFormat(QImage::Format_RGB32),
-                     expected(kobalt::reader::SleepStatus::Sleeping, 88));
+                     expected(kobalt::reader::SleepStatus::Sleeping, 68));
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::UpdateRequest);
+            paints.count = 0;
+            kobalt::battery = { 67, false, false };
+            kobalt::batteryChanged();
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::UpdateRequest);
+            QCOMPARE(paints.count, 0);
+            QCOMPARE(frame->grab().toImage().convertToFormat(QImage::Format_RGB32),
+                     expected(kobalt::reader::SleepStatus::Sleeping, 67));
+            kobalt::battery = { 100, true, false };
+            kobalt::batteryChanged();
+            QCOMPARE(frame->grab().toImage().convertToFormat(QImage::Format_RGB32),
+                     expected(kobalt::reader::SleepStatus::Charging, 100));
             kobalt::battery = { 100, true, true };
             kobalt::batteryChanged();
             QCOMPARE(frame->grab().toImage().convertToFormat(QImage::Format_RGB32),
@@ -568,6 +1102,7 @@ private slots:
             screen.present();
             QVERIFY(!power.findChild<QWidget *>("rrSleepFrame"));
             screen.forget();
+            screen.finishSave();
             QVERIFY(!QFile::exists(paths.sleepScreen()));
             screen.prepare(true);
             screen.present();
@@ -592,6 +1127,44 @@ private slots:
             screen.prepare(true);
             screen.present();
             QVERIFY(!power.findChild<QWidget *>("rrSleepFrame"));
+            QVERIFY(query.exec("DELETE FROM content WHERE ContentID = 'later'"));
+            // Random changes the status over the cached backdrop. A cached page
+            // cannot supply a Custom layer that asks for a different background.
+            using namespace kobalt;
+            sleep::Custom custom;
+            custom.sleep = { sleep::Mode::Plain, sleep::Design::Random, {} };
+            sleep::setDesign(preferences, sleep::Design::Custom);
+            for (const auto mode : { sleep::Mode::Plain, sleep::Mode::Page }) {
+                custom.sleep.backdrop = mode;
+                sleep::setCustom(preferences, custom);
+                QVERIFY(storage::writePreferences(paths.preferences(), preferences));
+                screen.remember(snapshot, "book");
+                screen.finishSave();
+                nickel::HomeSleepScreen restored(paths, nullptr);
+                restored.prepare(true, true);
+                restored.present();
+                auto *image = power.findChild<QWidget *>("rrSleepFrame");
+                if (mode == sleep::Mode::Plain) {
+                    QVERIFY(!image);
+                    continue;
+                }
+                QVERIFY(image);
+                const auto rendered = image->grab().toImage().convertToFormat(QImage::Format_RGB32);
+                bool matches = false;
+                for (const auto candidate : sleep::customStatuses) {
+                    if (!sleep::eligibleStatus(candidate))
+                        continue;
+                    auto reference = snapshot;
+                    const auto look = sleep::look(preferences, true, candidate);
+                    reference.design = look.design;
+                    reference.tile = look.tile;
+                    reference.place = sleep::place(preferences, {}, look);
+                    matches |= rendered
+                            == reader::sleepDesignImage(reference.image, reference, 100,
+                                                        reader::SleepStatus::PoweredOff);
+                }
+                QVERIFY(matches);
+            }
             database.close();
         }
         QSqlDatabase::removeDatabase(connection);
@@ -664,6 +1237,34 @@ private slots:
         power.hide();
         power.show();
         QVERIFY(!power.findChild<QWidget *>("rrSleepFrame"));
+    }
+
+    void powerOffKeepsPresentedPixels()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        MainWindowView window;
+        window.resize(800, 1200);
+        AbstractPowerView sleeping(&window), poweredOff(&window);
+        sleeping.setGeometry(window.rect());
+        poweredOff.setGeometry(window.rect());
+        poweredOff.hide();
+        window.show();
+        sleeping.show();
+        kobalt::nickel::HomeSleepScreen screen({ directory.path() }, nullptr);
+        QVERIFY(!screen.keepPresentedForPowerOff());
+        kobalt::sleep::Snapshot visible;
+        visible.image = QImage(window.size(), QImage::Format_RGB32);
+        visible.image.fill(QColor(175, 175, 175));
+        visible.orientation = Qt::PortraitOrientation;
+        visible.privateBook = true;
+        QVERIFY(directory.remove());
+        QVERIFY(screen.keepPresentedForPowerOff(visible));
+        sleeping.hide();
+        poweredOff.show();
+        auto *frame = poweredOff.findChild<QWidget *>("rrSleepFrame");
+        QVERIFY(frame);
+        QCOMPARE(frame->grab().toImage().convertToFormat(QImage::Format_RGB32), visible.image);
     }
 
     void powerOffKeepsSelectedDesign_data()
@@ -788,5 +1389,14 @@ private slots:
         QCOMPARE(background.painted, background.color);
     }
 };
-QTEST_MAIN(PowerScreenTests)
+
+int main(int argc, char **argv)
+{
+    QApplication app(argc, argv);
+    app.setQuitOnLastWindowClosed(false);
+    PowerScreenTests tests;
+    QTimer::singleShot(0, &app, [&] { app.exit(QTest::qExec(&tests, argc, argv)); });
+    return app.exec();
+}
+
 #include "kobo_power_screen.moc"

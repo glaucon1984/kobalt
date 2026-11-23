@@ -132,6 +132,60 @@ QJsonObject compareDeviceOutcomes(const Run &base, const Run &target, QStringLis
     return { { "base", before }, { "target", after }, { "missing", missing } };
 }
 
+// The target's device checks: each check scenario with its failed checks, and
+// the USB and power-off saves that collect-eval.cmake read from the event log.
+// A failed check scenario is already a failed part; a failed save adds one.
+QJsonObject reportDeviceChecks(const Run &target, QStringList &failed, QStringList &lines)
+{
+    QJsonObject result;
+    QStringList rows;
+    for (const auto &directory : QDir(target.directory).entryList({ "device-*" }, QDir::Dirs)) {
+        const auto path = target.directory + '/' + directory;
+        const auto document = readDevice(path);
+        const auto device = "device." + document["target"].toString();
+        for (const auto &value : document["scenarios"].toArray()) {
+            const auto scenario = value.toObject();
+            if (scenario["kind"].toString() != "check")
+                continue;
+            const auto status = scenario["status"].toString();
+            QStringList missed;
+            for (const auto &check : scenario["checks"].toArray())
+                if (!check.toObject()["pass"].toBool())
+                    missed << check.toObject()["check"].toString();
+            const auto id = device + '.' + scenario["id"].toString();
+            result[id] = QJsonObject{ { "status", status },
+                                      { "checks", scenario["checks"].toArray().size() },
+                                      { "failed_checks", QJsonArray::fromStringList(missed) } };
+            const auto word = status == "completed" ? "pass"
+                    : status == "skipped"           ? "skip"
+                                                    : "fail";
+            rows << QString("| `%1` | %2 | %3 |")
+                            .arg(id, word,
+                                 status == "completed"
+                                         ? QString::number(scenario["checks"].toArray().size())
+                                                 + (scenario["checks"].toArray().size() == 1
+                                                            ? " check"
+                                                            : " checks")
+                                         : scenario["reason"].toString().replace('|', '/'));
+        }
+        const auto manual = readObject(path + "/manual-checks.json");
+        for (const auto *key : { "usb_save", "power_off_save" }) {
+            if (!manual.contains(key))
+                continue;
+            const auto outcome = manual[key].toString();
+            const auto id = device + '.' + key;
+            result[id] = QJsonObject{ { "status", outcome } };
+            rows << QString("| `%1` | %2 | manual, from the event log |").arg(id, outcome);
+            if (outcome == "failed")
+                failed << "target: " + id + " failed";
+        }
+    }
+    if (!rows.isEmpty())
+        lines << "## Device checks" << "" << "| Check | Outcome | Detail |" << "| --- | --- | --- |"
+              << rows << "";
+    return result;
+}
+
 // Test outcomes from CTest's JUnit file, by test name.
 QMap<QString, QString> testOutcomes(const QString &path)
 {
@@ -658,7 +712,10 @@ QJsonObject compareMetrics(const Run &base, const Run &target, bool device,
         rows.append(row);
         const auto shownRatio =
                 baseMs > 0 && targetMs > 0 ? QString::number(ratio, 'f', 2) : QStringLiteral("n/a");
-        if (verdict != "same" && verdict != "noisy") {
+        if (verdict == "noisy" && b.resource) {
+            flags.append(QString("%1 is noisy (%2 → %3 %4). Measure again with more runs.")
+                                 .arg(it.key(), number(baseMs), number(targetMs), b.unit));
+        } else if (verdict != "same" && verdict != "noisy") {
             const bool unexpected = touched.isEmpty();
             flags.append(QString("%1 %2 %3× (%4 → %5 %6)%7")
                                  .arg(it.key(), verdict, shownRatio, number(baseMs),
@@ -739,6 +796,8 @@ int main(int argc, char **argv)
     }
     if (base.meta["profile"] != target.meta["profile"])
         notes << "the runs used different profiles";
+    if (base.meta["device_filter"].toString() != target.meta["device_filter"].toString())
+        notes << "the device runs used different scenario filters";
     if (!notes.isEmpty())
         lines << "**Measure again before trusting timings:** " + notes.join("; ") + "." << "";
     // A part that failed must not read like a part that was never run.
@@ -759,6 +818,8 @@ int main(int argc, char **argv)
             failed << QString(side) + ": " + parts.join(", ");
     }
     const auto deviceScenarios = compareDeviceOutcomes(base, target, failed, lines);
+    QStringList checkLines;
+    const auto deviceChecks = reportDeviceChecks(target, failed, checkLines);
     if (!failed.isEmpty())
         lines << "**Failed parts:** " + failed.join("; ") + ". See the logs in each run directory."
               << "";
@@ -769,6 +830,8 @@ int main(int argc, char **argv)
                         { "target", target.meta },
                         { "comparable_notes", QJsonArray::fromStringList(notes) } };
     report["device_scenarios"] = deviceScenarios;
+    report["device_checks"] = deviceChecks;
+    lines << checkLines;
     report["failed_parts"] = QJsonArray::fromStringList(failed);
     report["tests"] = compareTests(base, target, lines);
     report["screenshots"] = compareScreens(base, target, config, output, lines);
@@ -798,7 +861,7 @@ int main(int argc, char **argv)
                  !failed.isEmpty() ? "Evaluation contains failed or missing results.\n"
                          : !timed  ? "Timings were not compared: a run has no timing results.\n"
                          : summary.isEmpty() ? "No timing changes beyond the noise bands.\n"
-                                             : "Timing changes:\n\n" + summary.join('\n') + "\n");
+                                             : "Metrics to review:\n\n" + summary.join('\n') + "\n");
     report["flags"] = flags;
     // Two runs of the same subject show how far each metric moves by itself.
     // Each band allows 1.5 times the largest such move on a ratio scale, and at

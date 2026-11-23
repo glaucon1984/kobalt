@@ -8,6 +8,7 @@
 #include "support/qt_font.h"
 #include "support/strings.h"
 #include "bookmark_list.h"
+#include "reading/reading_progress.h"
 #include "ui/style/styles.h"
 #include "ui/style/fonts.h"
 #include <QLocale>
@@ -28,6 +29,18 @@
 #include "reading/reading_density.h"
 
 namespace kobalt {
+QString elideBookmarkExcerpt(const QString &text, int minimum, int maximum)
+{
+    if (text.size() <= maximum)
+        return text;
+    auto prefix = text.left(maximum);
+    if (minimum < maximum)
+        prefix.truncate(qMax(minimum, int(prefix.lastIndexOf(' '))));
+    if (!prefix.isEmpty() && prefix.at(prefix.size() - 1).isHighSurrogate())
+        prefix.chop(1);
+    return prefix + QString::fromUtf8("…");
+}
+
 namespace chrome = ui::metrics::chrome;
 
 BookmarkList::BookmarkList(QWidget *parent, KeyboardFactory factory)
@@ -203,7 +216,6 @@ void BookmarkList::showPinHelp()
     notice->dismissed = [this] { closePinHelp(); };
     notice->show();
     notice->raise();
-    notice->fitCard();
 }
 
 void BookmarkList::showPinErrors()
@@ -219,6 +231,7 @@ void BookmarkList::showPinErrors()
             { strings::get("common.ok"), "rrPinErrorsClose" });
     pinHelp = notice;
     notice->setObjectName("rrPinErrorsPopup");
+    notice->preferPagingToWidening();
     notice->setGeometry(parentWidget()->rect());
     auto *card = notice->card();
     const auto message = [card](const QString &text, const QString &name = QString()) {
@@ -256,7 +269,6 @@ void BookmarkList::showPinErrors()
     notice->dismissed = [this] { closePinHelp(); };
     notice->show();
     notice->raise();
-    notice->fitCard();
 }
 
 void BookmarkList::closePinHelp()
@@ -380,7 +392,7 @@ void BookmarkList::openPin(const BookmarkRow &row)
     if (row.pinIcon.isEmpty() && count >= BookmarkStore::maxPins) {
         auto *notice = new ui::NoticeModal(
                 parentWidget(),
-                { strings::get("bookmarks.pin_limit"), strings::get("bookmarks.pin"), {} },
+                { strings::get("bookmarks.pin_limit"), strings::get("bookmarks.pin_title"), {} },
                 { strings::get("common.ok"), "rrPinLimitClose" });
         pinPopup = notice;
         connect(notice->primaryButton(), &QPushButton::clicked, this, [this] { closePin(); });
@@ -392,11 +404,14 @@ void BookmarkList::openPin(const BookmarkRow &row)
         notice->raise();
         return;
     }
-    auto *dialog = new ui::ChoiceModal(
-            parentWidget(),
-            { {}, strings::get(row.pinIcon.isEmpty() ? "bookmarks.pin" : "bookmarks.modify"), {} },
-            { strings::get("common.cancel"), "rrPinCancel" },
-            { strings::get("common.save"), "rrPinSave" });
+    auto *dialog =
+            new ui::ChoiceModal(parentWidget(),
+                                { {},
+                                  strings::get(row.pinIcon.isEmpty() ? "bookmarks.pin_title"
+                                                                     : "bookmarks.modify_title"),
+                                  {} },
+                                { strings::get("common.cancel"), "rrPinCancel" },
+                                { strings::get("common.save"), "rrPinSave" });
     pinPopup = dialog;
     dialog->setObjectName("rrPinEditor");
     dialog->setDimmed(true);
@@ -608,7 +623,7 @@ void BookmarkList::openSort()
     sortPopup->setDimmed(true);
     sortPopup->dismissed = [this] { closeSort(); };
     auto *card = sortPopup->card();
-    card->heading(strings::get("marks.sort_title"));
+    card->heading(strings::get("marks.sort_dialog_title"));
     auto *options = new ui::RadioList(card);
     options->setMinimumRowHeight(chrome::listActionHeight);
     const QStringList values{ "position", "newest", "oldest" };
@@ -769,6 +784,7 @@ void BookmarkList::hideEvent(QHideEvent *event)
             row->setNote({}, 0);
             row->setAccessibleName({});
             row->setEnabled(false);
+            removes[i]->setAccessibleName({});
             removes[i]->setEnabled(false);
         }
     }
@@ -1061,6 +1077,7 @@ void BookmarkList::redraw()
         if (!shown) {
             if (lazy) {
                 buttons[row]->setEnabled(false);
+                removes[row]->setAccessibleName({});
                 removes[row]->setEnabled(false);
             }
             continue;
@@ -1100,10 +1117,49 @@ void BookmarkList::redraw()
         button->setObjectName(QString(annotations ? "rrAnnotation%1" : "rrBookmark%1").arg(index));
         removes[row]->setObjectName(
                 QString(annotations ? "rrAnnotationRemove%1" : "rrBookmarkMore%1").arg(index));
+        const auto title = item.pinName.isEmpty() ? chapter : item.pinName;
+        QStringList description;
+        const auto start = locationPageLabel(item.page, item.printedPage);
+        const auto end = locationPageLabel(item.endPage, item.printedEnd);
+        const bool startScreen = useScreens && item.printedPage.isEmpty();
+        const bool endScreen = useScreens && item.printedEnd.isEmpty();
+        const bool range = annotations && !start.isEmpty() && !end.isEmpty()
+                && (start != end || startScreen != endScreen);
+        QString label = screenLabel(start, startScreen);
+        if (range) {
+            if (startScreen == endScreen) {
+                label = startScreen ? strings::get("marks.screen_range").arg(start, end)
+                                    : QString("%1–%2").arg(start, end);
+                description << strings::get(startScreen ? "marks.screen_range_description"
+                                                        : "marks.page_range")
+                                       .arg(start, end);
+            } else {
+                const auto first = strings::get(startScreen ? "reader.screen_number"
+                                                            : "search_panel.page_number")
+                                           .arg(start);
+                const auto last = strings::get(endScreen ? "reader.screen_number"
+                                                         : "search_panel.page_number")
+                                          .arg(end);
+                label = strings::get("marks.location_range").arg(first, last);
+                description << label;
+            }
+        } else if (!start.isEmpty())
+            description << (startScreen ? label
+                                        : strings::get("search_panel.page_number").arg(start));
+        if (!title.isEmpty())
+            description << title;
+        if (!detailsReady || (description.isEmpty() && excerpt.isEmpty()))
+            description << strings::get(annotations ? "annotations.numbered_entry"
+                                                    : "bookmarks.numbered_entry")
+                                   .arg(index + 1);
+        if (!excerpt.isEmpty())
+            description << (detailsReady ? elideBookmarkExcerpt(excerpt.simplified(), 40, 80)
+                                         : excerpt);
+        const auto name = description.join(QStringLiteral(", "));
         removes[row]->setAccessibleName(
-                strings::get(annotations ? "annotations.remove" : "bookmarks.actions"));
-
-        button->setAccessibleName(chapter);
+                strings::get("marks.row_action")
+                        .arg(strings::get(annotations ? "annotations.remove" : "bookmarks.actions"),
+                             name));
         button->setEnabled((item.page >= 0 || item.pagePending) && detailsReady);
         removes[row]->setEnabled(detailsReady);
         button->setGeometry(0, y, width(), itemHeight);
@@ -1111,7 +1167,8 @@ void BookmarkList::redraw()
         itemRow->setActionIcon(annotations ? ui::ControlIcon::Trash : ui::ControlIcon::More);
         itemRow->setDetailFont(excerptFont());
         itemRow->setMetadataFont(ui::interfaceFont(chrome::captionText));
-        itemRow->setTitle(item.pinName.isEmpty() ? chapter : item.pinName);
+        itemRow->setTitle(title);
+        itemRow->setAccessibleName(name);
         itemRow->setTitlePixels(ui::px(24));
         itemRow->setTitleIcon(ui::ControlIcon::Pin, !annotations && !item.pinIcon.isEmpty(),
                               !annotations);
@@ -1132,12 +1189,9 @@ void BookmarkList::redraw()
             metadata << QLocale().toString(item.created.toLocalTime(), "d MMM yyyy, HH:mm");
         itemRow->setCaption(metadata.join(QStringLiteral(" · ")));
         itemRow->setAccessory(ui::ListRow::Caption{
-                item.page >= 0
-                        ? (annotations && item.endPage > item.page
-                                   ? QString("%1–%2").arg(item.page + 1).arg(item.endPage + 1)
-                                   : QString::number(item.page + 1))
-                        : QString(),
-                numberWidth });
+                label,
+                qMax(numberWidth,
+                     ui::interfaceTextWidth(label, ui::interfaceFont(chrome::captionText))) });
         y += itemHeight;
     }
     update();

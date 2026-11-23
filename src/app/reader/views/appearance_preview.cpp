@@ -18,6 +18,14 @@ QSize deviceSize(QSize logical, qreal ratio)
 {
     return { qMax(1, qRound(logical.width() * ratio)), qMax(1, qRound(logical.height() * ratio)) };
 }
+
+QRect stripBounds(const QRect &page, qreal scale, const QImage &image, bool footer)
+{
+    if (image.isNull())
+        return {};
+    const int height = qRound(image.height() / image.devicePixelRatio() * scale);
+    return { page.left(), footer ? page.bottom() + 1 - height : page.top(), page.width(), height };
+}
 } // namespace
 
 AppearancePreview::AppearancePreview(QWidget *parent) : QWidget(parent)
@@ -50,7 +58,8 @@ void AppearancePreview::setContent(Content next)
             && content.horizontalMargin == next.horizontalMargin
             && content.verticalMargin == next.verticalMargin && same(content.header, next.header)
             && same(content.footer, next.footer) && same(content.body, next.body)
-            && content.text == next.text && content.cropTop == next.cropTop;
+            && content.sample == next.sample && content.text == next.text
+            && content.lifted == next.lifted && content.cropTop == next.cropTop;
     content = std::move(next);
     // Created on first use: a hidden child repaints the Layout preview once more when
     // it first appears, and each repaint is a visible e-ink update.
@@ -65,6 +74,25 @@ void AppearancePreview::setContent(Content next)
         textHeader->setVisible(content.text);
     if (!unchanged)
         update();
+}
+
+void AppearancePreview::setStrips(const QImage &header, const QImage &footer)
+{
+    const auto bounds = pageBounds();
+    const auto factor = scale();
+    QRegion dirty;
+    const auto replace = [&](QImage &current, const QImage &next, bool bottom) {
+        if (current.cacheKey() == next.cacheKey())
+            return;
+        dirty += stripBounds(bounds, factor, current, bottom);
+        current = next;
+        dirty += stripBounds(bounds, factor, current, bottom);
+    };
+    replace(content.header, header, false);
+    replace(content.footer, footer, true);
+    dirty &= visibleRegion();
+    if (!dirty.isEmpty())
+        update(dirty);
 }
 
 void AppearancePreview::followPanel(QWidget *watched, std::function<void()> changed)
@@ -153,17 +181,36 @@ void AppearancePreview::paintCaption(QPainter &painter, int right) const
     painter.restore();
 }
 
-QRect AppearancePreview::textCard() const
+QRect AppearancePreview::noticeRect(const QString &notice) const
 {
-    const int top = textHeader->sizeHint().height();
-    int available = qMax(0, height() - top);
+    const int inset = ui::metrics::panel::contentMargins.left();
+    const int room = qMax(1, width() - 2 * inset);
+    const auto font = ui::interfaceFont(ui::metrics::chrome::descriptionText);
+    const int lines = notice.isEmpty() ? 0 : ui::wrappedInterfaceTextHeight(notice, font, room);
+    return { inset, textHeader->sizeHint().height() + (notice.isEmpty() ? 0 : ui::px(8)), room,
+             lines };
+}
+
+QRect AppearancePreview::textCard(int top) const
+{
+    const int available = qMax(0, height() - top);
     if (content.body.isNull() || available <= 0)
         return { 0, top, width(), available };
     // End at the gap under the last whole line, so that no line is cut in half.
     const QRgb paper = content.body.pixel(0, content.cropTop);
-    int last = qMin(content.cropTop + available, content.body.height()) - 1;
+    const int bottom = qMin(content.cropTop + available, content.body.height()) - 1;
+    int last = bottom;
     while (last > content.cropTop && !blankRow(content.body, last, paper))
         --last;
+    // Very large text can have a first line taller than the available space.
+    // Show that line clipped if trimming would leave just its top margin.
+    if ((content.sample || content.lifted) && last < bottom) {
+        int row = last;
+        while (row >= content.cropTop && blankRow(content.body, row, paper))
+            --row;
+        if (row <= content.cropTop)
+            last = bottom;
+    }
     return { 0, top, width(), qMax(1, last + 1 - content.cropTop) };
 }
 
@@ -187,7 +234,21 @@ void AppearancePreview::paintText(QPainter &painter)
     painter.fillRect(0, top, width(), height() - top,
                      content.body.isNull() ? ui::themeColors(this).paper
                                            : QColor(content.body.pixel(0, content.cropTop)));
-    const QRect card = textCard();
+    QString notice;
+    if (content.sample)
+        notice = strings::get("reader.text_preview_sample");
+    else if (content.lifted)
+        notice = strings::get("reader.text_preview_lifted");
+    const auto noticeArea = noticeRect(notice);
+    if (!notice.isEmpty()) {
+        painter.setFont(ui::interfaceFont(ui::metrics::chrome::descriptionText));
+        painter.setPen(ui::themeColors(this).secondaryInk);
+        ui::drawWrappedInterfaceText(painter, noticeArea, notice);
+    }
+    // The source crop can begin right at the illustration's lower edge.
+    // Leave room below the notice even when the book supplies no gap.
+    const int gap = content.lifted ? int(ui::metrics::spacing::row) : 0;
+    const QRect card = textCard(noticeArea.bottom() + 1 + gap);
     if (card.isEmpty() || content.body.isNull())
         return;
     // One image pixel per interface pixel: this is the text's true size.
@@ -220,12 +281,9 @@ void AppearancePreview::paintEvent(QPaintEvent *)
     paintCaption(painter, bounds.left());
     painter.setClipRect(bounds);
 
-    const auto logicalHeight = [factor](const QImage &image) {
-        return qRound(image.height() / image.devicePixelRatio() * factor);
-    };
     if (!content.header.isNull()) {
-        const QSize target(bounds.width(), logicalHeight(content.header));
-        painter.drawImage(bounds.topLeft(), scaled(scaledHeader, content.header, target));
+        const auto strip = stripBounds(bounds, factor, content.header, false);
+        painter.drawImage(strip.topLeft(), scaled(scaledHeader, content.header, strip.size()));
     }
     const int bodyTop = bounds.top() + qRound(content.bodyTop * factor);
     const QRect body(bounds.left(), bodyTop, bounds.width(), qRound(content.bodyHeight * factor));
@@ -233,9 +291,8 @@ void AppearancePreview::paintEvent(QPaintEvent *)
         painter.drawImage(body.topLeft(), scaled(scaledBody, content.body, body.size()));
     }
     if (!content.footer.isNull()) {
-        const QSize target(bounds.width(), logicalHeight(content.footer));
-        painter.drawImage(QPoint(bounds.left(), bounds.bottom() + 1 - target.height()),
-                          scaled(scaledFooter, content.footer, target));
+        const auto strip = stripBounds(bounds, factor, content.footer, true);
+        painter.drawImage(strip.topLeft(), scaled(scaledFooter, content.footer, strip.size()));
     }
     painter.setClipping(false);
 

@@ -68,6 +68,16 @@ bool Device::isTolino() const
     return pewter::options().tolino;
 }
 
+bool Device::isSpaKobo() const
+{
+    return pewter::options().claraColour;
+}
+
+bool Device::isSpaKoboBW() const
+{
+    return pewter::options().claraBW;
+}
+
 bool DatabaseAdapter::beginTransaction(QString name)
 {
     record("DatabaseAdapter::beginTransaction", { { "database", name } });
@@ -155,6 +165,29 @@ Cache<T> *Repository::refreshCache(const QString &database)
 }
 
 template Cache<Volume> *Repository::refreshCache<Volume>(const QString &);
+
+class SyncManagerBase : public QObject
+{
+public:
+    bool isSyncing() const;
+};
+
+class N3SyncManager : public SyncManagerBase
+{
+public:
+    static N3SyncManager *sharedInstance();
+};
+
+N3SyncManager *N3SyncManager::sharedInstance()
+{
+    static N3SyncManager manager;
+    return &manager;
+}
+
+bool SyncManagerBase::isSyncing() const
+{
+    return pewter::options().syncing;
+}
 
 class BookmarkSyncManagerBase : public QObject
 {

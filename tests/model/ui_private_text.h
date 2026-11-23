@@ -394,7 +394,15 @@ inline void checkPrivateFallbackStyles(const kobalt::AssetBundle &assets)
 inline void checkPrivateInterfaceText(const kobalt::AssetBundle &assets)
 {
     using namespace kobalt::ui;
-    require(privateInterfaceFontBytes() == 0, "Private interface fonts were loaded eagerly");
+    // The seven interface faces load at initialization and stay; fallbacks load lazily.
+    qint64 interfaceBytes = 0;
+    for (const auto *name :
+         { "IBMPlexSans-Regular.ttf", "IBMPlexSans-Bold.ttf", "IBMPlexSans-Italic.ttf",
+           "IBMPlexMono-Regular.ttf", "IBMPlexMono-Bold.ttf", "InstrumentSerif-Regular.ttf",
+           "InstrumentSerif-Italic.ttf" })
+        interfaceBytes += QFileInfo(assets.file(QStringLiteral("fonts/") + name)).size();
+    require(privateInterfaceFontBytes() == interfaceBytes,
+            "Initialization did not keep exactly the interface faces");
     QFont font(QStringLiteral("IBM Plex Sans"));
     font.setPixelSize(32);
     require(needsPrivateText(QStringLiteral("Chapter 4"), font),
@@ -404,16 +412,16 @@ inline void checkPrivateInterfaceText(const kobalt::AssetBundle &assets)
             "Private interface renderer replaced a requested reading font");
     require(needsPrivateText(QStringLiteral("第四章 한국어 목차"), font),
             "CJK text stayed on the native font backend");
-    const auto primaryBytes = QFileInfo(assets.file("fonts/IBMPlexSans-Regular.ttf")).size();
-    require(privateInterfaceFontBytes() == 0, "Text routing loaded font bytes before rendering");
+    require(privateInterfaceFontBytes() == interfaceBytes,
+            "Text routing loaded fallback bytes before rendering");
     const auto firstCjk = renderPrivateText(QStringLiteral("第一章 中文目录"), font);
     require(firstCjk.missingGlyphs == 0 && !firstCjk.image.isNull(),
             "Lazy CJK font did not render on first use");
     const auto cjkBytes = QFileInfo(assets.file("fonts/NotoSerifCJK-Regular.ttc")).size();
-    require(privateInterfaceFontBytes() == primaryBytes + cjkBytes,
+    require(privateInterfaceFontBytes() == interfaceBytes + cjkBytes,
             "CJK rendering loaded unrelated fallback fonts");
     renderPrivateText(QStringLiteral("한국어 日本語 中文"), font);
-    require(privateInterfaceFontBytes() == primaryBytes + cjkBytes,
+    require(privateInterfaceFontBytes() == interfaceBytes + cjkBytes,
             "CJK regional faces duplicated font bytes");
     for (const auto &sample :
          { QStringLiteral("第一章 中文目录 简体汉字"),
@@ -776,6 +784,25 @@ inline void checkPrivateInterfaceText(const kobalt::AssetBundle &assets)
             "Private interface renderer lost caption tracking");
     QFont capitals = font;
     capitals.setCapitalization(QFont::AllUppercase);
+    require(privateLayoutKey(capitals) != privateLayoutKey(font)
+                    && privateLayoutKey(tracked) != privateLayoutKey(font),
+            "Wrapped layout keys lost capitalization or letter spacing");
+    {
+        const QString words = QStringLiteral("one two");
+        QFont spaced = font;
+        spaced.setWordSpacing(font.wordSpacing() + 4);
+        const auto runWidth = [&](const QFont &runFont) {
+            PrivateTextStyle style;
+            style.length = words.size();
+            style.font = runFont;
+            return measurePrivateTextLayout(words, font, {}, PrivateTextEmphasis::FontFace,
+                                            Qt::LeftToRight, { style })
+                    .advance;
+        };
+        const int width = runWidth(font);
+        require(runWidth(spaced) == width + 4 && runWidth(font) == width,
+                "Cached styled text reused a run with different word spacing");
+    }
     require(renderPrivateText(QStringLiteral("Ελληνικά"), capitals).image
                     == renderPrivateText(QStringLiteral("ΕΛΛΗΝΙΚΆ"), font).image,
             "Private caption capitalization changed");

@@ -1,6 +1,7 @@
 #include "column_view.h"
 #include "engine_document.h"
 #include "reader_locations.h"
+#include "reader_source.h"
 #include <lvdocview.h>
 
 namespace kobalt {
@@ -70,7 +71,7 @@ ldomNode *fragmentFor(ldomDocument *doc, const QString &href)
     for (int i = 0; i < root->getChildCount(); ++i) {
         auto *node = root->getChildNode(i);
         if (node->isElement() && node->isNodeName("DocFragment")
-            && qstring(node->getAttributeValue("Source")) == href)
+            && enginelocation::spineHref(node) == href)
             return node;
     }
     return nullptr;
@@ -78,6 +79,12 @@ ldomNode *fragmentFor(ldomDocument *doc, const QString &href)
 } // namespace
 
 namespace enginelocation {
+QString spineHref(ldomNode *fragment)
+{
+    auto href = fragment->getAttributeValue("SpineHref");
+    return qstring(href.empty() ? fragment->getAttributeValue("Source") : href);
+}
+
 bool wrapper(ldomNode *node)
 {
     for (const char *name :
@@ -178,17 +185,119 @@ QStringList EngineDocument::spineItems() const
     auto *root = engine_ ? engine_->getDocument()->nodeFromXPath(U"/body") : nullptr;
     for (int i = 0; root && i < root->getChildCount(); ++i) {
         auto *node = root->getChildNode(i);
-        if (node->isElement() && node->isNodeName("DocFragment"))
+        if (node->isElement() && node->isNodeName("DocFragment")) {
             items.append(qstring(node->getAttributeValue("Source")));
+            const auto original = node->getAttributeValue("SpineHref");
+            if (!original.empty() && spineLocations_.isEmpty())
+                spineLocations_ = items.mid(0, items.size() - 1);
+            if (!original.empty() || !spineLocations_.isEmpty())
+                spineLocations_.append(original.empty() ? items.last() : qstring(original));
+        }
     }
     spineNames_ = items;
     return items;
 }
 
+QStringList EngineDocument::spineLocationNames() const
+{
+    const auto files = spineItems();
+    return spineLocations_.isEmpty() ? files : spineLocations_;
+}
+
+QString EngineDocument::afterChapter(const QVector<ChapterLink> &links, int index,
+                                     bool *deferred) const
+{
+    const int depth = links[index].depth;
+    const auto first = chapterBoundaryPosition(links, index, deferred);
+    int lastItem = spineItemIndex(first);
+    if (lastItem < 0)
+        return {};
+    for (int i = index + 1; i < links.size(); ++i) {
+        if (links[i].position.isEmpty())
+            continue;
+        const int item = spineItemIndex(links[i].position);
+        if (links[i].depth <= depth) {
+            if (item == lastItem) {
+                const auto next = chapterBoundaryPosition(links, i, deferred);
+                if (next.isEmpty())
+                    return {};
+                if (next != first)
+                    return next;
+            }
+            // Unlisted files before the next chapter, such as the later
+            // parts of a split chapter, belong to this one.
+            if (item > lastItem)
+                return QString("/body/DocFragment[%1]").arg(item + 1);
+            continue;
+        }
+        lastItem = qMax(lastItem, item);
+    }
+    if (lastItem + 1 < spineItems().size())
+        return QString("/body/DocFragment[%1]").arg(lastItem + 2);
+    return QStringLiteral("");
+}
+
+bool EngineDocument::validMainTextRange(const QString &first, const QString &after,
+                                        bool *deferred) const
+{
+    if (first.isEmpty() && after.isEmpty())
+        return true;
+    const int count = spineItems().size();
+    const int start = first.isEmpty() ? 0 : spineItemIndex(first);
+    const int end = after.isEmpty() ? count : spineItemIndex(after);
+    if ((!first.isEmpty() && (start < 0 || start >= count))
+        || (!after.isEmpty() && (end < 0 || end >= count)))
+        return false;
+    if (start != end || after.isEmpty())
+        return start < end;
+
+    // The chapter window may contain only placeholders for this spine item.
+    // The source scan recorded the order of its TOC and structural anchors.
+    if (!resolveTocFragments(start)) {
+        if (deferred)
+            *deferred = true;
+        return false;
+    }
+    const auto order = [this](QString position) {
+        if (position.endsWith(".0"))
+            position.chop(2);
+        if (position.section('/', -1).startsWith("DocFragment"))
+            return 0;
+        if (!source_)
+            return -1;
+        const auto &anchors = source_->boundaryElementOrder;
+        const auto known = anchors.constFind(position);
+        if (known != anchors.constEnd())
+            return known.value();
+
+        // The source scan indexes every step below /body. CREngine can omit
+        // [1] for the first element of a given name.
+        auto steps = position.split('/');
+        for (int i = 2; i < steps.size(); ++i)
+            if (!steps[i].isEmpty() && !steps[i].contains('['))
+                steps[i] += QStringLiteral("[1]");
+        return anchors.value(steps.join('/'), -1);
+    };
+    const int begin = first.isEmpty() ? 0 : order(first), stop = order(after);
+    if (begin >= 0 && stop >= 0)
+        return begin < stop;
+    if (!engine_ || (windowFirst_ >= 0 && (start < windowFirst_ || start > windowLast_)))
+        return false;
+    const auto pointer = [this](const QString &path) {
+        ldomXPointerEx pos(engine_->getDocument()->createXPointer(cre(path)));
+        if (!pos.isNull() && pos.getOffset() < 0)
+            pos.setOffset(0);
+        return pos;
+    };
+    const auto a = pointer(first.isEmpty() ? QStringLiteral("/body/DocFragment[1]") : first);
+    const auto b = pointer(after);
+    return !a.isNull() && !b.isNull() && a.compare(b) < 0;
+}
+
 int EngineDocument::spineItemOf(const QString &position) const
 {
     Location location;
-    return locationOf(position, &location) ? int(spineItems().indexOf(location.href)) : -1;
+    return locationOf(position, &location) ? int(spineLocationNames().indexOf(location.href)) : -1;
 }
 
 bool EngineDocument::locationOf(const QString &position, Location *location, bool *exact) const
@@ -204,7 +313,7 @@ bool EngineDocument::locationOf(const QString &position, Location *location, boo
     if (!fragment)
         return false;
     Location result;
-    result.href = qstring(fragment->getAttributeValue("Source"));
+    result.href = spineHref(fragment);
     if (result.href.isEmpty())
         return false;
     auto *root = body(fragment);

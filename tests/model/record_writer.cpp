@@ -4,7 +4,9 @@
 #include <QFile>
 #include <QTemporaryDir>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
+#include <time.h>
 #include <cstdio>
 #include <memory>
 #include <mutex>
@@ -17,9 +19,17 @@ using kobalt::storage::RecordWriter;
 
 namespace {
 int rejectedStarts = 0;
-}
+std::atomic_bool shiftNextWallTime{ false };
+} // namespace
 
 namespace kobalt::storage::test {
+// Simulate a wall-clock correction between reading the time and starting the wait.
+void adjustWriterTime(clockid_t clock, timespec &now)
+{
+    if (clock == CLOCK_REALTIME && shiftNextWallTime.exchange(false))
+        now.tv_sec -= 60;
+}
+
 void beforeWriterStart()
 {
     if (rejectedStarts > 0) {
@@ -199,7 +209,12 @@ int main()
         second.post(record(log, "b1"), {});
         first.post(record(log, "a2"), {});
         require(!first.idle() && !second.idle(), "Queued writers reported idle");
+        shiftNextWallTime = true;
+        const auto started = std::chrono::steady_clock::now();
         require(!first.flush(50), "A flush finished while its write was held");
+        require(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(50),
+                "A wall-clock adjustment shortened the writer flush timeout");
+        shiftNextWallTime = false;
         gate.release();
         require(first.flush() && second.flush(), "Writers did not drain");
         require(log.text() == "a1 b1 a2 ", "Writes ran out of queue order");
@@ -302,6 +317,27 @@ int main()
         release.join();
         saver.flush();
         require(log.text().empty(), "A cancelled write ran");
+    }
+    {
+        // USB discards queued writes without waiting for the running write.
+        Log log;
+        Gate gate;
+        RecordWriter saver;
+        saver.post(
+                [&] {
+                    gate.wait();
+                    log.add("active");
+                    return true;
+                },
+                {});
+        gate.awaitEntered();
+        saver.post(record(log, "queued"), [&](bool) { log.add("queued completion"); });
+        require(!saver.discardQueued() && !saver.idle(),
+                "Discard reported that the active write was finished");
+        require(!saver.tryPost(record(log, "late")), "Stopped writer accepted new work");
+        gate.release();
+        require(saver.flush() && saver.discardQueued(), "The active write did not retire");
+        require(log.text() == "active ", "Discard ran queued work or dropped the active write");
     }
     {
         // Destruction finishes a waiting write. A writer cancelled while

@@ -10,11 +10,28 @@ The engine knows a fixed list of hyphenation pattern names. `src/engine/blaze/da
 
 Preserve the GPLv2 notice in `src/engine/blaze/README.TXT`, the license text in `src/engine/blaze/COPYING`, the image-scaler license, and the copyright headers. Keep self-contained Blaze code in `extensions/`. Edit the inherited files where the parser, formatter or font manager needs to call it. The former `dependencies/crengine-patches.txt` series and its patch files are retained in Git history. Their changes are integrated into this source; builds do not apply a second engine patch stack.
 
+## Flex layout
+
+Blaze runs flex layout when the computed display is `flex` or `inline-flex`. Horizontal text rows support wrapping, grow and shrink factors, flex basis, percentage item widths, length gaps and main-axis alignment. Single-line rows can center, stretch or align items at either end of the cross axis. Inline containers use the inline box formatter and measure the row for an automatic width.
+
+A forward column stacks its children with a row gap and can align them horizontally. A short column with a definite height can center or distribute simple text items vertically. Oversized stacks use ordinary text page breaks. General nested layouts, reverse or wrapping columns, and independent fragmentation of side-by-side items remain outside the prototype. Multi-item rows support nonnegative fixed-length left and right margins. Horizontal auto margins share the line’s remaining space before justification. Block flex rows resolve percentage minimum and maximum item widths against the row’s content width. Inline flex rows still exclude those percentage limits. Multi-item rows exclude percentage margins, nonzero vertical margins and percentage padding. Blaze keeps the feature query `@supports (display: flex)` false.
+
 ## Bringing in upstream changes
 
-Compare the upstream change with the recorded KOReader base. In `crengine/`, keep upstream file names, indentation and declaration style. Kobalt’s [.clang-format-ignore](../../.clang-format-ignore) excludes these files. Format the adapter under `adapter/` with Kobalt’s Qt style.
+Blaze includes the upstream changes up to `koreader/crengine` commit `a459d926862ca92ce4701d2c1ecfb7244d2a2a68`. This is the recorded upstream revision. Compare Blaze with this revision, not with upstream `master`, which moves on. Check it out in the worktree's `build/` and only read it:
+
+```bash
+git clone https://github.com/koreader/crengine.git build/upstream/crengine
+git -C build/upstream/crengine checkout a459d926862ca92ce4701d2c1ecfb7244d2a2a68
+```
+
+To bring in newer upstream changes, apply each upstream commit after the recorded revision to `src/engine/blaze` with `git apply -p1 --directory=src/engine/blaze`. Merge a commit that touches a Blaze change by hand, and review cache compatibility ([Cache compatibility](#cache-compatibility)). In the same change, move the recorded revision here and in [UPSTREAM.md](../../src/engine/blaze/UPSTREAM.md), and check the **Upstream:** line of every entry in UPSTREAM.md against the new revision.
+
+In `crengine/`, keep upstream file names, indentation and declaration style. Kobalt’s [.clang-format-ignore](../../.clang-format-ignore) excludes these files. Format the adapter under `adapter/` with Kobalt’s Qt style.
 
 In inherited files, `Blaze:` marks a difference from the recorded KOReader revision. This includes changes carried over from earlier forks. Place the comment beside the code and explain what an upstream update must preserve. Find these comments with `rg -n 'Blaze:' src/engine/blaze/crengine`. Compare against the recorded revision for the full diff.
+
+[UPSTREAM.md](../../src/engine/blaze/UPSTREAM.md) explains every change to inherited code for CREngine maintainers, in this order: speedups, features, bug fixes, hardening and changes for Kobalt's reader. Update it in the same change as the Blaze edit. When an upstream update brings in a change that the file has, remove its entry.
 
 Blaze keeps its cancellation and pause callbacks and its chapter-window selection in `src/engine/blaze/extensions/`. They compile into the engine library and use the declarations in `crengine/include/koblaze.h`. The EPUB import loop still decides when parsing can stop and inserts an empty fragment for each skipped spine item so saved positions keep their fragment indices.
 
@@ -24,9 +41,17 @@ Each font face owns a word cache. The [cache](../../src/engine/blaze/extensions/
 
 For a change to text layout, check both the inherited `lvtextfm.cpp` and [Blaze’s vertical formatter](../../src/engine/blaze/extensions/vertical/lvtextfm_vert.cpp). They still compile together because the vertical formatter uses the private formatter class. The [vertical box painter](../../src/engine/blaze/extensions/vertical/vertical_boxes.cpp) maps borders, fills and background images into screen coordinates. The inherited renderer selects it using the writing mode of the current box and page. Both writing modes use the image sizing, positioning and tiling code in `drawutil.cpp`. Vertical pages supply their painted rectangle and clip on all four sides. Bold Reading and ordinary text use the same [font variation settings](../../src/engine/blaze/extensions/font_selection.cpp). Changes to block layout or the DOM also need testing with a chapter window and a complete document. Use the [layout regressions](../validation/layout.md) to compare them.
 
-The CSS parser keeps the selector grammar and cascade order. The [ancestor filter](../../src/engine/blaze/extensions/css_ancestors.cpp) records the requirements of a parsed selector and checks ancestor element names and classes before a full match.
+When horizontal Thai text has no legal line break, Blaze keeps a leading vowel with the next consonant and keeps attached vowels and marks with their base. It uses break opportunities supplied by the book, including zero-width spaces. Without Thai word segmentation, emergency wrapping can still split words.
+
+The CSS parser keeps the selector grammar and cascade order. The [ancestor filter](../../src/engine/blaze/extensions/css_ancestors.cpp) records the requirements of a parsed selector and checks ancestor element names and classes before a full match. Active stylesheets also index universal selectors that require a class. The matcher merges the candidates in cascade order.
+
+The EPUB importer resolves manifest fallback chains before building chapter fragments. Page lists use CREngine’s existing NCX and EPUB navigation parsers. Chapter windows retain the target ID for a printed page outside the loaded chapter. The reader resolves it when the page is selected.
+
+Blaze uses libwebp for still images and for the first composited frame of an animation. Layout reads the WebP header. A still-image decoder can produce a smaller raster when the drawing destination accepts one. FreeType uses Brotli for WOFF2. The embedded font cache retains reconstructed single-face fonts so other sizes and chapter windows can share them. Font collections use FreeType’s collection handling.
 
 ## Cache compatibility
+
+Parsed-book format 16 added DTBook chapters, manifest fallbacks and illustrated labels. Format 17 rebuilds earlier caches so printed pages have publication paths and EPUB landmarks are available. Format 18 comes with the upstream fix for raw `style` and `script` elements, which changes the parsed DOM of some books.
 
 Moving the same source into this repository does not change parsed-book or rendering cache formats. Later parser, preprocessing, shaping or layout changes must follow [Storage compatibility](../storage.md).
 

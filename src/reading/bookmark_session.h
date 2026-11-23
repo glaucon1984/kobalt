@@ -1,4 +1,5 @@
 #pragma once
+#include "reading/chapter.h"
 #include "storage/bookmark_store.h"
 #include "storage/record_writer.h"
 #include <QHash>
@@ -13,7 +14,48 @@
 namespace kobalt {
 class ReaderSession;
 
+// Look up titles for bookmarks from the last page towards the first. Contents
+// order decides which title wins, even when several entries share a page or
+// an entry points back to an earlier page.
+class BookmarkChapterTitles
+{
+public:
+    explicit BookmarkChapterTitles(const QVector<ChapterLink> &chapters)
+        : contents(chapters), remaining(chapters.size())
+    {
+    }
+
+    QString title(int page, const QString &stored)
+    {
+        if (page >= 0) {
+            while (remaining > 0) {
+                const auto &entry = contents[remaining - 1];
+                if (entry.page >= 0 && entry.page <= page)
+                    return entry.title;
+                --remaining;
+            }
+        }
+        return stored;
+    }
+
+private:
+    const QVector<ChapterLink> contents;
+    int remaining;
+};
+
 QString bookmarkLayoutKey(int pages, const QJsonObject &state, const QSize &pageArea);
+
+class BookmarkLayoutKeyCache
+{
+public:
+    QString key(int pages, const QJsonObject &state, const QSize &pageArea);
+
+private:
+    QJsonObject lastState;
+    QSize lastArea;
+    int lastPages = 0;
+    QString lastKey;
+};
 
 // Kobalt's own bookmarks for one open book, one per page. The engine thread
 // looks up the page of each stored bookmark whenever the layout changes.
@@ -54,6 +96,8 @@ public:
     int page(int index) const;
     // Whole-book display index. Local pages still control marking and merging.
     int bookPage(int index) const;
+
+    QString printedPage(const QString &position) const { return printedPages_.value(position); }
     // The page of the bookmark at `position` in the current layout, or -1.
     int pageOf(const QString &position) const;
     enum class Toggle { Refused, Removed, Adding };
@@ -65,6 +109,7 @@ public:
     const QVector<int> &pages() const { return pages_; }
 
     // True until the newest save has reported back.
+    bool discardQueuedWrites() { return !writer || writer->discardQueued(); }
     bool saving() const { return reported < posted; }
 
     // Waits for the running and pending save, for example before USB export.
@@ -100,6 +145,7 @@ private:
     // layout_ is set, pages_ has one entry per bookmark.
     QVector<int> pages_;
     QHash<QString, int> bookPages_;
+    QHash<QString, QString> printedPages_;
     QString layout_, lookup_;
     quint64 layoutRevision_ = 0, lookupRevision_ = 0, lookupRequest_ = 0, lookupGeneration_ = 0;
     // Changes with every edit of the list, so an older page lookup is repeated.

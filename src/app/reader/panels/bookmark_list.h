@@ -13,6 +13,9 @@
 #include "storage/custom_pins.h"
 
 namespace kobalt {
+// Prefer a space between the minimum and maximum excerpt lengths.
+QString elideBookmarkExcerpt(const QString &text, int minimum, int maximum);
+
 struct BookmarkRow
 {
     QString position, chapter, excerpt;
@@ -28,6 +31,7 @@ struct BookmarkRow
     // Annotation rows: whether the highlight has a note, and the note once read.
     bool hasNote = false;
     QString note = {};
+    QString printedPage = {}, printedEnd = {};
 };
 
 // The Bookmarks list covers the header's action row with its own bar, like
@@ -35,10 +39,13 @@ struct BookmarkRow
 class BookmarkList : public ui::Panel
 {
 public:
+    bool useScreens = false;
     explicit BookmarkList(QWidget *parent, KeyboardFactory keyboard = {});
     ~BookmarkList() override;
 
-    QWidget *pinDialog() const { return pinHelp ? pinHelp.data() : pinPopup.data(); }
+    QWidget *pinDialog() const { return pinPopup.data(); }
+
+    QWidget *pinHelpDialog() const { return pinHelp.data(); }
 
     std::function<bool(const QString &, const QString &, const QString &)> pinRequested;
     void showBookmarks(QVector<BookmarkRow> rows);

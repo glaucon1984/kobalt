@@ -1447,3 +1447,78 @@ before.
 
 Device backup before the update, with the previous package:
 `backups/era-lite-before-beta-9-20261119`.
+
+## Upstream v1.0-beta.10 (2026-11-22): the release tag
+
+The beta 10 release (`1796a325`, main = develop = tag) merged into the port: 395 commits past
+v1.0-beta.9. What it brings: bundled reading typefaces in groups (Kobalt Collection, System
+Fonts, International Fonts), System > Theming, header and footer typeface, size and padding with a
+preview, a progress bar at the top or bottom with chapter marks, a marked start and end of the
+book with Main text or Whole volume Stats, printed page numbers and landmarks in Chapters, Return
+to page after a jump from Chapters, columns settings, restoring one book's settings, WebP images,
+WOFF2 fonts, ZIP64 archives and DTBook chapters in the engine, and Settings with icons whose
+sections are built on first visit. `rendering_version` is 22 and the parsed-book cache format 18,
+so every book is parsed and paginated again once. SQLite schema 4, settings schema 1 and
+book-record format 1 are unchanged.
+
+Twenty-three conflicts. Ten files were the same as on `kobo-develop` and took its resolution
+(the desktop check lists, the three platform link lists, the Plugins section in Settings, the
+lifecycle test, three documents). The ones of the port:
+
+- **Text renderer** (`src/ui/style/private_text.cpp`). Upstream now builds the layout cache key as
+  bytes from the font description, and keeps tinted copies of a layout in the same cache
+  (`tintedPrivateText`). That replaces the port's `layoutKey` cache and its tint in place, which
+  are gone. The port's work counters (`PrivateTextWork`, `takePrivateTextWork()`) stay, counting
+  at upstream's cache lookup.
+- **Reading page** (`src/app/reader/views/reading_page.cpp`). Upstream moved the header and footer
+  strips into `renderStrips()` and skips the paper fill under an opaque page image, as the port
+  did. Upstream's versions are used. The turn diagnostics keep their fields: `renderStrips()`
+  records `header_ms`, `footer_ms` and `strips_rendered`, and `whole_book` joins them.
+- **KOSync schedule.** The sheet is now owned by `KosyncScheduleEditor`, which Settings keeps so
+  that the Zen page can open it before the Sync page exists. The port's third feature
+  (`finalConnects`, for the texts of [Every automatic KOSync sync turns Wi-Fi
+  on](#every-automatic-kosync-sync-turns-wi-fi-on-2026-11-15)) goes through
+  `Reader::updateKosyncFeatures()` to the page or, before the page exists, to the editor.
+- **Sleep image.** `sleepReader()` takes `externalScreenVisible`; the host calls it without, as
+  before. `WindowPresentation::presentSleepScreen()` has a third argument, `clean`, a request for
+  a flashing refresh when the frame reaches the display. The port's presentation ignores it: its
+  frame only reaches the lock-screen file.
+- **Standalone controller.** `OpenRequest` lost the layout cache path; the native location and
+  the position codec stay.
+- **Plugins.** Upstream removed the reader window built ahead of its opening, so plugins load
+  again where the window is built (`startPlugins()` before `startDeviceObservers()`). The Plugins
+  section is built with Settings > System on its first visit: `PluginsSection` gets its options
+  and rows from Settings (`settingsOption`, `listAction`), so they look like the others, and
+  hands rows and dialogs made later back for the reader's text and theme (`widgetCreated`).
+  `connectSettingsPage(System)` wires it and gives it the draft. The rows have icons, as every
+  System row now has: Lightning for Use plugins, Lightbulb for Plugin answers first, MagicWand
+  for a plugin. Not reviewed on a screenshot yet.
+
+Dependencies moved: Brotli and libwebp are new, and FreeType is built with Brotli for WOFF2.
+
+- `CMakeLists.txt` links `libbrotlidec.a`, `libbrotlicommon.a`, `libwebpdemux.a` and
+  `libwebpdecoder.a` from the prefix.
+- `tools/rebuild-deps.sh` no longer copies CREngine out of the dependency set, which has had none
+  since Blaze (the note of 2026-11-13); it refreshes the install prefix only.
+  `tools/kobalt-check` calls `kobalt_local_engine()`, which `shared-inputs.cmake` needs for the
+  engine's data files.
+- The set is `32e53c5c4731d195`. The prefix headers differ from the previous set only by the new
+  `brotli/` and `webp/` folders and FreeType's `ftoption.h` (Brotli on). Qt was not rebuilt:
+  FreeType's version and interface are the same, and the final link adds Brotli.
+- The two new archives were placed in the cache's `downloads/` on the build host by checksum,
+  as Lua was.
+
+Built in `kobalt-blaze` and `kobalt-pb-blaze` on the build host, as the beta 9 build was.
+
+Native tests from this branch, in the kobuild Linux image on the docker host: all pass except
+six, none of them new. `desktop.lightGestureFeedback` (the port's warmth snap),
+`build.sourceChecks` (the three `AllowBlocking` reasons of the host),
+`desktop.pluginLateCardAddsChoice`, and `model.annotation-database` and `model.diagnostics` (the
+30 s limit on that host's disk) are the five of the beta 9 merge. `build.loadLock` timed out
+while the other tests ran beside it; on `kobo-develop`, with the same merge, it did the same and
+passed when run alone.
+
+Device backup before the update, with the 0.12.0 package:
+`backups/era-lite-before-beta-10-20261122`.
+
+Tried on the Era Lite on 2026-11-23: it works. Released as 0.13.0.

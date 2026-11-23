@@ -20,7 +20,7 @@
 #include "storage/saved_words.h"
 #include "support/main_thread.h"
 #include "reading/reading_density.h"
-#include "support/strings.h"
+#include "support/percentage_text.h"
 #include "ui/input/hold_timer.h"
 #include <QPointer>
 #include <utility>
@@ -79,10 +79,15 @@ ui::Button *actionButton(QWidget *parent, const QString &text, const char *name,
     return button;
 }
 
-int minimumListRowHeight()
+QSize listCells(QSize screen, int availableHeight)
 {
-    return qMax<int>(ui::metrics::list::threeLines,
-                     metrics::thumbHeight + 2 * metrics::thumbPadding);
+    if (screen.width() > screen.height() && isPhoneScreen(screen, ui::density())) {
+        // Size compact rows for the three text lines, then fit the cover to the row.
+        return { 2, qBound(1, availableHeight / int(ui::metrics::list::threeLines), 2) };
+    }
+    const int rowHeight = qMax<int>(ui::metrics::list::threeLines,
+                                    metrics::thumbHeight + 2 * metrics::thumbPadding);
+    return { 1, qMax(1, availableHeight / rowHeight) };
 }
 
 QString countText(int count)
@@ -97,7 +102,7 @@ QString statusText(const Book &book)
     case Status::Finished:
         return strings::get("library.status_done");
     case Status::Reading:
-        return strings::get("common.percent").arg(book.percent);
+        return strings::percentage(book.percent);
     case Status::New:
         break;
     }
@@ -133,9 +138,8 @@ class BookPages final : public QWidget
     friend class LibraryView;
 
 public:
-    BookPages(const Index &index, std::function<QString(const QString &)> coverPath,
-              QWidget *parent)
-        : QWidget(parent), index(index), coverPath(std::move(coverPath))
+    BookPages(std::function<QString(const QString &)> coverPath, QWidget *parent)
+        : QWidget(parent), coverPath(std::move(coverPath))
     {
         setObjectName("libraryPages");
         setProperty("reader_owns_swipes", true);
@@ -171,12 +175,20 @@ public:
         QVector<Placement> result;
         if (view == View::List) {
             const int first = page * perPage;
-            for (int row = 0; row < perPage && first + row < books.size(); ++row) {
+            for (int i = 0; i < perPage && first + i < books.size(); ++i) {
+                const int column = i % columns, row = i / columns;
+                const int left = column * width() / columns;
+                const int right = (column + 1) * width() / columns;
                 const int top = rowTop(row);
-                const QRect area(0, top, width(), rowTop(row + 1) - top);
-                const QRect cover(chrome::inset, area.center().y() - metrics::thumbHeight / 2,
-                                  metrics::thumbWidth, metrics::thumbHeight);
-                result.append({ area, cover, books[first + row] });
+                const QRect area(left, top, right - left, rowTop(row + 1) - top);
+                const int coverHeight = columns == 1
+                        ? int(metrics::thumbHeight)
+                        : qBound(1, area.height() - 2 * metrics::thumbPadding,
+                                 int(metrics::thumbHeight));
+                const QRect cover(left + chrome::inset, area.center().y() - coverHeight / 2,
+                                  columns == 1 ? int(metrics::thumbWidth) : coverHeight * 2 / 3,
+                                  coverHeight);
+                result.append({ area, cover, books[first + i] });
             }
         } else {
             const int first = page * perPage;
@@ -328,7 +340,6 @@ private:
         return highlighted >= 0 && highlighted < placed.size() && &hit == &placed[highlighted];
     }
 
-    const Index &index;
     std::function<QString(const QString &)> coverPath;
     QCache<QString, QImage> covers;
     QVector<Placement> placed;
@@ -352,7 +363,7 @@ private:
     {
         // Round boundaries, not individual heights, so every list pixel belongs
         // to a row and the final row ends exactly at the pager.
-        return view == View::List ? int(qint64(row) * height() / perPage)
+        return view == View::List ? int(qint64(row) * height() / (perPage / columns))
                                   : firstTop + row * rowStep;
     }
 
@@ -369,8 +380,7 @@ private:
     {
         if (book.cover.isEmpty())
             return nullptr;
-        // A book keeps its cover file name when it changes, so the cache key
-        // also holds the file's date: a changed book reads its new cover.
+        // Older catalogues reused cover file names when a book changed.
         const auto key = book.cover + QLatin1Char(':') + QString::number(book.modified);
         if (auto *image = covers.object(key))
             return image->isNull() ? nullptr : image;
@@ -393,8 +403,9 @@ private:
         laidOut = size();
         const int available = height();
         if (view == View::List) {
-            // Rows are tall enough for the cover with some room around it.
-            perPage = qMax(1, available / minimumListRowHeight());
+            const auto cells = listCells(parentWidget()->size(), available);
+            columns = cells.width();
+            perPage = columns * cells.height();
             pages = (books.size() + perPage - 1) / perPage;
         } else {
             const int room = width() - 2 * chrome::inset, height = available - metrics::gridTop;
@@ -486,6 +497,9 @@ private:
             // A pressed row turns the reader's pressed gray, as list rows do.
             if (isHighlighted(hit))
                 painter.fillRect(area, palette().color(QPalette::Midlight));
+            if (area.left() > 0)
+                painter.fillRect(area.left(), area.top(), qMax(1, ui::px(2)), area.height(),
+                                 divider);
             paintCover(painter, hit.cover, book, ink, paper, true);
             const int left = hit.cover.right() + 1 + chrome::inset,
                       right = area.right() - metrics::progressWidth;
@@ -569,8 +583,8 @@ private:
                     drawCaption(painter,
                                 QRect(bar.left(), bar.bottom() + 1 + metrics::gridBarGap,
                                       bar.width(), percentHeight()),
-                                strings::get("common.percent").arg(book.percent), Qt::AlignLeft,
-                                ink, chrome::numberText);
+                                strings::percentage(book.percent), Qt::AlignLeft, ink,
+                                chrome::numberText);
             }
         }
     }
@@ -844,6 +858,7 @@ LibraryView::LibraryView(const Index &index, std::function<QString(const QString
     const auto cell = [this](ui::ControlIcon icon, const char *name, const QString &label) {
         auto *button = new ui::CellButton(icon, this);
         button->setObjectName(name);
+        button->setProperty("themed_icon", true);
         button->setAccessibleName(label);
         button->setRule(Qt::LeftEdge);
         return button;
@@ -885,7 +900,7 @@ LibraryView::LibraryView(const Index &index, std::function<QString(const QString
     progress = new ui::LoadingIndicator(ui::LoadingIndicator::Style::Squares, this);
     progress->setObjectName("libraryScanProgress");
     progress->hide();
-    pages = new BookPages(index, coverPath, this);
+    pages = new BookPages(coverPath, this);
     pager = new ui::PagerBar(this, "library");
     empty = buildEmpty();
     throttle = new QTimer(this);
@@ -1083,7 +1098,7 @@ void LibraryView::setScanning(bool value, int count)
 void LibraryView::setDark(bool value)
 {
     dark = value;
-    const auto colors = ui::readerPalette(palette(), dark);
+    const auto colors = ui::readerPalette(palette(), dark, ui::interfacePalette(this));
     setProperty("reader_dark", dark);
     ui::applyReaderPalette(this, colors);
     for (auto *widget : findChildren<QWidget *>()) {
@@ -1104,7 +1119,6 @@ void LibraryView::showNotice(const QString &title, const QString &message)
     notice->dismissed = [this] { closeOverlay(); };
     setDark(dark);
     notice->setGeometry(rect());
-    notice->fitCard();
     notice->show();
     notice->raise();
     notice->setFocus();
@@ -1252,7 +1266,8 @@ void LibraryView::rebuild(bool keepPage)
         // Decide whether a pager is needed before measuring the list. Otherwise
         // its previous visibility can leave an unnecessary page or stale count.
         const int available = qMax(1, height() - chrome::actionHeight - chrome::toolStripHeight);
-        const int capacity = qMax(1, available / minimumListRowHeight());
+        const auto cells = listCells(size(), available);
+        const int capacity = cells.width() * cells.height();
         pager->setVisible(pages->books.size() > capacity);
         arrange();
     }
@@ -1335,7 +1350,7 @@ void LibraryView::paintEvent(QPaintEvent *event)
     QPainter painter(this);
     // The reader style sheet on this root widget keeps its own text color, so
     // take the ink from the theme rather than the palette.
-    const auto &ink = ui::themeColors(dark).ink;
+    const auto &ink = ui::themeColors(this).ink;
     painter.fillRect(0, chrome::actionHeight - chrome::heavyRule, width(), chrome::heavyRule, ink);
     painter.fillRect(0,
                      chrome::actionHeight + chrome::toolStripHeight - ui::metrics::control::border,
@@ -1380,7 +1395,7 @@ void LibraryView::showBookMenu(const QString &key)
         header.image = QImage(ui::metrics::actionMenu::thumbnailWidth,
                               ui::metrics::actionMenu::thumbnailHeight, QImage::Format_RGB32);
         QPainter painter(&header.image);
-        const auto &colors = ui::themeColors(dark);
+        const auto &colors = ui::themeColors(this);
         BookPages::paintPlainCover(painter, header.image.rect(), book, colors.ink, colors.paper);
     }
     header.title = book.displayTitle();
@@ -1455,7 +1470,6 @@ void LibraryView::confirmRemove(const QString &key)
     setDark(dark);
     modal->setGeometry(rect());
     modal->setDimmed(true);
-    modal->fitCard();
     modal->show();
     modal->raise();
     modal->setFocus();
@@ -1468,13 +1482,7 @@ void LibraryView::showMoreSheet()
         return;
     }
     closeOverlay();
-    // My Words is listed while its feature is shown; Settings can change that
-    // while the Library is open in the background.
-    const bool words =
-            savedWords
-            && features::enabled(
-                    storage::readPreferences(savedWordsDirectory + "/reader-settings.json").object,
-                    features::Words);
+    const bool words = savedWords && features::enabled(readerPreferences(), features::Words);
     if (moreSheet && moreSheetWords != words) {
         moreSheet->deleteLater();
         moreSheet = nullptr;
@@ -1565,7 +1573,6 @@ void LibraryView::showResourceFolders()
     modal->dismissed = [this] { closeOverlay(); };
     setDark(dark);
     modal->setGeometry(rect());
-    modal->fitCard();
     modal->show();
     modal->raise();
     modal->setFocus();
@@ -1620,11 +1627,24 @@ void LibraryView::setWordsDirectory(const QString &directory)
     if (directory.isEmpty() || !annotationDatabaseEnabled())
         return;
     savedWords = std::make_unique<SavedWords>(directory);
+    if (savedWordsDirectory != directory)
+        savedPreferences.reset();
     savedWordsDirectory = directory;
     savedWords->changed = [this] {
         if (wordList && wordList->isVisible())
             showWords();
     };
+}
+
+const QJsonObject &LibraryView::readerPreferences()
+{
+    // A standalone Library without a host snapshot reads its profile once.
+    if (!savedPreferences)
+        savedPreferences = savedWordsDirectory.isEmpty()
+                ? QJsonObject()
+                : storage::readPreferences(storage::Paths{ savedWordsDirectory }.preferences())
+                          .object;
+    return *savedPreferences;
 }
 
 void LibraryView::showWords()
@@ -1655,8 +1675,7 @@ void LibraryView::showWords()
     wordList->setGeometry(rect());
     // Without an open book, words use the default reading font, and their
     // definitions the dictionary font when Settings chose one.
-    const auto preferences =
-            storage::readPreferences(savedWordsDirectory + "/reader-settings.json").object;
+    const auto &preferences = readerPreferences();
     const auto bookFamily =
             preferences.value("default_font_face").toString(QStringLiteral("Libron"));
     const auto dictionaryFamily = preferences.value("dictionary_font_face").toString();

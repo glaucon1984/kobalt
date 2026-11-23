@@ -7,7 +7,7 @@
 #include "ui/style/rich_text.h"
 #include "ui/style/theme.h"
 #include "support/qt_compat.h"
-#include "support/strings.h"
+#include "support/percentage_text.h"
 
 #include <QLinearGradient>
 #include <QPainter>
@@ -18,6 +18,7 @@
 
 #include <cmath>
 #include <functional>
+#include <vector>
 
 namespace kobalt::reader {
 namespace {
@@ -84,10 +85,7 @@ struct Content
 
     QString word() const { return sleepStatusText(status); }
 
-    QString percent() const
-    {
-        return strings::get("common.percent").arg(qBound(0, shot.percent, 100));
-    }
+    QString percent() const { return sleepPercentText(shot); }
 };
 
 QFont mono(qreal pixels, qreal spacingEm)
@@ -155,7 +153,7 @@ int lineHeight(const QFont &font)
 // The battery percentage and its icon, as one line. Returns its width.
 qreal batteryWidth(const QFont &font, int percent)
 {
-    const auto label = strings::get("common.percent").arg(percent);
+    const auto label = strings::percentage(percent);
     const qreal body = font.pixelSize() * 0.75;
     return ui::interfaceTextWidth(label, font) + font.pixelSize() * 0.35 + ui::batteryWidth(body);
 }
@@ -172,7 +170,7 @@ qreal inkMiddle(const QFont &font, qreal top, const QString &value)
 void battery(QPainter &painter, const QFont &font, const QColor &ink, const QColor &paper,
              QPointF leftCentre, int percent, bool charging, bool iconFirst = false)
 {
-    const auto label = strings::get("common.percent").arg(percent);
+    const auto label = strings::percentage(percent);
     const qreal body = font.pixelSize() * 0.75;
     const qreal iconWidth = body * int(ui::metrics::panel::batteryBodyWidth)
             / int(ui::metrics::panel::batteryBodyHeight);
@@ -424,6 +422,7 @@ void paintMedallion(QPainter &painter, const Frame &frame, const Content &conten
 struct PillLayout
 {
     QRectF pill;
+    QString progress;
     qreal height = 0;
 };
 
@@ -435,9 +434,12 @@ PillLayout pillLayout(const Frame &frame, const Content &content)
 {
     const QFont font = sans(3 * frame.u);
     const qreal gap = pillGap * frame.u;
-    qreal width = 1.8 * frame.u + 2.2 * frame.u + ui::interfaceTextWidth(content.word(), font) + gap
-            + ui::interfaceTextWidth(strings::get("sleep.percent_read").arg(content.shot.percent),
-                                     font);
+    qreal width = 1.8 * frame.u + 2.2 * frame.u + ui::interfaceTextWidth(content.word(), font);
+    QString progress;
+    if (content.shot.percent >= 0) {
+        progress = strings::get("sleep.percent_read").arg(sleepPercentText(content.shot, true));
+        width += gap + ui::interfaceTextWidth(progress, font);
+    }
     if (content.charging())
         width += gap + batteryWidth(font, content.battery);
     width += 2 * pillPadding * frame.u;
@@ -445,7 +447,7 @@ PillLayout pillLayout(const Frame &frame, const Content &content)
     const qreal top =
             content.shot.place == sleep::Place::Top ? frame.y(6) : frame.bottom(6) - height;
     const QRectF pill(frame.box.center().x() - width / 2, top, width, height);
-    return { pill, height };
+    return { pill, progress, height };
 }
 
 void paintPill(QPainter &painter, const Frame &frame, const Content &content, const Palette &colors)
@@ -489,11 +491,12 @@ void paintPill(QPainter &painter, const Frame &frame, const Content &content, co
     const auto word = content.word();
     label(word, colors.ink);
     x += ui::interfaceTextWidth(word, font);
-    rule(x);
-    x += gap;
-    const auto read = strings::get("sleep.percent_read").arg(content.shot.percent);
-    label(read, colors.ink);
-    x += ui::interfaceTextWidth(read, font);
+    if (!layout.progress.isEmpty()) {
+        rule(x);
+        x += gap;
+        label(layout.progress, colors.ink);
+        x += ui::interfaceTextWidth(layout.progress, font);
+    }
     if (content.charging()) {
         rule(x);
         x += gap;
@@ -585,7 +588,8 @@ void paintCaption(QPainter &painter, const Frame &frame, const Content &content)
     const QFont state = mono(2.2 * frame.u, 0.3);
     // While charging the state line carries the battery level: CHARGING (67%).
     const auto heading = content.charging()
-            ? strings::get("sleep.state_with_battery").arg(content.word()).arg(content.battery)
+            ? strings::get("sleep.state_with_battery")
+                      .arg(content.word(), strings::percentArgument(content.battery))
             : content.word();
     text(painter, state, white, QRectF(frame.x(8), layout.top, 84 * frame.u, lineHeight(state)),
          heading.toUpper());
@@ -615,17 +619,20 @@ QVector<QRect> captionAreas(const Frame &frame, const sleep::Snapshot &shot, QSi
 
 struct WidgetsLayout
 {
-    QRectF word, book, cover, read, second, left;
+    QRectF book, cover, read, second, left;
     std::unique_ptr<Block> title;
     qreal titleTop = 0, authorTop = 0, labelTop = 0;
 };
+
+QRectF widgetsStatusRect(const Frame &frame)
+{
+    return QRectF(frame.x(7), frame.y(8), 86 * frame.u, lineHeight(serif(12 * frame.u)));
+}
 
 WidgetsLayout widgetsLayout(const Frame &frame, const sleep::Snapshot &shot)
 {
     WidgetsLayout layout;
     const qreal u = frame.u, pad = 3.4 * u, gap = 3 * u;
-    const QFont state = serif(12 * u);
-    layout.word = QRectF(frame.x(7), frame.y(8), 86 * u, lineHeight(state));
     const qreal left = frame.x(7), width = 86 * u;
     const QSizeF coverShape =
             shot.coverArea.isEmpty() ? QSizeF(600, 851) : QSizeF(shot.coverArea.size());
@@ -676,12 +683,13 @@ void paintWidgets(QPainter &painter, const Frame &frame, const Content &content,
     const QColor background = colors.paper;
     painter.fillRect(QRect(QPoint(), size), background);
     const QFont state = serif(12 * u);
-    text(painter, state, colors.ink, layout.word, content.word(), Qt::AlignLeft | Qt::AlignTop);
+    const auto word = widgetsStatusRect(frame);
+    text(painter, state, colors.ink, word, content.word(), Qt::AlignLeft | Qt::AlignTop);
     if (content.charging()) {
         // The battery aligns with the tiles' right edge, on the state word's middle.
         const QFont level = sans(4 * u);
-        const qreal middle = inkMiddle(state, layout.word.top(), content.word());
-        const qreal left = layout.word.right() - batteryWidth(level, content.battery);
+        const qreal middle = inkMiddle(state, word.top(), content.word());
+        const qreal left = word.right() - batteryWidth(level, content.battery);
         battery(painter, level, colors.ink, background, QPointF(left, middle), content.battery,
                 true);
     }
@@ -768,12 +776,6 @@ void paintWidgets(QPainter &painter, const Frame &frame, const Content &content,
                  left.isEmpty() ? content.shot.remaining : left, Qt::AlignRight);
 }
 
-QVector<QRect> widgetsAreas(const Frame &frame, const sleep::Snapshot &shot)
-{
-    const auto layout = widgetsLayout(frame, shot);
-    return { layout.word.adjusted(-2, -2, 2, 2).toAlignedRect() };
-}
-
 // ---------------------------------------------------------------- C09
 
 void star(QPainter &painter, QPointF centre, qreal radius, bool filled, const QColor &ink)
@@ -820,8 +822,7 @@ NightLayout nightLayout(const Frame &frame)
     return layout;
 }
 
-void paintNight(QPainter &painter, const Frame &frame, const Content &content, QSize size,
-                const Palette &colors)
+void paintNightSky(QPainter &painter, const Frame &frame, QSize size, const Palette &colors)
 {
     paper(painter, size, colors);
 
@@ -859,6 +860,11 @@ void paintNight(QPainter &painter, const Frame &frame, const Content &content, Q
     painter.setBrush(colors.paper);
     painter.drawEllipse(QRectF(frame.right(3) - inner, frame.y(5), inner, inner));
     painter.restore();
+}
+
+void paintNightText(QPainter &painter, const Frame &frame, const Content &content,
+                    const Palette &colors)
+{
     const auto layout = nightLayout(frame);
     QFont word = serif(15 * frame.u, true);
     const QFont detail = sans(3 * frame.u);
@@ -876,10 +882,10 @@ void paintNight(QPainter &painter, const Frame &frame, const Content &content, Q
     text(painter, word, colors.ink,
          QRectF(frame.x(9), layout.wordTop, 82 * frame.u, lineHeight(word)), heading,
          Qt::AlignLeft | Qt::AlignTop);
-    QString line = content.shot.privateBook ? content.shot.progress
-                                            : strings::get("sleep.percent_through")
-                                                      .arg(qBound(0, content.shot.percent, 100))
-                                                      .arg(content.shot.details.title);
+    QString line = content.shot.privateBook
+            ? content.shot.progress
+            : strings::get("sleep.percent_through")
+                      .arg(sleepPercentText(content.shot, true), content.shot.details.title);
     if (!content.shot.remaining.isEmpty())
         line += QStringLiteral(" · ") + content.shot.remaining;
     text(painter, detail, colors.ink,
@@ -889,7 +895,9 @@ void paintNight(QPainter &painter, const Frame &frame, const Content &content, Q
         const QFont level = nightLevel(frame);
         text(painter, level, colors.ink,
              QRectF(frame.x(9), frame.y(8), 82 * frame.u, lineHeight(level)),
-             strings::get("sleep.battery_charged").arg(content.battery).toUpper(),
+             strings::get("sleep.battery_charged")
+                     .arg(strings::percentArgument(content.battery))
+                     .toUpper(),
              Qt::AlignLeft | Qt::AlignTop);
     }
 }
@@ -932,22 +940,28 @@ void paintRing(QPainter &painter, const Frame &frame, const Content &content, QS
     }
     painter.restore();
     const QFont figure = jost(25 * s), sign = jost(10 * s);
-    const auto number = QString::number(percent);
-    const int numberWidth = ui::interfaceTextWidth(number, figure);
-    const int signWidth = ui::interfaceTextWidth(QStringLiteral("%"), sign);
-    qreal start = centre.x() - (numberWidth + signWidth) / 2.0;
+    const auto parts = strings::percentParts(percent);
+    const int beforeWidth = ui::interfaceTextWidth(parts.before, sign);
+    const int numberWidth = ui::interfaceTextWidth(parts.number, figure);
+    const int afterX = beforeWidth + numberWidth;
+    const int totalWidth = afterX + ui::interfaceTextWidth(parts.after, sign);
+    qreal start = centre.x() - totalWidth / 2.0;
     qreal percentBaseline = box.top() + 54 * s;
     if (content.shot.details.title.isEmpty()) {
-        const auto ink = ui::interfaceInkBounds(number, figure)
-                                 .united(ui::interfaceInkBounds(QStringLiteral("%"), sign)
-                                                 .translated(numberWidth, 0));
+        const auto ink =
+                ui::interfaceInkBounds(parts.before, sign)
+                        .united(ui::interfaceInkBounds(parts.number, figure)
+                                        .translated(beforeWidth, 0))
+                        .united(ui::interfaceInkBounds(parts.after, sign).translated(afterX, 0));
         start = centre.x() - ink.center().x();
         percentBaseline = centre.y() - ink.center().y();
     }
-    baselineText(painter, figure, colors.ink, QPointF(start, percentBaseline), number,
+    baselineText(painter, sign, colors.ink, QPointF(start, percentBaseline), parts.before,
                  Qt::AlignLeft);
-    baselineText(painter, sign, colors.ink, QPointF(start + numberWidth, percentBaseline),
-                 QStringLiteral("%"), Qt::AlignLeft);
+    baselineText(painter, figure, colors.ink, QPointF(start + beforeWidth, percentBaseline),
+                 parts.number, Qt::AlignLeft);
+    baselineText(painter, sign, colors.ink, QPointF(start + afterX, percentBaseline), parts.after,
+                 Qt::AlignLeft);
     // The title may take two lines under the figure; a longer one is cut short.
     const QFont title = mono(3.6 * s, 0.8 / 3.6);
     const auto lines = wrapLines(content.shot.details.title.toUpper(), title, qRound(60 * s), 2);
@@ -1202,8 +1216,7 @@ QStringList letterParagraphs(const Content &content, const Palette &colors)
         const auto chapter = details.chapter.isEmpty()
                 ? QString()
                 : fill(strings::get("sleep.letter_chapter"), { escaped(details.chapter) });
-        const auto percent = mark(
-                strings::get("common.percent").arg(qBound(0, content.shot.percent, 100)), colors);
+        const auto percent = mark(sleepPercentText(content.shot), colors);
         main = fill(strings::get(off ? "sleep.letter_progress_off" : "sleep.letter_progress"),
                     { percent, title, chapter });
     }
@@ -1213,7 +1226,7 @@ QStringList letterParagraphs(const Content &content, const Palette &colors)
                 fill(strings::get("sleep.letter_remaining"), { mark(details.left, colors) }));
     if (content.charging()) {
         // The battery level starts its own line.
-        const auto level = mark(strings::get("common.percent").arg(content.battery), colors);
+        const auto level = mark(strings::percentage(content.battery), colors);
         paragraphs.append(escaped(strings::get("sleep.letter_charging")) + QStringLiteral("<br>")
                           + fill(strings::get("sleep.letter_battery"), { level }));
     }
@@ -1253,30 +1266,47 @@ void paintLetter(QPainter &painter, const Frame &frame, const Content &content, 
         shot.details.chapter = shortened(chapter, limit);
         return letterParagraphs({ shot, content.status, content.battery }, colors);
     };
-    const auto fits = [&](int limit) {
+
+    struct Paragraph
+    {
+        QString html;
+        std::unique_ptr<Block> layout;
+    };
+
+    // Shortening the title and chapter changes only their paragraph.
+    std::vector<Paragraph> bodyParagraphs;
+    const auto layoutParagraphs = [&](int limit) {
+        const auto text = paragraphs(limit);
+        bodyParagraphs.resize(text.size());
         qreal height = -gap;
-        for (const auto &paragraph : paragraphs(limit))
-            height += block(paragraph, font, width, letterSize * frame.u * letterLeading)->height
-                    + gap;
-        return height <= available;
+        for (int i = 0; i < text.size(); ++i) {
+            auto &paragraph = bodyParagraphs[i];
+            if (!paragraph.layout || paragraph.html != text[i]) {
+                paragraph.html = text[i];
+                paragraph.layout =
+                        block(paragraph.html, font, width, letterSize * frame.u * letterLeading);
+            }
+            height += paragraph.layout->height + gap;
+        }
+        return height;
     };
     int low = 0, high = qMax(title.size(), chapter.size());
-    if (!fits(high)) {
+    if (layoutParagraphs(high) > available) {
         while (low < high) {
             const int middle = (low + high + 1) / 2;
-            if (fits(middle))
+            if (layoutParagraphs(middle) <= available)
                 low = middle;
             else
                 high = middle - 1;
         }
+        layoutParagraphs(high);
     }
     qreal y = frame.y(20);
     painter.save();
     painter.setClipRect(QRectF(left, y, width, available), Qt::IntersectClip);
-    for (const auto &paragraph : paragraphs(high)) {
-        const auto laid = block(paragraph, font, width, letterSize * frame.u * letterLeading);
-        drawBlock(painter, *laid, QPointF(left, y), colors.ink);
-        y += laid->height + gap;
+    for (const auto &paragraph : bodyParagraphs) {
+        drawBlock(painter, *paragraph.layout, QPointF(left, y), colors.ink);
+        y += paragraph.layout->height + gap;
     }
     painter.restore();
     text(painter, font, colors.ink,
@@ -1299,10 +1329,13 @@ QVector<QRect> letterAreas(const Frame &frame, QSize size)
 // ----------------------------------------------------------------
 
 // Draws what a design adds to its backdrop before the status underlay is saved.
-void paintGround(QPainter &painter, QSize size, const sleep::Snapshot &shot)
+void paintGround(QPainter &painter, QSize size, const sleep::Snapshot &shot, SleepStatus status)
 {
     if (shot.design == Design::Caption)
         paintCaptionFade(painter, Frame(size), size, shot.place);
+    else if (shot.design == Design::Night)
+        paintNightSky(painter, Frame(size), size,
+                      palette(shot.dark || status == SleepStatus::PoweredOff));
 }
 
 // Draws a design that is not tiled over a backdrop already on the painter.
@@ -1330,7 +1363,7 @@ void paintDesign(QPainter &painter, QSize size, const sleep::Snapshot &shot, con
         paintWidgets(painter, frame, content, size, cover, colors);
         break;
     case Design::Night:
-        paintNight(painter, frame, content, size, colors);
+        paintNightText(painter, frame, content, colors);
         break;
     case Design::Ring:
         paintRing(painter, frame, content, size, colors);
@@ -1364,12 +1397,29 @@ sleep::Snapshot displaySnapshot(sleep::Snapshot shot)
     shot.details.greeting = metadata(shot.details.greeting);
     shot.details.left = metadata(shot.details.left);
     shot.details.clock = metadata(shot.details.clock);
-    shot.progress = metadata(shot.progress);
+    // Generated progress text follows the snapshot's percentage, so saved
+    // screens show its decimal when it has one. Other saved text stays.
+    const auto progressLabel = strings::get("sleep.percent_read");
+    const auto shownProgress = progressLabel.arg(sleepPercentText(shot, true));
+    const auto wholeProgress = progressLabel.arg(strings::percentArgument(qint64(shot.percent)));
+    if (shot.percent >= 0 && (shot.progress == wholeProgress || shot.progress == shownProgress))
+        shot.progress = shownProgress;
+    else
+        shot.progress = metadata(shot.progress);
     shot.remaining = metadata(shot.remaining);
     return shot;
 }
 
 } // namespace
+
+QString sleepPercentText(const sleep::Snapshot &shot, bool argument)
+{
+    if (shot.percentTenths >= 0)
+        return argument ? strings::percentArgument(shot.percentTenths / 10.0, 1)
+                        : strings::percentage(shot.percentTenths / 10.0, 1);
+    const qint64 percent = qBound(0, shot.percent, 100);
+    return argument ? strings::percentArgument(percent) : strings::percentage(percent);
+}
 
 QImage sleepDesignImage(QImage backdrop, const sleep::Snapshot &source, int batteryPercent,
                         SleepStatus status, QVector<QImage> *underlay)
@@ -1394,7 +1444,7 @@ QImage sleepDesignImage(QImage backdrop, const sleep::Snapshot &source, int batt
         dimSleepPage(backdrop, snapshot.dark);
     {
         QPainter ground(&backdrop);
-        paintGround(ground, backdrop.size(), snapshot);
+        paintGround(ground, backdrop.size(), snapshot, status);
     }
     if (underlay)
         *underlay = sleepStatusUnderlay(backdrop, sleepStatusAreas(backdrop.size(), snapshot));
@@ -1435,7 +1485,7 @@ QVector<QRect> sleepStatusAreas(QSize size, const sleep::Snapshot &source)
         areas = captionAreas(frame, snapshot, size);
         break;
     case Design::Widgets:
-        areas = widgetsAreas(frame, snapshot);
+        areas = { widgetsStatusRect(frame).adjusted(-2, -2, 2, 2).toAlignedRect() };
         break;
     case Design::Night:
         areas = nightAreas(frame, size);
@@ -1489,12 +1539,13 @@ QRect repaintSleepStatus(QImage &screen, const QVector<QImage> &underlay,
     QPainter screenPainter(&screen);
     for (int index = 0; index < areas.size(); ++index) {
         const auto &area = areas[index];
-        QImage patch = index < underlay.size() && underlay[index].size() == area.size()
-                ? underlay[index].copy()
-                : screen.copy(area);
+        const bool saved = index < underlay.size() && underlay[index].size() == area.size();
+        QImage patch = saved ? underlay[index].copy() : screen.copy(area);
         QPainter painter(&patch);
         painter.setRenderHint(QPainter::SmoothPixmapTransform);
         painter.translate(-area.topLeft());
+        if (snapshot.design == Design::Night && (!saved || status == SleepStatus::PoweredOff))
+            paintGround(painter, screen.size(), snapshot, status);
         paintDesign(painter, screen.size(), snapshot, {}, batteryPercent, status);
         painter.end();
         screenPainter.drawImage(area.topLeft(), patch);
@@ -1583,7 +1634,7 @@ void paintSleepPreview(QPainter &painter, const QRectF &target, QSize size, cons
         QImage tileCover;
         if (drawsCover(snapshot.design))
             tileCover = cover;
-        paintGround(painter, size, shot);
+        paintGround(painter, size, shot, status);
         paintDesign(painter, size, shot, tileCover, -1, status);
     }
     painter.restore();

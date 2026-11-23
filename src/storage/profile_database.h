@@ -22,6 +22,12 @@ bool profileTransaction(const QString &directory,
 // the device powers off. An unused profile can be blocked before its first
 // database operation without starting the writer thread.
 void closeProfile(bool keepClosed = false);
+// Queues the same close and block on the writer, after the writes already
+// waiting there, without waiting for it. `closed` runs on the writer thread.
+// The caller decides how long to wait, for example at power-off.
+void closeProfileLater(std::function<void()> closed);
+// Reject new transactions immediately. In-flight transactions may finish on the writer.
+void blockProfile();
 void reopenProfile();
 // Whether the profile database in `directory` opens. Incompatible is a Kobalt
 // database of a version this build does not know. Corrupt is a damaged, empty

@@ -1,6 +1,6 @@
 # Rendering engines
 
-Blaze is Kobalt’s EPUB rendering engine. It is a hard fork of KOReader’s CREngine, which grew out of CoolReader. Kobalt maintains the fork in this repository and builds it for Kobo, Android and desktop. See [source provenance and licenses](engines/koblaze.md).
+Blaze is Kobalt’s EPUB rendering engine. It is a hard fork of KOReader’s CREngine, which grew out of CoolReader. Kobalt maintains the fork in this repository and builds it for Kobo, Android and desktop. See [source provenance and licenses](engines/blaze.md).
 
 ## Status
 
@@ -22,15 +22,17 @@ Most Kobo models use one processor core, including the Clara BW. KOReader’s de
 
 ### The reader comes first
 
-- Background work runs in short steps and stops when other work waits. The engine worker counts each request from another thread, `engineWorkRequests()` in [engine_worker.h](../src/engine/engine_worker.h). Idle work checks that count between steps. A tap waits for one step at most: one 8 KB part of the page estimate, one 20 ms step of the parsed-book cache write, or the time to the next stop check of the whole-book build.
+- Background work runs in short steps and stops when other work waits. The engine worker counts each request from another thread, `engineWorkRequests()` in [engine_worker.h](../src/engine/engine_worker.h). Idle work checks that count between steps. A tap during a page estimate waits for the current 8 KB part. A whole-book build yields at its next stop check. A parsed-book cache step has a 20 ms budget. When saving nodes, Blaze returns to the idle loop after each numbered block. A waiting page turn can run before the next block. Styles, the table of contents and the page map can still take longer than the budget. The final cache flush has no time limit.
 - The whole-book build runs on its own thread, but never at the same time as the engine worker. The two threads hand the engine to each other, so the build adds no second busy thread. Any queued engine work parks the build at its next stop check, not only a page turn. The next quiet moment continues the build where it stopped, so no work is lost. See `FullBuild` in [reader_source.cpp](../src/engine/blaze/adapter/reader_source.cpp).
 - A step that is not needed for the next page waits for idle time. The documents that a turn or an appearance change replaced are destroyed after the neighbour pages, because their teardown can write the parsed-book cache. While the reader shows the whole book, the parsed-book cache is written in idle steps, so closing has little left to write.
 - A change of appearance or a rotation goes back to the chapter. A new layout of the whole book would hold up the reader. The whole book follows in the background.
 - A next slice that a tap stops keeps the pages that it drew, so the turn does not draw them again.
+- When the whole book is ready, idle time prepares the turn that adopts it. The whole book goes to the page on screen and draws the page after it, with the changed rectangle against the page on screen, the targets of its links and the pages of its contents. The turn then only changes documents. A close request stops preparation at its next check. If the reader returns to the book, preparation resumes. In two columns the whole book can pair the columns into screens otherwise than the chapter. A turn stays in the chapter if switching would repeat or skip a column. A numbered jump uses the chapter’s page number and switches only if the whole book shows the same spread. A jump to a passage can switch directly. A turn or jump that stays in the chapter keeps its layout, so lookups such as bookmark pages stay valid. They start again when a frame of the whole book reaches the reader. The whole book keeps the chapter files that the Nickel position codec parsed for the chapter, because that cache belongs to the open book. A turn in the chapter moves the page on screen, and the next idle moment prepares again. A backward turn draws its page itself.
 
 ### Do each piece of work once
 
 - The text measurements of the page estimate, search and links do not depend on the layout. A new document of the same book takes them over, so an appearance change does not measure the book again.
+- A selection that spans chapters reads its text one chapter at a time on the engine worker. To draw a saved highlight, the chapter layout first checks whether the range intersects the page. It checks unfamiliar endpoints against their source chapters and keeps the result for later turns with the same appearance. Only the displayed chapter supplies glyph rectangles and handles.
 - The contents place a spine item without a layout at its start, or by its characters. Neither needs a read of its XHTML.
 - The whole-book build finds the start of each spine item while it builds, in one walk over the fragments. A page turn does not wait for that later.
 - The Nickel position code parses a chapter source once and keeps its text once, with a range for each ID. The reader asks for the place of every page, mostly in the same chapter.
@@ -62,6 +64,6 @@ Nickel's event thread runs with idle priority (`SCHED_IDLE`). While Kobalt keeps
 
 ## Engines and revisions
 
-Blaze was imported from the local `koblaze` revision `6d3946edf08ef69afe19a3c457b88af126ae64aa`. Its upstream base is `koreader/crengine` at `4ce1aed17e9d7852e047e0b9b0bf6a637486fd97`. Changes since the import are in Kobalt’s Git history.
+Blaze was imported from the local `koblaze` revision `6d3946edf08ef69afe19a3c457b88af126ae64aa`. Its upstream base is `koreader/crengine` at `4ce1aed17e9d7852e047e0b9b0bf6a637486fd97`. It also includes later upstream changes, up to the revision that [Bringing in upstream changes](engines/blaze.md#bringing-in-upstream-changes) records. Changes since the import are in Kobalt’s Git history.
 
 The original audit also examined Crosspoint at `0333cbbe4649f80afafe83061bf1afe9fd372fcf`. The [dependency inventory](engines/inventory.md), [compatibility comparison](engines/compatibility.md), [proposed contract](engines/contract.md) and [migration plan](engines/migration.md) record the design work that preceded Blaze. Kobalt ships Blaze as its only engine.

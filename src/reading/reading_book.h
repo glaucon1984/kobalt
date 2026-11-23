@@ -32,6 +32,7 @@ public:
                 ReadingHistory::UtcClock utc = {}, ReadingTimer::Clock readingClock = {});
     ~ReadingBook();
 
+    bool discardQueuedWrites();
     void discardPendingSaves() { discardSaves = true; }
 
     ReaderSession *session() const { return session_.get(); }
@@ -116,7 +117,7 @@ public:
 
     bool readingActive() const { return activeReading.isValid(); }
 
-    ReadingEstimates estimates() const;
+    ReadingEstimates estimates(bool wholeVolume = false) const;
 
     void onEstimatesChanged(std::function<void()> changed)
     {
@@ -162,7 +163,8 @@ public:
 
     void acknowledge(const ReadingProgress &shown, bool moved);
     void markNativeReading();
-    NativeSaveResult writeNative(const QString &location, const QString &mappingError);
+    NativeSaveResult writeNative(const QString &location, const QString &mappingError,
+                                 bool wholeVolume = false);
     NativeSaveResult nativeSaveResult() const;
 
     // A background checkpoint is queued on the book's writer thread and
@@ -200,7 +202,7 @@ public:
 
     // The displayed page and chapters, from memory.
     ReadingActivity readingActivity() const;
-    bool saveDictionaryChoice(const QString &id);
+    void saveDictionaryChoice(const QString &id, std::function<void(bool)> done);
     QJsonObject imageView(const QString &id) const;
     // Memory only. The caller can queue the existing background checkpoint.
     bool rememberImageView(const QString &id, const QJsonObject &view);
@@ -279,7 +281,7 @@ private:
     // A writer holds one waiting write, so each record has its own: a speed
     // record must not replace a waiting position. The destructor resets both
     // after their last writes have finished.
-    std::unique_ptr<storage::RecordWriter> writer, speedWriter;
+    std::unique_ptr<storage::RecordWriter> writer, speedWriter, dictionaryWriter;
     std::shared_ptr<ReadingBook *> alive = std::make_shared<ReadingBook *>(this);
     // Waits for the reading history's write when a close checkpoint ends.
     SaveWait saveWait;

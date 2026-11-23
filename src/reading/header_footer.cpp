@@ -1,7 +1,7 @@
 #include "header_footer.h"
 #include "remaining_time.h"
 #include "reading_progress.h"
-#include "support/strings.h"
+#include "support/percentage_text.h"
 
 #include <QJsonArray>
 
@@ -43,11 +43,13 @@ bool anything(const Layout &layout, int first)
     return false;
 }
 
-QString pageFraction(int page, int pages, bool estimated)
+QString pageFraction(int page, int pages, bool estimated, bool useScreens)
 {
-    return pages > 0
-            ? strings::get("common.page_fraction").arg(page).arg(pageTotal(pages, estimated))
-            : QString();
+    return pages > 0 ? screenLabel(strings::get("common.page_fraction")
+                                           .arg(page)
+                                           .arg(pageTotal(pages, estimated)),
+                                   useScreens)
+                     : QString();
 }
 
 // A standalone estimate remains approximate while reading history accumulates.
@@ -80,9 +82,7 @@ QString percent(qint64 tenths, bool decimal)
 {
     if (tenths < 0)
         return {};
-    const auto whole = tenths / 10;
-    return strings::get("common.percent")
-            .arg(decimal ? QString("%1.%2").arg(whole).arg(tenths % 10) : QString::number(whole));
+    return decimal ? strings::percentage(tenths / 10.0, 1) : strings::percentage(tenths / 10);
 }
 
 QString percentDone(int page, int pages, bool decimal)
@@ -97,11 +97,13 @@ QString percentDone(int page, int pages, bool decimal)
 
 // Beside a name the page reads 5 of 33, so the slash does not compete with
 // the dot between the two parts.
-QString pageOf(int page, int pages, bool estimated)
+QString pageOf(int page, int pages, bool estimated, bool useScreens)
 {
-    return pages > 0
-            ? strings::get("header_footer.page_of").arg(page).arg(pageTotal(pages, estimated))
-            : QString();
+    return pages > 0 ? screenLabel(strings::get("header_footer.page_of")
+                                           .arg(page)
+                                           .arg(pageTotal(pages, estimated)),
+                                   useScreens)
+                     : QString();
 }
 
 QString milliseconds(qint64 value)
@@ -124,7 +126,7 @@ QString bookStatus(const Values &values)
     } else if (values.wholeBookFailed) {
         detail = strings::get("header_footer.status.failed");
     } else if (values.wholeBookPercent >= 0) {
-        detail = strings::get("common.percent").arg(values.wholeBookPercent);
+        detail = strings::percentage(values.wholeBookPercent);
     }
     const auto mode = strings::get(values.wholeBook ? "header_footer.status.full"
                                                     : "header_footer.status.fast");
@@ -166,9 +168,10 @@ bool Layout::footer() const
 bool Layout::operator==(const Layout &other) const
 {
     return slotFields == other.slotFields && headerSize == other.headerSize
-            && footerSize == other.footerSize && headerEnabled == other.headerEnabled
-            && footerEnabled == other.footerEnabled && uppercase == other.uppercase
-            && progressBar == other.progressBar;
+            && stripPadding == other.stripPadding && footerSize == other.footerSize
+            && headerEnabled == other.headerEnabled && footerEnabled == other.footerEnabled
+            && uppercase == other.uppercase && progressBar == other.progressBar
+            && progressBarTop == other.progressBarTop && progressTicks == other.progressTicks;
 }
 
 Layout presetLayout(Preset preset)
@@ -296,6 +299,7 @@ QJsonObject toJson(const Layout &layout)
         object[names[slot]] = fieldValue(layout.slotFields[slot]);
     object["header_size"] = savedSize(layout.headerSize, layout.headerEnabled);
     object["footer_size"] = savedSize(layout.footerSize, layout.footerEnabled);
+    object["strip_padding"] = layout.stripPadding;
     object["header_font_size"] = layout.headerSize;
     object["footer_font_size"] = layout.footerSize;
     QJsonArray uppercase;
@@ -303,6 +307,10 @@ QJsonObject toJson(const Layout &layout)
         uppercase.append(value);
     object["uppercase"] = uppercase;
     object["progress_bar"] = layout.progressBar;
+    // Optional. Older builds ignore it and draw the bar at the bottom.
+    object["progress_bar_position"] = QString::fromLatin1(layout.progressBarTop ? "top" : "bottom");
+    // Optional. Older builds ignore it and draw no ticks.
+    object["progress_bar_ticks"] = layout.progressTicks;
     return object;
 }
 
@@ -314,6 +322,8 @@ Layout fromJson(const QJsonObject &object, const Layout &fallback)
     for (int slot = 0; slot < slotCount; ++slot)
         if (object.value(names[slot]).isString())
             layout.slotFields[slot] = field(object.value(names[slot]).toString());
+    layout.stripPadding =
+            qBound(0, object.value("strip_padding").toInt(layout.stripPadding), maximumExtraHeight);
     readSize(object, "header_size", "header_font_size", layout.headerSize, layout.headerEnabled);
     readSize(object, "footer_size", "footer_font_size", layout.footerSize, layout.footerEnabled);
     // One value per slot. A single value applies to every slot.
@@ -325,6 +335,10 @@ Layout fromJson(const QJsonObject &object, const Layout &fallback)
             if (uppercase.toArray().at(slot).isBool())
                 layout.uppercase[slot] = uppercase.toArray().at(slot).toBool();
     layout.progressBar = object.value("progress_bar").toBool(fallback.progressBar);
+    const auto position = object.value("progress_bar_position").toString();
+    if (position == "top" || position == "bottom")
+        layout.progressBarTop = position == "top";
+    layout.progressTicks = object.value("progress_bar_ticks").toBool(fallback.progressTicks);
     return layout;
 }
 
@@ -373,6 +387,11 @@ static Selection selectLayout(const QJsonObject &preferences)
     const auto legacy = legacyLayout(preferences);
     if (legacy == legacyLayout({})) {
         selection.layout = presetLayout(Preset::Default);
+        // Explicit Small used to look identical to an unset size.
+        if (preferences.value("header_text_size") == QStringLiteral("small"))
+            selection.layout.headerSize = smallSize;
+        if (preferences.value("footer_text_size") == QStringLiteral("small"))
+            selection.layout.footerSize = smallSize;
         return selection;
     }
     selection.preset = Preset::Custom;
@@ -385,6 +404,7 @@ QJsonObject textSettings(const Layout &layout)
     QJsonObject result;
     result["header_size"] = savedSize(layout.headerSize, layout.headerEnabled);
     result["footer_size"] = savedSize(layout.footerSize, layout.footerEnabled);
+    result["strip_padding"] = layout.stripPadding;
     result["header_font_size"] = layout.headerSize;
     result["footer_font_size"] = layout.footerSize;
     return result;
@@ -403,6 +423,9 @@ Selection select(const QJsonObject &preferences, bool phone)
         selection.layout = presetLayout(Preset::Phone);
     }
     const auto text = preferences.value(textKey).toObject();
+    selection.layout.stripPadding =
+            qBound(0, text.value("strip_padding").toInt(selection.layout.stripPadding),
+                   maximumExtraHeight);
     readSize(text, "header_size", "header_font_size", selection.layout.headerSize,
              selection.layout.headerEnabled);
     readSize(text, "footer_size", "footer_font_size", selection.layout.footerSize,
@@ -429,12 +452,12 @@ Content content(Field field, const Values &values, bool uppercase)
         result.text = values.percentTenths >= 0
                 ? calculating()
                 : pageFraction(values.chapterPage, values.chapterPages,
-                               values.chapterPagesEstimated);
+                               values.chapterPagesEstimated, values.useScreens);
         break;
     case Field::BookPage:
         result.text = values.percentTenths >= 0
                 ? calculating()
-                : pageFraction(values.page, values.pages, values.pagesEstimated);
+                : pageFraction(values.page, values.pages, values.pagesEstimated, values.useScreens);
         break;
     case Field::ChapterPagesLeft:
         if (values.percentTenths >= 0) {
@@ -442,24 +465,25 @@ Content content(Field field, const Values &values, bool uppercase)
         } else if (values.chapterPages > 0) {
             // The current page is still to be read, as in Stats: the last page shows 1.
             const int left = qMax(1, values.chapterPages - values.chapterPage + 1);
-            result.text =
-                    strings::get("header_footer.pages_left")
-                            .arg(left)
-                            .arg(strings::get(left == 1 ? "stats.page_left" : "stats.pages_left"));
+            result.text = strings::get("header_footer.pages_left")
+                                  .arg(left)
+                                  .arg(remainingScreenUnit(left, values.useScreens));
         }
         break;
     case Field::ChapterAndPage:
         result.chapterTitle = values.chapter;
         result.chapterPosition = values.percentTenths >= 0
                 ? calculating()
-                : pageOf(values.chapterPage, values.chapterPages, values.chapterPagesEstimated);
+                : pageOf(values.chapterPage, values.chapterPages, values.chapterPagesEstimated,
+                         values.useScreens);
         result.text = joined(result.chapterTitle, result.chapterPosition);
         break;
     case Field::TitleAndPage:
         result.text = joined(values.title,
                              values.percentTenths >= 0
                                      ? calculating()
-                                     : pageOf(values.page, values.pages, values.pagesEstimated));
+                                     : pageOf(values.page, values.pages, values.pagesEstimated,
+                                              values.useScreens));
         break;
     case Field::BatteryPercentOnly:
     case Field::BatteryPercent:
@@ -470,7 +494,7 @@ Content content(Field field, const Values &values, bool uppercase)
             break;
         if (values.deviceStatus) {
             if (field != Field::Battery && values.battery >= 0)
-                result.text = strings::get("common.percent").arg(values.battery);
+                result.text = strings::percentage(values.battery);
             result.batteryIcon = field != Field::BatteryPercentOnly;
             result.battery = values.battery;
             result.charging = values.charging;
@@ -508,6 +532,17 @@ Content content(Field field, const Values &values, bool uppercase)
         result.text = bookStatus(values);
         break;
     }
+    if (field == Field::BookPercent && !values.matterPage.isEmpty())
+        result.text = percent(values.page <= 0 ? 0 : 1000, values.decimalPercentages);
+    const auto label = values.printedPage.isEmpty()
+            ? screenLabel(values.matterPage, values.useScreens)
+            : values.printedPage;
+    if (!label.isEmpty() && (field == Field::BookPage || field == Field::TitleAndPage)) {
+        result.text = field == Field::BookPage
+                ? label
+                : joined(uppercase ? values.title.toUpper() : values.title, label);
+        return result;
+    }
     if (uppercase) {
         result.text = result.text.toUpper();
         result.chapterTitle = result.chapterTitle.toUpper();
@@ -521,7 +556,7 @@ bool pageCount(Field field)
     return field == Field::ChapterPage || field == Field::BookPage;
 }
 
-QString fieldLabel(Field field)
+QString fieldLabel(Field field, bool useScreens)
 {
     switch (field) {
     case Field::Nothing:
@@ -533,13 +568,16 @@ QString fieldLabel(Field field)
     case Field::Chapter:
         return strings::get("header_footer.field.chapter");
     case Field::ChapterPage:
-        return strings::get("header_footer.field.chapter_page");
+        return strings::get(useScreens ? "header_footer.field.chapter_screen"
+                                       : "header_footer.field.chapter_page");
     case Field::BookPage:
         return strings::get("header_footer.field.book_page");
     case Field::ChapterPagesLeft:
-        return strings::get("header_footer.field.chapter_pages_left");
+        return strings::get(useScreens ? "header_footer.field.chapter_screens_left"
+                                       : "header_footer.field.chapter_pages_left");
     case Field::ChapterAndPage:
-        return strings::get("header_footer.field.chapter_and_page");
+        return strings::get(useScreens ? "header_footer.field.chapter_and_screen"
+                                       : "header_footer.field.chapter_and_page");
     case Field::TitleAndPage:
         return strings::get("header_footer.field.title_and_page");
     case Field::BatteryPercentOnly:
@@ -575,7 +613,7 @@ QString fieldDescription(Field field)
     switch (field) {
     case Field::BatteryWarning:
         return strings::get("header_footer.field_description.battery_warning")
-                .arg(batteryWarningBelow);
+                .arg(strings::percentArgument(batteryWarningBelow));
     case Field::ChapterTimeLeft:
     case Field::BookTimeLeft:
         return strings::get("header_footer.field_description.time_left");

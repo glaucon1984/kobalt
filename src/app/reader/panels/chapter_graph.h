@@ -19,23 +19,25 @@ public:
     void setData(QVector<ChapterLink> chapters, ChapterSelection selection, bool ready,
                  const QString &error);
     void setProgress(const QString &title, int chapterPage, int chapterPages, int nextChapterPages,
-                     int page, int pages, double bookFraction = -1, bool estimated = false);
+                     int page, int pages, int bookPercent = -1, bool estimated = false,
+                     bool useScreens = false);
     // `number` counts from 1 in the contents; 0 when the position is before them.
     void setChapterNumber(int number, int count);
-    // `words` is the shared whole-book total, or -1 when counting failed.
+    // `words` is the total for the selected scope, or -1 while unavailable.
     // The times are the rest of
     // the chapter and of the book at the session's pace, or -1 without a pace.
     void setReading(int minutes, qint64 words, qint64 chapterMilliseconds = -1,
-                    qint64 bookMilliseconds = -1, int pageTurns = 0);
+                    qint64 bookMilliseconds = -1, int pageTurns = 0, bool wholeVolume = false);
     // Dense charts show every chapter on one row; sparse charts page 20 at a time.
     void setDense(bool value);
+    void setWordScopeAvailable(bool available);
 
-    void setModeEnabled(bool enabled) { mode->setEnabled(enabled); }
 
     // The row under the cells that opens Activity, with today's reading and
     // the streak. Hidden without a handler.
     void setActivity(const QString &summary);
-    std::function<void()> activityRequested;
+    QString activitySummary() const;
+    std::function<void()> activityRequested, wordScopeRequested;
 
     void open();
 
@@ -69,6 +71,8 @@ private:
     int anchor = 0;
     int topPadding = 0, availableHeight = 0;
     // The chart can grow on larger screens and shrink on short ones.
+    double chapterSpread = 1.0;
+    void updateChartScale();
     int chartHeight() const;
     bool inlinePager() const;
     // On a short screen the word totals move from their row into the cells.
@@ -91,9 +95,9 @@ private:
     struct Progress
     {
         int chapterPage = 0, chapterPages = 0, nextChapterPages = 0, page = 0, pages = 0;
-        double bookFraction = -1;
+        int bookPercent = -1;
         // True for page totals that are an estimate.
-        bool estimated = false;
+        bool estimated = false, useScreens = false;
     } progress;
 
     QString error;
@@ -101,10 +105,11 @@ private:
     QString title;
     int progressWeight = -1;
     ui::PagerBar *pager;
-    ui::CellButton *mode;
+    ui::CellButton *mode, *wordScope;
     ChapterBars *bars;
     QLabel *chapterWords, *bookWords;
     QString chapterWordsText, bookWordsText;
+    bool wholeVolume = false;
     StatsCell *chapterCell, *bookCell, *sessionCell;
     int capacity() const;
     void refreshCells();

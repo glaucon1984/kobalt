@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <QCryptographicHash>
 #include <QElapsedTimer>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QRegularExpression>
 #include <climits>
@@ -227,7 +228,7 @@ QVector<int> EngineDocument::spineItemStarts(int first, int last,
     // A large book has hundreds of spine items. Each group takes a moment,
     // and `current` can park the work between groups.
     static constexpr int group = 32;
-    const auto items = spineItems();
+    const auto items = spineLocationNames();
     last = qMin(last, int(items.size()) - 1);
     if (!engine_)
         return {};
@@ -239,8 +240,7 @@ QVector<int> EngineDocument::spineItemStarts(int first, int last,
             auto *node = root->getChildNode(i);
             if (!node->isElement() || !node->isNodeName("DocFragment"))
                 continue;
-            const auto href =
-                    QString::fromUtf8(UnicodeToUtf8(node->getAttributeValue("Source")).c_str());
+            const auto href = enginelocation::spineHref(node);
             if (!fragments.contains(href))
                 fragments.insert(href, node);
         }
@@ -296,11 +296,17 @@ QString EngineDocument::estimateKey(const QJsonObject &settings, int slicePages)
     key["registered_fonts"] = layoutFontDigest();
     key["rendering_policy"] = QString::fromLatin1(KOBALT_RENDERING_POLICY);
     key["policy"] = QString::fromUtf8(documentCachePolicy());
-    return QString::fromLatin1(
+    // Every turn asks for the key with the same settings. Hash them only
+    // when they change.
+    if (key == estimateKeyInput_)
+        return estimateKeyValue_;
+    estimateKeyValue_ = QString::fromLatin1(
             QCryptographicHash::hash(QJsonDocument(key).toJson(QJsonDocument::Compact),
                                      QCryptographicHash::Sha1)
                     .toHex()
                     .left(16));
+    estimateKeyInput_ = std::move(key);
+    return estimateKeyValue_;
 }
 
 QString EngineDocument::fullDocumentKey(const QJsonObject &settings) const
@@ -311,6 +317,23 @@ QString EngineDocument::fullDocumentKey(const QJsonObject &settings) const
     return estimateKey(settings) + QLatin1Char('|')
             + QString::fromUtf8(QJsonDocument(pixels).toJson(QJsonDocument::Compact));
 }
+
+namespace {
+// The optional record fields of chapter ticks, for the record's layout only.
+// Measured ticks are saved even when there are none, so the book does not
+// measure them again when it opens.
+void writeTicks(QJsonObject &record, const QVector<double> &ticks, const QString &key,
+                const QString &range)
+{
+    if (key.isEmpty() || record.value("layout").toString() != key)
+        return;
+    QJsonArray values;
+    for (const double tick : ticks)
+        values.append(std::round(tick * 1000000) / 1000000);
+    record["chapter_ticks"] = values;
+    record["chapter_ticks_range"] = range;
+}
+} // namespace
 
 QJsonObject EngineDocument::pageEstimateRecord(const QJsonObject &settings) const
 {
@@ -335,6 +358,7 @@ QJsonObject EngineDocument::pageEstimateRecord(const QJsonObject &settings) cons
         record.layout = key;
         record.spineItems = spineItemCount_;
         record.read = map.completeItems();
+        record.wholeSpreads = map.wholeSpreads();
         if (map.keeping())
             record.kept = map.keptPages();
         // The parts of the spine items that stay in the record, the nearest
@@ -372,6 +396,8 @@ QJsonObject EngineDocument::pageEstimateRecord(const QJsonObject &settings) cons
     place.itemShown = rough.itemPage;
     auto result = estimate.record;
     place.writePlace(result);
+    const auto &ticks = source_->pageEstimate;
+    writeTicks(result, ticks.ticks, ticks.ticksKey, ticks.ticksRange);
     return result;
 }
 
@@ -422,6 +448,8 @@ QJsonObject EngineDocument::wholeBookEstimateRecord(const QJsonObject &settings)
         record.layout = key;
         record.spineItems = spineItemCount_;
         record.wholeBook = true;
+        if (columns_ == 2)
+            record.wholeSpreads = pages();
         for (int i = 0; i < starts.size(); ++i) {
             const int end = i + 1 < starts.size() ? starts[i + 1] : pages();
             if (starts[i] >= 0 && end >= starts[i])
@@ -443,6 +471,8 @@ QJsonObject EngineDocument::wholeBookEstimateRecord(const QJsonObject &settings)
         record.itemShown = pageInItem + 1;
         record.writePlace(result);
     }
+    const auto &ticks = source_->pageEstimate;
+    writeTicks(result, ticks.ticks, ticks.ticksKey, ticks.ticksRange);
     return result;
 }
 
@@ -456,15 +486,32 @@ void EngineDocument::restorePageEstimate(const QJsonValue &saved)
     map.setPrior(record.model);
     if (record.spineItems != spineItemCount_ || record.layout != estimateKey(settingsState()))
         return;
-    map.restore(record.read);
+    map.restore(record.read, record.wholeSpreads);
     map.restoreParts(record.parts);
     map.restoreKept(record.kept);
     auto &estimate = source_->pageEstimate;
     estimate.key = record.layout;
+    // Chapter ticks of the same layout, from a session that had the whole book.
+    estimate.ticks.clear();
+    estimate.ticksKey.clear();
+    estimate.ticksRange.clear();
+    if (const auto values = saved.toObject().value("chapter_ticks"); values.isArray()) {
+        for (const auto &tick : values.toArray())
+            if (tick.isDouble() && tick.toDouble() > 0 && tick.toDouble() < 1)
+                estimate.ticks.append(tick.toDouble());
+        estimate.ticksKey = record.layout;
+        estimate.ticksRange = saved.toObject().value("chapter_ticks_range").toString();
+    }
     if (record.item < 0)
         return;
-    estimate.book.restore(record.shown);
-    estimate.item.restore(record.itemShown);
+    // The whole book and the chapter can pair their columns differently.
+    // Let the chapter place its own page within the item. At the book end
+    // its first column can also precede the last whole-book screen.
+    const bool wholeSpread = record.wholeBook && columns_ == 2;
+    if (!wholeSpread || record.shown != record.wholeSpreads)
+        estimate.book.restore(record.shown);
+    if (!wholeSpread)
+        estimate.item.restore(record.itemShown);
     estimate.lastItem = record.item;
     estimate.lastFirst = record.first;
     // The record does not hold the end of the slice. A turn from the saved
@@ -578,7 +625,7 @@ EngineDocument::RoughPlace EngineDocument::roughPlace() const
         }
         return place;
     }
-    const auto items = spineItems();
+    const auto items = spineLocationNames();
     place.item = qBound(windowFirst_, spineItemOf(position()), windowLast_);
     QStringList starts;
     for (const int index : { place.item, place.item + 1 }) {
@@ -681,11 +728,30 @@ Engine::RoughPages EngineDocument::roughPages() const
     }
     if (fullDocumentReady()) {
         const auto anchor = engine_->getPageBookmark(page()).toString();
-        auto exact = full_->engine_->getDocument()->createXPointer(anchor);
-        if (!exact.isNull()) {
-            rough.page = full_->engine_->getBookmarkPage(exact) + 1;
+        auto &whole = *full_->engine_;
+        auto exact = whole.getDocument()->createXPointer(anchor);
+        // A heading hidden in the whole book has no page. Keep the page from the map.
+        const int y = exact.isNull() ? -1 : exact.toPoint().y;
+        if (y >= 0) {
+            rough.page = whole.screenOfColumn(whole.getPageList()->FindNearestPage(y, 0)) + 1;
             rough.pages = full_->pages();
             rough.pagesEstimated = false;
+            // Turns and checkpoints follow the first column, even when reading
+            // the last spread shows the whole-book total below.
+            if (map.wholeSpreads() > 0)
+                estimate.book.restore(rough.page);
+        }
+    }
+    // The last chapter spread can end one column past the whole-book screen
+    // containing its first column. It still shows the end of the book.
+    if (map.wholeSpreads() > 0) {
+        if (windowLast_ + 1 == spineItemCount_ && page() + 1 == pages()
+            && (!slices() || sliceEnd_ >= spineItemText()))
+            rough.page = map.wholeSpreads();
+        if (rough.page > 0) {
+            rough.pages = map.wholeSpreads();
+            rough.pagesEstimated = false;
+            rough.page = qMin(rough.page, rough.pages);
         }
     }
     estimate.lastWhole = false;
@@ -784,8 +850,7 @@ int EngineDocument::estimatedBookPage(const QString &position) const
     const int before = textBefore(position);
     if (!body || before < 0)
         return -1;
-    const int item = int(spineItems().indexOf(
-            QString::fromUtf8(UnicodeToUtf8(fragment->getAttributeValue("Source")).c_str())));
+    const int item = int(spineLocationNames().indexOf(enginelocation::spineHref(fragment)));
     // The characters of the item end with its last text.
     auto *last = body;
     while (last && last->isElement() && last->getChildCount() > 0)
@@ -859,8 +924,27 @@ bool EngineDocument::pageStartsBlock(int page, int *before) const
 #endif
     // A slice holds whole blocks of the text flow. A table, a float or
     // another such block is laid out as one, so a slice cannot start in it.
+    auto *child = block;
     for (auto *parent = block->getParentNode(); parent && !parent->isNodeName("DocFragment");
-         parent = parent->getParentNode()) {
+         child = parent, parent = parent->getParentNode()) {
+        // Restarting with only the tail of a flex row changes wrapping and
+        // alignment. A slice may start at the first item in the container.
+        const auto style = parent->getStyle();
+        if (css_is_flex(style->display)) {
+            // A forward column with automatic height and no row gap uses
+            // ordinary block flow. Its later children can begin a slice.
+            const bool plainColumn = style->flex_direction == 1 && !style->justify_content
+                    && style->height.type == css_val_unspecified
+                    && style->min_height.type == css_val_unspecified
+                    && style->max_height.type == css_val_unspecified && !style->row_gap.value;
+            if (!plainColumn) {
+                for (int i = 0; i < child->getNodeIndex(); ++i) {
+                    auto *sibling = parent->getChildNode(i);
+                    if (sibling->isElement() && sibling->getRendMethod() != erm_invisible)
+                        return false;
+                }
+            }
+        }
         if (parent->getRendMethod() != erm_block || parent->isFloatingBox())
             return false;
     }
@@ -1075,7 +1159,7 @@ bool EngineDocument::enterNextSlice(const std::function<bool()> &current)
         sliceHistory_ = history;
         windowLoadMs_ = loadMs;
         if (engine_->koblazeRestoreLayout()) {
-            engine_->groupColumns(hideNonlinearFragments_);
+            engine_->groupColumns(hideNonlinearFragments_, chapterStartsSpread_);
             visiblePages_ = visible;
             cache_ = images;
             damage_ = damage;
@@ -1230,23 +1314,99 @@ QVector<int> EngineDocument::bookPages(const QStringList &positions,
                                        const std::function<bool()> &current,
                                        bool rangeEndpoints) const
 {
-    QVector<int> result(positions.size(), -1);
     if (!engine_)
-        return result;
+        return QVector<int>(positions.size(), -1);
     if (windowFirst_ < 0) {
-        const auto pages = pagesOf(positions, rangeEndpoints, nullptr, current);
-        if (pages.size() != positions.size())
-            return {};
-        for (int i = 0; i < pages.size(); ++i)
-            result[i] = pages[i] >= 0 ? pages[i] + 1 : -1;
-        return result;
+        auto pages = pagesOf(positions, rangeEndpoints, nullptr, current);
+        for (int &page : pages)
+            if (page >= 0)
+                ++page;
+        return pages;
     }
+    if (columns_ == 2 && fullDocumentReady()) {
+        auto exact = full_->bookPages(positions, current, rangeEndpoints);
+        if (!exact.contains(-1))
+            return exact;
+        // Publisher CSS can hide a chapter passage in the whole document.
+        return chapterBookPages(positions, current, rangeEndpoints, std::move(exact));
+    }
+    return chapterBookPages(positions, current, rangeEndpoints);
+}
+
+QVector<int> EngineDocument::wholeBookPages(const QStringList &positions,
+                                            const std::function<bool()> &current,
+                                            bool rangeEndpoints) const
+{
+    if (windowFirst_ < 0)
+        return bookPages(positions, current, rangeEndpoints);
+    if (fullDocumentReady())
+        return full_->bookPages(positions, current, rangeEndpoints);
+    return {};
+}
+
+int EngineDocument::wholeBookPageCount() const
+{
+    if (windowFirst_ < 0)
+        return pages();
+    return fullDocumentReady() ? full_->pages() : 0;
+}
+
+void EngineDocument::prepareWholeBookText(const QString &first, const QString &after,
+                                          const std::function<bool()> &current)
+{
+    // The whole book finds its own main text and counts its own words: both
+    // are kept with it, and the chapter document's figures can differ.
+    if (windowFirst_ < 0 || !fullDocumentReady())
+        return;
+    full_->mainTextHints();
+    full_->wordsInMainText(first, after, current);
+}
+
+QVector<ChapterLink> EngineDocument::wholeBookChapters() const
+{
+    if (windowFirst_ < 0)
+        return chapters();
+    return fullDocumentReady() ? full_->chapters() : QVector<ChapterLink>{};
+}
+
+void EngineDocument::rememberWholeBookTicks(const QVector<double> &ticks, const QString &range)
+{
+    if (!source_)
+        return;
+    auto &estimate = source_->pageEstimate;
+    estimate.ticks = ticks;
+    estimate.ticksKey = ticksKey();
+    estimate.ticksRange = range;
+}
+
+bool EngineDocument::savedWholeBookTicks(const QString &range, QVector<double> *ticks) const
+{
+    if (!source_)
+        return false;
+    const auto &estimate = source_->pageEstimate;
+    if (estimate.ticksRange != range || estimate.ticksKey != ticksKey())
+        return false;
+    *ticks = estimate.ticks;
+    return true;
+}
+
+QString EngineDocument::ticksKey() const
+{
+    return estimateKey(settingsState(), slicePages_ > 0 ? slicePages_ : chapterSlicePages());
+}
+
+QVector<int> EngineDocument::chapterBookPages(const QStringList &positions,
+                                              const std::function<bool()> &current,
+                                              bool rangeEndpoints, QVector<int> result) const
+{
+    if (result.isEmpty())
+        result.fill(-1, positions.size());
     if (spineItemCount_ <= 0 || !source_ || pages() <= 0)
         return result;
     auto &map = pageMap();
     const bool known = map.complete() && map.total() > 0;
     const int last = qMax(1, qRound(map.total()));
-    const auto items = spineItems();
+    const auto items = spineLocationNames();
     // The pages of the spine items of the window, for a unit of several.
     QVector<int> itemStarts;
     if (!slices()) {
@@ -1263,6 +1423,8 @@ QVector<int> EngineDocument::bookPages(const QStringList &positions,
     for (int i = 0; i < positions.size(); ++i) {
         if (current && !current())
             return {};
+        if (result[i] >= 0)
+            continue;
         QString position = positions[i];
         int item = spineItemIndex(position);
         if (item < 0 || item >= spineItemCount_)
@@ -1373,9 +1535,9 @@ bool EngineDocument::goToFraction(double fraction)
         inItem = low;
     }
     if (item < windowFirst_ || item > windowLast_) {
-        const auto unit = slicePages_ > 0 ? unitFrom(item)
-                                          : qMakePair(qMax(0, item - 1),
-                                                      qMin(spineItemCount_ - 1, item + 1));
+        const auto unit = slicePages_ > 0
+                ? unitFrom(item)
+                : qMakePair(qMax(0, item - 1), qMin(spineItemCount_ - 1, item + 1));
         if (!showSpineItems(unit.first, unit.second))
             return false;
     }
@@ -1395,9 +1557,10 @@ bool EngineDocument::goToFraction(double fraction)
         return go(page);
     }
     Location start, next;
-    start.href = spineItems().value(item);
-    next.href = spineItems().value(item + 1);
-    const auto bounds = pagesOf({ positionOf(start), item < windowLast_ ? positionOf(next) : QString() });
+    start.href = spineLocationNames().value(item);
+    next.href = spineLocationNames().value(item + 1);
+    const auto bounds =
+            pagesOf({ positionOf(start), item < windowLast_ ? positionOf(next) : QString() });
     const int first = qMax(0, bounds.value(0, 0));
     const int end = bounds.value(1, -1) > first ? bounds[1] : pages();
     return go(qBound(0, first + int(inItem * (end - first)), qMax(0, pages() - 1)));
@@ -1414,13 +1577,19 @@ void EngineDocument::estimateChapterPages(const QVector<ChapterLink> &links,
     QStringList positions{ anchor_, links[result.current].position };
     if (result.next >= 0)
         positions.append(links[result.next].position);
-    const auto pages = bookPages(positions);
+    // Chapter progress counts the spreads of the chapter on screen, even
+    // when a prepared whole book pairs those columns differently.
+    const auto pages = chapterBookPages(positions);
     if (pages.size() != positions.size() || pages[0] <= 0 || pages[1] <= 0)
         return;
     const int first = qMin(pages[0], pages[1]);
-    const int last = result.next < 0
-            ? qMax(first, qRound(pageMap().total()))
-            : qMax(first, (pages[2] > 0 ? pages[2] : pages[0] + 1) - 1);
+    int last = qRound(pageMap().total());
+    if (result.next >= 0) {
+        const auto &next = links[result.next];
+        const bool shared = columns_ == 2 && next.page >= 0 && chapterEndPage(next) > next.page;
+        last = pages[2] > 0 ? pages[2] - (shared ? 0 : 1) : pages[0];
+    }
+    last = qMax(first, last);
     result.pages = last - first + 1;
     result.page = qBound(1, pages[0] - first + 1, result.pages);
 }

@@ -15,6 +15,10 @@
 namespace kobalt {
 struct ReaderFootnoteProbe
 {
+    static const ColumnView *prepared(const EngineDocument &document)
+    {
+        return document.ahead_ ? document.ahead_->engine_.get() : nullptr;
+    }
     static ColumnView &view(EngineDocument &document) { return *document.engine_; }
 };
 } // namespace kobalt
@@ -213,6 +217,9 @@ void chapterPageNotes()
             require(document.open(book, { 600, 800 }, settings, &error), qPrintable(error));
             const auto anchor = document.position();
             if (enableAfterOpen) {
+                require(!document.applyAppearance(appearance::Patch(
+                                { { "inpage_footnotes", true }, { "margin_pixels", -1 } })),
+                        "Enabling page notes accepted a negative margin");
                 require(document.applyAppearance(
                                 appearance::Patch({ { "inpage_footnotes", true } })),
                         "Cannot turn on chapter notes");
@@ -318,15 +325,19 @@ void inpageFootnotes()
             EngineDocument document(test::readerFonts());
             open(document, settings, false);
             const auto original = document.image(0);
-            const int originalPages = document.pages();
-            auto &view = ReaderFootnoteProbe::view(document);
-            require(view.getPageList()->operator[](0)->footnotes.length() == 0,
+            require(ReaderFootnoteProbe::view(document)
+                                    .getPageList()
+                                    ->operator[](0)
+                                    ->footnotes.length()
+                            == 0,
                     "Default layout enabled page notes");
             const auto origin = document.position();
             require(document.applyAppearance(appearance::Patch({ { "inpage_footnotes", true } })),
                     "Cannot enable page notes");
             require(document.position() == origin, "Page notes lost the source reading position");
             require(document.image(0) != original, "Page notes did not change the rendered page");
+            // A cross-chapter note can replace the chapter view with the whole book.
+            auto &view = ReaderFootnoteProbe::view(document);
             const auto &first = *view.getPageList()->operator[](0);
             require(first.footnotes.length() >= 1, "Semantic EPUB notes were not paginated");
             int fragments = 0, notePages = 0;
@@ -400,7 +411,11 @@ void inpageFootnotes()
                     "Reflow retained stale page-note layout");
             require(document.applyAppearance(appearance::Patch({ { "inpage_footnotes", false } })),
                     "Cannot disable page notes");
-            require(document.pages() == originalPages && document.image(0) == original,
+            settings["inpage_footnotes"] = false;
+            settings["koblaze_first_spine_item"] = -1;
+            EngineDocument ordinary(test::readerFonts());
+            open(ordinary, settings, false);
+            require(document.pages() == ordinary.pages() && document.image(0) == original,
                     "Disabling page notes did not restore ordinary pagination and pixels");
             // A parsed cache saved with either choice must reopen with the other
             // choice without reparsing, and match a fresh layout at every page.
@@ -562,12 +577,14 @@ void linksOutsideCurrentLayout()
     auto files = test::linkBook();
     files["OEBPS/first.xhtml"] =
             "<html xmlns='http://www.w3.org/1999/xhtml'><body><p>"
-            "<a href='#caf%C3%A9'>Later</a> <a href='second.xhtml#caf%C3%A9'>Next</a> "
+            "<a href='#caf%C3%A9'>Later</a> <a href='second.xhtml#caf%C3%A9'>1</a> "
             "<a href='#hidden'>Hidden</a> <a href='second.xhtml#missing'>Missing</a></p>"
             + QByteArray("<p>A paragraph of the chapter for the reader to turn through.</p>")
                       .repeated(100)
             + "<p id='café'>The last passage.</p><div style='display:none'><p id='hidden'>Hidden passage.</p></div></body></html>";
     files["OEBPS/second.xhtml"].replace("id='destination'", "id='café'");
+    // A numeric link to a contents entry is a passage, including across a chapter window.
+    files["OEBPS/nav.xhtml"].replace("second.xhtml'", "second.xhtml#caf%C3%A9'");
     QTemporaryDir directory;
     require(directory.isValid() && test::writeBook(directory.path(), "links.epub", files),
             "Cannot create the chapter link fixture");
@@ -579,18 +596,36 @@ void linksOutsideCurrentLayout()
     for (int slicePages : { -1, 1, 0 }) {
         EngineDocument model(test::readerFonts());
         QString error;
-        require(model.open(bytes, { 600, 800 }, { { "font_pixels", 28 } }, &error),
+        require(model.open(bytes, { 600, 800 },
+                           { { "font_pixels", 28 }, { "koblaze_first_spine_item", -1 } }, &error),
                 qPrintable(error));
         if (slicePages >= 0) {
             model.setChapterSlices(slicePages);
             require(model.showSpineItems(0, 0) && model.go(0), "Cannot open the chapter window");
         }
         const auto origin = model.position();
+        auto *doc = ReaderFootnoteProbe::view(model).getDocument();
+        require(!model.goTo("#_doc_fragment_0_ absent_printed_page"),
+                "A missing printed page unexpectedly resolved");
+        require(doc->findAttrValueIndex(U"_doc_fragment_0_ absent_printed_page") == lUInt32(-1),
+                "A missing printed-page jump added an attribute value to the document");
+        QString nextSource;
         const auto links = model.pageLinks();
         require(links.size() == 4, "The link fixture lost a reference");
         for (const auto &link : links) {
             const auto details = model.linkDetails(link.source);
             require(model.position() == origin, "Inspecting a link moved the page");
+            if (details.label == "1") {
+                nextSource = link.source;
+                require(details.kind == LinkKind::Passage,
+                        "Contents destination was inferred as a footnote");
+                require(details.chapter == "Passages", "Remote passage lost its chapter title");
+            }
+            if (details.label == "Missing")
+                require(ReaderFootnoteProbe::view(model).getDocument()->findAttrValueIndex(
+                                U"_doc_fragment_1_ missing")
+                                == lUInt32(-1),
+                        "Inspecting a missing passage added its ID to the document");
             if (details.label == "Hidden" || details.label == "Missing") {
                 require(details.kind == LinkKind::Unavailable && details.target.isEmpty(),
                         "A missing or hidden passage became navigable");
@@ -609,6 +644,9 @@ void linksOutsideCurrentLayout()
                 require(model.goTo(origin), "Cannot return to the passage containing the link");
             }
         }
+        model.setChapters({ { "Custom chapter", destinations["1"], -1, 0 } }, {});
+        require(model.linkDetails(nextSource).chapter == "Custom chapter",
+                "Remote passage lost the host's chapter title");
     }
 }
 
@@ -622,11 +660,13 @@ void remoteNoteSemantics()
                         "<p><a href='notes.xhtml#note'>remote</a> "
                         "<a role='doc-link' href='notes.xhtml#note'>passage override</a> "
                         "<a href='notes.xhtml#plain'>plain passage</a></p>") },
+              { "middle.xhtml",
+                test::publisherHtml(QByteArray("<p>Intervening chapter.</p>").repeated(1500)) },
               { "notes.xhtml",
                 test::publisherHtml(
                         "<aside role='doc-footnote'><div><p id='note'>Publisher note.</p></div></aside>"
                         "<p id='plain'>Ordinary passage.</p>") } },
-            "<itemref idref='text.xhtml'/><itemref idref='notes.xhtml'/>");
+            "<itemref idref='text.xhtml'/><itemref idref='middle.xhtml'/><itemref idref='notes.xhtml'/>");
     QTemporaryDir directory;
     require(directory.isValid() && test::writeBook(directory.path(), "notes.epub", files),
             "Cannot write the remote note fixture");
@@ -636,9 +676,23 @@ void remoteNoteSemantics()
     for (bool chapter : { false, true }) {
         EngineDocument model(test::readerFonts());
         QString error;
-        require(model.open(bytes, { 900, 900 }, {}, &error), qPrintable(error));
-        if (chapter)
+        require(model.open(bytes, { 900, 900 }, { { "koblaze_first_spine_item", -1 } }, &error),
+                qPrintable(error));
+        const ColumnView *prepared = nullptr;
+        if (chapter) {
+            model.setChapterSlices(2);
             require(model.showSpineItems(0, 0), "Cannot isolate the link chapter");
+            model.prepareAhead();
+            prepared = ReaderFootnoteProbe::prepared(model);
+            require(prepared, "Fixture must prepare the intervening chapter");
+        }
+        if (chapter) {
+            int polls = 0;
+            const auto cancelled = model.linkDetails(model.pageLinks().first().source, true,
+                                                     [&] { return ++polls < 4; });
+            require(polls >= 4 && cancelled.target.isEmpty() && cancelled.html.isEmpty(),
+                    "Opening a remote preview continued after dismissal");
+        }
         // The second lookup exercises cached target semantics.
         for (int lookup = 0; lookup < 2; ++lookup) {
             const auto links = model.pageLinks();
@@ -652,6 +706,10 @@ void remoteNoteSemantics()
                         "Link classification disagrees with its preview");
             }
         }
+        if (chapter)
+            require(ReaderFootnoteProbe::prepared(model) == prepared && model.turnInWindow(1)
+                            && &ReaderFootnoteProbe::view(model) == prepared,
+                    "Preview displaced the chapter prepared for the next page turn");
     }
 }
 

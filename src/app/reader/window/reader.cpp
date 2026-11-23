@@ -1,10 +1,11 @@
+#include "ui/dialogs/action_menu.h"
 #include "reading/header_footer.h"
 #include "app/reader/settings/sleep_editor.h"
 #include "app/reader/settings/sleep_gallery.h"
 #include "render/page_content.h"
 #include "reading/remaining_time.h"
 #include "ui/controls/buttons.h"
-#include "ui/controls/icons.h"
+#include "ui/controls/text.h"
 #include "ui/controls/paging.h"
 #include "ui/controls/panels.h"
 #include "ui/dialogs/modals.h"
@@ -13,6 +14,7 @@
 #include "support/qt_compat.h"
 #include "plugins/plugin_position.h"
 #include "support/strings.h"
+#include "support/percentage_text.h"
 #include "ui/input/input.h"
 #include "ui/style/fonts.h"
 #include "app/reader/views/sleep_screen.h"
@@ -72,7 +74,7 @@ Reader::~Reader()
         static_cast<SettingsPanel *>(general)->stylingHidden = {};
     cancelStylingSamples();
     plugins.reset();
-    if (kosyncClient)
+    if (kosyncClient && !releasingForUsb)
         kosyncClient->persistSyncTime();
     if (closeWithoutSaving)
         book->discardPendingSaves();
@@ -90,11 +92,14 @@ Reader::~Reader()
     disconnect(QGuiApplication::primaryScreen(), nullptr, this, nullptr);
     annotationExporter.reset();
     cancelKosync();
-    if (kosyncPage)
-        kosyncPage->dismissEditor();
+    dismissKosyncEditors();
     book->onEstimatesChanged({});
     session->cancelPagePreview();
+    session->printedLabelsChanged = {};
+    if (choices)
+        choices->printedLabel = {};
     if (pageScrubber) {
+        pageScrubber->printedLabel = {};
         pageScrubber->cancel();
         pageScrubber->cancelled = {};
     }
@@ -207,17 +212,86 @@ void Reader::prepareShutdown(std::function<void()> finished, bool allowFailedSav
     prepareTransition(std::move(finished), false);
 }
 
-void Reader::prepareUsb(std::function<void()> finished)
+void Reader::prepareUsb(std::function<void()> finished, bool save)
 {
-    allowFailedTransition = false;
-    prepareTransition(std::move(finished), true);
+    // A bounded save never asks the reader to Retry.
+    allowFailedTransition = save;
+    if (!save) {
+        prepareTransition(std::move(finished), true);
+        return;
+    }
+    // Save as an ordinary close would, but release on time even when storage
+    // is slow.
+    auto *deadline = new QTimer(this);
+    deadline->setObjectName("rrUsbSaveDeadline");
+    deadline->setSingleShot(true);
+    deadline->setTimerType(Qt::PreciseTimer);
+    const auto released = std::make_shared<bool>(false);
+    const auto release = [this, finished, released, timer = QPointer<QTimer>(deadline)](bool late) {
+        if (std::exchange(*released, true))
+            return;
+        if (timer) {
+            timer->stop();
+            timer->deleteLater();
+        }
+        if (late)
+            kobalt::diagnostic("usb-save-deadline", {}, kobalt::DiagnosticSeverity::Warning);
+        releaseForUsb(finished);
+    };
+    connect(deadline, &QTimer::timeout, this, [release] { release(true); });
+    deadline->start(usbSaveMilliseconds);
+    prepareTransition([release] { release(false); }, false);
+}
+
+void Reader::releaseForUsb(std::function<void()> finished)
+{
+    // End the remaining steps of a save that ran out of time. Its running
+    // writes still finish before the files are released.
+    ++closeRequest;
+    releasingForUsb = closeWithoutSaving = true;
+    retryDisposal = {};
+    if (closeSaveError) {
+        closeSaveError->hide();
+        closeSaveError->deleteLater();
+        closeSaveError.clear();
+    }
+    book->releaseNative(false);
+    releaseUsbWrites(std::move(finished));
+}
+
+void Reader::showShutdownNotice(bool restarting)
+{
+    if (!isVisible() || lifecycleHidden || closing || services.suspended())
+        return;
+    if (shutdownNotice)
+        shutdownNotice->deleteLater();
+    shutdownNotice = new kobalt::ui::ModalOverlay(this);
+    shutdownNotice->setObjectName("rrShutdownNotice");
+    shutdownNotice->setDimmed(true);
+    auto *card = shutdownNotice->card();
+    card->title(strings::get(restarting ? "shutdown.restarting" : "shutdown.shutting_down"),
+                "rrShutdownTitle");
+    card->message(strings::get("shutdown.saving"), "rrShutdownMessage");
+    shutdownNotice->setGeometry(rect());
+    card->fitToWidth(
+            qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance));
+    shutdownNotice->centerCard();
+    shutdownNotice->show();
+    shutdownNotice->raise();
 }
 
 void Reader::prepareTransition(std::function<void()> finished, bool usb)
 {
+    session->pauseHybridTurnPreparation(true);
+    if (usb) {
+        releasingForUsb = closeWithoutSaving = true;
+        retryDisposal = {};
+    } else {
+        book->retryFailedReadingSave();
+    }
     if (imageViewer && imageViewer->isVisible())
         imageViewer->closeImage();
-    book->retryFailedReadingSave();
+    clearExitSyncWait();
     const auto request = ++closeRequest;
     setProperty("reader_transition_save_failed", false);
     if (closeSaveError) {
@@ -230,36 +304,41 @@ void Reader::prepareTransition(std::function<void()> finished, bool usb)
     sleepImage = {};
     presentation->clearSleepScreen();
     session->cancelPendingTurn();
-    book->stopReading(true);
+    if (usb)
+        book->releaseNative(false);
+    else
+        book->stopReading(true);
     lifecycleHidden = true;
     exitPending = exportRunning = false;
     closing = true;
     cancelKosync();
-    if (kosyncPage)
-        kosyncPage->dismissEditor();
+    dismissKosyncEditors();
     clockTimer->stop();
     if (statusTimer)
         statusTimer->stop();
     setEnabled(false);
+    if (usb) {
+        releaseUsbWrites(std::move(finished));
+        return;
+    }
     auto completed = std::make_shared<bool>(false);
-    auto complete = [this, request, usb, finished](const QString &location, const QString &error,
+    auto complete = [this, request, finished](const QString &location, const QString &error,
                                                    bool mapped) {
         if (request != closeRequest)
             return;
-        saveTransition(request, usb, location, error, mapped, finished);
+        saveTransition(request, location, error, mapped, finished);
     };
     // Bound the engine mapping wait, not required storage acknowledgements.
-    // USB must not release a session that still owns unsaved reading time.
     // Each request has its own deadline, so a superseded request still reports
     // its timeout. The name lets tests check and run it instead of waiting.
     auto *deadline = new QTimer(this);
     deadline->setObjectName("rrTransitionMappingDeadline");
     deadline->setSingleShot(true);
-    connect(deadline, &QTimer::timeout, this, [deadline, completed, complete, usb] {
+    connect(deadline, &QTimer::timeout, this, [deadline, completed, complete] {
         deadline->deleteLater();
         if (std::exchange(*completed, true))
             return;
-        kobalt::diagnostic(usb ? "usb-save-timeout" : "shutdown-save-timeout");
+        kobalt::diagnostic("shutdown-save-timeout");
         complete({}, {}, false);
     });
     deadline->start(2000);
@@ -275,29 +354,54 @@ void Reader::prepareTransition(std::function<void()> finished, bool usb)
     });
 }
 
-void Reader::saveTransition(quint64 request, bool usb, const QString &location,
+void Reader::releaseUsbWrites(std::function<void()> finished)
+{
+    // A queued write owns no storage yet. Give up those writes and release Nickel
+    // once active writes and any open export destination have closed.
+    bool idle = book->discardQueuedWrites();
+    idle &= bookmarks->discardQueuedWrites();
+    idle &= highlights->discardQueuedWrites();
+    idle &= preferencesWriter.discardQueued();
+    if (savedWords)
+        idle &= savedWords->discardQueuedWrites();
+    if (reportWriter)
+        idle &= reportWriter->discardQueued();
+    if (idle && (!annotationExporter || !annotationExporter->writing())) {
+        finished();
+        return;
+    }
+    saveWait.after([this, finished] { releaseUsbWrites(finished); });
+}
+
+void Reader::saveTransition(quint64 request, const QString &location,
                             const QString &error, bool mapped, std::function<void()> finished,
                             int failures)
 {
     if (request != closeRequest)
         return;
     const QPointer<Reader> guard(this);
-    const auto again = [this, request, usb, location, error, mapped, finished](int failures) {
-        kobalt::qt::later(
-                100, this, [this, request, usb, location, error, mapped, finished, failures] {
-                    saveTransition(request, usb, location, error, mapped, finished, failures);
+    const auto again = [this, request, location, error, mapped, finished](int failures) {
+        auto *timer = new QTimer(this);
+        timer->setObjectName("rrTransitionSaveRetry");
+        timer->setSingleShot(true);
+        timer->setTimerType(Qt::PreciseTimer);
+        connect(timer, &QTimer::timeout, this,
+                [this, timer, request, location, error, mapped, finished, failures] {
+                    timer->deleteLater();
+                    saveTransition(request, location, error, mapped, finished, failures);
                 });
+        timer->start(100);
     };
     // Waiting for an active operation does not spend or renew its retry budget.
     if (pendingStorageSave()) {
-        saveWait.after([this, request, usb, location, error, mapped, finished, failures] {
-            saveTransition(request, usb, location, error, mapped, finished, failures);
+        saveWait.after([this, request, location, error, mapped, finished, failures] {
+            saveTransition(request, location, error, mapped, finished, failures);
         });
         return;
     }
     if (failures >= 3) {
         setProperty("reader_transition_save_failed", true);
-        kobalt::diagnostic(usb ? "usb-save-failed" : "shutdown-save-failed",
+        kobalt::diagnostic("shutdown-save-failed",
                            { { "attempts", failures } }, kobalt::DiagnosticSeverity::Error);
         if (allowFailedTransition || closeWithoutSaving) {
             closeWithoutSaving = true;
@@ -332,7 +436,7 @@ void Reader::saveTransition(quint64 request, bool usb, const QString &location,
                 book->stopReading(true);
                 if (mapped) {
                     mainthread::AllowBlocking allow("final native progress before storage handoff");
-                    const auto result = book->writeNative(location, error);
+                    const auto result = book->writeNative(location, error, statsUseWholeVolume());
                     if (result.failed()) {
                         retry();
                         return;
@@ -521,6 +625,15 @@ void Reader::sleepBackdrop(const sleep::Look &look, QSize size, sleep::Snapshot 
     }
 }
 
+sleep::Design Reader::sleepStatusPick(bool poweredOff)
+{
+    if (statusPickDue && sleep::randomStatus(preferences, poweredOff)) {
+        pickedStatus = sleep::pickStatus(pickedStatus);
+        statusPickDue = false;
+    }
+    return pickedStatus;
+}
+
 sleep::Snapshot Reader::powerScreenSnapshot()
 {
     if (book->hideBookOnSleepScreen())
@@ -535,7 +648,7 @@ sleep::Snapshot Reader::powerScreenSnapshot()
         // get a fresh backdrop for power-off, so the sleeping status is not
         // drawn twice and a separate power-off look or wallpaper shows.
         if (sleep::design(preferences) == sleep::Design::Custom || !sleep::tiled(shot.design)) {
-            const auto off = sleep::look(preferences, true);
+            const auto off = sleep::look(preferences, true, sleepStatusPick(true));
             shot.design = off.design;
             shot.tile = off.tile;
             shot.place = sleep::place(preferences, book->sleepPositions(), off);
@@ -558,13 +671,25 @@ sleep::Snapshot Reader::powerScreenSnapshot()
     return captureSleepScreen(true);
 }
 
+sleep::Snapshot Reader::presentedSleepSnapshot() const
+{
+    if (!lifecycleHidden || (!sleepFramePresented
+                             && (!privateSleepFrame || !privateSleepFrame->isVisible())))
+        return {};
+    sleep::Snapshot frame;
+    frame.image = sleepImage;
+    frame.orientation = sleepOrientation;
+    frame.privateBook = sleepShot.privateBook;
+    return frame;
+}
+
 sleep::Details Reader::sleepDetails()
 {
     sleep::Details details;
     details.title = session->title();
     details.author = session->author();
     details.chapter = session->chapterTitle();
-    details.clock = services.clock ? services.clock() : QString();
+    details.clock = clockText();
     // The letter uses the reader's chosen face; private text needs it registered.
     details.font = preferences.value("default_font_face").toString(kobalt::defaultFontFace);
     registerPickerFonts(details.font);
@@ -604,7 +729,8 @@ void Reader::loadTodayReading()
 sleep::Snapshot Reader::privateSleepSnapshot(bool poweredOff)
 {
     auto snapshot = sleep::privateSnapshot(page->size(), preferences, sleepPreviewSample(),
-                                           sleep::followsReading(preferences), poweredOff);
+                                           sleep::followsReading(preferences), poweredOff,
+                                           sleepStatusPick(poweredOff));
     // Nickel can change orientation after handoff. A later power screen keeps
     // the direction captured when the reader went to sleep.
     snapshot.orientation = lifecycleHidden && !sleepImage.isNull()
@@ -630,7 +756,7 @@ sleep::Snapshot Reader::captureSleepScreen(bool poweredOff)
     const qint64 pixels = qint64(page->width()) * page->height();
     const auto *modal = QApplication::activeModalWidget();
     const bool foreground = !modal || modal == this || isAncestorOf(modal);
-    auto look = sleep::look(preferences, poweredOff);
+    auto look = sleep::look(preferences, poweredOff, sleepStatusPick(poweredOff));
 #ifdef KOBALT_SCENARIO_PLAYER
     if (scenario::sleepPersistenceOptions().mode >= 0) {
         look.mode = sleep::Mode(scenario::sleepPersistenceOptions().mode);
@@ -649,10 +775,15 @@ sleep::Snapshot Reader::captureSleepScreen(bool poweredOff)
     if (snapshot.image.isNull())
         return {};
     // A book marked as finished is done, wherever its last page sits.
-    const int percent = book->finishedHere() ? 100 : session->progressPercent();
+    const int percent = book->finishedHere() ? 100 : session->statsPercent(statsUseWholeVolume());
     snapshot.orientation = kobalt::shownOrientation(QGuiApplication::primaryScreen());
-    snapshot.progress = strings::get("sleep.percent_read").arg(percent);
-    snapshot.remaining = sleepTimeLeft(book->estimates().bookMilliseconds,
+    snapshot.percent = percent;
+    // Progress percentages with one decimal show the same decimal when asleep.
+    if (headerfooter::decimalPercentages(preferences))
+        snapshot.percentTenths =
+                book->finishedHere() ? 1000 : session->statsPercentTenths(statsUseWholeVolume());
+    snapshot.progress = strings::get("sleep.percent_read").arg(sleepPercentText(snapshot, true));
+    snapshot.remaining = sleepTimeLeft(book->estimates(statsUseWholeVolume()).bookMilliseconds,
                                        remainingTime::approximate(preferences));
     snapshot.dark = darkTheme;
     snapshot.percent = percent;
@@ -731,12 +862,14 @@ QImage Reader::composePowerOffImage()
     return sleepDesignImage(std::move(backdrop), snapshot, -1, SleepStatus::PoweredOff);
 }
 
-void Reader::sleepReader()
+void Reader::sleepReader(bool externalScreenVisible)
 {
     // The device is going to sleep; no tap can turn the page until it wakes.
     mainthread::AllowBlocking allow("sleep");
-    if (imageViewer && imageViewer->isVisible())
-        imageViewer->closeImage();
+    const bool viewingImage = imageViewer && imageViewer->isVisible();
+    const bool viewerHasImage = viewingImage && imageViewer->hasImage();
+    if (viewingImage)
+        imageViewer->closeImage(false); // The sleep frame will clear the image.
     book->retryFailedReadingSave();
     if (plugins)
         plugins->flush();
@@ -753,7 +886,16 @@ void Reader::sleepReader()
     sleepSave = SleepSave::Waiting;
     sleepSavePosition = session->state().value("position").toString();
     clearPendingExit();
-    setProperty("reader_sleep_clean_pending", true);
+    const bool color = colorAnnotations();
+    if (externalScreenVisible)
+        sleepNeedsImageCleanup = true;
+    else if (viewingImage)
+        sleepNeedsImageCleanup = viewerHasImage;
+    else if ((sleepGallery && sleepGallery->isVisible())
+             || (sleepEditor && sleepEditor->isVisible()) || activityOpen())
+        sleepNeedsImageCleanup = sleepViewNeedsImageCleanup(*this, color);
+    else
+        sleepNeedsImageCleanup = page->needsImageCleanup(color);
     session->cancelPendingTurn();
     book->sleepReading(preferences);
     auto snapshot = captureSleepScreen();
@@ -841,8 +983,8 @@ void Reader::sleepReader()
     closeSearch();
     dismissLookup();
     hideKosyncOpening();
+    dismissKosyncEditors();
     if (kosyncPage) {
-        kosyncPage->dismissEditor();
         kosyncPage->clearPassword();
         kosyncPage->setStatus(kosyncMessage, false);
     }
@@ -869,12 +1011,11 @@ void Reader::prepareWake()
         presentation->pauseBackground(true);
 }
 
-void Reader::updateSleepBattery()
+void Reader::updateSleepBattery(const BatteryStatus &battery)
 {
     if (!lifecycleHidden || sleepImage.isNull()) {
         return;
     }
-    const auto battery = services.battery();
     if (battery.charging == sleepBattery.charging
         && battery.fullyCharged == sleepBattery.fullyCharged
         && ((!battery.charging && !battery.fullyCharged)
@@ -907,20 +1048,21 @@ void Reader::sleepViewReady()
 {
     if (!lifecycleHidden || !isVisible())
         return;
-    if (!sleepImage.isNull()) {
-        const bool presented = presentation->presentSleepScreen(sleepImage, sleepOrientation);
-        if (!presented && book->hideBookOnSleepScreen())
-            return;
-    }
+    const bool presented = !sleepImage.isNull()
+            && presentation->presentSleepScreen(sleepImage, sleepOrientation,
+                                                sleepNeedsImageCleanup);
+    sleepFramePresented = presented;
+    if (!presented && book->hideBookOnSleepScreen())
+        return;
     // Hiding a top-level window immediately submits the backing store
     // underneath it. Paint Nickel's sleep view first, or that store still
     // contains the library. Do not pump unrelated events during handoff.
-    // Submit that paint as one full GC16 refresh. It replaces the page, which
-    // Nickel's own partial sleep refreshes on colour screens would leave
-    // behind, so the panel flashes once on every device.
     setProperty("reader_preparing_handoff", true);
     presentation->resumeAndRepaintBackground();
     setProperty("reader_preparing_handoff", false);
+    // Custom frames request their own waveform; Nickel's stock view keeps
+    // the full-screen handoff refresh.
+    setProperty("reader_sleep_clean_pending", !presented);
     setProperty("reader_sleep_handoff", true);
     hide();
     setProperty("reader_sleep_handoff", false);
@@ -935,11 +1077,18 @@ void Reader::wakeReader()
     kosyncWaking = true;
     syncCoordinator->resetBackgroundFailures();
     sleepImage = {};
+    sleepFramePresented = false;
     presentation->clearSleepScreen();
     setProperty("reader_sleep_clean_pending", false);
-    if (lifecycleHidden)
+    const bool menuStayedVisible = lifecycleHidden && topControls->isVisible();
+    if (lifecycleHidden) {
+        statusPickDue = true;
+        displayedMinute = {};
         wakePositionEpoch = book->advancePositionSaveEpoch();
+    }
     lifecycleHidden = false;
+    if (!closing && !exitPending)
+        session->pauseHybridTurnPreparation(false);
     if (sleep::uses(preferences, sleep::Mode::Overlay))
         prepareSleepOverlay();
     // A random wallpaper may change with every sleep. A named one is already
@@ -961,6 +1110,9 @@ void Reader::wakeReader()
         orientation->start(kobalt::shownOrientation(QGuiApplication::primaryScreen()));
     }
     showFullScreen();
+    // A wake before the native sleep handoff did not hide and reshow the toolbar.
+    if (menuStayedVisible)
+        updateMenuStatus(true);
     book->invalidateProgress();
     startClock();
     refresh();
@@ -986,12 +1138,13 @@ void Reader::saveNativeProgress()
     const auto anchor = session->state().value("position").toString();
     if (anchor.isEmpty()
         || (anchor == savedNativeAnchor && session->page() == savedNativePage
-            && session->pages() == savedNativePages)) {
+            && session->pages() == savedNativePages
+            && session->statsPercent(statsUseWholeVolume()) == savedNativePercent)) {
         return;
     }
     QString error;
     const auto location = session->savedNativePosition(&error);
-    const auto result = book->writeNative(location, error);
+    const auto result = book->writeNative(location, error, statsUseWholeVolume());
     if (result.status() == NativeSaveResult::Status::Conflict) {
         return;
     }
@@ -1001,12 +1154,13 @@ void Reader::saveNativeProgress()
         savedNativeAnchor = anchor;
         savedNativePage = session->page();
         savedNativePages = session->pages();
+        savedNativePercent = session->statsPercent(statsUseWholeVolume());
     }
 }
 
 void Reader::progressTick()
 {
-    if (closing || exportRunning)
+    if (closing || exportRunning || exitProgress != ExitProgress::Normal)
         return;
     if (services.suspended() || book->deviceTransition() || !isVisible()) {
         if (syncDialog)
@@ -1040,12 +1194,14 @@ QVector<QWidget *> Reader::popups() const
              settingsSheet.data(),
              kosyncPage ? kosyncPage->editorDialog.data() : nullptr,
              bookmarkList ? bookmarkList->pinDialog() : nullptr,
+             bookmarkList ? bookmarkList->pinHelpDialog() : nullptr,
              kosyncDialog.data(),
              linkDialog.data(),
              debugDialog.data(),
              syncDialog.data(),
              finishDialog.data(),
              refreshPopup.data(),
+             wordScopePopup.data(),
              sleepPopup.data(),
              pageNavigationPopup.data(),
              tapZonesPopup.data(),
@@ -1208,6 +1364,9 @@ bool Reader::eventFilter(QObject *watched, QEvent *event)
     if ((type == QEvent::TouchBegin || type == QEvent::MouseButtonPress || type == QEvent::KeyPress)
         && event->spontaneous())
         lastPressTime = quint32(static_cast<QInputEvent *>(event)->timestamp());
+    if (type == QEvent::MouseButtonPress || type == QEvent::TouchBegin || type == QEvent::KeyPress
+        || (type == QEvent::Hide && watched == choices))
+        ++chapterActionRequest;
     if (watched == bookmarkList && type == QEvent::Hide) {
         closeMarksActions();
         // Bookmarks reopen on their list, not on a word.
@@ -1232,10 +1391,13 @@ bool Reader::eventFilter(QObject *watched, QEvent *event)
     // page is visible and no field needs them.
     if (type == QEvent::Show && watched == topControls && clockTimer && isVisible()
         && !services.suspended()) {
-        if (!clockTimer->isActive())
-            startClock();
+        session->requestMenuPagination();
+        startClock();
         book->minuteTick();
+        updateMenuStatus(true);
     }
+    if (type == QEvent::Hide && watched == topControls && statusTimer)
+        syncStatusTimer();
     // The sheet and the chooser are built separately, on first use. Either
     // can exist without the other.
     if (watched == menu && type == QEvent::Hide) {
@@ -1619,6 +1781,23 @@ void Reader::paintEvent(QPaintEvent *event)
                      palette().color(QPalette::WindowText));
 }
 
+ReadingPage::ReflowLayout Reader::reflowLayout() const
+{
+    const auto *settings = appearanceSession();
+    const int columns = preferences.value("two_columns_landscape").toBool(false)
+                    && bodySize().width() > bodySize().height()
+            ? 2
+            : 1;
+    const int gap =
+            qRound(settings->fontSize()
+                   * preferences.value("column_spacing_percent").toInt(defaultColumnSpacingPercent)
+                   / 100.0);
+    return { settings->fontSize(), settings->spacing(),
+             QMargins(settings->margin(), settings->topMargin(), settings->margin(),
+                      settings->bottomMargin()),
+             columns, gap };
+}
+
 void Reader::resizeEvent(QResizeEvent *)
 {
     // This resize shows the reflow placeholder below. Ask for the page's text
@@ -1686,7 +1865,7 @@ void Reader::resizeEvent(QResizeEvent *)
         acknowledgments->setGeometry(safeRect);
     searchPanel->setGeometry(safeRect);
     // Activity covers the same area as the All presets screen.
-    if (activityView)
+    if (activityOpen())
         activityView->setGeometry(textPresetGalleryBounds());
     const int bookmarkTop = navigation ? navigation->statusHeight() : 0;
     bookmarkList->setGeometry(0, bookmarkTop, width(),
@@ -1709,21 +1888,7 @@ void Reader::resizeEvent(QResizeEvent *)
         closeSaveError->setGeometry(rect());
     if (isVisible() && !page->image.isNull() && bodySize() != page->image.size()) {
         resizePending = true;
-        const auto *settings = appearanceEdit.edited() && appearanceEdit.ready()
-                ? appearanceEdit.preview()
-                : session;
-        const int columns = preferences.value("two_columns_landscape").toBool(false)
-                        && bodySize().width() > bodySize().height()
-                ? 2
-                : 1;
-        const int gap = qRound(
-                settings->fontSize()
-                * preferences.value("column_spacing_percent").toInt(defaultColumnSpacingPercent)
-                / 100.0);
-        page->reflowLayout = { settings->fontSize(), settings->spacing(),
-                               QMargins(settings->margin(), settings->topMargin(),
-                                        settings->margin(), settings->bottomMargin()),
-                               columns, gap };
+        page->reflowLayout = reflowLayout();
         page->setViewportTransition(true);
         resizeTimer.start();
         page->refreshContent();
@@ -1736,6 +1901,12 @@ void Reader::resizeEvent(QResizeEvent *)
 
 void Reader::closeEvent(QCloseEvent *event)
 {
+    // The host disposes this window from the opening save's completion.
+    // A window close during the save or its Retry prompt must not hand off the book.
+    if (openingSaveState != OpeningSaveState::Inactive) {
+        event->ignore();
+        return;
+    }
     if (imageViewer && imageViewer->isVisible())
         imageViewer->closeImage();
     session->cancelPendingTurn();
@@ -1753,12 +1924,13 @@ void Reader::closeEvent(QCloseEvent *event)
             closingTimes.started.start();
         event->ignore();
         exitPending = true;
+        session->pauseHybridTurnPreparation(true);
         QElapsedTimer stopping;
         stopping.start();
         book->stopReading(true);
         closingTimes.add("session", stopping);
         diagnostic("exit-session-stopped", { { "elapsed_ms", double(stopping.elapsed()) } });
-        if (appearanceEdit.panelOpen() || settingsVisible())
+        if (topControls->isVisible() || appearanceEdit.panelOpen() || settingsVisible())
             dismissControls();
         finishExit();
         return;
@@ -1790,9 +1962,10 @@ void Reader::closeEvent(QCloseEvent *event)
     setProperty("reader_preparing_handoff", false);
     QElapsedTimer step;
     step.start();
-    book->releaseNative(!closeWithoutSaving);
+    book->releaseNative(!closeWithoutSaving && exitProgress != ExitProgress::LocalOnly);
     closingTimes.add("session", step);
     session->updated = {};
+    session->printedLabelsChanged = {};
     session->renderProgressChanged = {};
     session->turnBoundary = {};
     session->idle = {};
@@ -1898,6 +2071,7 @@ void Reader::openSearch(const QString &query)
     dismissControls(false);
     if (searchOriginal.isEmpty()) {
         searchOriginal = session->state().value("position").toString();
+        searchOriginalPrintedPage = session->currentPrintedPosition();
         searchOriginalPage = session->page();
     }
     session->prepareSearch();
@@ -1906,7 +2080,8 @@ void Reader::openSearch(const QString &query)
     const auto safe = safeArea();
     searchPanel->setGeometry(rect().adjusted(0, safe.top, 0, -safe.bottom));
     searchPanel->open(session->state().value("position").toString() != searchOriginal,
-                      searchOriginalPage, query);
+                      searchOriginalPage, query,
+                      publisherPagesEnabled() ? searchOriginalPrintedPage : QString());
     topControls->show();
     updateMenuStatus();
     syncNavigation();
@@ -1956,7 +2131,7 @@ void Reader::dismissLinkConfirmation()
 
 void Reader::dismissLinks()
 {
-    ++linkEpoch;
+    ++*linkEpoch;
     linkPending = false;
     if (linkPanel) {
         const bool wasVisible = linkPanel->isVisible();
@@ -1973,7 +2148,9 @@ void Reader::updateLinkReturn()
 {
     if (!linkReturn)
         return;
-    syncLinkDiscovery();
+    // Cancelling reveal can restore the controls used by the Return action.
+    if (revealingLinks)
+        syncLinkDiscovery();
     const bool available = !linkHistory.isEmpty() && !session->busy() && !lifecycleHidden
             && !closing && !linksActive() && !lookupPending && !settingsVisible()
             && !acknowledgmentsVisible() && !bookmarkList->isVisible() && !lightPopup->isVisible()
@@ -2011,7 +2188,7 @@ bool Reader::openLink(QPoint point, bool direct)
         // alone. Restoring the toolbars would cover the link's sheet.
         hideRevealedLinks(false);
         syncNavigation();
-        const auto epoch = ++linkEpoch;
+        const auto epoch = ++*linkEpoch;
         if (orientation)
             orientation->setBlocked(true);
         page->mark(link.rectangles);
@@ -2019,9 +2196,8 @@ bool Reader::openLink(QPoint point, bool direct)
         kobalt::ui::PanelTiming timing("footnote");
         session->linkDetails(
                 link.source,
-                [guard, epoch, bounds, timing](const kobalt::LinkDetails &details) mutable {
-                    if (!guard || guard->linkEpoch != epoch || guard->lifecycleHidden
-                        || guard->services.suspended())
+                [guard, bounds, timing](const kobalt::LinkDetails &details) mutable {
+                    if (!guard || guard->lifecycleHidden || guard->services.suspended())
                         return;
                     timing.stage("details");
                     auto *reader = guard.data();
@@ -2062,10 +2238,20 @@ bool Reader::openLink(QPoint point, bool direct)
                     }
                     reader->updateOrientationBlock();
                     reader->updateLinkReturn();
-                });
+                },
+                [token = linkEpoch, epoch] { return token->load() == epoch; });
         return true;
     }
     return false;
+}
+
+Reader::LinkVisit Reader::currentVisit(bool pinnedShortcut) const
+{
+    return { session->state().value("position").toString(), session->bookPage(),
+             (session->chapterTitle().isEmpty() ? strings::get("reader.reading")
+                                                : session->chapterTitle())
+                     .toUpper(),
+             pinnedShortcut, session->currentPrintedPosition() };
 }
 
 void Reader::goToPassage(const QString &target, bool pinnedShortcut)
@@ -2073,11 +2259,7 @@ void Reader::goToPassage(const QString &target, bool pinnedShortcut)
     if (target.isEmpty() || session->busy() || closing || lifecycleHidden || services.suspended()) {
         return;
     }
-    const LinkVisit origin{ session->state().value("position").toString(), session->bookPage(),
-                            (session->chapterTitle().isEmpty() ? strings::get("reader.reading")
-                                                               : session->chapterTitle())
-                                    .toUpper(),
-                            pinnedShortcut };
+    const auto origin = currentVisit(pinnedShortcut);
     if (!session->goTo(target)) {
         return;
     }
@@ -2283,10 +2465,28 @@ void Reader::openDictionary(const QString &query, kobalt::ui::PanelTiming timing
     updateLinkReturn();
 }
 
-int Reader::millisecondsOfDay() const
+QDateTime Reader::localDateTime() const
 {
-    return services.millisecondsOfDay ? services.millisecondsOfDay()
-                                      : QTime::currentTime().msecsSinceStartOfDay();
+    return services.localDateTime ? services.localDateTime() : QDateTime::currentDateTime();
+}
+
+Reader::ClockMinute Reader::clockMinute(const QDateTime &now)
+{
+    return ClockMinute(now.date(), now.time().msecsSinceStartOfDay() / 60000, now.offsetFromUtc());
+}
+
+QString Reader::clockText()
+{
+    const auto minute = clockMinute(localDateTime());
+    // Desktop Fill uses the system time while device previews use a fixed time.
+    const bool desktopFill = hideNativeStatus();
+    // Nickel reads its 12/24-hour preference when it formats the time.
+    if (displayedMinute != minute || clockUsesDesktopFill != desktopFill) {
+        displayedClock = services.clock ? services.clock() : QString();
+        displayedMinute = minute;
+        clockUsesDesktopFill = desktopFill;
+    }
+    return displayedClock;
 }
 
 void Reader::resumeReadingClock()
@@ -2306,7 +2506,7 @@ void Reader::resumeReadingClock()
 
 void Reader::startClock()
 {
-    startClock(millisecondsOfDay());
+    startClock(localDateTime());
 }
 
 // The minute tick serves the host's minute work, a header or footer field
@@ -2332,7 +2532,7 @@ bool Reader::paceNeeded() const
 // minutes appear only in the reading menu, which pauses the reading clock and
 // refreshes its status when it opens, so no other minute needs a wakeup. The
 // reader's other periodic work runs on the same tick.
-void Reader::startClock(int now)
+void Reader::startClock(const QDateTime &now)
 {
     // Called where the clock's consumers or the reader's visibility change,
     // which are the Book status field's conditions too.
@@ -2344,12 +2544,13 @@ void Reader::startClock(int now)
         return;
     }
     // A restart after the minute changed, before its tick ran, keeps that tick.
-    if (clockTimer->isActive() && now / 60000 != clockMinute) {
+    const auto minute = clockMinute(now);
+    if (clockTimer->isActive() && minute != timerMinute) {
         clockTimer->start(0);
         return;
     }
-    clockMinute = now / 60000;
-    clockTimer->start(60000 - now % 60000 + 50);
+    timerMinute = minute;
+    clockTimer->start(60000 - now.time().msecsSinceStartOfDay() % 60000 + 50);
 }
 
 void Reader::configureNavigation()
@@ -2390,8 +2591,7 @@ void Reader::activateNavigation(kobalt::NavigationDestination destination)
         return;
     }
     if (destination == Nav::Annotate) {
-        // Quick annotation mode has no mode to toggle.
-        if (quickAnnotations())
+        if (!usesAnnotationToggle())
             return;
         bookmarkList->hide();
         toolbarComposition.annotate->click();
@@ -2456,7 +2656,11 @@ void Reader::syncStatusBoundary()
 
 void Reader::hideRevealedLinks(bool restoreControls)
 {
-    if (revealingLinks && restoreControls && !lifecycleHidden && !closing) {
+    if (!revealingLinks)
+        return;
+    if (linkDiscovery)
+        linkDiscovery->hide();
+    if (restoreControls && !lifecycleHidden && !closing) {
         topControls->show();
         bottomControls->show();
     }
@@ -2483,110 +2687,87 @@ void Reader::leaveRevealedLinks()
 
 void Reader::syncLinkDiscovery()
 {
-    if (!linkDiscovery)
+    if (!pageScrubber)
         return;
-    const bool blocked = !features::enabled(preferences, features::HighlightLinks) || annotationMode
-            || session->busy() || lifecycleHidden || closing || services.suspended() || sheetOpen()
-            || readingToolOpen() || positionPromptOpen() || menu->isVisible()
-            || bookmarkList->isVisible();
-    if (blocked
-        || (revealingLinks && revealedPosition != session->state().value("position").toString()))
-        hideRevealedLinks();
-    const int count = session->pageLinks().size();
-    if (!count)
-        hideRevealedLinks();
-    const bool controls = topControls->isVisible() || revealingLinks;
-    const bool linksAvailable = !blocked && controls && count > 0;
-    pageScrubber->setLinksAction(linksAvailable && !revealingLinks
-                                         ? strings::get("reader.highlight_links").arg(count)
-                                         : QString());
-    linkDiscovery->setVisible(linksAvailable && revealingLinks);
-    QVector<QRect> rectangles, footnotes;
-    if (revealingLinks)
-        for (const auto &link : session->pageLinks()) {
-            rectangles += link.rectangles;
-            if (link.kind == LinkKind::Footnote)
-                for (const auto &rect : link.rectangles)
-                    if (narrowFootnote(rect))
-                        footnotes += rect;
-        }
-    page->revealLinks(rectangles, footnotes);
-    if (blocked || !count)
+    if (!revealingLinks && !topControls->isVisible()) {
+        pageScrubber->setLinksAction({});
         return;
-
-    namespace styles = kobalt::ui::styles;
-    const QColor ink = palette().color(QPalette::WindowText);
-    // Styles change only with the place and the strip text size, so skip
-    // unchanged ones: this runs on every navigation update.
-    const auto restyle = [](QWidget *widget, const QString &style) {
-        if (widget->property("link_style").toString() == style)
-            return;
-        widget->setProperty("link_style", style);
-        kobalt::ui::readerStyle(widget, style);
-    };
-    const auto fits = [](int strip, int text) {
-        return strip >= ui::interfaceLineHeight(ui::headerFooterFont(text));
-    };
-
-    const QString label = strings::get("reader.highlight_links").arg(count);
-    auto *row = static_cast<QHBoxLayout *>(linkDiscovery->layout());
-    linkDiscoveryIcon->setVisible(!revealingLinks);
-    linkDiscoveryToggle->setVisible(!revealingLinks);
-    linkDiscoveryExit->setVisible(revealingLinks);
-    linkDiscoveryHint->setText(revealingLinks ? strings::get("reader.tap_revealed_link").toUpper()
-                                              : strings::get("reader.long_press_link"));
-    // In reveal mode the bar only labels the mode. Taps pass to the page, so
-    // anything but a link leaves, the strip included.
-    linkDiscovery->setAttribute(Qt::WA_TransparentForMouseEvents, revealingLinks);
-    linkDiscoveryHint->setWordWrap(!revealingLinks);
-    linkDiscoveryHint->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    if (revealingLinks) {
-        // The label replaces the header or footer strip, never the book text,
-        // in the strip's own face and size. Without a strip that fits, a tap on
-        // unlinked text still leaves.
-        const bool top = fits(page->topHeight(), page->headerTextPixels());
-        const int strip = top ? page->topHeight() : page->bottomHeight();
-        const int text = top ? page->headerTextPixels() : page->footerTextPixels();
-        linkDiscovery->setVisible(top || fits(strip, text));
-        linkDiscovery->setEdges({});
-        linkDiscovery->setDividers(top ? Qt::BottomEdge : Qt::TopEdge);
-        // Children paint their own background, so keep them off the divider.
-        const int border = metrics::control::border;
-        row->setContentsMargins(metrics::reading::headerSide, top ? 0 : border,
-                                metrics::reading::headerSide, top ? border : 0);
-        const QString stripText = QString("QLabel{font-family:'%1';%2color:%3;}")
-                                          .arg(kobalt::ui::headerFooterFont().family())
-                                          .arg(styles::font(text))
-                                          .arg(ink.name());
-        restyle(linkDiscoveryHint, stripText);
-        restyle(linkDiscoveryExit, stripText);
-        linkDiscovery->setGeometry(0, top ? 0 : height() - strip, width(), strip);
-    } else {
-        // Above the tabs the row matches the return row: the same height, the
-        // icon in the same column and a divider instead of a second heavy rule.
-        const int rule = metrics::chrome::heavyRule;
-        linkDiscovery->setEdges(Qt::TopEdge);
-        linkDiscovery->setDividers(navigation ? Qt::BottomEdge : kobalt::ui::Edges());
-        row->setContentsMargins(metrics::chrome::inset, rule, metrics::chrome::inset,
-                                metrics::control::border);
-        linkDiscoveryIcon->setPixmap(
-                kobalt::ui::controlIcon(kobalt::ui::ControlIcon::Link, ink)
-                        .pixmap(metrics::control::iconSize, metrics::control::iconSize));
-        restyle(linkDiscoveryHint,
-                QString("QLabel{%1color:%2;}")
-                        .arg(styles::font(metrics::chrome::labelText))
-                        .arg(ink.name()));
-        restyle(linkDiscoveryToggle,
-                styles::outlined() + "QPushButton{" + styles::font(metrics::chrome::labelText)
-                        + "}");
-        linkDiscoveryToggle->setText(label);
-        // Cover the navigation's own heavy rule, so its tabs start below this divider.
-        const int bottom = navigation ? navigation->navigationTop() + rule : bottomControls->y();
-        const int rowHeight = metrics::links::returnHeight + rule;
-        linkDiscovery->setGeometry(0, qMax(0, bottom - rowHeight), width(), rowHeight);
     }
-    if (linkDiscovery->isVisible())
-        linkDiscovery->raise();
+    const auto &links = session->pageLinks();
+    const bool available = !links.isEmpty()
+            && features::enabled(preferences, features::HighlightLinks) && !annotationMode
+            && !session->busy() && !lifecycleHidden && !closing && !services.suspended()
+            && !sheetOpen() && !readingToolOpen() && !positionPromptOpen() && !menu->isVisible()
+            && !bookmarkList->isVisible();
+    if (revealingLinks
+        && (!available || revealedPosition != session->state().value("position").toString()))
+        hideRevealedLinks();
+    pageScrubber->setLinksAction(available && !revealingLinks && topControls->isVisible()
+                                         ? strings::get("reader.highlight_links").arg(links.size())
+                                         : QString());
+    if (!revealingLinks)
+        return;
+
+    QVector<QRect> rectangles, footnotes;
+    for (const auto &link : links) {
+        rectangles += link.rectangles;
+        if (link.kind == LinkKind::Footnote)
+            for (const auto &rect : link.rectangles)
+                if (narrowFootnote(rect))
+                    footnotes += rect;
+    }
+    page->revealLinks(rectangles, footnotes);
+
+    // The hint replaces a reading strip that fits its own font. Without
+    // one, the highlights and the tap to leave are still available.
+    const auto fits = [](int strip, int text) {
+        return strip > 0 && strip >= ui::interfaceLineHeight(ui::headerFooterFont(text));
+    };
+    const bool top = fits(page->topHeight(), page->headerTextPixels());
+    const int strip = top ? page->topHeight() : page->bottomHeight();
+    const int text = top ? page->headerTextPixels() : page->footerTextPixels();
+    if (!top && !fits(strip, text)) {
+        if (linkDiscovery)
+            linkDiscovery->hide();
+        return;
+    }
+
+    const bool first = !linkDiscovery;
+    if (first) {
+        linkDiscovery = new ui::Panel(this);
+        linkDiscovery->setObjectName("rrLinkDiscovery");
+        // Tapping the hint leaves reveal mode just like tapping unlinked text.
+        linkDiscovery->setAttribute(Qt::WA_TransparentForMouseEvents);
+        auto *row = new QHBoxLayout(linkDiscovery);
+        row->setSpacing(metrics::links::hintGap);
+        linkDiscoveryHint = new ui::InterfaceLabel(
+                strings::get("reader.tap_revealed_link").toUpper(), linkDiscovery);
+        linkDiscoveryHint->setObjectName("rrLinkDiscoveryHint");
+        linkDiscoveryHint->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        row->addWidget(linkDiscoveryHint, 1);
+        linkDiscoveryExit = new ui::InterfaceLabel(
+                strings::get("reader.tap_elsewhere_to_exit").toUpper(), linkDiscovery);
+        linkDiscoveryExit->setObjectName("rrLinkDiscoveryExit");
+        row->addWidget(linkDiscoveryExit);
+    }
+    linkDiscovery->setDividers(top ? Qt::BottomEdge : Qt::TopEdge);
+    // Keep the opaque labels off the divider.
+    const int border = metrics::control::border;
+    linkDiscovery->layout()->setContentsMargins(metrics::reading::headerSide, top ? 0 : border,
+                                                metrics::reading::headerSide, top ? border : 0);
+    const QString style = QString("QLabel{font-family:'%1';%2color:%3;}")
+                                  .arg(ui::headerFooterFont().family())
+                                  .arg(ui::styles::font(text))
+                                  .arg(palette().color(QPalette::WindowText).name());
+    if (linkDiscoveryHint->property("reader_style").toString() != style) {
+        ui::readerStyle(linkDiscoveryHint, style);
+        ui::readerStyle(linkDiscoveryExit, style);
+    }
+    if (first)
+        prepareNewWidgets(linkDiscovery);
+    linkDiscovery->setGeometry(0, top ? 0 : height() - strip, width(), strip);
+    linkDiscovery->show();
+    linkDiscovery->raise();
 }
 
 void Reader::syncNavigation()
@@ -2664,12 +2845,18 @@ void Reader::syncNavigation()
                 && !kosyncDialog && !finishDialog && !imageTarget.isEmpty();
         pageScrubber->setImageAction(imageSuggestion ? strings::get("image.zoom_suggestion")
                                                      : QString());
-        pageScrubber->setReturnAction(linkReturnAvailable
-                                              ? (linkHistory.last().page >= 0
-                                                         ? strings::get("reader.return_page")
-                                                                   .arg(linkHistory.last().page + 1)
-                                                         : strings::get("reader.return_to_passage"))
-                                              : QString(),
+        QString returnText;
+        if (linkReturnAvailable) {
+            const auto &visit = linkHistory.last();
+            const auto printed = publisherPagesEnabled() ? visit.printedPage : QString();
+            returnText = !printed.isEmpty() ? strings::get("reader.return_page").arg(printed)
+                    : visit.page >= 0
+                    ? strings::get(publisherPagesEnabled() ? "reader.return_screen"
+                                                           : "reader.return_page")
+                              .arg(visit.page + 1)
+                    : strings::get("reader.return_to_passage");
+        }
+        pageScrubber->setReturnAction(returnText,
                                       linkHistory.isEmpty() || linkHistory.last().chapter.isEmpty()
                                               ? QString()
                                               : strings::get("reader.jumped_from_chapter")
@@ -2688,11 +2875,7 @@ void Reader::syncNavigation()
                   !session->busy() && !appearanceEdit.applying(),
                   services.lightAvailable(),
                   active,
-                  linkReturnAvailable ? (linkHistory.last().page >= 0
-                                                 ? strings::get("reader.return_page")
-                                                           .arg(linkHistory.last().page + 1)
-                                                 : strings::get("reader.return_to_passage"))
-                                      : QString(),
+                  returnText,
                   topActions,
                   general,
                   lightPopup,
@@ -2713,7 +2896,7 @@ void Reader::syncNavigation()
                   navigateAvailable(),
                   features::enabled(preferences, features::Stats),
                   zen,
-                  features::enabled(preferences, features::Annotations),
+                  usesAnnotationToggle(),
                   features::enabled(preferences, features::Bookmarks)
                           || features::enabled(preferences, features::Annotations),
                   annotationMode,
@@ -2732,7 +2915,6 @@ void Reader::syncNavigation()
         page->setStripsHidden(zen && topControls->isVisible());
     };
     update();
-    syncLinkDiscovery();
     if (choosingTypography && choices->isVisible()) {
         if (choices->isFontPicker()) {
             const int bottom = navigation->contentBottom(size());
@@ -2744,20 +2926,10 @@ void Reader::syncNavigation()
         choices->raise();
     }
     if (chromeSheet) {
-        const int bottom = navigation->contentBottom(size());
-        // At most up to the toolbar, with the sheet's rule on the toolbar's. A
-        // short screen has no room for the slot map there, so the sheet covers
-        // the action row with its own bar, as Chapters does.
-        const int top = isShortHeight(height(), ui::density())
-                ? navigation->statusHeight()
-                : navigation->toolbarHeight() - int(metrics::chrome::heavyRule);
-        const int room = qMax(1, bottom - top);
-        int sheetHeight = qMin(headerFooterView->preferredHeight(width()), room);
-        if (room - sheetHeight < metrics::headerFooter::toolbarSnap) {
-            sheetHeight = room;
-        }
-        headerFooterView->setGeometry(0, bottom - sheetHeight, width(), sheetHeight);
-        headerFooterView->raise();
+        headerFooterView->setGeometry(
+                rect().adjusted(0, navigation->statusHeight(), 0, -safeArea().bottom));
+        if (!settingsSheet || !settingsSheet->isVisible())
+            headerFooterView->raise();
     }
     if (searchPanel->isVisible()) {
         const auto safe = safeArea();
@@ -2890,30 +3062,174 @@ void Reader::toggleLight()
     }
 }
 
-void Reader::showChapters()
+void Reader::syncChapterBoundaries()
 {
+    const auto marks = session->mainTextMarks();
+    const auto links = session->chapters();
+    int start = -1, end = -1;
+    for (int i = 0; i < links.size(); ++i) {
+        if (links[i].page < 0 || links[i].position.isEmpty())
+            continue;
+        if (links[i].page <= session->firstMainPage()
+            && (start < 0 || links[start].page < links[i].page))
+            start = i;
+        if (links[i].page <= session->lastMainPage())
+            end = i;
+    }
+    start = marks.value("start").toObject().value("index").toInt(start);
+    end = marks.value("end").toObject().value("index").toInt(end);
+    choices->setChapterBoundaries(start, end, session->firstMainPage(), session->lastMainPage());
+}
+
+void Reader::showChapterActions(int index)
+{
+    const auto links = session->chapters();
+    if (index < 0 || index >= links.size())
+        return;
+    const auto title = links[index].title;
+    const QPointer<Reader> guard(this);
+    const auto request = ++chapterActionRequest;
+    session->chapterBoundaryActions(index, [this, guard, title, request](const auto &available) {
+        if (!guard || request != chapterActionRequest || !choices->isVisible())
+            return;
+        QVector<ui::ActionMenuItem> actions{
+            ui::actionItem(strings::get("chapter_contents.mark_start"), "rrMarkStart",
+                           ui::ControlIcon::BookStart, {}),
+            ui::actionItem(strings::get("chapter_contents.mark_end"), "rrMarkEnd",
+                           ui::ControlIcon::BookEnd, {})
+        };
+        for (const auto &action : available) {
+            const auto apply = [this, action] {
+                if (action.apply()) {
+                    QJsonObject state;
+                    book->checkpoint(&state, true);
+                    syncChapterBoundaries();
+                }
+            };
+            if (!action.reset) {
+                actions[action.start ? 0 : 1].triggered = apply;
+                continue;
+            }
+            auto restore = ui::actionItem(strings::get(action.start ? "chapter_contents.reset_start"
+                                                                    : "chapter_contents.reset_end"),
+                                          action.start ? "rrResetStart" : "rrResetEnd",
+                                          ui::ControlIcon::PinOff, apply);
+            restore.startsSection = actions.size() == 2;
+            actions.append(restore);
+        }
+        ui::ActionMenuHeader header;
+        header.title = title;
+        auto *actionsMenu = new ui::ActionMenu(this, header, actions);
+        for (const auto &item : actions)
+            actionsMenu->action(item.name)->setEnabled(bool(item.triggered));
+        actionsMenu->setObjectName("rrChapterActions");
+        actionsMenu->setProperty("reader_standard_modal", true);
+        actionsMenu->dismissed = [actionsMenu] {
+            actionsMenu->hide();
+            actionsMenu->deleteLater();
+        };
+        actionsMenu->setDimmed(true);
+        actionsMenu->setGeometry(rect());
+        actionsMenu->fitCard();
+        actionsMenu->show();
+        actionsMenu->raise();
+        actionsMenu->setFocus();
+    });
+}
+
+static bool numericPageLabel(const QString &label)
+{
+    return !label.isEmpty() && std::all_of(label.cbegin(), label.cend(), [](QChar c) {
+        return c >= QLatin1Char('0') && c <= QLatin1Char('9');
+    });
+}
+
+void Reader::showChapters(ContentsList mode)
+{
+    ++chapterActionRequest;
     session->cancelPendingTurn();
     lightPopup->hide();
     chapterGraph->hide();
     QVector<Choice> items;
     QString current;
-    for (const auto &chapter : session->chapters()) {
+    choices->boundaryRequested = [this](int i) { showChapterActions(i); };
+    choices->printedLabel = [this](int i) {
+        return publisherPagesEnabled() ? session->navigationPrintedPage(i, true) : QString();
+    };
+    choices->pageLabel = [this](int p) {
+        return screenLabel(session->displayPageLabel(p, secondaryNumberStyle()),
+                           publisherPagesEnabled());
+    };
+    const bool auxiliary = mode != ContentsList::Chapters;
+    const auto list = mode == ContentsList::Landmarks ? session->landmarks()
+            : mode == ContentsList::PrintedPages      ? session->printedPages()
+                                                      : session->chapters();
+    for (const auto &chapter : list) {
+        if (mode == ContentsList::PrintedPages && numericPageLabel(chapter.title.trimmed()))
+            continue;
         const int index = items.size();
-        const auto name = QString("rrChapter%1").arg(index);
+        const auto name = (mode == ContentsList::Landmarks ? QStringLiteral("rrLandmark%1")
+                                   : auxiliary             ? QStringLiteral("rrPrintedPage%1")
+                                                           : QStringLiteral("rrChapter%1"))
+                                  .arg(index);
         // The value is the index of the entry: several entries can share a
         // position until chapter mode loads their text.
-        items.append({ chapter.title,
-                       chapter.position.isEmpty() ? QString() : QString::number(index),
+        items.append({ chapter.title.isEmpty() && !chapter.labelImage.isEmpty()
+                               ? strings::get("chapter_contents.illustrated_entry").arg(index + 1)
+                               : chapter.title,
+                       auxiliary                            ? chapter.position
+                               : chapter.position.isEmpty() ? QString()
+                                                            : QString::number(index),
                        name,
                        {},
                        chapter.depth,
                        chapter.page });
-        if (index == session->contentsSelection().current)
+        items.last().labelImage = chapter.labelImage;
+        if (!auxiliary && index == session->contentsSelection().current)
             current = name;
     }
-    choices->selected = [this](const QString &index) {
-        if (session->goToChapter(index.toInt()))
+    QVector<ContentsList> lists{ ContentsList::Chapters };
+    if (!session->printedPages().isEmpty())
+        lists.append(ContentsList::PrintedPages);
+    if (!session->landmarks().isEmpty())
+        lists.append(ContentsList::Landmarks);
+    choices->setListMode(mode, lists, publisherPagesEnabled());
+    choices->switchList = [this](ContentsList selected) {
+        if (selected == ContentsList::PrintedPages) {
+            QHash<QString, QString> pages;
+            bool hasOtherLabels = false;
+            for (const auto &page : session->printedPages()) {
+                const auto label = page.title.trimmed();
+                if (!numericPageLabel(label))
+                    hasOtherLabels = true;
+                else if (!pages.contains(label))
+                    pages.insert(label, page.position);
+            }
+            if (!pages.isEmpty()) {
+                choices->showPrintedPageInput(
+                        pages, hasOtherLabels,
+                        [this](const QString &position) {
+                            const auto origin = currentVisit();
+                            if (session->goTo(position)) {
+                                pendingPassage = origin;
+                                dismissControls();
+                            }
+                        },
+                        [this] { showChapters(ContentsList::PrintedPages); });
+                return;
+            }
+        }
+        showChapters(selected);
+    };
+    choices->previewImage = [this](const QString &resource) { openImagePreview({}, resource); };
+    // A jump from the contents can be undone with Return to page, like a
+    // link or a jump from the scrubber.
+    choices->selected = [this, auxiliary](const QString &value) {
+        const auto origin = currentVisit();
+        if (auxiliary ? session->goTo(value) : session->goToChapter(value.toInt())) {
+            pendingPassage = origin;
             dismissControls();
+        }
     };
     choosingTypography = false;
     menu->hide();
@@ -2922,13 +3238,8 @@ void Reader::showChapters()
     const int top = navigation ? navigation->statusHeight() : 0;
     choices->setGeometry(0, top, width(),
                          (navigation ? navigation->contentBottom(size()) : height()) - top);
-    choices->setChapterPosition(
-            session->bookPages() > 0
-                    ? strings::get("stats.page_of")
-                              .arg(session->bookPage() + 1)
-                              .arg(headerfooter::pageTotal(session->bookPages(),
-                                                           session->bookPagesEstimated()))
-                    : strings::get("common.percent").arg(session->progressPercent()));
+    syncChapterBoundaries();
+    choices->setChapterPosition(displayedBookPosition());
     const auto groups = preferences.value("chapter_groups").toString();
     choices->showChoices(session->title(), std::move(items), current, ChoiceScreen::Mode::Chapters,
                          groups == "off"           ? ChapterGroups::Off
@@ -2972,6 +3283,15 @@ void Reader::openGraph()
     choices->hide();
     topControls->show();
     bottomControls->hide();
+    const bool showActivity =
+            book->tracksReadingHistory() && features::enabled(preferences, features::Activity);
+    if (showActivity)
+        chapterGraph->activityRequested = [this] { openActivity(); };
+    else
+        chapterGraph->activityRequested = {};
+    // Keep the last summary until the new one arrives, so the row does not
+    // blank and redraw on every visit. A changed summary replaces it.
+    chapterGraph->setActivity(showActivity ? chapterGraph->activitySummary() : QString());
     updateGraph();
     if (navigation) {
         chapterGraph->setAvailableHeight(navigation->contentBottom(size())
@@ -2981,7 +3301,8 @@ void Reader::openGraph()
     chapterGraph->open();
     if (navigation)
         navigation->stackPanel(chapterGraph);
-    loadActivity();
+    if (showActivity)
+        loadActivity();
     refresh();
 }
 
@@ -3081,12 +3402,17 @@ void Reader::pageButton(int direction, quint32 sourceTime, bool userInput, int p
         || bookmarkList->isVisible())
         return;
     if (userInput && physicalKey && services.buttonControls) {
+        const auto actions = preferences.value(pageButtons::preferenceKey).toObject();
+        const bool invertLandscape = (physicalKey == Qt::Key_F23 || physicalKey == Qt::Key_F24)
+                && width() > height() && actions.value(pageButtons::invertLandscapeKey).toBool();
         // Without saved actions the native direction already follows rotation.
-        const bool rotated = !preferences.value(pageButtons::preferenceKey).toObject().isEmpty()
-                && services.pageButtonsRotated && services.pageButtonsRotated();
-        for (const auto &button : pageButtons::held(services.buttonControls(), rotated)) {
+        const bool rotated =
+                !actions.isEmpty() && services.pageButtonsRotated && services.pageButtonsRotated();
+        for (const auto &button :
+             pageButtons::held(services.buttonControls(), rotated != invertLandscape)) {
             if (button.key == physicalKey) {
-                direction = pageButtons::direction(preferences, button.id, direction);
+                direction = pageButtons::direction(preferences, button.id,
+                                                   invertLandscape ? -direction : direction);
                 break;
             }
         }
@@ -3146,7 +3472,7 @@ void Reader::turnPage(int direction, quint32 sourceTime, bool userInput, ui::Inp
 // The layout that bookmark pages belong to, including the page area size.
 QString Reader::layoutKey() const
 {
-    return kobalt::bookmarkLayoutKey(session->pages(), session->state(), bodySize());
+    return bookmarkLayout.key(session->pages(), session->state(), bodySize());
 }
 
 void Reader::syncBookmarks()
@@ -3208,19 +3534,25 @@ void Reader::recordOpening()
 void Reader::finishExit()
 {
     if (!exitPending || closing || exportRunning || closeSaveError || session->busy()
-        || appearanceEdit.panelOpen() || appearanceEdit.applying() || appearanceEdit.finishPending()
-        || lifecycleHidden || services.suspended())
+        || appearanceEdit.panelOpen() || appearanceEdit.applying()
+        || appearanceEdit.finishPending() || lifecycleHidden || services.suspended())
         return;
     if (finishDialog || annotationErrorDialog || settingsWriteErrorDialog)
         return;
-    if (!book->deviceTransition()) {
+    if (exitProgress != ExitProgress::LocalOnly && services.nickelSyncing
+        && !book->deviceTransition() && services.nickelSyncing()) {
+        showExitSyncWait();
+        return;
+    }
+    clearExitSyncWait();
+    if (exitProgress != ExitProgress::LocalOnly && !book->deviceTransition()) {
         book->observeProgress();
         if (book->pendingProgress()) {
             showProgressChoice();
             return;
         }
     }
-    if (!finishChoiceResolved && book->offerFinish()) {
+    if (exitProgress != ExitProgress::LocalOnly && !finishChoiceResolved && book->offerFinish()) {
         showFinishChoice();
         return;
     }
@@ -3264,7 +3596,7 @@ void Reader::saveExit(quint64 request)
         return;
     // Writer completion and GUI acknowledgement are different barriers. Wait
     // for both before allowing destruction or reporting a failed annotation.
-    if (savingDenseGraph || annotationSaving || bookmarks->saving() || highlights->saving()
+    if (appliedSettingWrites > 0 || annotationSaving || bookmarks->saving() || highlights->saving()
         || book->savesPending() || (annotationExporter && annotationExporter->writing())) {
         saveWait.after([this, request] { saveExit(request); });
         return;
@@ -3287,6 +3619,12 @@ void Reader::saveExit(quint64 request)
             failExit(request);
             return;
         }
+        if (exitProgress == ExitProgress::LocalOnly) {
+            save(true, true, false);
+            flushKosync([this, request] { finishExitSaved(request); },
+                        kosyncClient->schedule().onClose);
+            return;
+        }
         diagnostic("exit-native-queued");
         session->nativePosition([this, request](const QString &location, const QString &error) {
             finishExitNative(request, location, error);
@@ -3298,6 +3636,13 @@ void Reader::finishExitNative(quint64 request, const QString &location, const QS
 {
     if (request != closeRequest || !exportRunning || lifecycleHidden)
         return;
+    if (services.nickelSyncing && !book->deviceTransition() && services.nickelSyncing()) {
+        ++closeRequest;
+        exportRunning = false;
+        setEnabled(true);
+        showExitSyncWait();
+        return;
+    }
     closingTimes.add("native", closeStage);
     closeStage.restart();
     const QPointer<Reader> guard(this);
@@ -3306,7 +3651,7 @@ void Reader::finishExitNative(quint64 request, const QString &location, const QS
     // what that write did not carry, before the reader closes.
     const auto result = [&] {
         mainthread::AllowBlocking allow("final native progress before storage handoff");
-        return book->writeNative(location, error);
+        return book->writeNative(location, error, statsUseWholeVolume());
     }();
     closingTimes.add("native", closeStage);
     closeStage.restart();
@@ -3353,7 +3698,8 @@ void Reader::finishExitSaved(quint64 request)
 {
     if (request != closeRequest || !exportRunning || lifecycleHidden)
         return;
-    if (pendingStorageSave()) {
+    if (localStorageSavePending()
+        || (exitProgress != ExitProgress::LocalOnly && book->readingSavePending())) {
         saveWait.after([this, request] { finishExitSaved(request); });
         return;
     }
@@ -3377,20 +3723,21 @@ void Reader::transitionSaveError(std::function<void()> retry, std::function<void
         closeSaveError.clear();
         setEnabled(false);
     };
-    connect(notice->primaryButton(), &QPushButton::clicked, this, [this, request, dismiss, retry] {
-        if (request != closeRequest)
-            return;
-        dismiss();
-        retry();
-    });
-    connect(notice->quitButton(), &QPushButton::clicked, this, [this, request, dismiss, discard] {
-        if (request != closeRequest)
-            return;
-        closeWithoutSaving = true;
-        dismiss();
-        discard();
-    });
-    notice->fitCard();
+    connect(notice->primaryButton(), &QPushButton::clicked, this,
+            [this, notice, request, dismiss, retry] {
+                if (request != closeRequest || closeSaveError != notice)
+                    return;
+                dismiss();
+                retry();
+            });
+    connect(notice->quitButton(), &QPushButton::clicked, this,
+            [this, notice, request, dismiss, discard] {
+                if (request != closeRequest || closeSaveError != notice)
+                    return;
+                closeWithoutSaving = true;
+                dismiss();
+                discard();
+            });
     show();
     notice->show();
     notice->raise();
@@ -3403,6 +3750,7 @@ void Reader::failExit(quint64 request, const QString &error, SaveErrorView::Caus
 {
     if (request != closeRequest || lifecycleHidden)
         return;
+    clearExitSyncWait();
     ++closeRequest;
     exportRunning = false;
     setEnabled(true);
@@ -3410,10 +3758,12 @@ void Reader::failExit(quint64 request, const QString &error, SaveErrorView::Caus
         return;
     // A close that only waits for the host's records can end without them:
     // Kobalt has saved the place in the book.
-    const bool savedLocally = cause == SaveErrorView::Cause::TimedOut && !book->savesPending()
-            && !annotationSaving && !bookmarks->saving() && !highlights->saving();
+    const bool savedLocally = exitProgress != ExitProgress::LocalOnly
+            && cause == SaveErrorView::Cause::TimedOut && !book->savesPending() && !annotationSaving
+            && !bookmarks->saving() && !highlights->saving();
     auto *notice = new SaveErrorView(this, error,
-                                     closeSaveRetried && cause == SaveErrorView::Cause::Failed,
+                                     exitProgress != ExitProgress::LocalOnly && closeSaveRetried
+                                             && cause == SaveErrorView::Cause::Failed,
                                      cause, savedLocally);
     closeSaveError = notice;
     notice->setObjectName("rrCloseSaveError");
@@ -3448,7 +3798,6 @@ void Reader::failExit(quint64 request, const QString &error, SaveErrorView::Caus
         dismiss();
         cancelExit();
     };
-    notice->fitCard();
     notice->show();
     notice->raise();
     notice->primaryButton()->setFocus();
@@ -3515,6 +3864,8 @@ void Reader::recoverSleepSave()
 
 void Reader::clearPendingExit()
 {
+    clearExitSyncWait();
+    exitProgress = ExitProgress::Normal;
     // An abandoned close keeps the cache. The next Return asks nothing.
     cacheEviction = 0;
     if (finishDialog && finishChoiceForExit) {
@@ -3538,20 +3889,26 @@ void Reader::cancelExit()
 {
     ++closeRequest;
     clearPendingExit();
+    session->pauseHybridTurnPreparation(false);
     observeReading();
     refresh();
 }
 
 bool Reader::pendingStorageSave() const
 {
-    return (annotationExporter && annotationExporter->writing()) || savingButtonControls
-            || savingDenseGraph || book->savesPending() || book->readingSavePending()
-            || bookmarks->saving() || highlights->saving() || annotationSaving
-            || (reportWriter && !reportWriter->idle());
+    return localStorageSavePending() || book->readingSavePending();
+}
+
+bool Reader::localStorageSavePending() const
+{
+    return (annotationExporter && annotationExporter->writing()) || appliedSettingWrites > 0
+            || book->savesPending() || bookmarks->saving() || highlights->saving()
+            || annotationSaving || (reportWriter && !reportWriter->idle());
 }
 
 void Reader::finishStorageSave(std::function<void(bool)> finished, bool nativeAllowed)
 {
+    session->pauseHybridTurnPreparation(true);
     if (imageViewer && imageViewer->isVisible())
         imageViewer->closeImage();
     ++closeRequest;
@@ -3570,17 +3927,72 @@ void Reader::finishStorageSave(std::function<void(bool)> finished, bool nativeAl
 
 void Reader::revokeNativeReading()
 {
+    session->pauseHybridTurnPreparation(true);
     ++closeRequest;
     exitPending = exportRunning = false;
     closing = lifecycleHidden = true;
     book->releaseNative(false);
 }
 
-void Reader::finishStorageData(std::function<void(bool)> finished, bool nativeAllowed, int failures)
+static constexpr int disposalSaveAttempts = 3;
+
+bool Reader::openingSaveParked() const
 {
+    return openingSaveState == OpeningSaveState::Sleeping && retryDisposal && !pendingStorageSave();
+}
+
+void Reader::setOpeningSaveState(OpeningSaveState state)
+{
+    const auto previous = std::exchange(openingSaveState, state);
+    const bool dismissError = retryDisposal && closeSaveError
+            && (state == OpeningSaveState::Sleeping
+                || state == OpeningSaveState::LowBatteryShutdown);
+    if (dismissError) {
+        closeSaveError->hide();
+        closeSaveError->deleteLater();
+        closeSaveError.clear();
+        setEnabled(false);
+    }
+    // Retry dismisses the notice before its write finishes. The disabled
+    // reader can still be visible when Nickel begins the next sleep.
+    if (state == OpeningSaveState::Sleeping || dismissError)
+        hide();
+    if (previous == state || !retryDisposal)
+        return;
+    if (previous == OpeningSaveState::Sleeping
+        && (state == OpeningSaveState::Awake || state == OpeningSaveState::Required))
+        resumeDisposalSave(disposalSaveAttempts - 1);
+    else
+        handleDisposalFailure();
+}
+
+void Reader::resumeDisposalSave(int failures)
+{
+    auto retry = std::exchange(retryDisposal, {});
+    if (retry)
+        retry(failures);
+}
+
+void Reader::handleDisposalFailure()
+{
+    if (allowFailedTransition || openingSaveState == OpeningSaveState::LowBatteryShutdown) {
+        closeWithoutSaving = true;
+        resumeDisposalSave(0);
+    } else if (openingSaveState != OpeningSaveState::Sleeping) {
+        // The notice records an explicit Quit before invoking this continuation.
+        const auto resume = [this] { resumeDisposalSave(0); };
+        transitionSaveError(resume, resume);
+    }
+}
+
+void Reader::finishStorageData(std::function<void(bool)> finished, bool nativeAllowed, int failures,
+                               bool retriedAnnotations)
+{
+    if (releasingForUsb)
+        return;
     if (pendingStorageSave()) {
-        saveWait.after([this, finished, nativeAllowed, failures] {
-            finishStorageData(finished, nativeAllowed, failures);
+        saveWait.after([this, finished, nativeAllowed, failures, retriedAnnotations] {
+            finishStorageData(finished, nativeAllowed, failures, retriedAnnotations);
         });
         return;
     }
@@ -3588,20 +4000,19 @@ void Reader::finishStorageData(std::function<void(bool)> finished, bool nativeAl
         finished(false);
         return;
     }
-    if (failures >= 3) {
+    const bool annotationsFailed = bookmarks->hasFailedSave() || highlights->hasFailedSave();
+    if (retriedAnnotations && annotationsFailed)
+        ++failures;
+    if (failures >= disposalSaveAttempts) {
         setProperty("reader_transition_save_failed", true);
         kobalt::diagnostic("disposal-save-failed", { { "attempts", failures } },
                            kobalt::DiagnosticSeverity::Error);
-        if (allowFailedTransition || closeWithoutSaving) {
-            closeWithoutSaving = true;
-            finished(false);
-        } else
-            transitionSaveError(
-                    [this, finished, nativeAllowed] {
-                        book->retryFailedReadingSave();
-                        finishStorageData(finished, nativeAllowed);
-                    },
-                    [finished] { finished(false); });
+        retryDisposal = [this, finished, nativeAllowed](int failures) {
+            if (!closeWithoutSaving)
+                book->retryFailedReadingSave();
+            finishStorageData(finished, nativeAllowed, failures);
+        };
+        handleDisposalFailure();
         return;
     }
     const auto retry = [this, finished, nativeAllowed, failures] {
@@ -3609,15 +4020,19 @@ void Reader::finishStorageData(std::function<void(bool)> finished, bool nativeAl
             finishStorageData(finished, nativeAllowed, failures + 1);
         });
     };
-    if (bookmarks->hasFailedSave() || highlights->hasFailedSave()) {
+    if (annotationsFailed) {
         bookmarks->retryFailedSave();
         highlights->retryFailedSave();
-        retry();
+        // A repaired annotation still needs the checkpoint and native finish
+        // from this attempt, including the single retry after wake.
+        qt::later(100, this, [this, finished, nativeAllowed, failures] {
+            finishStorageData(finished, nativeAllowed, failures, true);
+        });
         return;
     }
     const QPointer<Reader> guard(this);
     book->checkpointForClose([this, guard, finished, nativeAllowed, retry](bool saved) {
-        if (!guard)
+        if (!guard || guard->releasingForUsb)
             return;
         if (!saved) {
             retry();
@@ -3628,7 +4043,7 @@ void Reader::finishStorageData(std::function<void(bool)> finished, bool nativeAl
             return;
         }
         book->finishReading([guard, finished, retry](NativeActivityResult activityResult) {
-            if (!guard)
+            if (!guard || guard->releasingForUsb)
                 return;
             if (activityCompleted(activityResult))
                 finished(true);
@@ -3665,7 +4080,9 @@ bool Reader::flushBeforeStandby()
     if (services.readerStandbySupported && preferences.value(disableReaderStandbyKey).toBool(false)
         && isVisible() && !lifecycleHidden && !closing && !exportRunning && !services.suspended())
         return false;
-    // Standby pauses Qt timers. Let the visible confirmation dismiss first.
+    // Standby pauses Qt timers, including the check that resumes a waiting exit.
+    if (exitProgress == ExitProgress::WaitingForSync && exitPending && !lifecycleHidden)
+        return false;
     auto *notice = dynamic_cast<KosyncNotice *>(kosyncDialog.data());
     if (!lifecycleHidden && notice && notice->completing())
         return false;
@@ -3709,8 +4126,31 @@ bool Reader::save(bool snapshot, bool background, bool persist)
         return saved;
     if (book->paths().stateReport.isEmpty())
         return saved;
+    describe(state);
+    // Inspection reports never write or wait on the GUI thread. Pending
+    // storage saves include this queue at sleep, USB and close.
+    if (!reportWriter)
+        reportWriter = std::make_unique<storage::RecordWriter>();
+    reportWriter->post([path = book->paths().stateReport, state] { return writeJson(path, state); },
+                       {});
+    return saved;
+}
+
+// What the state report holds besides the checkpoint: the page, the
+// layout, the open panel and the bookmarks.
+void Reader::describe(QJsonObject &state)
+{
     state["page"] = session->page();
     state["pages"] = session->pages();
+    if (services.development.detailedStateReports) {
+        state["main_first_page"] = session->firstMainPage();
+        state["main_last_page"] = session->lastMainPage();
+        const auto printed = currentPrintedPage();
+        state["main_page_label"] = printed.isEmpty()
+                ? session->displayPageLabel(session->bookPage(), secondaryNumberStyle())
+                : printed;
+        state["main_percent"] = session->mainPercent();
+    }
     state["cached_pages"] = session->cachedPages();
     state["chapters"] = session->chapters().size();
     if (services.development.detailedStateReports) {
@@ -3734,6 +4174,7 @@ bool Reader::save(bool snapshot, bool background, bool persist)
         state["word_counts"] =
                 kobalt::qt::object({ { "ready", session->totalWords() >= 0 },
                                      { "total_words", double(session->totalWords()) },
+                                     { "main_words", double(session->mainWords()) },
                                      { "words", counts },
                                      { "positions", positions },
                                      { "titles", titles },
@@ -3762,7 +4203,7 @@ bool Reader::save(bool snapshot, bool background, bool persist)
     state["menu_session_text"] = menuSession->text();
     state["menu_clock_font"] = QFontInfo(menuClock->font()).family();
     state["menu_battery_font"] = QFontInfo(menuBattery->font()).family();
-    state["ui_icon_set"] = QStringLiteral("Lucide");
+    state["ui_icon_set"] = QStringLiteral("Phosphor");
     state["typography_button_font"] = QFontInfo(toolbarButtons.typography->font()).family();
     state["benchmark_typography"] = session->temporaryTypography();
     state["display_settings"] = preferences;
@@ -3810,15 +4251,15 @@ bool Reader::save(bool snapshot, bool background, bool persist)
             pages.append(p);
         return pages;
     }();
-    // Inspection reports never write or wait on the GUI thread. Pending
-    // storage saves include this queue at sleep, USB and close.
-    if (!reportWriter)
-        reportWriter = std::make_unique<storage::RecordWriter>();
-    reportWriter->post([path = book->paths().stateReport, state] { return writeJson(path, state); },
-                       {});
-    return saved;
+    state["highlight_count"] = highlights ? int(highlights->highlights().size()) : -1;
 }
 
+QJsonObject Reader::inspect()
+{
+    auto state = book->checkpointState();
+    describe(state);
+    return state;
+}
 } // namespace kobalt::reader
 
 namespace kobalt {

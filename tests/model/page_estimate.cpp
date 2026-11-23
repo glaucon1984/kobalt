@@ -1,4 +1,5 @@
 #include "check.h"
+#include "book_fixtures.h"
 #include "engine_fixtures.h"
 #include "reader_inputs.h"
 #include "engine/blaze/adapter/column_view.h"
@@ -7,16 +8,19 @@
 #include "engine/blaze/adapter/reader_render_callback.h"
 #include "engine/blaze/adapter/reader_source.h"
 #include "publication/page_estimate.h"
+#include "reading/opening_job.h"
 #include "render/page_content.h"
 #include "support/qt_compat.h"
 #include "support/diagnostics.h"
 #include <QCryptographicHash>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QSet>
@@ -104,6 +108,23 @@ struct ReaderLocationProbe
     static PageMap &editMap(EngineDocument &model) { return model.source_->pageEstimate.map; }
 
     static QVector<qint64> spineBytes(const EngineDocument &model) { return model.spineBytes(); }
+
+    static bool fragmentsPending(const EngineDocument &model, const QString &path)
+    {
+        return model.source_->pendingTocFragments.contains(path);
+    }
+
+    static std::unique_ptr<ReaderSession> chapterActionSession(
+            EngineDocument &engine, const QJsonObject &marks)
+    {
+        auto session = std::unique_ptr<ReaderSession>(
+                new ReaderSession(std::shared_ptr<Engine>(&engine, [](Engine *) {}), {}));
+        session->lease_ = std::make_shared<SourceLease>();
+        session->frame.chapters = engine.chapters();
+        session->frame.state["main_text_marks"] = marks;
+        engine.mainTextMarks = marks;
+        return session;
+    }
 
     static int windowFirst(const EngineDocument &model) { return model.windowFirst_; }
 
@@ -979,7 +1000,8 @@ test::BookFiles observedBook()
 }
 
 // Opens the files of a book with `settings`, which can hold a saved state.
-void openResources(EngineDocument &model, const test::BookFiles &files, const QJsonObject &settings)
+void openResources(EngineDocument &model, const test::BookFiles &files, const QJsonObject &settings,
+                   QSize viewport = { 600, 800 })
 {
     QMap<QString, qint64> sizes;
     for (auto it = files.cbegin(); it != files.cend(); ++it)
@@ -992,7 +1014,7 @@ void openResources(EngineDocument &model, const test::BookFiles &files, const QJ
             },
             std::make_shared<std::atomic_bool>(false));
     QString error;
-    require(model.openResources(source, sizes, { 600, 800 }, settings, &error), qPrintable(error));
+    require(model.openResources(source, sizes, viewport, settings, &error), qPrintable(error));
 }
 
 void openFiles(EngineDocument &model, const test::BookFiles &files)
@@ -1002,6 +1024,35 @@ void openFiles(EngineDocument &model, const test::BookFiles &files)
     QString error;
     require(model.showSpineItems(0, 0, &error), qPrintable(error));
     require(model.go(0), "Cannot go to the first page");
+}
+
+void splitTextEstimate()
+{
+    const QByteArray xhtml =
+            "<html xmlns='http://www.w3.org/1999/xhtml'><body><p>"
+            "one <![CDATA[two]]><![CDATA[]]> thr&#101;e <em>f&#x6f;ur</em> five</p></body></html>";
+    const QString plain = QStringLiteral("one two three four five");
+    EngineDocument model(test::readerFonts());
+    openResources(model,
+                  test::publisherPackage("en", "Text positions", { { "part.xhtml", xhtml } },
+                                         "<itemref idref='part.xhtml'/>"),
+                  {});
+    qint64 expectedWords = 0;
+    for (const auto &word : plain.split(' ')) {
+        const auto hits = model.searchPage(word, 0).hits;
+        require(hits.size() == 1, qPrintable("Missing rendered word: " + word));
+        const QString end = hits.first().end;
+        const QString path = end.mid(end.lastIndexOf("/body"));
+        qint64 words = -1;
+        const auto fraction = pageEstimateTextFraction(xhtml, path, false, &words);
+        const int length = plain.indexOf(word) + word.size();
+        require(words == ++expectedWords, qPrintable("Incorrect word count at " + end));
+        require(std::abs(fraction * plain.size() - length) < 0.000001,
+                qPrintable(QString("Estimate at %1 (%2) counted %3 characters instead of %4")
+                                   .arg(word, end)
+                                   .arg(fraction * plain.size())
+                                   .arg(length)));
+    }
 }
 
 void selectionAcrossSliceAfterReflow()
@@ -1566,7 +1617,12 @@ void savedPlaceOutsideOpeningWindow()
     require(model.position() == shown, "The whole-book handoff changed the reading position");
     // Hybrid appearance edits return to chapter mode before changing text.
     // Repeat the edit and whole-book handoff away from the cover.
-    for (const int pixels : { 36, 20, 28 }) {
+    const auto minimum = minimumFontPixels();
+    const appearance::Patch tooSmall(qt::object({ { "font_pixels", minimum - 1 } }));
+    require(!model.setChapterMode(true, tooSmall, { 600, 800 }) && !model.partOfBook()
+                    && model.position() == shown,
+            "An invalid font size replaced the whole book");
+    for (const int pixels : { 36, minimum, 28 }) {
         const appearance::Patch next(qt::object({ { "font_pixels", pixels } }));
         require(model.setChapterMode(true, next, { 600, 800 }),
                 "Cannot change text size in chapter mode");
@@ -1666,6 +1722,34 @@ void parkWholeBook(EngineDocument &model)
                             == Engine::FullDocument::Stopped
                     && model.fullDocumentStarted() && !model.fullDocumentReady(),
             "The whole-book build must have started and parked");
+}
+
+void parkedBookLanguage()
+{
+    auto files = pagesBook();
+    EngineDocument book(test::readerFonts());
+    book.setChapterSlices(2);
+    openResources(book, files,
+                  { { "koblaze_first_spine_item", 0 }, { "koblaze_last_spine_item", 0 } });
+    parkWholeBook(book);
+    const auto original = TextLangMan::getMainLang();
+    files["book.opf"].replace("<dc:language>en</dc:language>", "<dc:language>fr</dc:language>");
+    {
+        EngineDocument preview(test::readerFonts());
+        openResources(preview, files, {});
+    }
+    require(TextLangMan::getMainLang() == U"fr" && original != U"fr",
+            "The other book must change the active language");
+    bool resume = true;
+    lString32 resumedLanguage;
+    book.prepareFullDocument([&] {
+        // The caller checks once before waking the parked build.
+        if (std::exchange(resume, false))
+            return true;
+        resumedLanguage = TextLangMan::getMainLang();
+        return false;
+    });
+    require(resumedLanguage == original, "The parked build resumed with the other book's language");
 }
 
 void returnToEvictedBookmark()
@@ -2088,21 +2172,22 @@ void chaptersMeasuredInIdle()
 
 // The previous chapter is a placeholder in chapter mode. Its class only
 // participates in the sibling selector when the whole book is laid out.
-void hiddenHeadingAtHandoff()
+void hiddenHeadingAtHandoff(QSize viewport)
 {
-    auto files = test::engineBook(false, 2, 12);
-    for (const auto &name : { "OEBPS/c1.xhtml", "OEBPS/c2.xhtml" })
+    auto files = test::engineBook(false, 4, 50);
+    for (const auto &name : { "OEBPS/c3.xhtml", "OEBPS/c4.xhtml" })
         files[name].replace("<html ", "<html class='chapter' ");
-    files["OEBPS/c2.xhtml"].replace("</head>",
+    files["OEBPS/c4.xhtml"].replace("</head>",
                                     "<style>.chapter + .chapter h1 {display:none}</style></head>");
+    const QJsonObject settings{ { "font_pixels", 28 }, { "two_columns_landscape", true } };
 
     for (const bool prepared : { true, false }) {
         EngineDocument model(test::readerFonts());
-        openResources(model, files, { { "font_pixels", 28 } });
-        model.setChapterSlices(6);
+        openResources(model, files, settings, viewport);
+        model.setChapterSlices(chapterSlicePages());
         QString error;
-        require(model.showSpineItems(1, 1, &error) && model.go(0), qPrintable(error));
-        require(model.pageExcerpt(0).startsWith("Chapter 2"),
+        require(model.showSpineItems(3, 3, &error) && model.go(0), qPrintable(error));
+        require(model.pageExcerpt(0).startsWith("Chapter 4"),
                 "The chapter heading must be visible");
         require(model.turnInWindow(1), "Cannot turn past the heading");
         const auto next = model.position();
@@ -2110,7 +2195,7 @@ void hiddenHeadingAtHandoff()
         const auto heading = model.position();
         if (prepared) {
             EngineDocument whole(test::readerFonts());
-            openResources(whole, files, { { "font_pixels", 28 } });
+            openResources(whole, files, settings, viewport);
             require(whole.goTo(next) && whole.page() > 0,
                     "Cannot reach the passage after the hidden heading");
             const int page = whole.page();
@@ -2121,10 +2206,28 @@ void hiddenHeadingAtHandoff()
                     "A hidden heading must not be assigned the cover page");
             require(!whole.goTo(heading) && whole.page() == page && whole.position() == next,
                     "A jump to a hidden heading must keep the displayed passage");
-        }
-        if (prepared)
+            while (model.refinePageEstimate()) { }
             require(model.prepareFullDocument({}) == Engine::FullDocument::Ready,
                     "Cannot prepare the whole book");
+            // The heading is hidden in the whole book, but its first paragraph is on screen.
+            const int first =
+                    whole.pagesOf({ "/body/DocFragment[4]/body/p[1]/span/text().0" }).value(0, -1);
+            if (viewport.width() > viewport.height()) {
+                require(model.bookPages({ heading, cover, next })
+                                == QVector<int>({ first + 1, 1, page + 1 }),
+                        "A heading hidden in the whole book must keep its chapter's label");
+                require(model.bookPages({ heading, next }, [] { return false; }).isEmpty(),
+                        "Cancelled two-column labels returned a partial batch");
+            }
+            const auto count = model.roughPages();
+            require(first > 0 && count.page == first + 1 && count.pages == whole.pages()
+                            && !count.pagesEstimated,
+                    qPrintable(QString("Chapter 4 showed %1/%2 after pagination, expected %3/%4")
+                                       .arg(count.page)
+                                       .arg(count.pages)
+                                       .arg(first + 1)
+                                       .arg(whole.pages())));
+        }
         require(!model.setChapterMode(false, {}, {}),
                 "A heading hidden in the whole book must not move the reader to the cover");
         require(model.bookFraction() >= 0 && model.position() == heading && model.turnInWindow(1)
@@ -2237,14 +2340,12 @@ void fullDocument()
     // A build that is parked is given up without a wait when the font size
     // changes, and when its book closes.
     int seen = 0;
-    require(other.prepareFullDocument([&] { return ++seen <= 5; })
-                    == Engine::FullDocument::Stopped,
+    require(other.prepareFullDocument([&] { return ++seen <= 5; }) == Engine::FullDocument::Stopped,
             "The build must park");
     require(other.applyAppearance(appearance::Patch(qt::object({ { "font_pixels", 28 } }))),
             "Cannot change the font size with a parked build");
     seen = 0;
-    require(other.prepareFullDocument([&] { return ++seen <= 5; })
-                    == Engine::FullDocument::Stopped,
+    require(other.prepareFullDocument([&] { return ++seen <= 5; }) == Engine::FullDocument::Stopped,
             "A new build must start for the new font size");
     require(other.prepareFullDocument({}) == Engine::FullDocument::Ready,
             "The new build must finish");
@@ -2340,9 +2441,9 @@ void parkedFullDocument(const std::function<void(EngineDocument &)> &openWhole, 
 // The switch to the whole book resolves the place of the page on screen in
 // the whole-book document. Walks a book in chapter mode and asks the whole
 // book for the place of every page.
-void handoffWalk(const QByteArray &text, int slicePages = 0)
+void handoffWalk(const QByteArray &text, int slicePages = 0, QSize viewport = { 600, 800 },
+                 QJsonObject settings = { { "font_pixels", 28 }, { "line_spacing_version", 1 } })
 {
-    const QJsonObject settings{ { "font_pixels", 28 }, { "line_spacing_version", 1 } };
     const auto pixels = [](const QImage &image) {
         return QCryptographicHash::hash(
                 QByteArray::fromRawData(reinterpret_cast<const char *>(image.constBits()),
@@ -2351,13 +2452,13 @@ void handoffWalk(const QByteArray &text, int slicePages = 0)
     };
     QString error;
     EngineDocument whole(test::readerFonts());
-    require(whole.open(text, QSize(600, 800), settings, &error), qPrintable(error));
+    require(whole.open(text, viewport, settings, &error), qPrintable(error));
     EngineDocument model(test::readerFonts());
     const auto previousPages = qgetenv("KOBALT_CHAPTER_PAGES");
     if (slicePages > 0)
         qputenv("KOBALT_CHAPTER_PAGES", QByteArray::number(slicePages));
     setChapterModeOverride(1);
-    const bool opened = model.open(text, QSize(600, 800), settings, &error);
+    const bool opened = model.open(text, viewport, settings, &error);
     if (slicePages > 0) {
         if (previousPages.isNull())
             qunsetenv("KOBALT_CHAPTER_PAGES");
@@ -2417,6 +2518,26 @@ void handoffWalk(const QByteArray &text, int slicePages = 0)
     require(unresolved == 0, "A chapter page has no place in the whole book");
     require(pages == whole.pages() && otherStart == 0 && otherPixels == 0,
             "Chapter pages differ from the whole book");
+}
+
+void flexRowHandoff()
+{
+    QByteArray body;
+    for (int row = 0; row < 100; ++row) {
+        body += "<div style='display:flex;flex-wrap:wrap;justify-content:center'>";
+        for (int item = 0; item < 5; ++item)
+            body += "<div>Series " + QByteArray::number(row) + " item " + QByteArray::number(item)
+                    + ".</div>";
+        body += "</div>";
+    }
+    QTemporaryDir dir;
+    const auto files = test::publisherPackage("en", "Flex rows",
+                                              { { "rows.xhtml", test::publisherHtml(body) } },
+                                              "<itemref idref='rows.xhtml'/>");
+    require(dir.isValid() && test::writeBook(dir.path(), "rows.epub", files), "Create flex rows");
+    QFile file(dir.filePath("rows.epub"));
+    require(file.open(QIODevice::ReadOnly), "Read flex rows");
+    handoffWalk(file.readAll(), 2);
 }
 
 // A parked build must not reuse another book's font bytes, even when the
@@ -2855,7 +2976,15 @@ void retiredUntilIdle()
                                  {}, {})
                     && Probe::retired(model) == 1,
             "The whole book must wait for idle time");
+    const int first = Probe::windowFirst(model);
+    while (Probe::windowFirst(model) == first) {
+        model.prepareAhead();
+        require(model.turnInWindow(1), "The fixture must cross into a prepared chapter");
+    }
+    const int freeSlots = ldomDocument::koblazeFreeDocumentSlots();
     model.releaseRetired();
+    require(ldomDocument::koblazeFreeDocumentSlots() > freeSlots,
+            "Crossing a chapter kept the retired whole book alive through idle time");
     require(Probe::retired(model) == 0 && model.turnInWindow(1),
             "The chapter must read on after the release");
 }
@@ -3416,6 +3545,120 @@ void layoutProgressForward()
             "A new layout kept the old progress");
 }
 
+static void lazyChapterFragments()
+{
+    auto files = test::publisherPackage(
+            "en", "TOC fragments",
+            { { "first.xhtml",
+                test::publisherHtml("<p id='start'>First target.</p><p id='start'>Last duplicate.</p>"
+                                    "<p id='end'>Exclusive end.</p>")
+                        + "<broken" },
+              { "second.xhtml", test::publisherHtml("<p id='other'>Another chapter.</p>") },
+              { "third.xhtml",
+                test::publisherHtml("<section xmlns:b='http://www.idpf.org/2007/op&#115;' "
+                                    "b:type='bodymatter' id='body'><p>Body text.</p></section>") },
+              { "nav.xhtml",
+                test::publisherHtml("<nav epub:type='toc'><ol>"
+                                    "<li><a href='first.xhtml#start'>Start</a></li>"
+                                    "<li><a href='first.xhtml#end'>End</a></li>"
+                                    "<li><a href='second.xhtml#other'>Other</a></li>"
+                                    "<li><a href='third.xhtml#body'>Body</a></li>"
+                                    "<li><a href='first.xhtml'>Beginning</a></li>"
+                                    "</ol></nav>") } },
+            "<itemref idref='first.xhtml'/><itemref idref='second.xhtml'/>"
+            "<itemref idref='third.xhtml'/>");
+    files["book.opf"].replace("id=\"nav.xhtml\"", "id=\"nav.xhtml\" properties=\"nav\"");
+    files["third.xhtml"].replace(" xmlns:epub=\"http://www.idpf.org/2007/ops\"", "");
+    QMap<QString, qint64> sizes;
+    for (auto it = files.cbegin(); it != files.cend(); ++it)
+        sizes[it.key()] = it.value().size();
+    std::atomic_bool unavailable{ false };
+    auto resources = std::make_shared<ResourceCache>(
+            files.keys(),
+            [&](const QString &name, const ResourceCache::Sink &sink, QString *error) {
+                if (unavailable.load() && name == "first.xhtml") {
+                    *error = "Temporary chapter read failure";
+                    return false;
+                }
+                const auto bytes = files.value(name);
+                return sink(bytes.constData(), bytes.size());
+            },
+            std::make_shared<std::atomic_bool>(false));
+    EngineDocument model(test::readerFonts());
+    QString error;
+    require(model.openResources(resources, sizes, { 600, 800 },
+                                { { "koblaze_first_spine_item", -1 } }, &error),
+            qPrintable(error));
+    const QString body = "/body/DocFragment[3]/body[1]/section[1]";
+    require(model.mainTextHints().first == body && !Probe::fragmentsPending(model, "third.xhtml"),
+            "A prefixed type with an escaped namespace was deferred");
+    require(Probe::fragmentsPending(model, "first.xhtml")
+                    && Probe::fragmentsPending(model, "second.xhtml"),
+            "Opening scanned TOC fragments without semantic boundaries");
+    const QString first = "/body/DocFragment[1]/body[1]/p[2]";
+    const QString after = "/body/DocFragment[1]/body[1]/p[3]";
+    const QJsonObject marks{ { "start", QJsonObject{ { "index", 0 }, { "title", "Start" } } },
+                             { "end", QJsonObject{ { "anchor", after } } } };
+    model.mainTextMarks = marks;
+    resources->releaseBytes();
+    unavailable = true;
+    ReaderFrame frame;
+    captureChapters(frame, model);
+    require(model.mainTextMarks == marks && frame.state.value("main_text_marks").toObject() == marks
+                    && Probe::fragmentsPending(model, "first.xhtml"),
+            "A temporary read failure removed saved marks or consumed the pending fragments");
+    const auto chapterActionMarks = QJsonObject{
+        { "start", QJsonObject{ { "anchor", first } } },
+        { "end", QJsonObject{ { "anchor", after } } }
+    };
+    {
+        const auto session = Probe::chapterActionSession(model, chapterActionMarks);
+        const auto startOffered = [&] {
+            QEventLoop completed;
+            QTimer deadline;
+            deadline.setSingleShot(true);
+            QObject::connect(&deadline, &QTimer::timeout, &completed, &QEventLoop::quit);
+            bool returned = false, offered = false;
+            session->chapterBoundaryActions(4, [&](const auto &actions) {
+                returned = true;
+                offered = std::any_of(actions.cbegin(), actions.cend(), [](const auto &action) {
+                    return action.start && !action.reset;
+                });
+                completed.quit();
+            });
+            deadline.start(5000);
+            completed.exec();
+            require(returned, "Chapter actions did not return");
+            return offered;
+        };
+        require(!startOffered() && session->mainTextMarks() == chapterActionMarks,
+                "A start action could discard an unreadable end bound");
+        unavailable = false;
+        require(startOffered() && session->mainTextMarks() == chapterActionMarks,
+                "A start action was not offered again after the fragment became readable");
+    }
+    model.mainTextMarks = marks;
+    unavailable = false;
+    require(model.validMainTextRange(first, after) && !model.validMainTextRange(after, first),
+            "A deferred same-spine range lost source order");
+    require(!Probe::fragmentsPending(model, "first.xhtml")
+                    && Probe::fragmentsPending(model, "second.xhtml"),
+            "Checking one range resolved an unrelated chapter");
+    const auto links = model.chapters();
+    require(links.size() == 5 && model.chapterBoundaryPosition(links, 0) == first
+                    && model.chapterBoundaryPosition(links, 1) == after
+                    && model.chapterBoundaryPosition(links, 3) == body,
+            "Deferring TOC fragments changed duplicate IDs or anchors before malformed XML");
+    require(model.chapterBoundaryPosition(links, 2) == "/body/DocFragment[2]/body[1]/p[1]"
+                    && !Probe::fragmentsPending(model, "second.xhtml"),
+            "Requesting a chapter did not resolve its exact source fragment");
+    captureChapters(frame, model);
+    require(model.mainTextMarks.value("start").toObject().value("anchor").toString() == first
+                    && model.mainTextMarks.value("end").toObject().value("anchor").toString()
+                            == after,
+            "Retrying a temporary read failure did not restore the saved range");
+}
+
 int main(int argc, char **argv)
 {
     QGuiApplication app(argc, argv);
@@ -3448,8 +3691,20 @@ int main(int argc, char **argv)
     };
     walkFixture("overflowing-float-bookmarks.epub", 3);
     walkFixture("heading-after-floats.epub", 1);
+    flexRowHandoff();
+    QFile titleStack(QStringLiteral(KOBALT_TEST_FIXTURES) + "/large-type-flex-column.epub");
+    require(titleStack.open(QIODevice::ReadOnly), "Open the centered title stack");
+    const int previousPpi = readingPpi.exchange(96);
+    handoffWalk(titleStack.readAll(), 2, { 320, 360 },
+                { { "font_pixels", 40 },
+                  { "margin_pixels", 8 },
+                  { "top_margin_pixels", 4 },
+                  { "bottom_margin_pixels", 4 },
+                  { "text_alignment", "publisher" } });
+    readingPpi.store(previousPpi);
     hiddenHeadingOnChapterReflow();
-    hiddenHeadingAtHandoff();
+    hiddenHeadingAtHandoff({ 1072, 758 });
+    hiddenHeadingAtHandoff({ 600, 800 });
 #endif
     {
         QTemporaryDir directory;
@@ -3471,8 +3726,10 @@ int main(int argc, char **argv)
         require(layout() != before, "Replacing a font under the same family kept the layout key");
     }
     offscreenRangeEnd();
+    splitTextEstimate();
     selectionAcrossSliceAfterReflow();
     savedPlaceOutsideOpeningWindow();
+    parkedBookLanguage();
     returnToEvictedBookmark();
     reopenAfterWholeBookPreparation();
     nestedSliceHonorsCancellation();
@@ -3585,6 +3842,11 @@ int main(int argc, char **argv)
     searchSplitWords();
     keptObservations();
 #endif
-    std::printf("PASS: page estimate measurement, map, saved record and chapter mode pages\n");
-    return 0;
+    // The chapter action uses the engine worker, which stops when the app quits.
+    qt::later(0, &app, [&] {
+        lazyChapterFragments();
+        std::printf("PASS: page estimate measurement, map, saved record and chapter mode pages\n");
+        app.quit();
+    });
+    return app.exec();
 }

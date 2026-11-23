@@ -270,8 +270,9 @@ void ReaderController::begin(BookOpen book)
     const auto viewport = readerInterface().readingViewport(body, settings);
     opening = std::make_unique<ReaderSession>(fonts, placeholder);
     QPointer<ReaderController> guard(this);
-    OpenRequest request{ identity, path,  viewport, saved, nativeLocation, paths.layoutCache(),
-                         lease,    source->resources(lease) };
+    OpenRequest request{
+        identity, path, viewport, saved, nativeLocation, lease, source->resources(lease)
+    };
 #ifdef KOBALT_POCKETBOOK
     request.positions = pocketbook::positionCodec();
 #endif
@@ -322,6 +323,7 @@ void ReaderController::begin(BookOpen book)
     request.dictionariesPath = QString::fromLatin1(pocketbook::userDictionaryDirectory);
 #endif
     request.appearanceDefaults = appearance::bookDefaults(settings);
+    opening->setPublisherPageNumbers(settings.value("publisher_page_numbers").toBool());
     opening->open(
             std::move(request),
             [guard, identity, statePath, pixels, baseline,

@@ -10,6 +10,7 @@
 
 #include <QElapsedTimer>
 #include <QCache>
+#include <QDataStream>
 #include <QFontMetrics>
 #include <QFile>
 #include <QFileInfo>
@@ -70,6 +71,46 @@ struct GlyphMask
     bool drawn = false;
 };
 
+struct CachedText : PrivateText
+{
+    QRect ink;
+    bool inkMeasured = false;
+
+    void measureInk(QRect *bounds)
+    {
+        if (!bounds)
+            return;
+        if (!inkMeasured) {
+            int left = image.width(), right = -1, top = image.height(), bottom = -1;
+            for (int y = 0; y < image.height(); ++y) {
+                // Private text uses ARGB32 premultiplied. Preserve the same
+                // alpha test for other formats passed to tintedPrivateText.
+                const auto *row = image.format() == QImage::Format_ARGB32_Premultiplied
+                        ? reinterpret_cast<const QRgb *>(image.constScanLine(y))
+                        : nullptr;
+                const auto visible = [&](int x) {
+                    return qAlpha(row ? row[x] : image.pixel(x, y));
+                };
+                int first = 0;
+                while (first < image.width() && !visible(first))
+                    ++first;
+                if (first == image.width())
+                    continue;
+                int last = image.width() - 1;
+                while (last > first && !visible(last))
+                    --last;
+                left = qMin(left, first);
+                right = qMax(right, last);
+                top = qMin(top, y);
+                bottom = y;
+            }
+            ink = right >= left ? QRect(QPoint(left, top), QPoint(right, bottom)) : QRect();
+            inkMeasured = true;
+        }
+        *bounds = ink;
+    }
+};
+
 struct RegisteredFace
 {
     QString file;
@@ -91,6 +132,9 @@ struct Fonts
     QSet<QString> unreadable;
     QStringList recent;
     QSet<QString> pinned;
+    // Interface faces stay loaded: the budget never evicts them, so drawing
+    // interface text never reads storage again.
+    QSet<QString> kept;
     int rendering = 0;
 
     qint64 bytes() const
@@ -108,7 +152,7 @@ struct Fonts
         while (bytes() + size > privateInterfaceFontBudget) {
             QString victim;
             for (const auto &file : recent)
-                if (!pinned.contains(file) && pending.contains(file)) {
+                if (!pinned.contains(file) && !kept.contains(file) && pending.contains(file)) {
                     victim = file;
                     break;
                 }
@@ -192,16 +236,19 @@ struct Fonts
     QMap<QString, std::shared_ptr<Face>> faces;
     QHash<FT_Face, Face *> owners;
     // Costs are in 256-byte units, so small measurements do not each take a kilobyte of the budget.
-    QCache<QString, PrivateText> layouts{ 8192 };
+    QCache<QByteArray, CachedText> layouts{ 8192 };
     // Resolved primary faces and font descriptions, used for every measurement.
     QHash<QString, FT_Face> primaries;
     // Rendered glyphs by face, size, glyph and synthetic emboldening or slant.
     QCache<QByteArray, GlyphMask> glyphs{ 4096 };
-    QVector<QPair<QFont, QString>> descriptions;
-    QVector<QPair<QFont, QString>> layoutKeys;
+    QVector<QPair<QFont, QByteArray>> descriptions;
     QMap<QString, QVector<RegisteredFace>> registered;
     // Registrations already made, by path and expected family.
     QSet<QString> registrations;
+    QSet<QString> failedRegistrationPaths;
+    // Changes whenever shaped text is cleared, so layouts that callers keep
+    // can tell that the faces behind them changed.
+    quint64 layoutGeneration = 0;
 
     ~Fonts()
     {
@@ -216,6 +263,7 @@ struct Fonts
     {
         layouts.clear();
         primaries.clear();
+        ++layoutGeneration;
     }
 
     void clearFaces()
@@ -313,31 +361,7 @@ struct Fonts
         return owner->shaper;
     }
 
-    // The font's part of a layout's cache key. Equal fonts share it, and a
-    // page turn asks for dozens of layouts in a handful of fonts, so the
-    // number formatting is done once for each.
-    QString layoutKey(const QFont &font)
-    {
-        for (const auto &entry : layoutKeys) {
-            if (entry.first == font) {
-                return entry.second;
-            }
-        }
-        if (layoutKeys.size() >= 16) {
-            layoutKeys.removeLast();
-        }
-        layoutKeys.prepend(
-                { font,
-                  description(font) + ':' + QString::number(font.capitalization()) + ':'
-                          + QString::number(font.letterSpacingType()) + ':'
-                          + QString::number(font.letterSpacing(), 'g', 16) + ':'
-                          + QString::number(font.wordSpacing(), 'g', 16) + ':'
-                          + QString::number(font.stretch()) + ':'
-                          + QString::number(font.kerning()) });
-        return layoutKeys.first().second;
-    }
-
-    QString description(const QFont &font)
+    QByteArray description(const QFont &font)
     {
         for (const auto &entry : descriptions) {
             if (entry.first == font) {
@@ -347,7 +371,15 @@ struct Fonts
         if (descriptions.size() >= 16) {
             descriptions.removeLast();
         }
-        descriptions.prepend({ font, font.toString() });
+        // Qt 5.2's font description leaves out case and spacing. Record the
+        // attributes the private renderer reads, once per recently used font.
+        QByteArray data;
+        QDataStream key(&data, QIODevice::WriteOnly);
+        key << font.family() << qint32(font.pixelSize()) << qint32(font.weight()) << font.italic()
+            << font.underline() << font.strikeOut() << qint32(font.stretch()) << font.kerning()
+            << qint32(font.capitalization()) << qint32(font.letterSpacingType())
+            << double(font.letterSpacing()) << double(font.wordSpacing());
+        descriptions.prepend({ font, data });
         return descriptions.first().second;
     }
 };
@@ -365,6 +397,15 @@ Fonts &fonts()
         return *previewFonts;
     static Fonts value;
     return value;
+}
+
+void cacheLayout(const QByteArray &key, const CachedText &text)
+{
+    const int cost = cacheCost(qint64(text.image.bytesPerLine()) * text.image.height()
+                               + key.capacity() + qint64(sizeof(CachedText)));
+    auto &cache = fonts().layouts;
+    if (cost <= cache.maxCost())
+        cache.insert(key, new CachedText(text), cost);
 }
 
 // The same glyph at the same size renders the same mask on every line, so
@@ -632,15 +673,22 @@ struct Glyph
 };
 } // namespace
 
+// The bundled faces of the interface families, 1.1 MB together.
+constexpr const char *interfaceFontFiles[] = {
+    "IBMPlexSans-Regular.ttf",    "IBMPlexSans-Bold.ttf", "IBMPlexSans-Italic.ttf",
+    "IBMPlexMono-Regular.ttf",    "IBMPlexMono-Bold.ttf", "InstrumentSerif-Regular.ttf",
+    "InstrumentSerif-Italic.ttf",
+};
+
 bool initializePrivateInterfaceText(const AssetBundle &assets, bool opening,
                                     const QMap<QString, QByteArray> &checked)
 {
     QMap<QString, std::function<QByteArray()>> pending;
-    QStringList files{ "IBMPlexSans-Regular.ttf",    "IBMPlexSans-Bold.ttf",
-                       "IBMPlexSans-Italic.ttf",     "IBMPlexMono-Regular.ttf",
-                       "IBMPlexMono-Bold.ttf",       "InstrumentSerif-Regular.ttf",
-                       "InstrumentSerif-Italic.ttf", "NotoSansMath-Regular.ttf",
-                       "NotoSerifCJK-Regular.ttc" };
+    QStringList files;
+    for (const auto *file : interfaceFontFiles)
+        files.append(QLatin1String(file));
+    files << "NotoSansMath-Regular.ttf"
+          << "NotoSerifCJK-Regular.ttc";
     for (const auto *file : serifFallbackFontFiles) {
         files.append(QLatin1String(file));
     }
@@ -666,6 +714,7 @@ bool initializePrivateInterfaceText(const AssetBundle &assets, bool opening,
     state.clearFaces();
     state.registered.clear();
     state.registrations.clear();
+    state.failedRegistrationPaths.clear();
     state.sources.clear();
     state.sizes.clear();
     state.bundledPaths.clear();
@@ -674,18 +723,58 @@ bool initializePrivateInterfaceText(const AssetBundle &assets, bool opening,
     state.unreadable.clear();
     state.recent.clear();
     state.pinned.clear();
+    state.kept.clear();
     state.pending = pending;
     for (auto it = pending.cbegin(); it != pending.cend(); ++it) {
         const auto path = assets.file("fonts/" + it.key());
-        state.sizes.insert(it.key(), QFileInfo(path).size());
-        state.bundledPaths.insert(QFileInfo(path).absoluteFilePath(), it.key());
-        state.pendingPaths.insert(it.key(), QFileInfo(path).absoluteFilePath());
+        const QFileInfo info(path);
+        state.bundledPaths.insert(info.absoluteFilePath(), it.key());
+        const auto bytes = checked.value(it.key());
+        if (!bytes.isEmpty()) {
+            // Qt already owns these checked bytes. Count them against the
+            // private budget only when FreeType needs this face.
+            state.pending[it.key()] = [bytes] { return bytes; };
+            state.sizes.insert(it.key(), bytes.size());
+        } else {
+            state.sizes.insert(it.key(), info.size());
+            state.pendingPaths.insert(it.key(), info.absoluteFilePath());
+        }
     }
-    for (auto it = checked.cbegin(); it != checked.cend(); ++it)
-        if (pending.contains(it.key()) && !it.value().isEmpty())
-            state.sources.insert(it.key(), it.value());
+    // The bundled interface faces draw every screen. Load them now, mostly
+    // from the bytes that Qt already checked, and keep them.
+    for (const auto *file : interfaceFontFiles) {
+        const QString name = QLatin1String(file);
+        state.kept.insert(name);
+        state.face(name);
+    }
     setDiagnosticFontBytes(state.bytes());
     return true;
+}
+
+bool keepPrivateInterfaceFamilies(const QStringList &families)
+{
+    auto &state = fonts();
+    QSet<QString> files;
+    for (const auto *file : interfaceFontFiles)
+        files.insert(QLatin1String(file));
+    bool loaded = true;
+    for (const auto &family : families) {
+        if (family.isEmpty())
+            continue;
+        const auto faces = state.registered.value(family);
+        if (faces.isEmpty())
+            loaded = false;
+        for (const auto &face : faces) {
+            files.insert(face.file);
+            state.kept.insert(face.file);
+            if (!state.face(face.file, face.index))
+                loaded = false;
+        }
+    }
+    // A family that is no longer chosen can be evicted again.
+    state.kept = files;
+    setDiagnosticFontBytes(state.bytes());
+    return loaded;
 }
 
 void warmTextShaping(const QByteArray &font, const QString &text)
@@ -740,25 +829,31 @@ bool registerPrivateInterfaceFont(const QString &path, const QString &expectedFa
     if (state.registrations.contains(registrationKey)) {
         return true;
     }
+    if (state.failedRegistrationPaths.contains(path))
+        return false;
+    const auto failed = [&state, &path] {
+        state.failedRegistrationPaths.insert(path);
+        return false;
+    };
     QString key = state.bundledPaths.value(QFileInfo(path).absoluteFilePath());
     if (key.isEmpty())
         key = "reading:" + path;
     const auto size = QFileInfo(path).size();
     if (size <= 0 || size > privateInterfaceFontBudget)
-        return false;
+        return failed();
     // Inspect one face at a time. Keep metadata, not buffers for every style.
     QVector<QPair<QString, RegisteredFace>> pending;
     FT_Face first = nullptr;
     if (FT_New_Face(state.library, QFile::encodeName(path).constData(), 0, &first))
-        return false;
+        return failed();
     const auto count = first->num_faces;
     FT_Done_Face(first);
     if (count <= 0 || count > 256)
-        return false;
+        return failed();
     for (int index = 0; index < count; ++index) {
         FT_Face face = nullptr;
         if (FT_New_Face(state.library, QFile::encodeName(path).constData(), index, &face))
-            return false;
+            return failed();
         const QString family = QString::fromUtf8(face->family_name);
         const RegisteredFace entry{ key, index, bool(face->style_flags & FT_STYLE_FLAG_BOLD),
                                     bool(face->style_flags & FT_STYLE_FLAG_ITALIC) };
@@ -797,10 +892,26 @@ bool registerPrivateInterfaceFont(const QString &path, const QString &expectedFa
     return true;
 }
 
+bool privateInterfaceFontRegistered(const QString &family)
+{
+    return fonts().registered.contains(family);
+}
+
+void retryFailedPrivateInterfaceFonts()
+{
+    fonts().failedRegistrationPaths.clear();
+}
+
 void forgetPrivateInterfaceFonts(const QString &directory)
 {
     auto &state = fonts();
     const auto prefix = QDir(directory).absolutePath() + '/';
+    for (auto it = state.failedRegistrationPaths.begin();
+         it != state.failedRegistrationPaths.end();)
+        if (QFileInfo(*it).absoluteFilePath().startsWith(prefix))
+            it = state.failedRegistrationPaths.erase(it);
+        else
+            ++it;
     const auto sourcePrefix = "reading:" + prefix;
     QSet<QString> removed;
     for (auto it = state.pending.cbegin(); it != state.pending.cend(); ++it)
@@ -862,12 +973,37 @@ bool needsPrivateText(const QString &text, const QFont &)
     return fonts().library && !text.isEmpty();
 }
 
+namespace {
+// The weight steps of private text with this font when the caller names none.
+int defaultWeightSteps(const QFont &font)
+{
+    const bool interface = !previewFonts
+            && (interfaceFamily(font) || font.family() == interfaceFont().family()
+                || font.family() == chromeFont().family()
+                || font.family() == headerFooterFont().family());
+    return interface ? interfaceWeight() : 0;
+}
+} // namespace
+
+QString privateLayoutKey(const QFont &font)
+{
+    // A font preview has its own faces on its own thread.
+    if (previewFonts || !fonts().library)
+        return {};
+    auto &state = fonts();
+    return QString::number(state.layoutGeneration) + ':'
+            + QString::fromLatin1(state.description(font).toHex()) + ':'
+            + QString::number(defaultWeightSteps(font));
+}
+
 static PrivateText layoutPrivateText(const QString &input, const QFont &font, int weight,
                                      const QVector<QPair<int, int>> &boldRanges, bool rasterize,
                                      const QVector<QPair<int, int>> &underlineRanges = {},
                                      PrivateTextEmphasis emphasis = PrivateTextEmphasis::Synthetic,
                                      Qt::LayoutDirection direction = Qt::LayoutDirectionAuto,
-                                     const QVector<PrivateTextStyle> &styles = {})
+                                     const QVector<PrivateTextStyle> &styles = {},
+                                     QRect *inkBounds = nullptr,
+                                     TextDigits digits = TextDigits::Default)
 {
     struct Rendering
     {
@@ -888,34 +1024,25 @@ static PrivateText layoutPrivateText(const QString &input, const QFont &font, in
     } else if (font.capitalization() == QFont::AllLowercase) {
         text = text.toLower();
     }
-    PrivateText result;
+    CachedText result;
     if (text.isEmpty() || !fonts().library) {
         return result;
     }
-    const bool interface =
-            !previewFonts && (interfaceFamily(font) || interfaceTextFamily(font.family()));
-    const int steps = weight < 0 ? (interface ? interfaceWeight() : 0) : qBound(0, weight, 12);
-    QString cacheKey = fonts().layoutKey(font) + ':' + QString::number(steps) + ':'
-            + QString::number(rasterize);
-    for (const auto &range : boldRanges) {
-        cacheKey += ':' + QString::number(range.first) + ',' + QString::number(range.second);
-    }
-    cacheKey +=
-            ":underline:" + QString::number(int(emphasis)) + ':' + QString::number(int(direction));
-    for (const auto &range : underlineRanges) {
-        cacheKey += ':' + QString::number(range.first) + ',' + QString::number(range.second);
-    }
-    for (const auto &style : styles) {
-        cacheKey += ":style:" + QString::number(style.start) + ',' + QString::number(style.length)
-                + ':' + fonts().description(style.font) + ':' + style.color.name(QColor::HexArgb)
-                + ':' + QString::number(style.baselineShift) + ':'
-                + QString::number(style.image.cacheKey());
-        if (style.background.isValid())
-            cacheKey += ":background:" + style.background.name(QColor::HexArgb);
-    }
-    cacheKey += ':' + text;
+    const int steps = weight < 0 ? defaultWeightSteps(font) : qBound(0, weight, 12);
+    const auto fontKey = fonts().description(font);
+    QByteArray cacheKey;
+    QDataStream key(&cacheKey, QIODevice::WriteOnly);
+    key << quint8('L') << fontKey << quint8(steps) << rasterize << quint8(emphasis)
+        << quint8(direction) << quint8(digits) << boldRanges << underlineRanges
+        << quint32(styles.size());
+    for (const auto &style : styles)
+        key << qint32(style.start) << qint32(style.length) << fonts().description(style.font)
+            << style.color << qint32(style.baselineShift) << style.image.cacheKey()
+            << style.background;
+    key << text;
     ++textWork.layouts;
-    if (const auto *cached = fonts().layouts.object(cacheKey)) {
+    if (auto *cached = fonts().layouts.object(cacheKey)) {
+        cached->measureInk(inkBounds);
         return *cached;
     }
     ++textWork.layoutMisses;
@@ -1166,16 +1293,20 @@ static PrivateText layoutPrivateText(const QString &input, const QFont &font, in
         hb_buffer_add_utf32(buffer, characters.constData(), count, run.first, run.count);
         hb_buffer_guess_segment_properties(buffer);
         hb_buffer_set_direction(buffer, run.level & 1 ? HB_DIRECTION_RTL : HB_DIRECTION_LTR);
-        hb_feature_t features[3];
+        hb_feature_t features[4];
         hb_feature_from_string(runFont.kerning() ? "kern=1" : "kern=0", -1, &features[0]);
+        unsigned featureCount = 1;
         const bool separateLetters = !boldRanges.isEmpty() || !underlineRanges.isEmpty()
                 || (runFont.letterSpacingType() == QFont::AbsoluteSpacing
                     && runFont.letterSpacing() != 0);
         if (separateLetters) {
-            hb_feature_from_string("liga=0", -1, &features[1]);
-            hb_feature_from_string("clig=0", -1, &features[2]);
+            hb_feature_from_string("liga=0", -1, &features[featureCount++]);
+            hb_feature_from_string("clig=0", -1, &features[featureCount++]);
         }
-        hb_shape(hbFont, buffer, features, separateLetters ? 3 : 1);
+        if (digits == TextDigits::Tabular)
+            features[featureCount++] = { HB_TAG('t', 'n', 'u', 'm'), 1, HB_FEATURE_GLOBAL_START,
+                                         HB_FEATURE_GLOBAL_END };
+        hb_shape(hbFont, buffer, features, featureCount);
         auto runUnderlines = underlineRanges;
         if (runFont.underline())
             runUnderlines.append({ 0, int(text.size()) });
@@ -1285,10 +1416,7 @@ static PrivateText layoutPrivateText(const QString &input, const QFont &font, in
     }
     result.advance = int(qMin<qint64>(2147483647, qMax<qint64>(0, (pen + 63) / 64)));
     if (!rasterize) {
-        const int cost = cacheCost(qint64(cacheKey.size()) * 2 + qint64(sizeof(PrivateText)));
-        if (cost <= fonts().layouts.maxCost()) {
-            fonts().layouts.insert(cacheKey, new PrivateText(result), cost);
-        }
+        cacheLayout(cacheKey, result);
         return result;
     }
     bounds = bounds.united(QRect(0, -pixels, result.advance, pixels));
@@ -1314,11 +1442,8 @@ static PrivateText layoutPrivateText(const QString &input, const QFont &font, in
         painter.fillRect(underline.first.translated(-bounds.topLeft()), underline.second);
     }
     painter.end();
-    const int cost = cacheCost(qint64(result.image.bytesPerLine()) * result.image.height()
-                               + qint64(cacheKey.size()) * 2 + qint64(sizeof(PrivateText)));
-    if (cost <= fonts().layouts.maxCost()) {
-        fonts().layouts.insert(cacheKey, new PrivateText(result), cost);
-    }
+    result.measureInk(inkBounds);
+    cacheLayout(cacheKey, result);
     return result;
 }
 
@@ -1327,6 +1452,33 @@ PrivateTextWork takePrivateTextWork()
     const auto work = textWork;
     textWork = {};
     return work;
+}
+
+QImage tintedPrivateText(const QImage &image, const QColor &color, QRect *inkBounds)
+{
+    if (image.isNull()) {
+        if (inkBounds)
+            *inkBounds = {};
+        return {};
+    }
+    // Tints share the layout budget. The tag keeps their keys distinct.
+    QByteArray key;
+    QDataStream stream(&key, QIODevice::WriteOnly);
+    stream << quint8('T') << image.cacheKey() << color;
+    if (auto *cached = fonts().layouts.object(key)) {
+        cached->measureInk(inkBounds);
+        return cached->image;
+    }
+
+    CachedText result;
+    result.image = image;
+    QPainter painter(&result.image);
+    painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+    painter.fillRect(result.image.rect(), color);
+    painter.end();
+    result.measureInk(inkBounds);
+    cacheLayout(key, result);
+    return result.image;
 }
 
 PrivateText renderPrivateText(const QString &text, const QFont &font, int weight,
@@ -1576,14 +1728,20 @@ int fittingTextEnd(const QVector<int> &ends, int start, int limit, int width,
 }
 
 QString elidePrivateText(const QString &text, const QFont &font, int width,
-                         const QVector<QPair<int, int>> &boldRanges)
+                         const QVector<QPair<int, int>> &boldRanges, TextDigits digits)
 {
-    const int advance = measurePrivateText(text, font, boldRanges);
+    const auto measure = [&](const QString &value) {
+        return layoutPrivateText(value, font, -1, boldRanges, false, {},
+                                 PrivateTextEmphasis::Synthetic, Qt::LayoutDirectionAuto, {},
+                                 nullptr, digits)
+                .advance;
+    };
+    const int advance = measure(text);
     if (advance <= width) {
         return text;
     }
     const QString ellipsis(QChar(0x2026));
-    if (measurePrivateText(ellipsis, font, boldRanges) > width) {
+    if (measure(ellipsis) > width) {
         return {};
     }
     QTextBoundaryFinder finder(QTextBoundaryFinder::Grapheme, text);
@@ -1595,10 +1753,7 @@ QString elidePrivateText(const QString &text, const QFont &font, int width,
     qreal unitAdvance = qreal(advance) / qMax(1, int(text.size()));
     const int end = fittingTextEnd(
             boundaries, 0, text.size(), width,
-            [&](int candidate) {
-                return measurePrivateText(text.left(candidate) + ellipsis, font, boldRanges);
-            },
-            unitAdvance);
+            [&](int candidate) { return measure(text.left(candidate) + ellipsis); }, unitAdvance);
     return text.left(end) + ellipsis;
 }
 
@@ -1612,12 +1767,10 @@ QRect interfaceInkBounds(const QString &text, const QFont &font)
 {
     if (!needsPrivateText(text, font))
         return QFontMetrics(font).tightBoundingRect(text);
-    const auto rendered = renderPrivateText(text, font);
     QRect bounds;
-    for (int y = 0; y < rendered.image.height(); ++y)
-        for (int x = 0; x < rendered.image.width(); ++x)
-            if (qAlpha(rendered.image.pixel(x, y)))
-                bounds |= QRect(x, y, 1, 1);
+    const auto rendered =
+            layoutPrivateText(text, font, -1, {}, true, {}, PrivateTextEmphasis::Synthetic,
+                              Qt::LayoutDirectionAuto, {}, &bounds);
     return bounds.translated(rendered.origin);
 }
 
@@ -1627,7 +1780,7 @@ int interfaceLineHeight(const QFont &font)
                            : QFontMetrics(font).height();
 }
 
-int interfaceTextWidth(const QString &text, const QFont &font)
+int interfaceTextWidth(const QString &text, const QFont &font, TextDigits digits)
 {
     if (!needsPrivateText(text, font)) {
 #if QT_VERSION < QT_VERSION_CHECK(5, 11, 0)
@@ -1636,33 +1789,34 @@ int interfaceTextWidth(const QString &text, const QFont &font)
         return QFontMetrics(font).horizontalAdvance(text);
 #endif
     }
-    return measurePrivateText(text, font);
+    return layoutPrivateText(text, font, -1, {}, false, {}, PrivateTextEmphasis::Synthetic,
+                             Qt::LayoutDirectionAuto, {}, nullptr, digits)
+            .advance;
 }
 
-QString elideInterfaceText(const QString &text, const QFont &font, int width)
+QString elideInterfaceText(const QString &text, const QFont &font, int width, TextDigits digits)
 {
     if (!needsPrivateText(text, font)) {
         return QFontMetrics(font).elidedText(text, Qt::ElideRight, width);
     }
-    return elidePrivateText(text, font, width);
+    return elidePrivateText(text, font, width, {}, digits);
 }
 
 namespace {
 void drawPrivateText(QPainter &painter, const QRect &area, const QString &text,
                      Qt::Alignment alignment, int weight,
-                     const QVector<QPair<int, int>> &boldRanges, bool optical,
+                     const QVector<QPair<int, int>> &boldRanges, bool optical, TextDigits digits,
                      bool shareBaseline = false)
 {
-    auto rendered = renderPrivateText(text, painter.font(), weight, boldRanges);
+    const auto rendered = layoutPrivateText(text, painter.font(), weight, boldRanges, true, {},
+                                            PrivateTextEmphasis::Synthetic, Qt::LayoutDirectionAuto,
+                                            {}, nullptr, digits);
     if (rendered.image.isNull()) {
         return;
     }
-    // The layout is black ink already; only another colour needs its own copy.
-    if (painter.pen().color() != QColor(Qt::black)) {
-        QPainter color(&rendered.image);
-        color.setCompositionMode(QPainter::CompositionMode_SourceIn);
-        color.fillRect(rendered.image.rect(), painter.pen().color());
-    }
+    QRect ink;
+    const auto image =
+            tintedPrivateText(rendered.image, painter.pen().color(), optical ? &ink : nullptr);
     const int x = alignment.testFlag(Qt::AlignRight) ? area.right() + 1 - rendered.advance
             : alignment.testFlag(Qt::AlignHCenter)
             ? area.left() + (area.width() - rendered.advance) / 2
@@ -1671,61 +1825,50 @@ void drawPrivateText(QPainter &painter, const QRect &area, const QString &text,
             : alignment.testFlag(Qt::AlignVCenter)
             ? area.top() + (area.height() - rendered.image.height()) / 2
             : area.top();
-    if (optical) {
+    if (!ink.isEmpty()) {
         // Center the rows that hold ink, as Qt's tight bounds do for native
         // text, so a line without descenders does not sit high.
-        int first = -1, last = -1;
-        for (int row = 0; row < rendered.image.height(); ++row) {
-            const auto *pixels = reinterpret_cast<const QRgb *>(rendered.image.constScanLine(row));
-            for (int column = 0; column < rendered.image.width(); ++column)
-                if (qAlpha(pixels[column])) {
-                    if (first < 0)
-                        first = row;
-                    last = row;
-                    break;
-                }
-        }
-        if (first >= 0) {
-            // Labels side by side share a baseline, so a descender must not
-            // lift one of them. The image starts at origin.y() above the
-            // baseline. Round letters overshoot it slightly; only a descender,
-            // a tenth of the height above the baseline or more, is left out.
-            const int baseline = -rendered.origin.y();
-            const int overshoot = qMax(1, (baseline - first) / 10);
-            if (shareBaseline && baseline > first && last >= baseline + overshoot)
-                last = baseline - 1;
-            y = qRound(area.top() + area.height() / 2.0 - (first + last + 1) / 2.0);
-        }
+        const int first = ink.top();
+        int last = ink.bottom();
+        // Labels side by side share a baseline, so a descender must not
+        // lift one of them. The image starts at origin.y() above the
+        // baseline. Round letters overshoot it slightly; only a descender,
+        // a tenth of the height above the baseline or more, is left out.
+        const int baseline = -rendered.origin.y();
+        const int overshoot = qMax(1, (baseline - first) / 10);
+        if (shareBaseline && baseline > first && last >= baseline + overshoot)
+            last = baseline - 1;
+        y = qRound(area.top() + area.height() / 2.0 - (first + last + 1) / 2.0);
     }
     painter.save();
     painter.setClipRect(area, Qt::IntersectClip);
-    painter.drawImage(QPoint(x, y), rendered.image);
+    painter.drawImage(QPoint(x, y), image);
     painter.restore();
 }
 } // namespace
 
 void drawInterfaceText(QPainter &painter, const QRect &area, const QString &text,
                        Qt::Alignment alignment, int weight,
-                       const QVector<QPair<int, int>> &boldRanges)
+                       const QVector<QPair<int, int>> &boldRanges, TextDigits digits)
 {
     if (weight < 0 && !needsPrivateText(text, painter.font())) {
         painter.drawText(area, alignment, text);
         return;
     }
-    drawPrivateText(painter, area, text, alignment, weight, boldRanges, false);
+    drawPrivateText(painter, area, text, alignment, weight, boldRanges, false, digits);
 }
 
 void drawOpticalPrivateText(QPainter &painter, const QRect &area, const QString &text,
                             Qt::Alignment alignment, int weight,
-                            const QVector<QPair<int, int>> &boldRanges)
+                            const QVector<QPair<int, int>> &boldRanges, TextDigits digits)
 {
-    drawPrivateText(painter, area, text, alignment, weight, boldRanges, true);
+    drawPrivateText(painter, area, text, alignment, weight, boldRanges, true, digits);
 }
 
 void drawSegmentPrivateText(QPainter &painter, const QRect &area, const QString &text,
                             Qt::Alignment alignment)
 {
-    drawPrivateText(painter, area, text, alignment, -1, {}, true, true);
+    drawPrivateText(painter, area, text, alignment, -1, {}, true, TextDigits::Default, true);
 }
 
 int PrivateTextLabel::textWidth(const QString &value) const

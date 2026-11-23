@@ -26,6 +26,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <vector>
 #if USE_UTF8PROC==1
 #include <utf8proc.h>
 #endif
@@ -70,6 +71,9 @@ class TexHyph : public HyphMethod
     lUInt32 _hash;
     lUInt32 _pattern_count;
     lString32 _supported_modifiers;
+    // Blaze: packed patterns from the host. When they are loaded, match() uses them, not the table.
+    std::vector<lUInt8> packedPatterns;
+    bool matchPacked(unsigned bucket, const lChar32 *text, char *mask) const;
 public:
     int largest_overflowed_word;
     bool match( const lChar32 * str, char * mask );
@@ -79,6 +83,8 @@ public:
     TexHyph( lString32 id=HYPH_DICT_ID_DICTIONARY, int leftHyphenMin=HYPHMETHOD_DEFAULT_HYPHEN_MIN, int rightHyphenMin=HYPHMETHOD_DEFAULT_HYPHEN_MIN );
     virtual ~TexHyph();
     bool load( LVStreamRef stream );
+    bool loadPacked(LVStreamRef source, LVStreamRef packed);
+    bool savePacked(LVStreamRef output, lUInt32 sourceCrc) const;
     bool load( lString32 fileName );
     virtual lUInt32 getHash() { return _hash; }
     virtual lUInt32 getCount() { return _pattern_count; }
@@ -281,7 +287,10 @@ HyphMethod * HyphMan::getHyphMethodForDictionary( lString32 id, int leftHyphenMi
         return &NO_HYPH;
     }
     TexHyph * newmethod = new TexHyph(id, leftHyphenMin, rightHyphenMin);
-    if ( !newmethod->load( stream ) ) {
+    // Blaze: use the packed patterns from the host when it has them, else load the XML.
+    const bool packed = p->getType() == HDT_DICT_TEX
+            && newmethod->loadPacked(stream, _dataLoader->compiledPatterns(id));
+    if ( !packed && !newmethod->load( stream ) ) {
         CRLog::error("Cannot open hyphenation dictionary %s", UnicodeToUtf8(id).c_str() );
         delete newmethod;
         return &NO_HYPH;
@@ -746,7 +755,7 @@ void TexHyph::checkForModifiers( lString32 str )
 }
 
 lUInt32 TexHyph::getSize() {
-    return _pattern_count * sizeof(TexPattern);
+    return packedPatterns.empty() ? _pattern_count * sizeof(TexPattern) : packedPatterns.size();
 }
 
 bool TexHyph::load( LVStreamRef stream )
@@ -895,9 +904,18 @@ bool TexHyph::load( lString32 fileName )
 }
 
 
+#include "../../extensions/packed_hyphenation.inc"
+
 bool TexHyph::match( const lChar32 * str, char * mask )
 {
     bool found = false;
+    // Blaze: match the packed patterns when they are loaded, see packed_hyphenation.inc.
+    if (!packedPatterns.empty()) {
+        for (auto hash : { TexPattern::hash(str), TexPattern::hash3(str),
+                           TexPattern::hash2(str), TexPattern::hash1(str) })
+            found = matchPacked(hash, str, mask) || found;
+        return found;
+    }
     TexPattern * res = table[ TexPattern::hash( str ) ];
     if ( res ) {
         found = res->match( str, mask ) || found;

@@ -15,6 +15,110 @@
 #include "reader_icon_vectors.h"
 
 namespace kobalt::ui {
+QString iconStyleId(IconStyle style)
+{
+    switch (style) {
+    case IconStyle::Rings:
+        return QStringLiteral("rings");
+    case IconStyle::Color:
+        return QStringLiteral("color");
+    case IconStyle::Pastel:
+        return QStringLiteral("pastel");
+    default:
+        return QStringLiteral("monochrome");
+    }
+}
+
+IconStyle iconStyleFromId(const QString &id)
+{
+    if (id == "rings")
+        return IconStyle::Rings;
+    if (id == "color")
+        return IconStyle::Color;
+    if (id == "pastel")
+        return IconStyle::Pastel;
+    return IconStyle::Monochrome;
+}
+
+IconStyle widgetIconStyle(const QWidget *widget)
+{
+    for (; widget; widget = widget->parentWidget()) {
+        const auto value = widget->property("kobalt_icon_style");
+        if (value.isValid())
+            return static_cast<IconStyle>(value.toInt());
+    }
+    return IconStyle::Monochrome;
+}
+
+QColor paintIconBackground(QPainter &painter, IconStyle style, ControlIcon icon, const QRect &area,
+                           const QColor &normalInk)
+{
+    if (style == IconStyle::Monochrome)
+        return normalInk;
+    QColor paper, ink;
+    switch (icon) {
+    case ControlIcon::Chapters:
+    case ControlIcon::System:
+    case ControlIcon::Bookmark:
+        paper = QColor(255, 204, 215);
+        ink = QColor(124, 32, 66);
+        break;
+    case ControlIcon::Compass:
+    case ControlIcon::Display:
+    case ControlIcon::Sync:
+        paper = QColor(171, 231, 218);
+        ink = QColor(16, 87, 77);
+        break;
+    case ControlIcon::Typography:
+    case ControlIcon::Styling:
+    case ControlIcon::Annotate:
+        paper = QColor(225, 203, 250);
+        ink = QColor(93, 48, 134);
+        break;
+    case ControlIcon::Light:
+    case ControlIcon::Layout:
+    case ControlIcon::Swipe:
+    case ControlIcon::Undo:
+        paper = QColor(255, 220, 153);
+        ink = QColor(121, 65, 15);
+        break;
+    default:
+        paper = QColor(186, 219, 253);
+        ink = QColor(35, 77, 129);
+        break;
+    }
+    if (style == IconStyle::Color)
+        return normalInk.lightness() > 128 ? paper : ink.lighter(128);
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(paper);
+    const int side = qMin(area.width(), area.height());
+    QRectF tile(0, 0, side, side);
+    tile.moveCenter(QRectF(area).center());
+    if (style == IconStyle::Rings) {
+        ink = normalInk.lightness() > 128 ? paper : ink;
+        const qreal stroke = qMax(1, side / 18);
+        painter.setPen(QPen(ink, stroke));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawEllipse(tile.adjusted(stroke / 2, stroke / 2, -stroke / 2, -stroke / 2));
+    } else {
+        painter.drawRoundedRect(tile, side * .28, side * .28);
+    }
+    painter.restore();
+    return ink;
+}
+
+void paintStyledIcon(QPainter &painter, IconStyle style, ControlIcon icon, const QRect &area,
+                     const QColor &normalInk)
+{
+    const auto ink = paintIconBackground(painter, style, icon, area, normalInk);
+    const int pad = style == IconStyle::Rings ? qMin(area.width(), area.height()) / 5
+            : style == IconStyle::Pastel      ? qMin(area.width(), area.height()) / 9
+                                              : 0;
+    paintOpeningIcon(painter, icon, area.adjusted(pad, pad, -pad, -pad), ink);
+}
+
 QStringList bookmarkIconNames()
 {
     return { "map",      "compass",   "home",   "flag",     "heart",     "lightbulb", "people",
@@ -87,6 +191,17 @@ Geometry geometry(ControlIcon icon, bool sideButtons)
         const char *names[] = { "book-open-text", "arrow-line-left", "arrow-line-right" };
         phosphorGeometry(QString::fromLatin1(names[int(icon) - int(ControlIcon::SearchChapter)]),
                          path);
+    } else if (icon >= ControlIcon::ClockCountdown && icon <= ControlIcon::TextTSlash) {
+        static const char *const names[] = { "clock-countdown", "cpu",         "eye-closed",
+                                             "moon-stars",      "palette",     "percent",
+                                             "text-t",          "text-t-slash" };
+        static_assert(
+                sizeof(names) / sizeof(*names)
+                == size_t(int(ControlIcon::TextTSlash) - int(ControlIcon::ClockCountdown) + 1));
+        result.canvas = 256;
+        result.filled = true;
+        phosphorGeometry(QString::fromLatin1(names[int(icon) - int(ControlIcon::ClockCountdown)]),
+                         path);
     } else if (icon == ControlIcon::WidowsOrphans) {
         line(11, 18, 34, 18);
         line(11, 32, 37, 32);
@@ -109,6 +224,20 @@ Geometry geometry(ControlIcon icon, bool sideButtons)
         dot.addEllipse(QPointF(49, 20), 3.5, 3.5);
         path = stroke.createStroke(path).united(dot);
         result.filled = true;
+    } else if (icon >= ControlIcon::Lotus && icon <= ControlIcon::Gauge) {
+        static const char *const names[] = { "flower-lotus", "text-b",   "arrow-clockwise",
+                                             "rows",         "hand-tap", "tree-view",
+                                             "gauge" };
+        static_assert(sizeof(names) / sizeof(*names)
+                      == size_t(int(ControlIcon::Gauge) - int(ControlIcon::Lotus) + 1));
+        result.canvas = 256;
+        result.filled = true;
+        phosphorGeometry(QString::fromLatin1(names[int(icon) - int(ControlIcon::Lotus)]), path);
+        if (icon == ControlIcon::HardwareButtons) {
+            QTransform turn;
+            turn.translate(result.canvas, 0);
+            path = turn.rotate(90).map(path);
+        }
     } else if (icon == ControlIcon::FitImage) {
         line(22, 9, 9, 9);
         line(9, 9, 9, 22);
@@ -123,6 +252,10 @@ Geometry geometry(ControlIcon icon, bool sideButtons)
         result.canvas = 256;
         result.filled = true;
         phosphorGeometry(QStringLiteral("door-open"), path);
+    } else if (icon == ControlIcon::Ruler) {
+        result.canvas = 256;
+        result.filled = true;
+        phosphorGeometry(QStringLiteral("ruler"), path);
     } else if (icon == ControlIcon::LockOpen) {
         result.canvas = 256;
         result.filled = true;
@@ -413,6 +546,35 @@ Geometry geometry(ControlIcon icon, bool sideButtons)
         phosphorGeometry(icon == ControlIcon::FolderPlus ? QStringLiteral("folder-plus")
                                                          : QStringLiteral("folders"),
                          path);
+    } else if (icon == ControlIcon::Hourglass) {
+        line(12, 8, 52, 8);
+        line(12, 56, 52, 56);
+        path.moveTo(16, 8);
+        path.cubicTo(16, 24, 25, 27, 32, 32);
+        path.cubicTo(39, 37, 48, 40, 48, 56);
+        path.moveTo(48, 8);
+        path.cubicTo(48, 24, 39, 27, 32, 32);
+        path.cubicTo(25, 37, 16, 40, 16, 56);
+        line(24, 18, 40, 18);
+        line(25, 50, 39, 50);
+    } else if (icon == ControlIcon::BookStart || icon == ControlIcon::BookEnd) {
+        result.filled = true;
+        path.setFillRule(Qt::WindingFill);
+        path.addRect(10, 7, 4, 50);
+        if (icon == ControlIcon::BookStart) {
+            path.moveTo(13, 7);
+            path.lineTo(56, 20);
+            path.lineTo(13, 34);
+            path.closeSubpath();
+        } else {
+            for (int row = 0; row < 3; ++row)
+                for (int column = 0; column < 4; ++column)
+                    if ((row + column) % 2 == 0)
+                        path.addRect(14 + column * 10, 8 + row * 9, 10, 9);
+            path.addRect(14, 7, 40, 2);
+            path.addRect(52, 7, 2, 28);
+            path.addRect(14, 33, 40, 2);
+        }
     } else if (icon == ControlIcon::SelectionStart || icon == ControlIcon::SelectionEnd) {
         const bool start = icon == ControlIcon::SelectionStart;
         const int caret = start ? 12 : 52;
@@ -773,13 +935,17 @@ QIcon controlIcon(ControlIcon icon, QColor color, bool sideButtons)
             && icon != ControlIcon::BookmarkRemove && icon != ControlIcon::ExportAction
             && icon != ControlIcon::FitImage && icon != ControlIcon::Door
             && icon != ControlIcon::PreviousChapter && icon != ControlIcon::NextChapter
+            && icon != ControlIcon::BookStart && icon != ControlIcon::BookEnd
+            && icon != ControlIcon::Hourglass && icon != ControlIcon::Ruler
             && icon != ControlIcon::Sync && icon != ControlIcon::Sort
             && icon != ControlIcon::ArrowDownRight && icon != ControlIcon::EditHighlight
             && icon != ControlIcon::Bold && icon != ControlIcon::WordsAdd
             && icon != ControlIcon::WordsSaved && icon != ControlIcon::DeviceRotate
             && icon != ControlIcon::ZoomIn && icon != ControlIcon::ZoomOut
             && icon != ControlIcon::LockOpen
+            && (icon < ControlIcon::Lotus || icon > ControlIcon::Gauge)
             && (icon < ControlIcon::SearchChapter || icon > ControlIcon::SearchAfter)
+            && (icon < ControlIcon::ClockCountdown || icon > ControlIcon::TextTSlash)
             && (icon < ControlIcon::Rows || icon > ControlIcon::Export)
             && (icon < ControlIcon::KeyboardShift || icon > ControlIcon::KeyboardReturn)
             && (icon < ControlIcon::SpreadHorizontal || icon > ControlIcon::Diamond)))
@@ -807,15 +973,14 @@ void Button::refreshIcon()
 {
     if (!hasConfiguredIcon)
         return;
-    const bool dark = darkTheme(this);
-    if (hasIconTheme && iconDark == dark)
+    const auto &colors = themeColors(this);
+    if (hasIconTheme && iconInk == colors.ink)
         return;
     const auto &configuration = configuredIcon;
-    const auto &colors = themeColors(dark);
     setIcon(QIcon(new VectorIconEngine(configuration.glyph, colors.ink,
                                        configuration.rotationSideButtons, configuration.rendition,
                                        colors.paper)));
-    iconDark = dark;
+    iconInk = colors.ink;
     hasIconTheme = true;
 }
 

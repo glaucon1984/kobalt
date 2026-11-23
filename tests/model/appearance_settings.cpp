@@ -64,6 +64,46 @@ int main()
                 "Invalid swipe direction did not fall back to normal");
     require(sleep::design({}) == sleep::Design::Bookmark,
             "Missing sleep preferences changed the default bookmark");
+    {
+        QJsonObject preferences;
+        sleep::setDesign(preferences, sleep::Design::Custom);
+        auto custom = sleep::custom(preferences);
+        require(!sleep::randomStatus(preferences),
+                "Existing Custom screens must keep their status");
+        custom.same = false;
+        custom.sleep = { sleep::Mode::Wallpaper, sleep::Design::Random, "cover.jpg" };
+        custom.off = { sleep::Mode::Page, sleep::Design::Caption, {} };
+        sleep::setCustom(preferences, custom);
+        preferences = appearance::cleanPreferences(preferences);
+        const auto saved = sleep::custom(preferences);
+        require(saved.sleep == custom.sleep && saved.off == custom.off && !saved.same
+                        && sleep::randomStatus(preferences)
+                        && !sleep::randomStatus(preferences, true),
+                "Random status changed a saved background or the separate power-off screen");
+        for (const auto choice : sleep::customStatuses) {
+            const auto next = sleep::pickStatus(choice);
+            require(sleep::eligibleStatus(next) && next != choice,
+                    "Random status repeated or picked an unavailable status");
+            auto look = sleep::look(preferences, false, choice);
+            const bool visible = choice != sleep::Design::Random && choice != sleep::Design::Cover;
+            require(sleep::eligibleStatus(choice) == visible && look.mode == sleep::Mode::Wallpaper
+                            && look.design == (visible ? choice : sleep::Design::Bookmark)
+                            && look.tile == sleep::tileFor(look.design),
+                    "Random status lost the wallpaper or resolved to the wrong indicator");
+        }
+        require(sleep::look(preferences, true).design == sleep::Design::Caption
+                        && sleep::uses(preferences, sleep::Mode::Wallpaper)
+                        && !sleep::uses(preferences, sleep::Mode::Cover),
+                "Random status changed the separate power-off indicator or backdrop preparation");
+        custom.same = true;
+        sleep::setCustom(preferences, custom);
+        require(sleep::randomStatus(preferences, true),
+                "Power-off did not follow the sleeping status");
+        sleep::setDesign(preferences, sleep::Design::Letter);
+        require(!sleep::randomStatus(preferences)
+                        && sleep::look(preferences).design == sleep::Design::Letter,
+                "A saved Custom status affected another gallery preset");
+    }
     for (const auto mode : sleep::modes) {
         for (const auto tile : sleep::tiles) {
             const QJsonObject legacy{ { sleep::preferenceKey, sleep::value(mode) },
@@ -380,6 +420,15 @@ int main()
                     && hiddenFeatures.value("tappable_links") == "all"
                     && hiddenFeatures.value("future_option").toInt() == 42,
             "Hidden features retained incompatible options or lost unrelated preferences");
+    for (bool hideActivity : { false, true }) {
+        auto saved = appearance::cleanPreferences(
+                { { "disable_stats", true }, { "disable_activity", hideActivity } });
+        require(!features::enabled(saved, features::Activity),
+                "Activity was available while Stats was hidden");
+        saved["disable_stats"] = false;
+        require(features::enabled(saved, features::Activity) == !hideActivity,
+                "Showing Stats lost the saved Activity choice");
+    }
     // My Words shares the bookmarks' sort order, so it keeps the order alone.
     const auto wordsShown = appearance::cleanPreferences({ { "disable_annotations", true },
                                                            { "disable_bookmarks", true },
@@ -508,7 +557,7 @@ int main()
             "Dictionary UI preferences invalidated the book layout");
     // Appearance settings decide the layout. The list must stay complete, because a
     // missing key would let a retained layout survive a changed setting.
-    require(appearance::keys.size() == 38, "The appearance keys changed without this check");
+    require(appearance::keys.size() == 39, "The appearance keys changed without this check");
     require(appearance::bookDefaults({}).value("paragraph_indent").toInt() == -1,
             "Paragraph indentation no longer defaults to Publisher");
     for (int percent : { -1, 0, 100, 300 }) {
@@ -955,8 +1004,8 @@ int main()
     locked["locked_orientation"] = 8;
     require(appearance::cleanPreferences(locked) == locked,
             "Cleaning settings must preserve the exact lock independently of the mode");
-    for (const auto &invalid : { QJsonValue(true), QJsonValue(-1), QJsonValue(3),
-                                 QJsonValue(1.5), QJsonValue("8") }) {
+    for (const auto &invalid :
+         { QJsonValue(true), QJsonValue(-1), QJsonValue(3), QJsonValue(1.5), QJsonValue("8") }) {
         locked["locked_orientation"] = invalid;
         require(appearance::cleanPreferences(locked) == sharedOrientation,
                 "An invalid lock must keep the chosen rotation mode");
@@ -1014,6 +1063,7 @@ int main()
             "Shared margins replaced a book's text style or did not apply");
     auto globalColumns =
             appearance::bookDefaults(qt::object({ { "two_columns_landscape", true },
+                                                  { "chapter_starts_spread", true },
                                                   { "column_spacing_percent", 200 },
                                                   { appearance::inheritTextLayoutKey, false } }));
     auto savedColumns = qt::object(
@@ -1021,10 +1071,12 @@ int main()
     appearance::applyBookDefaults(savedColumns, globalColumns);
     require(savedColumns.value("columns").toInt() == 1
                     && savedColumns.value("two_columns_landscape").toBool()
+                    && savedColumns.value("chapter_starts_spread").toBool()
                     && savedColumns.value("column_spacing_percent").toInt() == 200,
             "Saved book columns overrode the global landscape policy");
     appearance::applyBookDefaults(savedColumns, appearance::bookDefaults({}));
-    require(!savedColumns.value("two_columns_landscape").toBool()
+    require(!savedColumns.value("chapter_starts_spread").toBool()
+                    && !savedColumns.value("two_columns_landscape").toBool()
                     && savedColumns.value("columns").toInt() == 1
                     && savedColumns.value("column_spacing_percent").toInt() == 150,
             "Disabling global columns retained a book override");

@@ -4,6 +4,10 @@
 #include "library/library_index.h"
 #include "library/library_store.h"
 #include "library/scanner.h"
+#include "storage/record_writer.h"
+#include "storage/profile_database.h"
+#include <QSqlQuery>
+#include <QSemaphore>
 #include <QBuffer>
 #include <QCoreApplication>
 #include <QDir>
@@ -431,6 +435,184 @@ int main(int argc, char **argv)
         require(removed.size() == 1 && removed.first().endsWith("two.EPUB"),
                 "A deleted book was not reported");
     }
+    // An in-flight scan must not put back a folder the user removed.
+    {
+        const auto profile = root.filePath("removed-during-scan");
+        const auto path = root.filePath("late-folder");
+        write(path + "/book.epub", epub("Late entry", "", true));
+        Store store(profile, std::make_shared<LocalSource>());
+        store.addFolder({ path, "Late" });
+        store.removeFolder(path);
+        QElapsedTimer elapsed;
+        elapsed.start();
+        while (store.scanning() && elapsed.elapsed() < 10000)
+            QCoreApplication::processEvents(QEventLoop::WaitForMoreEvents, 50);
+        store.save();
+        require(!store.scanning() && store.index().books.isEmpty()
+                        && QDir(profile + "/library-covers").entryList(QDir::Files).isEmpty(),
+                "A late scan restored a removed folder's book or cover");
+    }
+    // Imported books can share a cover name. Keep it until the last reference goes.
+    {
+        const auto profile = root.filePath("shared-legacy-cover");
+        Index seed;
+        require(seed.loadDatabase(profile), "Could not open the shared cover catalogue");
+        for (const auto &key : { "one", "two" }) {
+            auto entry = book(key, key, "", 1);
+            entry.cover = "shared.png";
+            seed.books.insert(key, entry);
+        }
+        require(seed.saveDatabase(profile), "Could not seed books with the same cover");
+        Store store(profile, std::make_shared<LocalSource>());
+        const auto path = store.coverPath("shared.png");
+        write(path, "shared");
+        store.removeBook("one");
+        store.save();
+        require(QFile::exists(path), "Removing one book deleted another book's cover");
+        store.removeBook("two");
+        store.save();
+        require(!QFile::exists(path), "The final book left its shared cover behind");
+    }
+    for (const bool escaped : { false, true }) {
+        const auto directory = root.filePath(escaped ? "escaped-book-keys" : "literal-book-keys");
+        const QString plain = "book.epub";
+        const QString marked = QChar(0xfeff) + plain;
+        const QByteArray marker = escaped ? QByteArray("\\ufeff") : QByteArray::fromHex("efbbbf");
+        write(directory + "/library.json",
+              R"({"schema":1,"folders":[],"books":[{"key":"book.epub"},{"key":")" + marker
+                      + R"(book.epub"}]})");
+        Index imported;
+        require(imported.loadDatabase(directory), "Could not import the legacy Library");
+        require(imported.books.contains(marked) && imported.books.contains(plain),
+                "Import changed the keys");
+        imported.removeBook(marked);
+        require(imported.saveDatabase(directory), "Could not save the book removal");
+        Index reopened;
+        require(reopened.loadDatabase(directory) && reopened.books.size() == 1
+                        && reopened.books.contains(plain),
+                "A removed book with a leading FEFF returned");
+    }
+    {
+        const auto directory = root.filePath("book-batch");
+        Index legacy;
+        auto first = book("a", "First", "", 11);
+        auto last = book("z", "Last", "Author", 22, 33, true);
+        const auto removed = book("old", "Removed", "Other", 44);
+        for (const auto &entry : { first, last, removed })
+            legacy.books.insert(entry.key, entry);
+        require(QDir().mkpath(directory) && legacy.save(directory + "/library.json"),
+                "Could not create the legacy Library batch");
+        Index index;
+        require(index.loadDatabase(directory) && index.books.size() == 3
+                        && index.books.value(first.key).json() == first.json()
+                        && index.books.value(last.key).json() == last.json(),
+                "Import reused another book's values");
+        index.removeBook(removed.key);
+        index.books[first.key].title = "Changed first";
+        index.books[last.key].title = "Changed last";
+        require(kobalt::storage::profileTransaction(
+                        directory,
+                        [](QSqlDatabase &db) {
+                            return QSqlQuery(db).exec(
+                                    "CREATE TEMP TRIGGER reject_last BEFORE INSERT ON library_books "
+                                    "WHEN NEW.key='z' BEGIN SELECT RAISE(ABORT,'last book'); END");
+                        }),
+                "Could not install the Library write failure");
+        Index saved;
+        require(!index.saveDatabase(directory) && saved.loadDatabase(directory)
+                        && saved.books.size() == 3 && saved.books.contains(removed.key)
+                        && saved.books.value(first.key).json() == first.json()
+                        && saved.books.value(last.key).json() == last.json(),
+                "A failed book write committed part of the batch");
+        require(kobalt::storage::profileTransaction(directory,
+                                                    [](QSqlDatabase &db) {
+                                                        return QSqlQuery(db).exec(
+                                                                "DROP TRIGGER reject_last");
+                                                    }),
+                "Could not clear the Library write failure");
+        require(index.saveDatabase(directory) && saved.loadDatabase(directory)
+                        && saved.books.size() == 2 && !saved.books.contains(removed.key)
+                        && saved.books.value(first.key).json()
+                                == index.books.value(first.key).json()
+                        && saved.books.value(last.key).json() == index.books.value(last.key).json(),
+                "Retry lost a book change or restored a removed book");
+    }
+    {
+        const auto folder = root.filePath("folder-writes");
+        Index index;
+        require(index.loadDatabase(folder), "Could not open Library folder fixture");
+        index.addFolder({ "/keep", "Keep" });
+        index.addFolder({ "/remove", "Remove" });
+        index.addFolder({ "/rename", "Old label" });
+        const auto entry = book("/keep/a.epub", "A", "Author", 1);
+        index.books.insert(entry.key, entry);
+        require(index.saveDatabase(folder), "Could not seed Library folder fixture");
+        require(kobalt::storage::profileTransaction(
+                        folder,
+                        [](QSqlDatabase &db) {
+                            QSqlQuery query(db);
+                            for (const auto &operation :
+                                 QStringList{ "DELETE", "INSERT", "UPDATE" }) {
+                                const auto row = operation == "INSERT" ? "NEW" : "OLD";
+                                if (!query.exec(
+                                            "CREATE TEMP TRIGGER guard_" + operation + " BEFORE "
+                                            + operation + " ON library_folders WHEN " + row
+                                            + ".key='/keep' BEGIN "
+                                              "SELECT RAISE(ABORT,'unchanged folder written'); END"))
+                                    return false;
+                            }
+                            return true;
+                        }),
+                "Could not guard the unchanged folder");
+        index.books[entry.key].percent = 35;
+        require(index.saveDatabase(folder), "A progress-only save wrote an unchanged folder");
+        index.removeFolder("/remove");
+        index.addFolder({ "/rename", "New label" });
+        index.addFolder({ "/new", "" });
+        require(index.saveDatabase(folder), "A folder edit rewrote an unaffected folder");
+        Index saved;
+        require(saved.loadDatabase(folder) && saved.folders.size() == 3
+                        && saved.folders[0].key == "/keep" && saved.folders[1].key == "/rename"
+                        && saved.folders[1].label == "New label" && saved.folders[2].key == "/new"
+                        && saved.folders[2].label.isEmpty() && saved.books[entry.key].percent == 35,
+                "Library save lost folder order, labels or book progress");
+    }
+    // A slow profile writer must not hold up input when the Library save timer fires.
+    {
+        const auto folder = root.filePath("background-save");
+        Store store(folder, std::make_shared<LocalSource>());
+        QSemaphore started, release;
+        kobalt::storage::RecordWriter blocker;
+        const bool queued = blocker.tryPost([&] {
+            started.release();
+            require(release.tryAcquire(1, 4000),
+                    "Library save timer blocked the event loop on the profile writer");
+            return true;
+        });
+        require(queued && started.tryAcquire(1, 4000), "Could not hold the profile writer busy");
+        // Queue the next event from the actual save timer, after its timeout handler.
+        auto *saveTimer = store.findChild<QTimer *>(QString(), Qt::FindDirectChildrenOnly);
+        require(saveTimer, "Missing Library save timer");
+        QEventLoop nextEvent;
+        QObject::connect(saveTimer, &QTimer::timeout, &nextEvent, &QEventLoop::quit,
+                         Qt::QueuedConnection);
+        Settings settings;
+        settings.view = View::List;
+        store.setSettings(settings);
+        nextEvent.exec();
+        release.release();
+        require(blocker.writeNow([] { return true; }), "Could not drain the queued Library save");
+        Index saved;
+        require(saved.loadDatabase(folder) && saved.settings.view == View::List,
+                "The timer did not persist the Library settings while the store was open");
+        settings.view = View::Home;
+        store.setSettings(settings);
+    }
+    {
+        Store reopened(root.filePath("background-save"), std::make_shared<LocalSource>());
+        require(reopened.index().settings.view == View::Home,
+                "Closing lost the latest Library settings");
+    }
     // The store adds single books, keeps the reader's marks and survives a damaged index.
     {
         const auto folder = root.filePath("store");
@@ -479,7 +661,45 @@ int main(int argc, char **argv)
             store.setOpened(key);
             require(store.index().books.value(key).mark == Book::Mark::None,
                     "Opening an unread book did not clear the mark");
+            write(bookPath, epub("Emma", "Jane Austen", true, { 0, 0 }));
+            require(store.addBook(bookPath) && store.index().books.value(key).cover.isEmpty(),
+                    "A revised book with no readable cover stayed linked to the old image");
             store.save();
+            require(!QFile::exists(store.coverPath(added.cover)),
+                    "Replacing a single book left its obsolete cover on disk");
+            write(bookPath, epub("Emma", "Jane Austen", true));
+            require(store.addBook(bookPath), "The replacement cover could not be read");
+            const auto previous = store.index().books.value(key).cover;
+            require(store.addBook(bookPath), "The second replacement cover could not be read");
+            store.save();
+            require(QFile::exists(store.coverPath(store.index().books.value(key).cover)),
+                    "Cleaning up the previous cover removed its replacement");
+            require(!QFile::exists(store.coverPath(previous)),
+                    "The replaced cover was not removed");
+        }
+        Index stale;
+        require(stale.loadDatabase(folder), "Could not open the single book catalogue");
+        auto &oldBook = stale.books[QFileInfo(bookPath).absoluteFilePath()];
+        oldBook.metadata = metadataVersion - 1;
+        require(stale.saveDatabase(folder), "Could not prepare outdated metadata");
+        write(bookPath, epub("Emma revised", "Jane Austen", true, { 0, 0 }));
+        {
+            Store refresh(folder, std::make_shared<LocalSource>());
+            refresh.scan();
+            require(refresh.scanning() && refresh.index().books.value(oldBook.key).title == "Emma",
+                    "Refreshing an outdated single book blocked the caller");
+            QElapsedTimer elapsed;
+            elapsed.start();
+            while (refresh.scanning() && elapsed.elapsed() < 10000)
+                QCoreApplication::processEvents(QEventLoop::WaitForMoreEvents, 50);
+            const auto revised = refresh.index().books.value(oldBook.key);
+            require(!refresh.scanning() && revised.title == "Emma revised"
+                            && revised.cover.isEmpty() && revised.opened == oldBook.opened
+                            && revised.metadata == metadataVersion,
+                    "The background scan failed to refresh the single book or lost its progress");
+            refresh.save();
+            require(!QFile::exists(refresh.coverPath(oldBook.cover)),
+                    "The background scan kept a cover no longer in the catalogue");
         }
         Store reopened(folder, std::make_shared<LocalSource>());
         require(reopened.index().books.size() == 1, "The store did not save its books");

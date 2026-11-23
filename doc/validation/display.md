@@ -2,7 +2,9 @@
 
 Label `display`. Build `mac-tests`, then run `ctest --preset mac -L display` from `platforms/desktop/`. `ctest --preset mac -N -L display` lists its tests.
 
-These checks cover page animations, refresh policies and regions, pixel damage, paint batching, the Library theme surface and the BOOX frame transport. `platform.page-animation` and `platform.page-transition-native` check policy and submission with fake display calls. The `boox` checks use the Android frame transport and queue.
+These checks cover page animations, refresh policies and regions, pixel damage, paint batching, the Library theme surface and the BOOX frame transport. `platform.page-animation` and `platform.page-transition-native` check policy and submission with fake display calls. The `boox` checks use the Android frame transport and queue. `ui.booxAppCanvases` repaints a visible canvas while the activity is inactive. It checks that a rejected clean frame and new partial damage reach the Surface when the activity resumes.
+
+`ui.pagePaintsPaperAroundBody` compares reading and sleep snapshots with paper drawn under opaque, undersized, translucent and high-DPI body images. It checks a clipped, mirrored widget render and verifies that a viewport transition covers the old page while the replacement is being laid out.
 
 `ui.navigationPressKeepsDamageInItsTab` checks that pressing or cancelling each bottom tab repaints only that tab's column, with a panel open or closed and in both themes. It uses a native backing store so a graphics proxy cannot hide broad repaint requests.
 
@@ -15,6 +17,8 @@ Use `KOBALT_GALLERY_CASE=androidPageAnimations` to capture only the Android page
 The widget keyboard batches key release with the editor change. On MediaTek in the light theme, ordinary edits confined to the visible keyboard and its editor use one partial update. Whole-keyboard changes, unrelated panel damage and dark cleanup keep their existing policies. The model checks cover the damage boundary; `pewter.qt5-refresh` checks the combined submission through both policy-list ABIs. Physical typing latency and ghosting require a device check. Nickel's keyboard on firmware 4 does not use that policy. A modal editor and that keyboard can share one top-level owner, so key damage forms its own update group. `ui.keyboardDamageStaysApartFromEditor` checks that a keypress does not merge the edited text and the key into one rectangle over the page between them. On firmware 4 in the light theme, the editor that Nickel's keyboard serves refreshes its text in partial mode, as Nickel refreshes its own keys; `component.ui` checks that keys and window-sized policies keep their own mode.
 
 ## Qt5 refresh adapter
+
+Typing in an annotation note keeps its text refresh when the note field covers a coloured highlight. The covered part keeps its pending cleanup until the page is exposed again. Both Kobo adapters use this rule, and the Qt5 adapter check exercises it through both policy-list ABIs.
 
 The Kobo test `pewter.qt5-refresh`, in `tests/pewter/refresh_qt5.cpp`, drives the production Qt5 refresh adapter through both policy-list ABIs, against the firmware Qt 5.2.1 libraries of the prepared Qt5 image. It also checks that a selection drag uses the direct waveform in partial mode, and that the next update redraws the dragged area once with REAGL in full mode. The Qt6 adapter applies the same rule without a pewter check, and the physical refresh speed is not measured. `bash platforms/kobo/build.sh qt5 --check` builds and runs it with the [Kobo adapter tests](kobo.md#pewter-the-fake-nickel).
 

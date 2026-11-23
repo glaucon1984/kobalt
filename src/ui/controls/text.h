@@ -13,6 +13,8 @@ struct Content;
 }
 
 namespace kobalt::ui {
+QLabel *makeZenMark(QWidget *parent, const char *name);
+
 // Elides only the title in a combined chapter field.
 QString headerFooterText(const headerfooter::Content &content, const QFont &font, int width);
 
@@ -57,6 +59,10 @@ void drawWrappedInterfaceText(QPainter &painter, const QRect &bounds, const QStr
                               QVector<QRect> *lineRectangles = nullptr);
 // Uses the same font backend and wrapping as WholeLineLabel.
 qreal excerptTextHeight(const QString &html, const QFont &font, int width);
+// Search results use book line spacing and keep the marked match intact.
+QString searchExcerptBlock(const QString &html);
+QString fitSearchExcerpt(const QString &before, const QString &match, const QString &after,
+                         const QFont &font, const QSize &bounds);
 
 // Search excerpts end between complete lines, even when their context wraps.
 class WholeLineLabel : public QLabel
@@ -126,8 +132,9 @@ QFont fontSample(const QString &face);
 // Page counts such as 5 / 33 keep half-width spaces around the slash. A
 // Unicode thin space still takes a full cell in mono fonts, so the painter
 // draws each word and advances half a space between them.
-qreal halfSpacedWidth(const QFont &font, const QString &text);
+qreal halfSpacedWidth(const QFont &font, const QString &text,
+                      TextDigits digits = TextDigits::Default);
 void drawHalfSpaced(QPainter &painter, qreal x, const QRect &bounds, const QString &text,
-                    int weight = -1);
+                    int weight = -1, TextDigits digits = TextDigits::Default);
 void captionLabel(QLabel *label, int pixels = metrics::chrome::captionText);
 } // namespace kobalt::ui

@@ -6,7 +6,6 @@
 #include "storage/reader_storage.h"
 #include "support/diagnostics.h"
 #include "support/strings.h"
-#include "ui/style/metrics.h"
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -17,7 +16,6 @@
 
 namespace kobalt::reader {
 using kobalt::platform::textRefresh;
-namespace metrics = ui::metrics;
 
 namespace {
 QString bytesText(qint64 value)
@@ -52,16 +50,6 @@ struct DebugFacts
 void Reader::buildDebugSettings()
 {
     auto *settings = static_cast<SettingsPanel *>(general);
-    connect(settings->debugModeOption, &QCheckBox::toggled, this, [this](bool on) {
-        // Fast is offered only in debug mode. Without it a saved "fast"
-        // opens as Hybrid, so the draft says so.
-        if (!on && settingsRenderingMode == QLatin1String("fast")) {
-            settingsRenderingMode = renderingMode::value(renderingMode::Mode::Hybrid);
-            showSettingsFonts();
-        }
-        if (on)
-            refreshDebugFacts();
-    });
     connect(settings->evictBookCacheButton, &QPushButton::clicked, this,
             [this] { askCacheEviction(false); });
     connect(settings->clearCachesButton, &QPushButton::clicked, this,
@@ -86,13 +74,6 @@ void Reader::buildDebugSettings()
 void Reader::showDebugSettings()
 {
     auto *settings = static_cast<SettingsPanel *>(general);
-    const bool debug = features::debugMode(preferences);
-    // The facts are read once, below, not also by the toggled handler. Qt 5.2
-    // has no QSignalBlocker.
-    const bool blocked = settings->debugModeOption->blockSignals(true);
-    settings->debugModeOption->setChecked(debug);
-    settings->debugModeOption->blockSignals(blocked);
-    settings->showDebug(debug);
     const bool switchable = !diagnosticsMarker().isEmpty();
     settings->detailedDiagnosticsOption->setChecked(detailedDiagnostics());
     settings->detailedDiagnosticsOption->setEnabled(switchable);
@@ -111,7 +92,7 @@ void Reader::showDebugSettings()
             online > 0 && configured > 0
                     ? strings::get("debug.cores_value").arg(online).arg(configured).toUpper()
                     : strings::get("debug.unknown").toUpper());
-    if (debug)
+    if (debugModeOption.checked())
         refreshDebugFacts();
 }
 
@@ -199,9 +180,6 @@ void Reader::askCacheEviction(bool allBooks)
     choice->dismissed = [finish] { finish(false); };
     connect(choice->secondaryButton(), &QPushButton::clicked, this, [finish] { finish(false); });
     connect(choice->primaryButton(), &QPushButton::clicked, this, [finish] { finish(true); });
-    choice->card()->fitToWidth(
-            qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance));
-    evictionDialog->centerCard();
     for (auto *widget : evictionDialog->findChildren<QWidget *>())
         textRefresh(widget);
     textRefresh(evictionDialog);

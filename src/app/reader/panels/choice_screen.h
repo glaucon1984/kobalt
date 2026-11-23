@@ -8,6 +8,10 @@
 #include <QStringList>
 #include <functional>
 
+namespace kobalt::ui {
+class ModalOverlay;
+}
+
 namespace kobalt {
 // `page` is the zero-based page a chapter starts on, or -1 when it is unknown.
 struct Choice
@@ -19,7 +23,10 @@ struct Choice
     QString detail = {};
     bool placeholder = false;
     QStringList fontFiles = {};
+    QString labelImage = {};
 };
+
+enum class ContentsList { Chapters, PrintedPages, Landmarks };
 
 enum class ChapterGroups { Current, All, Off };
 
@@ -28,14 +35,25 @@ enum class ChapterGroups { Current, All, Off };
 class ChapterContents : public ui::Panel
 {
 public:
-    explicit ChapterContents(QWidget *parent);
+    explicit ChapterContents(QWidget *parent, QWidget *overlayHost = nullptr);
     void showChapters(const QString &title, QVector<Choice> choices, const QString &current,
                       ChapterGroups groups = ChapterGroups::Current);
+    bool useScreens = false;
+    void setListMode(ContentsList active, const QVector<ContentsList> &available);
+    void showPrintedPageInput(const QHash<QString, QString> &pages, bool hasOtherLabels,
+                              std::function<void(QString)> jump, std::function<void()> other);
+    std::function<void(ContentsList)> switchList;
+    std::function<void(const QString &)> previewImage;
     void setPosition(const QString &text);
     void setPages(const QVector<int> &pages);
+    void setBoundaries(int start, int end, int firstPage, int lastPage);
 
     int currentPage() const { return page; }
 
+    std::function<void(int)> boundaryRequested;
+    std::function<QString(int)> pageLabel, printedLabel;
+
+    void refreshPageLabels() { redraw(); }
     std::function<void(const QString &)> selected;
     std::function<void()> back, changed;
 
@@ -44,6 +62,9 @@ protected:
     void resizeEvent(QResizeEvent *) override;
 
 private:
+    void hideEvent(QHideEvent *event) override;
+    void openListMenu();
+    void closeListMenu();
     void arrange(int anchor = -1);
     void redraw();
     void rebuildVisible();
@@ -55,21 +76,31 @@ private:
     QVector<int> parents, visible;
     QVector<bool> expanded;
     QVector<QPushButton *> buttons;
-    QVector<QPushButton *> disclosures;
+    QVector<QPushButton *> disclosures, previews;
     QVector<QLabel *> labels;
     QString current;
     QLabel *title, *position, *summary, *pageHeading, *empty;
     ui::ListHeader *listHeader;
+    ui::CellButton *moreButton;
+    QVector<ContentsList> availableLists;
+    QWidget *modalHost;
+    ui::ModalOverlay *listMenu = nullptr;
+    ContentsList listMode = ContentsList::Chapters;
     ui::CellButton *close;
     ui::PagerBar *pager;
     int page = 0, rows = 1;
     bool collapsible = true;
+    int startRow = -1, endRow = -1, firstMainPage = -1, lastMainPage = -1;
 };
 
 class ChoiceScreen : public kobalt::ui::Panel
 {
 public:
     enum class Mode { Chapters, Fonts, Sizes };
+    std::function<void(int)> boundaryRequested;
+    std::function<QString(int)> pageLabel, printedLabel;
+
+    void refreshPageLabels() { contents->refreshPageLabels(); }
     std::function<void(const QString &)> selected;
     std::function<void()> back, changed;
     std::function<void(const QString &, bool instructions)> defaultRequested;
@@ -80,8 +111,30 @@ public:
                      Mode presentation = Mode::Chapters,
                      ChapterGroups groups = ChapterGroups::Current);
     void setDropdownGeometry(const QRect &bounds);
+
+    void setListMode(ContentsList active, const QVector<ContentsList> &available,
+                     bool useScreens = false)
+    {
+        contents->useScreens = useScreens;
+        contents->setListMode(active, available);
+    }
+
+    std::function<void(ContentsList)> switchList;
+    std::function<void(const QString &)> previewImage;
+
+    void showPrintedPageInput(const QHash<QString, QString> &pages, bool hasOtherLabels,
+                              std::function<void(QString)> jump, std::function<void()> other)
+    {
+        contents->showPrintedPageInput(pages, hasOtherLabels, std::move(jump), std::move(other));
+    }
     void setChapterPosition(const QString &text);
     void setChapterPages(const QVector<int> &pages);
+
+    void setChapterBoundaries(int start, int end, int firstPage, int lastPage)
+    {
+        contents->setBoundaries(start, end, firstPage, lastPage);
+    }
+
     void selectValue(const QString &value);
     int chapterPage() const;
     int fontPanelHeight() const;

@@ -167,9 +167,6 @@ void Reader::finishMarksExport(AnnotationExportFormat format, bool saved, const 
     };
     notice->dismissed = done;
     connect(notice->primaryButton(), &QPushButton::clicked, this, done);
-    notice->card()->fitToWidth(
-            qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance));
-    notice->centerCard();
     notice->show();
     notice->raise();
 }
@@ -274,6 +271,11 @@ bool Reader::quickAnnotations() const
             && preferences.value("annotation_interaction").toString() == QLatin1String("quick");
 }
 
+bool Reader::usesAnnotationToggle() const
+{
+    return features::enabled(preferences, features::Annotations) && !quickAnnotations();
+}
+
 void Reader::settleQuickAnnotations()
 {
     // Wait for the current event: a new hold clears the old draft before it
@@ -312,7 +314,13 @@ void Reader::annotationActionsFor(const QVector<AnnotationAction> &actions, QRec
     auto *card = annotationPopover->card();
     auto *rows = card->rows();
     while (auto *item = rows->takeAt(0)) {
-        delete item->widget();
+        if (auto *row = item->widget()) {
+            // Actions can rebuild the card from their own clicked signal.
+            // Detach the old rows so widget lookups find the replacement.
+            row->hide();
+            row->setParent(nullptr);
+            row->deleteLater();
+        }
         delete item;
     }
     if (highlights->error() == "overlap" && !annotationDraft->range().start.isEmpty())
@@ -384,7 +392,8 @@ void Reader::annotationActionsFor(const QVector<AnnotationAction> &actions, QRec
                    (height() - 2 * int(metrics::notice::sideClearance) - paletteHeight)
                            / qMax(1, int(menuActions.size())),
                    int(metrics::links::actionHeight));
-    const bool compact = compactActions && menuActions.size() <= 6;
+    // Load failures can open this menu with no actions: then there is no strip.
+    const bool compact = compactActions && !menuActions.isEmpty() && menuActions.size() <= 6;
     QGridLayout *buttons = nullptr;
     int columns = menuActions.size();
     if (compact) {
@@ -880,7 +889,7 @@ void Reader::prepareAnnotation(bool leave, std::function<void()> after)
     annotationSaving = true;
     QPointer<Reader> guard(this);
     annotationDraft->prepareSave([guard, leave, after](AnnotationDraft::Prepared result, quint64) {
-        if (!guard)
+        if (!guard || guard->releasingForUsb)
             return;
         guard->annotationSaving = false;
         saves::settled();
@@ -1135,20 +1144,38 @@ void Reader::syncAnnotationControls()
 
 void Reader::syncMarkupRequest()
 {
-    ReaderMarkupRequest request;
-    for (const auto &item : highlights->highlights()) {
-        if (item.id != annotationDraft->editingId()) {
-            request.saved.append(
-                    { item.start, item.end,
-                      colorAnnotations() ? highlightDisplayColor(item.color) : QString("gray"),
-                      highlightDisplayStyle(item.style) });
+    const quint64 generation = highlights->generation();
+    const auto &editingId = annotationDraft->editingId();
+    const auto &items = highlights->highlights();
+    const bool inColor = !items.isEmpty() && colorAnnotations();
+    const bool savedChanged = !savedMarkupReady || savedMarkupGeneration != generation
+            || savedMarkupEditingId != editingId || savedMarkupInColor != inColor;
+    const auto &start = annotationDraft->range().start;
+    const QString end = start.isEmpty() ? QString() : annotationDraft->end();
+    // A new appearance preview inherits the current request in ReaderSession::openPreview.
+    if (!savedChanged && annotationRequest.draftStart == start && annotationRequest.draftEnd == end)
+        return;
+
+    if (savedChanged) {
+        QVector<ReaderMarkupRange> saved;
+        saved.reserve(items.size());
+        for (const auto &item : items) {
+            if (item.id != editingId) {
+                saved.append({ item.start, item.end,
+                               inColor ? highlightDisplayColor(item.color) : QStringLiteral("gray"),
+                               highlightDisplayStyle(item.style) });
+            }
         }
+        // A note edit changes the highlight generation but keeps the displayed ranges.
+        if (annotationRequest.saved != saved)
+            annotationRequest.saved = std::move(saved);
+        savedMarkupReady = true;
+        savedMarkupGeneration = generation;
+        savedMarkupEditingId = editingId;
+        savedMarkupInColor = inColor;
     }
-    if (!annotationDraft->range().start.isEmpty()) {
-        request.draftStart = annotationDraft->range().start;
-        request.draftEnd = annotationDraft->end();
-    }
-    annotationRequest = std::move(request);
+    annotationRequest.draftStart = start;
+    annotationRequest.draftEnd = end;
     session->setMarkup(annotationRequest);
     if (auto *preview = appearanceEdit.preview()) {
         preview->setMarkup(annotationRequest);
@@ -1242,9 +1269,11 @@ QString Reader::annotationViewportKey() const
     // Preview frames have separate geometry and cannot start a lookup.
     if (appearanceEdit.panelOpen())
         return "preview:" + QString::number(page->image.cacheKey());
-    return QString::number(session->layoutRevision()) + ':' + layoutKey() + ':'
-            + QString::number(session->page()) + ':'
-            + session->state().value("position").toString();
+    // Book page estimates can change without replacing the visible text layout.
+    const auto &state = session->state();
+    const auto slice = state.value("slice_start").toString();
+    return QString::number(session->layoutRevision()) + ':' + slice + ':'
+            + QString::number(session->page()) + ':' + state.value("position").toString();
 }
 
 void Reader::syncAnnotations()
@@ -1384,6 +1413,10 @@ QVector<BookmarkRow> Reader::annotationRows() const
         BookmarkRow row{
             item.id, {}, {}, item.created, locations.bookPages.value(i * 2, -1), false
         };
+        if (publisherPagesEnabled()) {
+            row.printedPage = locations.printedPages.value(i * 2);
+            row.printedEnd = locations.printedPages.value(i * 2 + 1);
+        }
         row.endPage = locations.bookPages.value(i * 2 + 1, -1);
         row.pagePending = session->state().contains("book_fraction")
                 && session->state().value("rough_pages").toInt() <= 0;
@@ -1502,13 +1535,7 @@ void Reader::showSavedAnnotationAt(const QString &id, QRect anchor, bool navigat
                 strings::get("annotations.edit_note"), [this, id] { openNoteEditor(id); } },
               { "rrAnnotationAppearance", ui::ControlIcon::Styling,
                 strings::get(colorAnnotations() ? "annotations.color" : "annotations.style"),
-                [this, id, anchor, navigate] {
-                    // Rebuilding the card deletes this button, so wait until its
-                    // click has been delivered.
-                    qt::later(0, this, [this, id, anchor, navigate] {
-                        showSavedAppearance(id, anchor, navigate, true);
-                    });
-                } },
+                [this, id, anchor, navigate] { showSavedAppearance(id, anchor, navigate, true); } },
               { "rrAnnotationEdit", ui::ControlIcon::EditHighlight,
                 strings::get("annotations.edit"),
                 [this, id, navigate, anchor] {
@@ -1561,13 +1588,9 @@ void Reader::showSavedAppearance(const QString &id, QRect anchor, bool navigate,
     };
     if (colorStep) {
         // Discard leaves the choices unsaved and returns to the note.
-        actions.append({ "rrAnnotationDiscard", ui::ControlIcon::Undo,
-                         strings::get("annotations.discard"), [this, id, anchor, navigate] {
-                             // Rebuilding the card deletes this button.
-                             qt::later(0, this, [this, id, anchor, navigate] {
-                                 showSavedAnnotationAt(id, anchor, navigate);
-                             });
-                         } });
+        actions.append(
+                { "rrAnnotationDiscard", ui::ControlIcon::Undo, strings::get("annotations.discard"),
+                  [this, id, anchor, navigate] { showSavedAnnotationAt(id, anchor, navigate); } });
     } else {
         actions.append({ "rrAnnotationAddNote", ui::ControlIcon::Note,
                          strings::get("annotations.add_note"),
@@ -1617,10 +1640,10 @@ void Reader::openNoteEditor(const QString &id)
                                colorAnnotations() ? highlightDisplayColor(detail.color)
                                                   : QStringLiteral("gray"),
                                bookmarkList->excerptFont() };
-    noteEditor = new NoteEditor(
-            this, services.keyboard,
-            strings::get(detail.note.isEmpty() ? "annotations.add_note" : "annotations.edit_note"),
-            passage, detail.note);
+    noteEditor = new NoteEditor(this, services.keyboard,
+                                strings::get(detail.note.isEmpty() ? "annotations.add_note_title"
+                                                                   : "annotations.edit_note_title"),
+                                passage, detail.note);
     noteEditor->saveRequested = [this, id](const QString &text) {
         if (text.size() > HighlightStore::maxNoteUnits)
             noteEditor->setError(strings::get("annotations.note_too_long"));
@@ -1664,11 +1687,9 @@ void Reader::showAnnotationMatches(QVector<QString> ids, QRect anchor, int listP
             if (item.id != ids[i]) {
                 continue;
             }
-            QString excerpt = item.text.simplified();
-            if (excerpt.size() > 36) {
-                excerpt = excerpt.left(36) + QString::fromUtf8("…");
-            }
-            excerpt = QString::number(i + 1) + ". " + excerpt;
+            const auto excerpt = strings::get("common.numbered_title")
+                                         .arg(i + 1)
+                                         .arg(elideBookmarkExcerpt(item.text.simplified(), 36, 36));
             const QString name = QString("rrAnnotationMatch%1").arg(i);
             const QString id = item.id;
             actions.append({ name, ui::ControlIcon::Annotate, excerpt,
@@ -1701,21 +1722,21 @@ void Reader::removeAnnotation(const QString &id)
         return;
     }
     QString excerpt = details.first().text;
-    int number = -1;
+    QString label;
+    bool screen = false;
     for (const auto &row : annotationRows()) {
         if (row.position == id) {
-            number = row.page;
+            label = locationPageLabel(row.page, row.printedPage);
+            screen = publisherPagesEnabled() && row.printedPage.isEmpty();
             break;
         }
     }
     if (excerpt.isEmpty())
         return;
-    if (excerpt.size() > 80) {
-        excerpt = excerpt.left(80);
-        excerpt = excerpt.left(qMax(40, excerpt.lastIndexOf(' '))) + QString::fromUtf8("…");
-    }
-    const auto detail = number >= 0
-            ? strings::get("bookmarks.remove_detail").arg(number + 1).arg(excerpt)
+    excerpt = elideBookmarkExcerpt(excerpt, 40, 80);
+    const auto detail = !label.isEmpty()
+            ? strings::get(screen ? "bookmarks.remove_screen_detail" : "bookmarks.remove_detail")
+                      .arg(label, excerpt)
             : excerpt;
     auto *choice = new ui::ChoiceModal(
             this, { detail, strings::get("annotations.remove_prompt"), {} },
@@ -1740,9 +1761,6 @@ void Reader::removeAnnotation(const QString &id)
     };
     connect(choice->secondaryButton(), &QPushButton::clicked, this, [finish] { finish(false); });
     connect(choice->primaryButton(), &QPushButton::clicked, this, [finish] { finish(true); });
-    choice->card()->fitToWidth(
-            qMin<int>(metrics::notice::cardWidth, width() - 2 * metrics::notice::sideClearance));
-    choice->centerCard();
     choice->show();
     choice->raise();
 }

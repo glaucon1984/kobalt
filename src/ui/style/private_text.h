@@ -36,8 +36,15 @@ qint64 privateInterfaceFontBytes();
 void warmTextShaping(const QByteArray &font, const QString &text);
 // Registers metadata only. Each style's bytes load when first rendered and
 // may be evicted between layouts. Qt's font loader never sees them.
-// Returns whether the file could be registered.
+// Remember unreadable files until the next book or a refresh of their folder.
 bool registerPrivateInterfaceFont(const QString &path, const QString &expectedFamily);
+bool privateInterfaceFontRegistered(const QString &family);
+// Loads the registered faces of each family now and keeps them, with the
+// bundled interface faces, out of eviction. Families kept by an earlier call
+// can be evicted again. False if a face could not be loaded.
+bool keepPrivateInterfaceFamilies(const QStringList &families);
+// A new reader may have a new font catalog, including files replaced over USB.
+void retryFailedPrivateInterfaceFonts();
 // GUI-thread only, between readers. Forget a replaced host folder and text derived from its faces.
 void forgetPrivateInterfaceFonts(const QString &directory);
 // A native editor needs a Qt face. Only single-face TrueType files are safe
@@ -71,6 +78,7 @@ struct PrivateText
     QPoint origin;
 };
 enum class PrivateTextEmphasis { Synthetic, FontFace };
+enum class TextDigits { Default, Tabular };
 
 struct PrivateTextStyle
 {
@@ -85,12 +93,20 @@ struct PrivateTextStyle
 // All application text uses private painting once font sources are initialized.
 bool needsPrivateText(const QString &text, const QFont &font);
 bool privateFontFixedPitch(const QFont &font);
+// Everything besides the text and its ranges that decides how private text in
+// this font lays out when no weight is named: the font, the interface weight
+// and the faces registered so far. Layouts kept outside this file include it
+// in their key. Empty while a font preview renders, which keeps none.
+QString privateLayoutKey(const QFont &font);
 PrivateText renderPrivateText(const QString &text, const QFont &font, int weight = -1,
                               const QVector<QPair<int, int>> &boldRanges = {},
                               const QVector<QPair<int, int>> &underlineRanges = {},
                               PrivateTextEmphasis emphasis = PrivateTextEmphasis::Synthetic,
                               Qt::LayoutDirection direction = Qt::LayoutDirectionAuto,
                               const QVector<PrivateTextStyle> &styles = {});
+// Paints the source coverage with this ink and shares the result across repaints.
+// When requested, inkBounds encloses its nontransparent pixels in image coordinates.
+QImage tintedPrivateText(const QImage &image, const QColor &color, QRect *inkBounds = nullptr);
 int measurePrivateText(const QString &text, const QFont &font,
                        const QVector<QPair<int, int>> &boldRanges = {},
                        PrivateTextEmphasis emphasis = PrivateTextEmphasis::Synthetic,
@@ -110,8 +126,10 @@ QSize measurePrivateTextSize(const QString &text, const QFont &font);
 int fittingTextEnd(const QVector<int> &ends, int start, int limit, int width,
                    const std::function<int(int end)> &measure, qreal &unitAdvance);
 QString elidePrivateText(const QString &text, const QFont &font, int width,
-                         const QVector<QPair<int, int>> &boldRanges = {});
-int interfaceTextWidth(const QString &text, const QFont &font);
+                         const QVector<QPair<int, int>> &boldRanges = {},
+                         TextDigits digits = TextDigits::Default);
+int interfaceTextWidth(const QString &text, const QFont &font,
+                       TextDigits digits = TextDigits::Default);
 // Work of the text renderer since the last call, for timing diagnostics:
 // layouts asked for, layouts not found in the cache with the time they took,
 // and glyphs that had to be drawn.
@@ -124,14 +142,17 @@ PrivateTextWork takePrivateTextWork();
 int interfaceLineHeight(const QFont &font);
 int interfaceLineAscent(const QFont &font);
 QRect interfaceInkBounds(const QString &text, const QFont &font);
-QString elideInterfaceText(const QString &text, const QFont &font, int width);
+QString elideInterfaceText(const QString &text, const QFont &font, int width,
+                           TextDigits digits = TextDigits::Default);
 void drawInterfaceText(QPainter &painter, const QRect &area, const QString &text,
                        Qt::Alignment alignment = Qt::AlignLeft | Qt::AlignVCenter, int weight = -1,
-                       const QVector<QPair<int, int>> &boldRanges = {});
+                       const QVector<QPair<int, int>> &boldRanges = {},
+                       TextDigits digits = TextDigits::Default);
 // Centers the ink of the letters vertically instead of the line box.
 void drawOpticalPrivateText(QPainter &painter, const QRect &area, const QString &text,
                             Qt::Alignment alignment = Qt::AlignLeft, int weight = -1,
-                            const QVector<QPair<int, int>> &boldRanges = {});
+                            const QVector<QPair<int, int>> &boldRanges = {},
+                            TextDigits digits = TextDigits::Default);
 // The same for one label of a row, such as a segment: a descender does not
 // lift it above the baseline that its neighbours share.
 void drawSegmentPrivateText(QPainter &painter, const QRect &area, const QString &text,

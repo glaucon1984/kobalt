@@ -8,6 +8,7 @@
 #include "reading/header_footer.h"
 #include "support/strings.h"
 #include <QAbstractTextDocumentLayout>
+#include <QCache>
 #include <QFontInfo>
 #include <QFontMetrics>
 #include <QHash>
@@ -18,25 +19,43 @@
 #include <QPainterPath>
 #include <QTextBlock>
 #include <QTextBoundaryFinder>
+#include <QTextCursor>
 #include <QTextDocument>
 #include <QTextFragment>
 #include <QTextLayout>
 #include <QtMath>
 #include <algorithm>
+#include <limits>
 
 namespace kobalt::ui {
+QLabel *makeZenMark(QWidget *parent, const char *name)
+{
+    auto *mark = new QLabel(strings::get("navigation.zen"), parent);
+    mark->setObjectName(name);
+    mark->setAlignment(Qt::AlignCenter);
+    readerStyle(mark,
+                QString("QLabel{%1font-weight:bold;background:palette(window-text);"
+                        "color:palette(window);padding:%2px %3px;}")
+                        .arg(styles::caption(), QString::number(px(2)), QString::number(px(12))));
+    auto font = captionFont();
+    font.setBold(true);
+    mark->setFont(font);
+    return mark;
+}
+
 QString headerFooterText(const headerfooter::Content &content, const QFont &font, int width)
 {
-    if (interfaceTextWidth(content.text, font) <= width)
+    constexpr auto digits = TextDigits::Tabular;
+    if (interfaceTextWidth(content.text, font, digits) <= width)
         return content.text;
     if (content.chapterPosition.isEmpty())
-        return elideInterfaceText(content.text, font, width);
+        return elideInterfaceText(content.text, font, width, digits);
     const QString ellipsis(QChar(0x2026));
     const auto joined = [&](const QString &title) {
         return strings::get("reader.chapter_position").arg(title, content.chapterPosition);
     };
     QString best = joined(ellipsis);
-    if (interfaceTextWidth(best, font) > width)
+    if (interfaceTextWidth(best, font, digits) > width)
         return content.chapterPosition;
     QTextBoundaryFinder finder(QTextBoundaryFinder::Grapheme, content.chapterTitle);
     QVector<int> boundaries;
@@ -48,7 +67,7 @@ QString headerFooterText(const headerfooter::Content &content, const QFont &font
     while (first <= last) {
         const int middle = first + (last - first) / 2;
         const auto text = joined(content.chapterTitle.left(boundaries[middle]) + ellipsis);
-        if (interfaceTextWidth(text, font) <= width) {
+        if (interfaceTextWidth(text, font, digits) <= width) {
             best = text;
             first = middle + 1;
         } else {
@@ -99,8 +118,10 @@ QVector<QPair<int, int>> lineRanges(const QVector<QPair<int, int>> &ranges, int 
     return result;
 }
 
-QVector<ExcerptLine> privateExcerptLines(const QTextDocument &document, const QFont &font,
-                                         int width, int maximumLines = 0, bool *overflow = nullptr)
+QVector<ExcerptLine>
+privateExcerptLines(const QTextDocument &document, const QFont &font, int width,
+                    int maximumLines = 0, bool *overflow = nullptr,
+                    qreal maximumHeight = std::numeric_limits<qreal>::infinity())
 {
     if (overflow)
         *overflow = false;
@@ -168,6 +189,8 @@ QVector<ExcerptLine> privateExcerptLines(const QTextDocument &document, const QF
                            measured.lineAscent, lineText.isEmpty() ? 0 : measured.advance,
                            direction });
             top += height;
+            if (top > maximumHeight)
+                return lines;
             start = end;
             if (start == separator) {
                 ++start;
@@ -192,6 +215,40 @@ QString interfaceHtml(const QString &text)
 {
     return text.toHtmlEscaped().replace('\n', "<br/>");
 }
+
+struct WrappedLines
+{
+    QVector<ExcerptLine> lines;
+    bool overflow = false;
+};
+
+// Panels measure wrapped descriptions in every layout pass and break them
+// again in every paint. Breaking a paragraph parses it and shapes several
+// candidate lines, so keep recent results. They depend only on the text, the
+// width, the line limit and what privateLayoutKey() covers.
+WrappedLines wrappedInterfaceLines(const QString &text, const QFont &font, int width,
+                                   int maximumLines)
+{
+    // Notes and excerpts use this path too. Keep only short interface text.
+    const auto layoutKey = text.size() <= 512 ? privateLayoutKey(font) : QString();
+    static QCache<QString, WrappedLines> cache(512);
+    QString key;
+    if (!layoutKey.isEmpty()) {
+        key = layoutKey + '\n' + QString::number(width) + ':' + QString::number(maximumLines) + '\n'
+                + text;
+        if (const auto *found = cache.object(key))
+            return *found;
+    }
+    QTextDocument document;
+    document.setDefaultFont(font);
+    document.setDocumentMargin(0);
+    document.setHtml(interfaceHtml(text));
+    WrappedLines result;
+    result.lines = privateExcerptLines(document, font, width, maximumLines, &result.overflow);
+    if (!key.isEmpty())
+        cache.insert(key, new WrappedLines(result));
+    return result;
+}
 } // namespace
 
 namespace {
@@ -199,10 +256,7 @@ QStringList interfaceLines(const QString &text, const QFont &font, int width, in
 {
     QStringList result;
     if (needsPrivateText(text, font)) {
-        QTextDocument document;
-        document.setDefaultFont(font);
-        document.setHtml(interfaceHtml(text));
-        for (const auto &line : privateExcerptLines(document, font, width, limit))
+        for (const auto &line : wrappedInterfaceLines(text, font, width, limit).lines)
             result.append(line.text.trimmed());
     } else {
         QTextLayout layout(text, font);
@@ -291,10 +345,7 @@ int wrappedInterfaceTextHeight(const QString &text, const QFont &font, int width
         return QFontMetrics(font)
                 .boundingRect(QRect(0, 0, qMax(1, width), 0), Qt::TextWordWrap, text)
                 .height();
-    QTextDocument document;
-    document.setDefaultFont(font);
-    document.setHtml(interfaceHtml(text));
-    const auto lines = privateExcerptLines(document, font, qMax(1, width), maximumLines);
+    const auto lines = wrappedInterfaceLines(text, font, qMax(1, width), maximumLines).lines;
     const int count = maximumLines > 0 ? qMin(int(lines.size()), maximumLines) : int(lines.size());
     return count ? qCeil(lines[count - 1].top + lines[count - 1].height) : 0;
 }
@@ -358,14 +409,9 @@ void drawWrappedInterfaceText(QPainter &painter, const QRect &bounds, const QStr
         painter.drawText(bounds, alignment | Qt::TextWordWrap, text);
         return;
     }
-    QTextDocument document;
-    document.setDefaultFont(painter.font());
-    document.setDocumentMargin(0);
-    document.setHtml(interfaceHtml(text));
-    bool overflow = false;
-    auto lines =
-            privateExcerptLines(document, painter.font(), bounds.width(), maximumLines, &overflow);
-    if (overflow) {
+    auto wrapped = wrappedInterfaceLines(text, painter.font(), bounds.width(), maximumLines);
+    auto &lines = wrapped.lines;
+    if (wrapped.overflow) {
         auto &last = lines.last();
         last.text =
                 elidePrivateText(last.text + QStringLiteral(" …"), painter.font(), bounds.width());
@@ -385,14 +431,11 @@ void drawWrappedInterfaceText(QPainter &painter, const QRect &bounds, const QStr
                                                      : 0);
     painter.save();
     painter.setClipRect(bounds, Qt::IntersectClip);
+    const auto ink = painter.pen().color();
     for (const auto &line : lines) {
-        auto rendered = renderPrivateText(line.text, painter.font());
+        const auto rendered = renderPrivateText(line.text, painter.font());
         if (rendered.image.isNull())
             continue;
-        QPainter color(&rendered.image);
-        color.setCompositionMode(QPainter::CompositionMode_SourceIn);
-        color.fillRect(rendered.image.rect(), painter.pen().color());
-        color.end();
         const auto visual = QStyle::visualAlignment(line.direction, alignment);
         const qreal x = bounds.x()
                 + (visual & Qt::AlignHCenter         ? (bounds.width() - line.advance) / 2
@@ -400,7 +443,7 @@ void drawWrappedInterfaceText(QPainter &painter, const QRect &bounds, const QStr
                                                      : 0);
         painter.drawImage(QPointF(x + rendered.origin.x(),
                                   top + line.top + line.ascent + rendered.origin.y()),
-                          rendered.image);
+                          tintedPrivateText(rendered.image, ink));
         if (lineRectangles)
             lineRectangles->append(
                     QRectF(x, top + line.top, line.advance, line.height).toAlignedRect());
@@ -512,25 +555,114 @@ void InterfaceLabel::paintEvent(QPaintEvent *event)
         drawInterfaceText(painter, bounds, text(), alignment());
 }
 
+namespace {
+// Stop once the result exceeds the available height. The complete height is
+// only needed when sizing the rows, before any search hits are displayed.
+qreal excerptHeight(QTextDocument &document, const QFont &font, int width, qreal maximum)
+{
+    if (privateExcerptNeeded(document, font)) {
+        const auto lines = privateExcerptLines(document, font, width, 0, nullptr, maximum);
+        return lines.isEmpty() ? 0 : lines.last().top + lines.last().height;
+    }
+    if (document.textWidth() != width)
+        document.setTextWidth(width);
+    qreal bottom = document.size().height();
+    for (auto block = document.begin(); block.isValid() && bottom <= maximum;
+         block = block.next()) {
+        const auto *layout = block.layout();
+        for (int i = 0; i < layout->lineCount() && bottom <= maximum; ++i)
+            bottom = qMax(bottom, excerptLineBottom(*layout, layout->lineAt(i)));
+    }
+    return bottom;
+}
+} // namespace
+
 qreal excerptTextHeight(const QString &html, const QFont &font, int width)
 {
     QTextDocument document;
     document.setDefaultFont(font);
     document.setDocumentMargin(0);
     document.setHtml(html);
-    if (privateExcerptNeeded(document, font)) {
-        const auto lines = privateExcerptLines(document, font, width);
-        return lines.isEmpty() ? 0 : lines.last().top + lines.last().height;
-    }
-    document.setTextWidth(width);
-    qreal bottom = document.size().height();
-    for (auto block = document.begin(); block.isValid(); block = block.next()) {
-        const auto *layout = block.layout();
-        for (int i = 0; i < layout->lineCount(); ++i) {
-            bottom = qMax(bottom, excerptLineBottom(*layout, layout->lineAt(i)));
+    return excerptHeight(document, font, width, std::numeric_limits<qreal>::infinity());
+}
+
+QString searchExcerptBlock(const QString &html)
+{
+    return QStringLiteral("<div style=\"line-height:%1%\">%2</div>")
+            .arg(metrics::search::excerptLineHeight)
+            .arg(html);
+}
+
+QString fitSearchExcerpt(const QString &before, const QString &match, const QString &after,
+                         const QFont &font, const QSize &bounds)
+{
+    QString left = before.trimmed().isEmpty() ? QString() : before;
+    QString right = after.trimmed().isEmpty() ? QString() : after;
+    const QString marked = "<b><u>" + match.toHtmlEscaped() + "</u></b>";
+    const auto isSpace = [](QChar ch) { return ch.isSpace(); };
+    // Context without a word boundary always produces the marked match alone.
+    if (std::none_of(left.cbegin(), left.cend(), isSpace)
+        && std::none_of(right.cbegin(), right.cend(), isSpace))
+        return searchExcerptBlock(marked);
+    const QChar ellipsis(0x2026);
+    const auto html = [&] {
+        return searchExcerptBlock(
+                (left.isEmpty() ? QString() : ellipsis + left.toHtmlEscaped()) + marked
+                + (right.isEmpty() ? QString() : right.toHtmlEscaped() + ellipsis));
+    };
+    QTextDocument document;
+    document.setUndoRedoEnabled(false);
+    document.setDefaultFont(font);
+    document.setDocumentMargin(0);
+    const auto parse = [&] {
+        document.setHtml(html());
+        // HTML folds whitespace. Cursor offsets are valid only while the
+        // parsed block has the same text as the three source strings.
+        return document.blockCount() == 1
+                && document.begin().text()
+                == (left.isEmpty() ? QString() : ellipsis + left) + match
+                        + (right.isEmpty() ? QString() : right + ellipsis);
+    };
+    bool editable = parse();
+    // Measure every candidate in order. Removing a character can change the
+    // shaping of the surrounding text as well as its line breaks.
+    while ((!left.isEmpty() || !right.isEmpty())
+           && excerptHeight(document, font, bounds.width(), bounds.height()) > bounds.height()) {
+        const bool leading = left.size() >= right.size();
+        const int units = leading ? (left.at(0).isHighSurrogate() ? 2 : 1)
+                                  : (right.at(right.size() - 1).isLowSurrogate() ? 2 : 1);
+        if (leading)
+            left.remove(0, units);
+        else
+            right.chop(units);
+        // With no context on this side, its ellipsis goes too. HTML can now
+        // strip whitespace from the exposed edge of the match.
+        if (!editable || (leading ? left.isEmpty() : right.isEmpty())) {
+            editable = parse();
+            continue;
         }
+        QTextCursor cursor(&document);
+        // The last document character is a paragraph separator.
+        const int start = leading ? 1 : document.characterCount() - 2 - units;
+        cursor.setPosition(start);
+        cursor.setPosition(start + units, QTextCursor::KeepAnchor);
+        cursor.removeSelectedText();
     }
-    return bottom;
+    // The engine can supply partial words even before we trim. Keep all
+    // spacing and punctuation next to the match, and drop the outer words.
+    int first = 0;
+    while (first < left.size() && !left.at(first).isSpace())
+        ++first;
+    while (first < left.size() && left.at(first).isSpace())
+        ++first;
+    left.remove(0, first);
+    int end = right.size();
+    while (end > 0 && !right.at(end - 1).isSpace())
+        --end;
+    while (end > 0 && right.at(end - 1).isSpace())
+        --end;
+    right.truncate(end);
+    return html();
 }
 
 void WholeLineLabel::paintEvent(QPaintEvent *)
@@ -549,6 +681,7 @@ void WholeLineLabel::paintEvent(QPaintEvent *)
         }
         QPainter painter(this);
         painter.setClipRect(rect());
+        const auto ink = palette().color(QPalette::WindowText);
         if (alignment() & Qt::AlignVCenter) {
             painter.translate(0, (height() - bottom) / 2);
         }
@@ -556,19 +689,15 @@ void WholeLineLabel::paintEvent(QPaintEvent *)
             if (line.top + line.height > bottom) {
                 break;
             }
-            auto rendered = renderPrivateText(line.text, font(), 0, line.bold, line.underline,
-                                              PrivateTextEmphasis::FontFace, line.direction);
+            const auto rendered = renderPrivateText(line.text, font(), 0, line.bold, line.underline,
+                                                    PrivateTextEmphasis::FontFace, line.direction);
             if (rendered.image.isNull()) {
                 continue;
             }
-            QPainter color(&rendered.image);
-            color.setCompositionMode(QPainter::CompositionMode_SourceIn);
-            color.fillRect(rendered.image.rect(), palette().color(QPalette::WindowText));
-            color.end();
             const int x = line.direction == Qt::RightToLeft ? width() - line.advance : 0;
             painter.drawImage(
                     QPointF(x + rendered.origin.x(), line.top + line.ascent + rendered.origin.y()),
-                    rendered.image);
+                    tintedPrivateText(rendered.image, ink));
         }
         return;
     }
@@ -872,14 +1001,14 @@ void SampleLabel::paintEvent(QPaintEvent *event)
 
 // Some fonts report an x-height that does not match their glyphs. Measure
 // capitals as well as lowercase so small x-heights do not inflate font names.
-qreal halfSpacedWidth(const QFont &font, const QString &text)
+qreal halfSpacedWidth(const QFont &font, const QString &text, TextDigits digits)
 {
-    return interfaceTextWidth(text, font)
-            - text.count(' ') * interfaceTextWidth(QStringLiteral(" "), font) / 2.0;
+    return interfaceTextWidth(text, font, digits)
+            - text.count(' ') * interfaceTextWidth(QStringLiteral(" "), font, digits) / 2.0;
 }
 
 void drawHalfSpaced(QPainter &painter, qreal x, const QRect &bounds, const QString &text,
-                    int weight)
+                    int weight, TextDigits digits)
 {
     if (weight < 0 && !needsPrivateText(text, painter.font())) {
         const auto metrics = painter.fontMetrics();
@@ -892,11 +1021,11 @@ void drawHalfSpaced(QPainter &painter, qreal x, const QRect &bounds, const QStri
         }
         return;
     }
-    const qreal space = interfaceTextWidth(QStringLiteral(" "), painter.font()) / 2.0;
+    const qreal space = interfaceTextWidth(QStringLiteral(" "), painter.font(), digits) / 2.0;
     for (const auto &word : text.split(' ')) {
-        const int width = interfaceTextWidth(word, painter.font());
+        const int width = interfaceTextWidth(word, painter.font(), digits);
         drawInterfaceText(painter, QRect(qRound(x), bounds.y(), width, bounds.height()), word,
-                          Qt::AlignLeft | Qt::AlignVCenter, weight);
+                          Qt::AlignLeft | Qt::AlignVCenter, weight, {}, digits);
         x += width + space;
     }
 }
@@ -909,17 +1038,33 @@ QFont fontSample(const QString &face)
     font.setHintingPreference(QFont::PreferNoHinting);
     font.setPixelSize(128);
     if (needsPrivateText(QStringLiteral("Hox"), font)) {
-        const auto rendered = renderPrivateText(QStringLiteral("Hox"), font);
-        int first = rendered.image.height(), last = -1;
-        for (int y = 0; y < rendered.image.height(); ++y) {
-            for (int x = 0; x < rendered.image.width(); ++x) {
-                if (qAlpha(rendered.image.pixel(x, y)) >= 128) {
-                    first = qMin(first, y);
-                    last = y;
-                    break;
+        // Settings shows several samples each time it opens. The ink rows of
+        // a face change only with the faces behind it, so measure them once.
+        static QHash<QString, QPair<int, int>> inkRows;
+        const auto key = privateLayoutKey(font);
+        QPair<int, int> rows;
+        if (!key.isEmpty() && inkRows.contains(key)) {
+            rows = inkRows.value(key);
+        } else {
+            const auto rendered = renderPrivateText(QStringLiteral("Hox"), font);
+            rows = { rendered.image.height(), -1 };
+            for (int y = 0; y < rendered.image.height(); ++y) {
+                for (int x = 0; x < rendered.image.width(); ++x) {
+                    if (qAlpha(rendered.image.pixel(x, y)) >= 128) {
+                        rows.first = qMin(rows.first, y);
+                        rows.second = y;
+                        break;
+                    }
                 }
             }
+            if (!key.isEmpty()) {
+                // Keys of replaced faces stay behind; a few faces fill this.
+                if (inkRows.size() >= 256)
+                    inkRows.clear();
+                inkRows.insert(key, rows);
+            }
         }
+        const int first = rows.first, last = rows.second;
         const int size = last >= first
                 ? qRound(128.0 * metrics::choices::sampleInkHeight / (last - first + 1))
                 : metrics::choices::sampleBase;

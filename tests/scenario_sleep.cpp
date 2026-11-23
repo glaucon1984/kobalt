@@ -1,12 +1,17 @@
 #include "scenario/player.h"
 #include "support/diagnostics.h"
-#include <QCoreApplication>
+#include <QApplication>
+#include <QCheckBox>
+#include <QCloseEvent>
+#include <QWidget>
 #include <QElapsedTimer>
 #include <QJsonArray>
+#include <QLineEdit>
 #include <QTimer>
 #include <QVector>
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
 
 // This check drives the player's failure paths without a reader or hardware.
 namespace kobalt {
@@ -73,12 +78,86 @@ void require(bool condition, const char *message)
         std::exit(1);
     }
 }
+class ClosingWidget final : public QWidget
+{
+public:
+    std::function<void()> requested;
+
+protected:
+    void closeEvent(QCloseEvent *event) override
+    {
+        event->ignore();
+        requested();
+    }
+};
+
+void checkCloseNotifications()
+{
+    for (const auto *mode : { "synchronous", "asynchronous", "early", "missing" }) {
+        ClosingWidget reader;
+        bool hasReader = true, idle = false, dispatchingWake = false, wokeFromNotification = false;
+        const bool synchronous = qstrcmp(mode, "synchronous") == 0;
+        const bool early = qstrcmp(mode, "early") == 0;
+        const bool notified = qstrcmp(mode, "missing") != 0;
+        const auto emitClosed = [] {
+            kobalt::observer(QJsonObject{ { "event", "book-close" }, { "total_ms", 12 } });
+        };
+        const auto retire = [&] {
+            hasReader = false;
+            idle = !early;
+            if (notified)
+                emitClosed();
+            if (!synchronous) {
+                // Deliver queued notification callbacks without dispatching
+                // timer events, even when the test machine is under load.
+                dispatchingWake = true;
+                QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+                dispatchingWake = false;
+            }
+            if (early)
+                QTimer::singleShot(0, &reader, [&] { idle = true; });
+        };
+        reader.requested = [&] {
+            if (synchronous)
+                retire();
+            else
+                QTimer::singleShot(0, &reader, retire);
+        };
+        kobalt::scenario::Host host;
+        host.reader = [&]() -> QWidget * { return hasReader ? &reader : nullptr; };
+        host.idle = [&] {
+            if (dispatchingWake && idle)
+                wokeFromNotification = true;
+            return idle;
+        };
+        host.open = [](const QString &) { return true; };
+        QJsonArray steps{ QJsonObject{ { "mark", true } }, QJsonObject{ { "close", true } } };
+        if (notified)
+            steps.append(QJsonObject{ { "event", "book-close" }, { "earlier", true },
+                                      { "timeout", 100 } });
+        steps.append(QJsonObject{ { "mark_end", true } });
+        const QJsonObject scenario{
+            { "id", "resources.close-notification" },
+            { "repeat", 1 },
+            { "steps", steps },
+            { "sample", QJsonObject{ { "timer", true }, { "resources", true } } }
+        };
+        const auto results = kobalt::scenario::run(
+                QJsonObject{ { "scenarios", QJsonArray{ scenario } } }, host);
+        require(results.size() == 1 && results.first().value("status") == "completed"
+                        && !hasReader && idle,
+                "Close must wait for a missing reader and an idle host, and keep its event");
+        require(wokeFromNotification == (!synchronous && notified && !early),
+                "An asynchronous close must check host completion on notification");
+    }
+}
 } // namespace
 
 // Checks the scenario player's sleep benchmark, KOSync account, `native-sync`, `wifi` and event steps, real-time waits, keep-awake and resource samples, with a controlled host.
 int main(int argc, char **argv)
 {
-    QCoreApplication app(argc, argv);
+    QApplication app(argc, argv);
+    checkCloseNotifications();
     auto scenario = QJsonObject{
         { "id", "sleep.test" },
         { "opt_in", true },
@@ -228,7 +307,11 @@ int main(int argc, char **argv)
             "a host that cannot turn Wi-Fi off skips the scenario");
     bool up = true;
     int offCalls = 0;
-    radio.wifiUp = [&] { return up; };
+    int radioChecks = 0;
+    radio.wifiUp = [&] {
+        ++radioChecks;
+        return up;
+    };
     radio.wifiOff = [&] {
         ++offCalls;
         QTimer::singleShot(30, [&] { up = false; });
@@ -240,6 +323,7 @@ int main(int argc, char **argv)
             "the wifi step completes once the radio is down");
     require(offCalls == 1, "the step turns Wi-Fi off only while it is up");
     up = true;
+    radioChecks = 0;
     radio.wifiOff = [] { return QString(); };
     auto stuck = wifiScenario;
     stuck["steps"] = QJsonArray{ QJsonObject{ { "wifi", "off" }, { "timeout", 50 } },
@@ -249,6 +333,7 @@ int main(int argc, char **argv)
     require(results[0].value("status") == "failed"
                     && results[0].value("reason").toString().contains("Wi-Fi stayed on"),
             "a radio that stays up fails the sample");
+    require(radioChecks <= 8, "a 50 ms radio wait must not poll every millisecond");
     radio.wifiOff = [] { return QStringLiteral("this firmware has no WirelessManager::off()"); };
     results = kobalt::scenario::run(wifiFile(), radio, options);
     require(results[0].value("status") == "failed"
@@ -348,6 +433,7 @@ int main(int argc, char **argv)
             "a host without its own sync skips the scenario");
     bool syncing = true, startedWhileSyncing = false;
     int starts = 0;
+    std::thread worker;
     store.nativeSyncing = [&] { return syncing; };
     store.nativeSync = [&] {
         startedWhileSyncing = syncing;
@@ -355,8 +441,10 @@ int main(int argc, char **argv)
         // The first save ends before the page turn and is passed over; the
         // second ends after the step that waits for the turn.
         kobalt::observer(save(11));
-        QTimer::singleShot(20, [] {
-            kobalt::observer(QJsonObject{ { "event", "page-turn-painted" }, { "elapsed_ms", 5 } });
+        QTimer::singleShot(20, [&] {
+            worker = std::thread([notify = kobalt::observer] {
+                notify(QJsonObject{ { "event", "page-turn-painted" }, { "elapsed_ms", 5 } });
+            });
         });
         QTimer::singleShot(150, [&] { kobalt::observer(save(22)); });
         QTimer::singleShot(200, [] {
@@ -366,6 +454,8 @@ int main(int argc, char **argv)
     };
     QTimer::singleShot(30, [&] { syncing = false; });
     results = kobalt::scenario::run(syncFile(), store, options);
+    if (worker.joinable())
+        worker.join();
     require(results[0].value("status") == "completed", "the native sync scenario completes");
     require(starts == 1 && !startedWhileSyncing, "the step waits for the earlier sync to end");
     const auto samples = results[0].value("samples").toArray();
@@ -433,4 +523,167 @@ int main(int argc, char **argv)
                     && results[0].value("counts").toArray() == QJsonArray({ "ends", "writes" })
                     && results[0].value("expect").toObject() == QJsonObject{ { "writes", 0 } },
             "the result names its counts and limits for the comparison");
+    // The first scenario inherits an already open book. Only reuse a book
+    // for an explicit rendering mode after opening it in that mode.
+    QWidget reader;
+    reader.show();
+    QVector<int> openedModes;
+    kobalt::scenario::Host library;
+    library.reader = [&] { return reader.isVisible() ? &reader : nullptr; };
+    library.busy = [] { return false; };
+    library.open = [&](const QString &) {
+        openedModes.append(kobalt::renderingMode::overrides.last());
+        reader.show();
+        return true;
+    };
+    QJsonObject turn{ { "id", "turn" },
+                      { "book", "test" },
+                      { "repeat", 1 },
+                      { "steps",
+                        QJsonArray{ QJsonObject{ { "mark", true } },
+                                    QJsonObject{ { "mark_end", true } } } },
+                      { "sample", QJsonObject{ { "timer", true } } } };
+    QJsonArray turns;
+    for (auto mode : { "accurate", "hybrid", "hybrid" }) {
+        turn["rendering"] = mode;
+        turns.append(turn);
+    }
+    options.filter = "turn";
+    options.openBook = "test";
+    results = kobalt::scenario::run(QJsonObject{ { "scenarios", turns } }, library, options);
+    for (const auto &result : results)
+        require(result.value("status") == "completed", "rendering scenario did not complete");
+    require(openedModes == QVector<int>({ 0, 2 }),
+            "scenario reused an unknown or different rendering mode, or reopened a matching book");
+
+    auto cacheStep = [&](QJsonObject step) {
+        auto scenario = turn;
+        scenario.remove("book");
+        scenario["steps"] = QJsonArray{ step, QJsonObject{ { "mark", true } },
+                                        QJsonObject{ { "mark_end", true } } };
+        return kobalt::scenario::run(QJsonObject{ { "scenarios", QJsonArray{ scenario } } },
+                                     library, options)
+                .first()
+                .value("status")
+                .toString();
+    };
+    const auto openings = openedModes.size();
+    require(cacheStep({ { "open", "test" }, { "fresh", true } }) == "skipped"
+                    && openedModes.size() == openings && reader.isVisible(),
+            "fresh open changed the reader without a cache removal callback");
+    int removals = 0;
+    library.forget = [&](const QString &) {
+        ++removals;
+        return true;
+    };
+    require(cacheStep({ { "forget", "test" } }) == "failed" && removals == 0 && reader.isVisible(),
+            "the player removed caches while the book was open");
+    reader.close();
+    require(cacheStep({ { "forget", "test" } }) == "completed" && removals == 1,
+            "the player did not remove caches after the book closed");
+    library.forget = [](const QString &) { return false; };
+    require(cacheStep({ { "open", "test" }, { "fresh", true } }) == "failed"
+                    && openedModes.size() == openings,
+            "a failed cache removal was measured as a cold open");
+    require(cacheStep({ { "forget", "test" } }) == "failed",
+            "a failed cache removal step reported success");
+    library.reader = {};
+    require(cacheStep({ { "forget", "test" } }) == "skipped" && removals == 1,
+            "the player removed caches without knowing whether a book was open");
+    reader.show();
+
+    const QJsonObject opening{ { "scenarios", QJsonArray{ turn } } };
+    kobalt::scenario::Host incomplete;
+    int attempts = 0;
+    incomplete.open = [&](const QString &) {
+        ++attempts;
+        return true;
+    };
+    options.openBook.clear();
+    try {
+        results = kobalt::scenario::run(opening, incomplete, options);
+        require(results.first().value("status") == "skipped" && attempts == 0,
+                "a host without a reader callback started an opening");
+        incomplete.reader = [&] { return &reader; };
+        results = kobalt::scenario::run(opening, incomplete, options);
+        require(results.first().value("status") == "skipped" && attempts == 0 && reader.isVisible(),
+                "a host without a busy callback changed the open reader");
+        turn.remove("book");
+        turn["steps"] = QJsonArray{ QJsonObject{ { "settle", true } } };
+        results = kobalt::scenario::run(QJsonObject{ { "scenarios", QJsonArray{ turn } } },
+                                        incomplete, options);
+        require(results.first().value("status") == "skipped",
+                "settle accepted a host that cannot report work in flight");
+    } catch (const std::bad_function_call &) {
+        require(false, "scenario player called an absent host callback");
+    }
+
+    // A check passes or fails on its comparisons and takes no sample. After a
+    // failure it still runs its teardown, and a blocked main thread fails it.
+    {
+        QWidget window;
+        auto *option = new QCheckBox(&window);
+        option->setObjectName("checkOption");
+        option->setChecked(true);
+        auto *field = new QLineEdit(&window);
+        field->setObjectName("checkField");
+        window.show();
+        kobalt::scenario::Host checking;
+        checking.reader = [&]() -> QWidget * { return &window; };
+        const auto check = [](const QJsonArray &steps, const QJsonArray &teardown = {}) {
+            return QJsonObject{ { "scenarios",
+                                  QJsonArray{ QJsonObject{ { "id", "check.option" },
+                                                           { "kind", "check" },
+                                                           { "opt_in", true },
+                                                           { "steps", steps },
+                                                           { "teardown", teardown } } } } };
+        };
+        kobalt::scenario::Options checks;
+        checks.filter = "check.";
+        require(kobalt::scenario::run(check({}), checking).isEmpty(), "checks are opt-in");
+        results = kobalt::scenario::run(
+                check({ QJsonObject{ { "remember", "start" }, { "widget", "checkOption" } },
+                        QJsonObject{ { "widget", "checkOption" },
+                                     { "same_as", "start" },
+                                     { "check", "Option stays" } },
+                        QJsonObject{ { "widget", "checkOption" },
+                                     { "property", "enabled" },
+                                     { "is", true } } }),
+                checking, checks);
+        const auto passed = results.value(0).value("checks").toArray();
+        require(results.size() == 1 && results[0].value("status") == "completed"
+                        && results[0].value("samples").toArray().isEmpty() && passed.size() == 2
+                        && passed[0].toObject().value("check") == "Option stays"
+                        && passed[0].toObject().value("pass").toBool(),
+                "a check that holds passes without a sample");
+        results = kobalt::scenario::run(
+                check({ QJsonObject{ { "widget", "checkOption" },
+                                     { "is", false },
+                                     { "timeout", 0 },
+                                     { "check", "Option is off" } },
+                        QJsonObject{ { "type", "never" }, { "into", "checkField" } } },
+                      { QJsonObject{ { "type", "undone" }, { "into", "checkField" } } }),
+                checking, checks);
+        const auto missed = results.value(0).value("checks").toArray();
+        require(results[0].value("status") == "failed"
+                        && results[0].value("reason").toString().contains("Option is off")
+                        && missed.size() == 1 && !missed[0].toObject().value("pass").toBool()
+                        && missed[0].toObject().value("actual") == true,
+                "a check that does not hold fails with its name and value");
+        require(field->text() == "undone", "a failed check still runs its teardown");
+        results = kobalt::scenario::run(
+                check({ QJsonObject{
+                        { "expect", "font_pixels" }, { "is", 1 }, { "timeout", 0 } } }),
+                checking, checks);
+        require(results[0].value("status") == "failed"
+                        && results[0].value("reason").toString().contains("no book is open"),
+                "a state check needs an open reader");
+        QTimer::singleShot(0, [] { kobalt::observer({ { "event", "main-thread-blocked" } }); });
+        results = kobalt::scenario::run(check({ QJsonObject{ { "wait_ms", 20 } } }), checking,
+                                        checks);
+        require(results[0].value("status") == "failed"
+                        && results[0].value("reason").toString().contains(
+                                "main thread was blocked"),
+                "a blocked main thread fails the check");
+    }
 }

@@ -2,7 +2,13 @@
 
 Label `library`. Build `mac-tests`, then run `ctest --preset mac -L library` from `platforms/desktop/`. `ctest --preset mac -N -L library` lists its tests.
 
+`model.library` holds the profile writer busy when the Library save timer fires. It checks that the next event runs while storage is busy, the settings reach storage while the Library is open, and closing saves the most recent edit. It also checks that progress saves and edits to other folders leave unchanged folder rows alone. Its scan fixtures cover background refresh of individually added books, folder removal during a scan and thumbnail cleanup after catalogue saves. Folder order and labels survive reopening. Import accepts literal UTF-8 and escaped U+FEFF in book keys. Removing an imported book whose key starts with U+FEFF preserves the book with the otherwise identical key.
+
 These checks cover Library onboarding, folder scanning, covers, list and grid layouts, the scan caption, action buttons, Library page buttons, text inheritance for new books and reopening finished books. `model.library` checks the catalogue model. The `desktop` checks drive the standalone Library and reader, and the `ui` checks measure Library widgets in pixels. `session.reading-book`, in [Storage and history](storage.md), checks reopening finished books in the session.
+
+The landscape phone list check opens each of the four cells on consecutive pages and checks the book order.
+
+The standalone Library checks its My Words menu and fonts with a host preference snapshot that differs from the saved profile, including after a text-size change rebuilds the view. The theming gallery returns from a book to the Library and checks the saved preset’s typeface, palette and toolbar icons. The standalone Library also applies these settings at startup.
 
 The About checks open the screen from an empty Library without requesting a book. They cover shared version fields, project-row painting through the standalone canvas, project paging, nested Back navigation, both themes, portrait and landscape sizes, and interface text at 100% and 150%. The gallery includes the Library entry and all About pages.
 

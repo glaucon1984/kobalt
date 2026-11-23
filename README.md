@@ -2,7 +2,7 @@
   <img src="assets/kobalt.svg" alt="Kobalt" width="320" height="208">
 </p>
 
-**Kobalt is an EPUB reader with a Qt reading interface. Its rendering engine is [Blaze](doc/engines.md), Kobalt’s hard fork of CREngine.**
+**Kobalt is an EPUB reader with a Qt reading interface. Its rendering engine is [Blaze](doc/engines.md), Kobalt’s fork of CREngine.**
 
 > [!NOTE]
 > This is a fork of [nicoverbruggen/kobalt](https://github.com/nicoverbruggen/kobalt) that adds a **PocketBook** version, on the `pocketbook` branch. Everything else is Nico Verbruggen's work; the Kobo, Android and macOS versions are his and are documented below unchanged. See [PocketBook](#pocketbook) and [Kobalt on PocketBook](doc/pocketbook.md).

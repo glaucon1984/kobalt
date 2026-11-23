@@ -28,6 +28,15 @@ void open(EngineDocument &model, const test::BookFiles &files, QSize size = { 60
             qPrintable(error));
 }
 
+// The reference scan resolves all positions against a single rendered DOM.
+void useWholeBook(EngineDocument &model)
+{
+    if (model.partOfBook())
+        require(model.prepareFullDocument({}) == Engine::FullDocument::Ready
+                        && model.setChapterMode(false, {}, {}),
+                "Cannot adopt the complete document for the reference scan");
+}
+
 QStringList endpoints(const Ranges &ranges)
 {
     QStringList result;
@@ -89,6 +98,14 @@ int main(int argc, char **argv)
 {
     QGuiApplication app(argc, argv);
     EngineDocument model(test::readerFonts());
+    auto largeBook = test::engineBook(false, 3, 5);
+    largeBook["OEBPS/c3.xhtml"].replace(
+            "</body>", "<p style='display:none'>" + QByteArray(300000, 'x') + "needle</p></body>");
+    open(model, largeBook);
+    require(Probe::mayContain(model, 2, "needle") && !Probe::mayContain(model, 2, "absentword"),
+            "Chapter prefilter lost a match or failed to exclude an absent word");
+    require(Probe::retainedSearchBytes(model) <= 512 * 1024,
+            "Chapter search retained an oversized folded text key");
     auto book = test::engineBook(false, 3, 5);
     book["OEBPS/c1.xhtml"].replace("</body>",
                                    "<p style=\"display:none\">Invisible marker.</p></body>");
@@ -96,6 +113,20 @@ int main(int argc, char **argv)
     for (const bool normalized : { false, true })
         require(Probe::positionLookupPreservesNames(model, normalized),
                 "Invalid position lookup added a name to the document");
+    if (model.partOfBook()) {
+        Ranges chapterMarks;
+        for (const auto &hit : model.searchPage("reader", model.page()).hits)
+            chapterMarks.append({ hit.start, hit.end });
+        require(!chapterMarks.isEmpty(), "Chapter fixture has no visible marks");
+        const auto visible = model.visibleRanges(chapterMarks);
+        require(visible.size() == chapterMarks.size(), "A visible chapter hit was not indexed");
+        const auto rectangles = model.pageRangeRects(model.page(), chapterMarks);
+        require(rectangles.size() == chapterMarks.size(), "Chapter hit geometry is incomplete");
+        for (int i = 0; i < chapterMarks.size(); ++i)
+            require(visible[i] == i && !rectangles[i].isEmpty(),
+                    "Indexed chapter hits lost their order or geometry");
+    }
+    useWholeBook(model);
     require(model.pages() > 8, "Fixture does not span enough pages");
     Ranges marks;
     for (int page = 0; page < model.pages(); ++page) {
@@ -232,8 +263,10 @@ int main(int argc, char **argv)
     // if allocator reuse gives the replacement document the same address.
     open(model, test::engineBook(false, 1, 1));
     require(!Probe::cached(model), "Replacing document retained source pointers");
+    useWholeBook(model);
     compare(model, marks);
     open(model, book);
+    useWholeBook(model);
     compare(model, marks);
     fprintf(stderr,
             "Source index: ranges, geometry, pages, reflow, replacement, cancellation and budgets passed\n");

@@ -17,6 +17,9 @@ public:
     AssetBundle(const AssetBundle &) = delete;
     AssetBundle &operator=(const AssetBundle &) = delete;
     bool available() const;
+    Verification verification() const;
+    // Identifies this bundle and its current storage lifecycle.
+    quint64 generation() const;
     // Explicit bundles remain unavailable until this full check succeeds.
     // Run at storage lifecycle boundaries, on a worker, never on book opening.
     bool verify(const std::function<bool()> &current = {});
@@ -27,6 +30,8 @@ public:
     bool setAside(const QString &name) const;
     QMap<QString, QByteArray> verifiedFontDigests() const;
     QString file(const QString &name) const;
+    // Maps a dictionary ID such as English_US.pattern to its verified packed file.
+    QMap<QString, QString> verifiedHyphenation() const;
     QByteArray fontData(const QString &name) const;
     // Capture verified metadata without retaining font bytes or this bundle.
     // The reader checks the file again when it is first needed.
@@ -34,16 +39,19 @@ public:
     // Verify the whole bundle once for a batch. Each reader still verifies its
     // own file when called. A set-aside member is left out of the result; any
     // other missing member rejects the complete batch.
-    QMap<QString, std::function<QByteArray()>> deferredFontData(const QStringList &names) const;
+    // When requested, digests records the SHA-256 each reader must match.
+    QMap<QString, std::function<QByteArray()>>
+    deferredFontData(const QStringList &names, QMap<QString, QByteArray> *digests = nullptr) const;
     // Checks one font against the manifest without verifying the whole bundle
     // first. After a full verification, this is the same as fontData().
-    QByteArray manifestFontData(const QString &name) const;
+    QByteArray manifestFontData(const QString &name, QByteArray *digest = nullptr) const;
     // Retain an independent manifest reader for text shown before full verification.
     std::function<QByteArray()> deferredManifestFontData(const QString &name) const;
     const QString &root() const;
 
 private:
-    bool verifyFiles() const;
+    // `current` returning false stops the check before the next file or block.
+    bool verifyFiles(const std::function<bool()> &current = {}) const;
     struct Data;
     std::unique_ptr<Data> data;
 };
